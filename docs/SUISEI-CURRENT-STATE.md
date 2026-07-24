@@ -42,15 +42,31 @@ target:    Suisei.app (native client) ←IPC→ suisei-daemon (durable App state
      tests, and an open/edit/save/reopen smoke test pass on macOS.
 
 2. **Replace the GUI’s Vim-mode emulation with first-class editing commands.**
-   - Keep the Core command state machine, but expose semantic commands for
-     insert, move, delete, select, marked text, and pointer selection.
-   - Remove the face’s synthetic `i` / `Esc` policy from normal typing and
-     mouse flows. It is a compatibility layer, not a sound document model.
-   - Introduce `Selection { anchor, head, goal_x }` and plural selections;
-     map shift-arrows, word/line selection, option-drag and command-click to
-     it. A caret is an empty selection.
-   - Gate: Shift+arrow, typing-over-selection, IME composition, drag, and
-     multi-cursor work without a mode-specific Swift workaround.
+   *(Largely done 2026-07-24. Single-cursor editing is fully modeless; only
+   multi-cursor RENDERING remains.)*
+   - DONE `Selection { anchor, head, goal_x }` + `SelectionSet` (`selection.rs`),
+     exclusive, plural; `App.sel` is the single selection authority and
+     `selected_range()` derives the legacy inclusive span from it.
+   - DONE semantic edits on `app.sel` (`gui_edit.rs`): caret_move/extend,
+     caret_place/drag/add, select_word/all, and gui_insert_text /
+     gui_insert_newline / gui_delete_backward/forward — type-over-selection and
+     multi-cursor edits, mode-independent. Undo coalesces a typing/delete run
+     into one group (`App.edit_run`).
+   - DONE the engine dispatch routes characters, backspace, delete, enter and
+     the arrows straight to those commands; the synthetic `i`/`c`/`d` and the
+     `mode_is_insert` fast-path gate are gone (`editor_accepts_text`). Mouse and
+     Shift/Alt-arrow selection, drag, ⌘-click, and Esc→collapse are wired
+     through Swift. vim keyboard commands (`:` `/` space-leader `i` hjkl) no
+     longer exist in the GUI — a bare key just types. Core vim machinery stays
+     as dormant dead code, deletable incrementally.
+   - REMAINING: multi-cursor is inherent in the model and edits, but the render
+     paints only the primary selection/caret (`selected_range()` → one span).
+     Painting every caret + span needs a multi-span `SuiseiEditorLineC` — an ABI
+     layout change touching both hard-coded decoders (mind the offset trap), so
+     it is its own careful patch.
+   - Gate: Shift+arrow, typing-over-selection, IME composition, drag ✅ without a
+     mode-specific Swift workaround; multi-cursor works in the model, pending its
+     paint.
 
 3. **Make unsaved work durable before expanding the feature surface.**
    - Implement Architecture Plan D0 first: append edit deltas to a shadow WAL
