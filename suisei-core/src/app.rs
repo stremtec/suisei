@@ -4461,6 +4461,28 @@ impl App {
         }
     }
 
+    /// Heads of every selection in `self.sel` **except the primary** — the
+    /// extra carets a GUI multi-cursor paints. The primary is already drawn
+    /// through the per-line `caret_*`/`sel_*` fields (via [`Self::selected_range`]),
+    /// so it is deliberately excluded to avoid a double caret. Empty when the
+    /// set is a single selection (the common single-cursor case).
+    ///
+    /// Positions are exclusive heads (between-character), which is exactly the
+    /// drawn-caret column — no inclusive `+1` fix-up, unlike the vim cursor.
+    pub fn secondary_caret_positions(&self) -> Vec<Position> {
+        if !self.sel.is_multi() {
+            return Vec::new();
+        }
+        let primary = self.sel.primary_index();
+        self.sel
+            .all()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != primary)
+            .map(|(_, s)| s.head)
+            .collect()
+    }
+
     pub fn execute_xlc(&mut self) {
         let cmd = self.xlc.execute();
         match cmd {

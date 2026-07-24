@@ -2009,6 +2009,15 @@ fn build_lines_at(
         None
     };
     let multi_active = tab == app.current_buffer && app.multi.is_active();
+    // GUI multi-cursor: every caret in `app.sel` except the primary (the primary
+    // is painted through caret_*/sel_*). Resolved once for the whole band, not
+    // per row/chunk. Empty in the single-cursor case, so the hot path pays
+    // nothing. Distinct from the dormant vim `app.multi` above.
+    let gui_secondaries: Vec<Position> = if tab == app.current_buffer && app.sel.is_multi() {
+        app.secondary_caret_positions()
+    } else {
+        Vec::new()
+    };
     let diags_active = tab == app.current_buffer && !app.lsp.diagnostics.is_empty();
 
     // Visual row origin for first buffer line in this window (approx: 1:1 before scroll).
@@ -2154,6 +2163,25 @@ fn build_lines_at(
                             kind: 250,
                         });
                     }
+                }
+            }
+            // GUI multi-cursor extras. Unlike kind-250 above (cell columns), these
+            // carry UTF-16 offsets — the face positions them with CoreText so an
+            // extra caret tracks CJK the same way the primary does. The head is an
+            // exclusive between-character column, i.e. already the drawn column.
+            // (Secondary SELECTION fills are a separate kind, to add with ⌘-D.)
+            for head in &gui_secondaries {
+                if head.row != row {
+                    continue;
+                }
+                let vc = visual_col(raw, head.col) as u32;
+                if vc >= base_col && vc < caret_limit {
+                    let u = utf16_offset_for_vcol(&chunk, vc.saturating_sub(base_col));
+                    spans.push(SpanScene {
+                        start: u,
+                        end: u.saturating_add(1),
+                        kind: 250,
+                    });
                 }
             }
             if diags_active {

@@ -425,6 +425,31 @@ mod tests {
     }
 
     #[test]
+    fn secondary_carets_exclude_the_primary() {
+        // The render paints the primary through caret_*/sel_*; the extras come
+        // from secondary_caret_positions(). Together they must cover every head
+        // exactly once, with no double-count of the primary.
+        let mut app = app_with("line0\nline1\nline2");
+        app.caret_place(Position::new(0, 0));
+        app.caret_add(Position::new(2, 3)); // this one becomes primary
+        let secondaries = app.secondary_caret_positions();
+        assert_eq!(secondaries.len(), 1);
+        assert_eq!(secondaries[0], Position::new(0, 0));
+        // Primary head + secondaries == the full set of caret heads.
+        let mut heads = secondaries;
+        heads.push(app.sel.primary().head);
+        heads.sort();
+        assert_eq!(heads, vec![Position::new(0, 0), Position::new(2, 3)]);
+    }
+
+    #[test]
+    fn secondary_carets_empty_for_single_cursor() {
+        let mut app = app_with("solo");
+        app.caret_place(Position::new(0, 2));
+        assert!(app.secondary_caret_positions().is_empty());
+    }
+
+    #[test]
     fn select_all_spans_document() {
         let mut app = app_with("ab\ncde");
         app.select_all_gui();

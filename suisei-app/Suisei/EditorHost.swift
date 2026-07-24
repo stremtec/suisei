@@ -823,9 +823,24 @@ final class EditorCanvasView: NSView {
             }
             for sp in line.spans {
                 if sp.kind == 250 {
-                    let cx = gutter + CGFloat(sp.start) * cell
+                    // Extra caret (GUI multi-cursor). sp.start is a UTF-16 offset,
+                    // not a cell column — resolve it against the DRAWN line so it
+                    // tracks CJK glyphs exactly like the primary caret, instead of
+                    // sitting at vcol*cell far to the right on Hangul/CJK lines.
+                    let cx = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(sp.start), nil)
+                    // Same cap-height geometry as the primary caret above, so a
+                    // secondary caret is visually indistinguishable from it.
+                    let baseline = textY + font.ascender
+                    let capTop = baseline - font.capHeight
+                    let descBottom = baseline - font.descender
+                    let caretRect = CGRect(
+                        x: cx,
+                        y: (capTop - 1).rounded(),
+                        width: 2,
+                        height: (descBottom - capTop + 2).rounded()
+                    )
                     colors.caret.withAlphaComponent(0.85).setFill()
-                    CGRect(x: cx, y: y + 2, width: 2, height: fontSize + 2).fill()
+                    caretRect.fill()
                 } else if sp.kind >= 251 && sp.kind <= 253 {
                     let x0 = gutter + CGFloat(sp.start) * cell
                     let w = max(cell, CGFloat(sp.end - sp.start) * cell)

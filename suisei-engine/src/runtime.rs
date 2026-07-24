@@ -1543,6 +1543,57 @@ mod tests {
     }
 
     #[test]
+    fn secondary_caret_composes_a_kind_250_span() {
+        // GUI multi-cursor render contract: every caret except the primary is
+        // emitted as a kind-250 span on its row; the primary is NOT a span (it
+        // rides the dedicated caret_* fields). Guards the app.sel → compositor
+        // wiring end to end.
+        use suisei_core::buffer::Position;
+        let mut eng = eng_with_text("hello\nworld");
+        // caret_add makes the *added* caret primary, so place the intended
+        // secondary first, then add the primary elsewhere.
+        eng.app.caret_place(Position::new(1, 2)); // secondary on line 2 ("world")
+        eng.app.caret_add(Position::new(0, 0)); // added → primary on line 1
+        let (lines, _) = eng.editor_band(0, 0, 20);
+
+        let line2 = lines.iter().find(|l| l.line_no == 2).expect("row 2");
+        let carets: Vec<u32> = line2
+            .spans
+            .iter()
+            .filter(|s| s.kind == 250)
+            .map(|s| s.start)
+            .collect();
+        assert_eq!(carets, vec![2], "secondary caret at UTF-16 col 2 of 'world'");
+
+        // The primary (line 1) must not be duplicated as a kind-250 span.
+        let line1 = lines.iter().find(|l| l.line_no == 1).expect("row 1");
+        assert!(
+            !line1.spans.iter().any(|s| s.kind == 250),
+            "primary caret must not also be a kind-250 span"
+        );
+    }
+
+    #[test]
+    fn secondary_caret_offset_is_utf16_not_cell_grid() {
+        // The reason the span carries a UTF-16 offset instead of a cell column:
+        // on a CJK line the two diverge. Caret after 3 wide glyphs sits at cell
+        // column 6 but UTF-16 offset 3 — the face measures glyph 3 with CoreText.
+        use suisei_core::buffer::Position;
+        let mut eng = eng_with_text("가나다x\nabc");
+        eng.app.caret_place(Position::new(0, 3)); // secondary after 가나다 (3 wide glyphs)
+        eng.app.caret_add(Position::new(1, 0)); // added → primary on "abc"
+        let (lines, _) = eng.editor_band(0, 0, 20);
+        let cjk = lines.iter().find(|l| l.line_no == 1).expect("row 1");
+        let start = cjk
+            .spans
+            .iter()
+            .find(|s| s.kind == 250)
+            .map(|s| s.start)
+            .expect("secondary caret span");
+        assert_eq!(start, 3, "UTF-16 offset (3), not the cell column (6)");
+    }
+
+    #[test]
     fn drag_builds_gui_selection() {
         // Mouse drag now drives the GUI SelectionSet (exclusive), not vim
         // Visual mode. The painted span must still equal the yank slice.
