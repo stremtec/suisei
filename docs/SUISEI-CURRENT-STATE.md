@@ -74,13 +74,23 @@ target:    Suisei.app (native client) ←IPC→ suisei-daemon (durable App state
      ⌘-click multi-cursor caret paint ✅ without a mode-specific Swift workaround.
 
 3. **Make unsaved work durable before expanding the feature surface.**
-   - Implement Architecture Plan D0 first: append edit deltas to a shadow WAL
-     with a 250 ms / 4 KiB fsync policy, periodic snapshots, and recovery UI.
-   - Then move authoritative `App` ownership behind a local Unix-socket daemon
-     (D1). Keep a protocol version in every message; do not reuse silent
-     fixed-offset decoding across processes without a version handshake.
-   - Gate: force-killing the GUI restores unsaved text, cursor and scroll;
-     killing during save leaves the original file valid.
+   *(D0 done 2026-07-24 — the crash-safety gate below is met. D1 daemon is a
+   separate, larger step, deferred pending an explicit decision.)*
+   - DONE Architecture Plan D0 (shadow WAL): `suisei-engine/src/journal.rs`
+     flushes the dirty buffer on the tick loop under a 250 ms / 4 KiB policy;
+     both the WAL and the file save use `fs_atomic::atomic_write_file`
+     (tmp → fsync → rename). Recovery scan/count/path/accept/discard cross the
+     C ABI (`recovery_ffi.rs`, 9 tests) and the face shows a recovery sheet on
+     startup. Accept restores text, cursor **and** scroll (clamped). The journal
+     lives in Suisei's own `~/.suisei/journal`, not `~/.xei`.
+   - REMAINING D1 (daemon): move authoritative `App` ownership behind a local
+     Unix-socket daemon so GUI crashes cannot lose in-flight state at all. Keep
+     a protocol version in every message; do not reuse silent fixed-offset
+     decoding across processes without a version handshake. Per the Architecture
+     Plan, D0 alone already solves crash loss, so D1 is an isolation/multiwindow
+     investment, not a prerequisite for this gate.
+   - Gate: force-killing the GUI restores unsaved text, cursor and scroll (✅ via
+     D0); killing during save leaves the original file valid (✅ atomic save).
 
 ### P1 — latency and IDE-grade daily work
 
