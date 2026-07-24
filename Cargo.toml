@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["suisei-core", "suisei-engine"]
+
+# Single source of truth for the app version. The packaging script reads this
+# (`grep -m1 '^version' Cargo.toml`) into Info.plist. Suisei starts its own
+# version line as an independent product.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/stremtec/suisei"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

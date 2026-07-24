@@ -1,0 +1,156 @@
+{
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.01680,0.19835,1.00000,1.00000",
+          "srgb:1.00000,0.95716,0.86523,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.5,
+            "y" : 0
+          },
+          "stop" : {
+            "x" : 0.5,
+            "y" : 0.7
+          }
+        }
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.22896,0.22896,0.22896,1.00000",
+          "srgb:0.00000,0.00000,0.00000,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.5,
+            "y" : 1
+          },
+          "stop" : {
+            "x" : 0.5,
+            "y" : 0.3
+          }
+        }
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : {
+            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+          },
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "제목을 입력해주세요. (10).png",
+          "name" : "제목을 입력해주세요. (10)",
+          "position" : {
+            "scale" : 0.16,
+            "translation-in-points" : [
+              -114.56574006551637,
+              -127.74142759604399
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+          },
+          "glass" : false,
+          "image-name" : "제목을 입력해주세요. (8).png",
+          "name" : "제목을 입력해주세요. (8)",
+          "position" : {
+            "scale" : 0.46,
+            "translation-in-points" : [
+              -290.5057400655163,
+              -240.621427596044
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+          },
+          "glass" : false,
+          "image-name" : "제목을 입력해주세요. (8).png",
+          "name" : "제목을 입력해주세요. (8)",
+          "position" : {
+            "scale" : 0.46,
+            "translation-in-points" : [
+              93,
+              -240.621427596044
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "제목을 입력해주세요. (7).png",
+          "name" : "제목을 입력해주세요. (7)",
+          "position" : {
+            "scale" : 1.99,
+            "translation-in-points" : [
+              -32.09074006551634,
+              1600
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "제목을 입력해주세요. (7).png",
+          "name" : "제목을 입력해주세요. (7)",
+          "opacity" : 0,
+          "position" : {
+            "scale" : 1.99,
+            "translation-in-points" : [
+              0.9950000000000045,
+              -959.7828570685028
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "제목을 입력해주세요. (7).png",
+          "name" : "제목을 입력해주세요. (7)",
+          "position" : {
+            "scale" : 1.99,
+            "translation-in-points" : [
+              0.9950000000000045,
+              1246.7573244972891
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

@@ -1,0 +1,31 @@
+[package]
+name = "suisei-core"
+version.workspace = true
+edition.workspace = true
+description = "Suisei (彗星) core — GUI-first editor engine"
+license.workspace = true
+repository.workspace = true
+keywords = ["editor", "gui", "core", "headless"]
+
+[dependencies]
+unicode-width = "0.2"
+ratatui = { version = "0.29", features = ["underline-color"] }
+portable-pty = "0.8"
+image = { version = "0.25", default-features = false, features = ["gif", "png", "jpeg", "webp", "bmp"] }
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-bash = "0.23"
+tree-sitter-json = "0.24"
+streaming-iterator = "0.1"
+serde_json = "1"
+unicode-segmentation = "1"
+
+# NOTE: the VSCode-compatible extension host (`extensions` feature → xei-ext-host)
+# was dropped when Suisei split from the xei workspace. All call sites remain
+# behind `#[cfg(feature = "extensions")]` and never compile in this build. To
+# revive it, vendor the ext-host crate into this repo and re-add the feature.

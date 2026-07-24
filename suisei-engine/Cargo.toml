@@ -1,0 +1,15 @@
+[package]
+name = "suisei-engine"
+version.workspace = true
+edition.workspace = true
+description = "Suisei desktop engine — Core host, Compositor, Bridge (Rust). Face is Swift."
+license.workspace = true
+publish = false
+
+[lib]
+name = "suisei_engine"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+suisei-core = { path = "../suisei-core" }
+unicode-width = "0.2"

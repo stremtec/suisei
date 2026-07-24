@@ -1,0 +1,199 @@
+import AppKit
+import SwiftUI
+
+/// Settings / document window chrome — theme background without killing traffic lights.
+enum WindowChrome {
+    static func applyThemedTitlebar(to window: NSWindow, background: NSColor, light: Bool) {
+        window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        window.backgroundColor = background
+        window.isOpaque = true
+
+        // Keep a real titlebar so ●●● always exist and stay clickable.
+        window.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
+        // Do NOT use fullSizeContentView here — content drawing under titlebar
+        // was covering / losing traffic lights in the Settings window.
+        window.styleMask.remove(.fullSizeContentView)
+        window.titlebarAppearsTransparent = false
+        window.titleVisibility = .visible
+
+        // Ensure standard buttons are visible and enabled.
+        for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            if let btn = window.standardWindowButton(kind) {
+                btn.isHidden = false
+                btn.alphaValue = 1
+                btn.isEnabled = true
+            }
+        }
+
+        if let cv = window.contentView {
+            cv.wantsLayer = true
+            cv.layer?.backgroundColor = background.cgColor
+        }
+    }
+}
+
+/// Re-apply chrome when the hosting window appears.
+struct ThemedWindowChrome: NSViewRepresentable {
+    var background: NSColor
+    var light: Bool
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView(frame: .zero)
+        v.isHidden = true
+        DispatchQueue.main.async { apply(v) }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { apply(nsView) }
+    }
+
+    private func apply(_ nsView: NSView) {
+        guard let window = nsView.window else { return }
+        WindowChrome.applyThemedTitlebar(to: window, background: background, light: light)
+    }
+}
+
+
+// MARK: - Resize HUD (child window — covers the entire frame, lights included)
+
+/// Frosted full-window overlay with live dimensions during window resize.
+/// A child NSWindow is the only layer that can cover the traffic lights AND
+/// still sample the window content behind it (its material blends behind-window,
+/// so the parent's live pixels frost through — an in-window overlay host showed
+/// a dead slab instead, because animating its alpha re-rendered the backdrop
+/// offscreen where there is nothing to sample).
+final class ResizeHudWindow {
+    static let shared = ResizeHudWindow()
+    private var hud: NSWindow?
+    private weak var parent: NSWindow?
+    /// Bumped on every show — a hide animation's completion from a PREVIOUS
+    /// gesture must not tear down the HUD a newer show just put up.
+    private var generation = 0
+
+    private let model = ResizeHudModel()
+
+    func show(over parent: NSWindow) {
+        self.parent = parent
+        generation += 1
+        let w = hud ?? makeWindow()
+        hud = w
+        model.size = parent.frame.size
+        w.setFrame(parent.frame, display: true)
+        applyCornerMask(to: w, matching: parent)
+        if w.parent == nil {
+            parent.addChildWindow(w, ordered: .above)
+        }
+        w.alphaValue = 0
+        w.orderFront(nil)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.16
+            w.animator().alphaValue = 1
+        }
+    }
+
+    func update(over parent: NSWindow) {
+        guard let hud else { return }
+        hud.setFrame(parent.frame, display: true)
+        // Re-read every frame: a drag that starts from a maximized window
+        // begins square (radius 0) and gains rounded corners mid-gesture.
+        applyCornerMask(to: hud, matching: parent)
+        model.size = parent.frame.size
+    }
+
+    func hide() {
+        guard let hud else { return }
+        let gen = generation
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.2
+            hud.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, self.generation == gen, let hud = self.hud else { return }
+            hud.parent?.removeChildWindow(hud)
+            hud.orderOut(nil)
+        })
+    }
+
+    /// The child window is a plain rectangle: unmasked, its square corners paint
+    /// over the parent's rounded ones for the whole drag. Clip it to match. The
+    /// parent's frame view doesn't expose its radius as layer.cornerRadius on
+    /// this OS (reads 0), so fall back to the standard window radius; fullscreen
+    /// windows are the only truly square case.
+    private func applyCornerMask(to hud: NSWindow, matching parent: NSWindow) {
+        guard let content = hud.contentView else { return }
+        content.wantsLayer = true
+        let parentRadius = parent.contentView?.superview?.layer?.cornerRadius ?? 0
+        let radius: CGFloat
+        if parent.styleMask.contains(.fullScreen) {
+            radius = 0
+        } else {
+            radius = parentRadius > 0 ? parentRadius : 12
+        }
+        content.layer?.cornerRadius = radius
+        content.layer?.cornerCurve = .continuous
+        content.layer?.masksToBounds = true
+    }
+
+    private func makeWindow() -> NSWindow {
+        let w = NSWindow(
+            contentRect: .zero,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.ignoresMouseEvents = true
+        w.hasShadow = false
+        w.contentView = NSHostingView(rootView: ResizeHudView(model: model))
+        return w
+    }
+}
+
+final class ResizeHudModel: ObservableObject {
+    @Published var size: CGSize = .zero
+}
+
+/// Frost for the HUD child window. Must be a real NSVisualEffectView blending
+/// BEHIND the (transparent) child window — the window server then blurs the
+/// parent window's live pixels through it. A SwiftUI Material here has nothing
+/// in its own window to sample and collapses into an opaque slab.
+private struct HudBehindWindowBlur: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.blendingMode = .behindWindow
+        v.material = .hudWindow
+        v.state = .active
+        return v
+    }
+
+    func updateNSView(_ v: NSVisualEffectView, context: Context) {}
+}
+
+struct ResizeHudView: View {
+    @ObservedObject var model: ResizeHudModel
+    private var size: CGSize { model.size }
+
+    var body: some View {
+        ZStack {
+            HudBehindWindowBlur()
+            VStack(spacing: 6) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("\(Int(size.width)) × \(Int(size.height))")
+                    .font(.system(size: 26, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .animation(.snappy(duration: 0.18), value: size.width + size.height)
+                Text("Suisei")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 20)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Radius.floating, style: .continuous))
+            .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
+        }
+    }
+}
