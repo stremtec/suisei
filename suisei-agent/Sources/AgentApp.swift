@@ -23,9 +23,10 @@ struct SuiseiDaemonAgentApp: App {
         let path = Bundle.main.path(forResource: "StatusIcon", ofType: "png")
         let img = (path.flatMap { NSImage(contentsOfFile: $0) }) ?? NSImage()
         img.isTemplate = true
-        // Fill the menu-bar height — the source is tight-cropped to the shape,
-        // so this shows the glyph large rather than a speck in a padded frame.
-        img.size = NSSize(width: 20, height: 20)
+        // Fill the menu-bar height — the source is tight-cropped to the shape
+        // (alpha-thresholded, so the faint halo no longer defeats the crop),
+        // so the glyph reads large instead of as a speck in a padded frame.
+        img.size = NSSize(width: 22, height: 22)
         return img
     }()
 }
