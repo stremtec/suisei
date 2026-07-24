@@ -18,6 +18,22 @@ impl Position {
     }
 }
 
+/// Row-major document order: earlier row first, then earlier column. This is
+/// what the `Selection` model needs to normalise anchor/head into a range and
+/// to merge overlapping selections, so it lives on `Position` itself rather
+/// than being re-derived at each call site.
+impl PartialOrd for Position {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Position {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.row.cmp(&other.row).then(self.col.cmp(&other.col))
+    }
+}
+
 #[derive(Clone)]
 pub struct Buffer {
     lines: Vec<String>,

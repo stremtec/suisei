@@ -25,6 +25,7 @@ pub mod macros;
 pub mod multi_cursor;
 pub mod nav;
 pub mod ops;
+pub mod selection;
 pub mod palette;
 pub mod media;
 pub mod peek;
