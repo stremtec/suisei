@@ -1196,6 +1196,16 @@ impl LspClient {
     }
 }
 
+impl Drop for LspClient {
+    /// Reap the language-server child. `std::process::Child`'s own drop does
+    /// NOT kill the process, so without this every dropped client — test
+    /// teardown, GUI exit, a server swap that forgets to shut down — orphans a
+    /// live rust-analyzer. That was the source of the 80+ leaked processes.
+    fn drop(&mut self) {
+        self.shutdown_quiet();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LspStatus {
     Idle,
@@ -2689,6 +2699,31 @@ fn lang_id(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drop_reaps_the_language_server_child() {
+        // `std::process::Child`'s drop does NOT kill the process — the `Drop`
+        // impl must. Spawn a uniquely-tagged stand-in "server" and confirm that
+        // dropping the client leaves no orphan (the leak this fixes).
+        let marker = "319274.5";
+        let running = || {
+            let out = std::process::Command::new("pgrep")
+                .args(["-f", &format!("sleep {marker}")])
+                .output()
+                .expect("pgrep");
+            !out.stdout.is_empty()
+        };
+        {
+            let mut lsp = LspClient::new();
+            lsp.server_overrides
+                .insert("rust".to_string(), format!("sleep {marker}"));
+            lsp.auto_start_with_text("/tmp/suisei_drop_reap.rs", Some(""));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(running(), "stand-in server should be alive before drop");
+        } // drop → Drop → shutdown_quiet → kill + wait
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!running(), "child must be reaped when the client is dropped");
+    }
 
     #[test]
     fn code_lens_split_resolved_unresolved() {

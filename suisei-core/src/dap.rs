@@ -2126,6 +2126,15 @@ impl DapClient {
     }
 }
 
+impl Drop for DapClient {
+    /// Reap the debug-adapter child (same reason as `LspClient`): `Child`'s
+    /// drop leaves the process running, so a dropped client would orphan the
+    /// adapter.
+    fn drop(&mut self) {
+        self.finish_shutdown();
+    }
+}
+
 // ── Transport ──────────────────────────────────────────────────────────────
 
 fn read_loop<R: Read>(stdout: R, tx: mpsc::Sender<Value>) {
