@@ -390,6 +390,13 @@ struct ContentView: View {
                 applyWindowAppearance()
             }
         }
+        .onChange(of: engine.referencesActive) { _, active in
+            // "Find All References" surfaces its results in the Find navigator.
+            if active {
+                engine.uiNavVisible = true
+                navMode = .find
+            }
+        }
         .onChange(of: navMode) { old, new in
             guard !pillDragCommitting,
                   let a = NavMode.allCases.firstIndex(of: old),
@@ -1343,9 +1350,22 @@ struct ContentView: View {
         )
     }
 
-    /// Find navigator — project-wide grep. The core has had `search_project`
-    /// all along; this is the surface it never had.
+    /// The Find navigator shows project grep, or — when a "Find All
+    /// References" lookup is active — the LSP references for the symbol,
+    /// Xcode-style (references land in the Find navigator).
     private var findPanelContent: some View {
+        Group {
+            if engine.referencesActive {
+                referencesPanelContent
+            } else {
+                searchPanelContent
+            }
+        }
+    }
+
+    /// Project-wide grep. The core has had `search_project` all along; this is
+    /// the surface it never had.
+    private var searchPanelContent: some View {
         VStack(spacing: 0) {
             NavigatorSearchField(text: $findQuery) {
                 engine.searchProject(findQuery)
@@ -1447,6 +1467,89 @@ struct ContentView: View {
                         }
                         if engine.searchTruncated {
                             Text("Showing the first \(engine.searchHits.count) matches")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
+            }
+        }
+    }
+
+    /// References navigator — LSP "Find All References", shown in the Find
+    /// slot. Header names the count and offers the way back to search; each
+    /// row jumps to the usage (same styling as a search hit).
+    private var referencesPanelContent: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "link")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("References")
+                    .font(.system(size: 12, weight: .semibold))
+                if engine.referencesReady {
+                    Text("\(engine.references.count)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    engine.dismissReferences()
+                    focused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Back to search")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+
+            if !engine.referencesReady {
+                navigatorPlaceholder("link", "Finding references…", nil)
+            } else if engine.references.isEmpty {
+                navigatorPlaceholder(
+                    "link", "No references",
+                    "No references found — or no language server is running for this file."
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(engine.references) { ref in
+                            Button {
+                                engine.openSearchHit(ref)
+                                focused = true
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(ref.name)
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                        Text(":\(ref.row + 1)")
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                        Spacer(minLength: 0)
+                                    }
+                                    Text(ref.line)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if engine.referencesTruncated {
+                            Text("Showing the first \(engine.references.count) references")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.tertiary)
                                 .padding(.horizontal, 8)

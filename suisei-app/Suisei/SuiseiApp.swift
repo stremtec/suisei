@@ -152,6 +152,11 @@ struct SuiseiApp: App {
             }
             .keyboardShortcut("j", modifiers: [.command, .control])
 
+            Button("Find All References") {
+                engine.requestReferences()
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+
             Button("Rename Symbol…") {
                 engine.promptRenameSymbol()
             }

@@ -629,11 +629,14 @@ impl LspClient {
     }
 
     pub fn request_references(&mut self, path: &str, row: usize, col: usize) {
-        self.references_ready = false;
         self.pending_references.clear();
         if !self.server_running {
+            // Nothing to wait for — resolve immediately as "zero references" so
+            // the face shows a result instead of spinning forever.
+            self.references_ready = true;
             return;
         }
+        self.references_ready = false;
         let uri = path_to_uri(&abs_path(path));
         let col16 = self.char_col_to_utf16(row, col);
         let id = self.alloc_id(PendingReq::References);

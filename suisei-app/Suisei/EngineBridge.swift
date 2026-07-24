@@ -476,6 +476,13 @@ final class EngineBridge: ObservableObject {
     @Published private(set) var searchRunning: Bool = false
     /// Why a search produced nothing, when the reason is not "no matches".
     @Published private(set) var searchMessage: String = ""
+    /// Find All References (LSP) — reuses the search-hit row shape. `active`
+    /// drives the References view taking over the Find navigator; `ready`
+    /// distinguishes "still waiting on the server" from "resolved, 0 refs".
+    @Published private(set) var references: [SearchHitItem] = []
+    @Published var referencesActive: Bool = false
+    @Published private(set) var referencesReady: Bool = false
+    @Published private(set) var referencesTruncated: Bool = false
     @Published private(set) var hoverText: String = ""
     private var hoverPoll: DispatchWorkItem?
     /// Discards results from a superseded query — the user types faster than a
@@ -715,6 +722,8 @@ final class EngineBridge: ObservableObject {
         tickTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             guard let self, let engine = self.engine else { return }
             let gen = suisei_engine_tick(engine, 50)
+            // Pick up an async references reply (one publish, then it stops).
+            self.pollReferencesIfNeeded()
             // Never publish SwiftUI editor updates mid-gesture — the canvas
             // already merges paint windows itself; publishing re-enters
             // updateNSView while AppKit scrolls and shows as jitter.
@@ -2166,6 +2175,59 @@ final class EngineBridge: ObservableObject {
     func openSearchHit(_ hit: SearchHitItem) {
         openPath(hit.path)
         gotoLine(hit.row + 1)
+    }
+
+    // ── Find All References (LSP) ────────────────────────────────────────
+    /// Ask the language server for every reference to the symbol under the
+    /// cursor. The answer is asynchronous; `pollReferencesIfNeeded()` on the
+    /// tick loop picks it up. Takes over the Find navigator until dismissed.
+    func requestReferences() {
+        guard let engine else { return }
+        references = []
+        referencesReady = false
+        referencesTruncated = false
+        referencesActive = true
+        suisei_engine_request_references(engine)
+    }
+
+    /// Return the Find navigator to project search.
+    func dismissReferences() {
+        referencesActive = false
+        references = []
+        referencesReady = false
+    }
+
+    /// Cheap while the server is still thinking (`ready == 0`); decodes the
+    /// result once and then stops polling.
+    func pollReferencesIfNeeded() {
+        guard referencesActive, !referencesReady, let engine else { return }
+        let snap = UnsafeMutablePointer<SuiseiReferencesSnapshot>.allocate(capacity: 1)
+        defer { snap.deallocate() }
+        snap.initialize(to: SuiseiReferencesSnapshot())
+        let ok = suisei_engine_references(engine, snap)
+        guard ok != 0, snap.pointee.ready != 0 else { return }
+        var out: [SearchHitItem] = []
+        let n = Int(snap.pointee.count)
+        out.reserveCapacity(n)
+        let base = UnsafeRawPointer(snap)
+        let rr = base.advanced(by: MemoryLayout<SuiseiReferencesSnapshot>
+            .offset(of: \.rows)!).assumingMemoryBound(to: UInt32.self)
+        let cc = base.advanced(by: MemoryLayout<SuiseiReferencesSnapshot>
+            .offset(of: \.cols)!).assumingMemoryBound(to: UInt32.self)
+        let pp = base.advanced(by: MemoryLayout<SuiseiReferencesSnapshot>
+            .offset(of: \.paths)!).assumingMemoryBound(to: CChar.self)
+        let ll = base.advanced(by: MemoryLayout<SuiseiReferencesSnapshot>
+            .offset(of: \.lines)!).assumingMemoryBound(to: CChar.self)
+        for i in 0..<n {
+            out.append(SearchHitItem(
+                path: String(cString: pp + i * Int(SUISEI_REF_PATH)),
+                row: rr[i], col: cc[i],
+                line: String(cString: ll + i * Int(SUISEI_REF_LINE))
+            ))
+        }
+        references = out
+        referencesTruncated = snap.pointee.truncated != 0
+        referencesReady = true
     }
 
     /// Replace the first match of `query` on the hit's line (atomic write).
