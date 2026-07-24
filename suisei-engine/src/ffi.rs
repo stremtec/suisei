@@ -268,11 +268,20 @@ pub extern "C" fn suisei_engine_completions_open(ptr: *const SuiseiEngine) -> u8
 /// costs a full editor-line decode plus a SwiftUI republish. Dispatching a key
 /// costs ~1µs; asking whether we may dispatch must not cost more than that.
 #[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_mode_is_insert(ptr: *const SuiseiEngine) -> u8 {
+pub extern "C" fn suisei_engine_editor_accepts_text(ptr: *const SuiseiEngine) -> u8 {
     if ptr.is_null() {
         return 0;
     }
-    unsafe { u8::from(matches!((*ptr).0.app().mode, suisei_core::app::Mode::Insert)) }
+    // Editing is modeless now: the typing fast path is eligible whenever the
+    // editor (not a chrome panel or the terminal) owns the keys. A selection is
+    // fine — the fast path replaces it. Was `mode_is_insert`, which pinned the
+    // fast path to a vim Insert mode the GUI never enters.
+    unsafe {
+        u8::from(matches!(
+            (*ptr).0.app().mode,
+            suisei_core::app::Mode::Normal | suisei_core::app::Mode::Insert
+        ))
+    }
 }
 
 /// Drain side-effects; returns current `frame_gen` (face should paint only when it changes).

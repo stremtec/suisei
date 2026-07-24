@@ -31,6 +31,16 @@ use crate::theme::{self, Theme, OCEAN};
 use crate::undo::UndoStack;
 use crate::xlc::{Xlc, XlcCmd};
 
+/// What kind of GUI edit the last keystroke was, for undo coalescing. A run of
+/// the same kind shares one snapshot; switching kind (or moving the caret)
+/// starts a new undo group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditRun {
+    None,
+    Insert,
+    Delete,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Normal,
@@ -146,6 +156,11 @@ pub struct App {
     /// `visual_anchor`/`Mode` pair above, which stays for TUI compatibility —
     /// the GUI face drives this through the semantic `caret_*` commands.
     pub sel: crate::selection::SelectionSet,
+    /// Undo coalescing for the GUI edits: a run of characters (or a run of
+    /// deletes) shares one undo snapshot instead of cloning the whole buffer
+    /// per keystroke. Reset by any caret move — moving then typing starts a
+    /// fresh group, the standard editor contract.
+    pub edit_run: crate::app::EditRun,
     /// Last committed search pattern (used by n/N after leaving search mode).
     pub search_pattern: Option<String>,
     /// Live query while in Search mode (does not touch `search_pattern` until commit).
@@ -488,6 +503,7 @@ impl Default for App {
             which_key: crate::which_key::WhichKeyState::default(),
             visual_anchor: None,
             sel: crate::selection::SelectionSet::new(),
+            edit_run: EditRun::None,
             search_pattern: None,
             search_input: String::new(),
             search_matches: Vec::new(),
@@ -5586,6 +5602,7 @@ impl App {
             self.sel = crate::selection::SelectionSet::single(
                 crate::selection::Selection::caret(self.buffer.cursor()),
             );
+            self.edit_run = EditRun::None;
         }
     }
 

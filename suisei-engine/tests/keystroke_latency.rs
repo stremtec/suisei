@@ -73,3 +73,27 @@ fn empty_buffer_keystroke_cost() {
     println!("it is in the Swift side (chrome pull + SwiftUI publish + redraw).");
     println!();
 }
+
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn large_buffer_typing_cost() {
+    // The regression guard for undo coalescing: `gui_insert_text` snapshots the
+    // buffer once per typing RUN, not per keystroke. Without coalescing this
+    // clones every line on every character — O(file) per key — and a 6k-line
+    // file crawls. With it, typing a run stays flat regardless of file size.
+    println!();
+    println!("=== keystroke cost while typing into a 6,000-line file ===");
+    let mut engine = Engine::new();
+    engine.resize(1600.0, 1000.0, 18.0, 8.0, 2.0);
+    for _ in 0..6000 {
+        engine.dispatch_key(key_from_ffi(CODE_CHAR, 'x' as u32, 0, 0).unwrap());
+        engine.dispatch_key(key_from_ffi(2 /* Enter */, 0, 0, 0).unwrap());
+    }
+    // Now type a run of characters mid-document and measure per-key cost.
+    let _ = type_chars(&mut engine, 5); // warm
+    report("6,000-line file · typing run", type_chars(&mut engine, 100));
+    println!();
+    println!("If this tracks the empty-buffer cost, coalescing is holding; a jump");
+    println!("to O(file) per key means a per-keystroke snapshot slipped back in.");
+    println!();
+}

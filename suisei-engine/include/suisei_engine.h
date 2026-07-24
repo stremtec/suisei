@@ -133,8 +133,8 @@ const char *suisei_engine_version(void);
 uint8_t suisei_engine_dispatch_key(
     SuiseiEngine *ptr, uint32_t code, uint32_t ch, uint8_t f_num, uint8_t mods);
 /* Returns frame_gen after tick — face should refresh only when it changes. */
-/* Cheap probe for the typing fast path — no snapshot decode. */
-uint8_t suisei_engine_mode_is_insert(const SuiseiEngine *ptr);
+/* Typing fast-path eligibility: editor owns keys (modeless) — no snapshot. */
+uint8_t suisei_engine_editor_accepts_text(const SuiseiEngine *ptr);
 /* Cheap probe: completion popup open? (typing fast path) */
 uint8_t suisei_engine_completions_open(const SuiseiEngine *ptr);
 /* Face acted on the scroll intent — clear it. */

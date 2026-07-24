@@ -100,6 +100,7 @@ impl App {
     /// From a non-empty selection, a plain Left/Right lands on the near/far
     /// edge without moving further — the macOS text-field convention.
     pub fn caret_move(&mut self, motion: Motion) {
+        self.edit_run = crate::app::EditRun::None;
         let sel = self.sel.primary();
         if !sel.is_empty() && matches!(motion, Motion::Left | Motion::Right) {
             let collapsed = match motion {
@@ -119,6 +120,7 @@ impl App {
     /// Extend the selection (Shift): keep the anchor, move only the head.
     /// If there is no selection yet, the current head becomes the anchor.
     pub fn caret_extend(&mut self, motion: Motion) {
+        self.edit_run = crate::app::EditRun::None;
         let sel = self.sel.primary();
         let (head, goal) = self.apply_motion(motion);
         self.sel.set_primary(Selection { anchor: sel.anchor, head, goal_x: goal });
@@ -127,6 +129,7 @@ impl App {
 
     /// Place a single caret at `pos` (a plain click), discarding other cursors.
     pub fn caret_place(&mut self, pos: Position) {
+        self.edit_run = crate::app::EditRun::None;
         let clamped = self.clamp_to_document(pos);
         self.sel = crate::selection::SelectionSet::single(Selection::caret(clamped));
         self.buffer.cursor = clamped;
@@ -134,6 +137,7 @@ impl App {
 
     /// Extend the primary selection's head to `pos` (a drag, or Shift+Click).
     pub fn caret_drag_to(&mut self, pos: Position) {
+        self.edit_run = crate::app::EditRun::None;
         let clamped = self.clamp_to_document(pos);
         let anchor = self.sel.primary().anchor;
         self.sel.set_primary(Selection::new(anchor, clamped));
@@ -142,6 +146,7 @@ impl App {
 
     /// Add a caret at `pos` (⌘-click multi-cursor).
     pub fn caret_add(&mut self, pos: Position) {
+        self.edit_run = crate::app::EditRun::None;
         let clamped = self.clamp_to_document(pos);
         self.sel.add(Selection::caret(clamped));
         self.buffer.cursor = self.sel.primary().head;
@@ -208,7 +213,11 @@ impl App {
         if text.is_empty() {
             return;
         }
-        self.push_undo();
+        // Coalesce a typing run: snapshot once when the run starts, not per key.
+        if self.edit_run != crate::app::EditRun::Insert {
+            self.push_undo();
+            self.edit_run = crate::app::EditRun::Insert;
+        }
         let mut heads = vec![Position::zero(); self.sel.len()];
         for i in self.selections_last_first() {
             let s = self.sel.all()[i];
@@ -230,6 +239,7 @@ impl App {
     /// Insert a smart-indented newline at every caret (Return).
     pub fn gui_insert_newline(&mut self, indent_unit: &str) {
         self.push_undo();
+        self.edit_run = crate::app::EditRun::None;
         let mut heads = vec![Position::zero(); self.sel.len()];
         for i in self.selections_last_first() {
             let s = self.sel.all()[i];
@@ -250,7 +260,10 @@ impl App {
 
     /// Backspace: delete the selection, or one grapheme before each caret.
     pub fn gui_delete_backward(&mut self) {
-        self.push_undo();
+        if self.edit_run != crate::app::EditRun::Delete {
+            self.push_undo();
+            self.edit_run = crate::app::EditRun::Delete;
+        }
         let mut heads = vec![Position::zero(); self.sel.len()];
         for i in self.selections_last_first() {
             let s = self.sel.all()[i];
@@ -281,7 +294,10 @@ impl App {
 
     /// Forward delete: delete the selection, or one grapheme after each caret.
     pub fn gui_delete_forward(&mut self) {
-        self.push_undo();
+        if self.edit_run != crate::app::EditRun::Delete {
+            self.push_undo();
+            self.edit_run = crate::app::EditRun::Delete;
+        }
         let mut heads = vec![Position::zero(); self.sel.len()];
         for i in self.selections_last_first() {
             let s = self.sel.all()[i];
@@ -541,6 +557,30 @@ mod tests {
         app.caret_add(Position::new(2, 2));
         app.gui_delete_backward();
         assert_eq!(app.buffer.text(), "a\nb\nc");
+    }
+
+    #[test]
+    fn typing_run_undoes_as_one_group() {
+        let mut app = app_with("");
+        app.caret_place(Position::new(0, 0));
+        for c in "hello".chars() {
+            app.gui_insert_text(&c.to_string());
+        }
+        assert_eq!(app.buffer.text(), "hello");
+        app.undo(); // one undo reverts the whole coalesced run
+        assert_eq!(app.buffer.text(), "");
+    }
+
+    #[test]
+    fn caret_move_breaks_the_undo_run() {
+        let mut app = app_with("");
+        app.caret_place(Position::new(0, 0));
+        app.gui_insert_text("a");
+        app.caret_move(Motion::Right); // boundary (no-op move still resets run)
+        app.gui_insert_text("b");
+        assert_eq!(app.buffer.text(), "ab");
+        app.undo(); // reverts only "b"
+        assert_eq!(app.buffer.text(), "a");
     }
 
     #[test]

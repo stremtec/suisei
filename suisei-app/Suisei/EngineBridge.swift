@@ -791,11 +791,10 @@ final class EngineBridge: ObservableObject {
     /// the rest of the UI (tab dirty dot, Ln/Col, outline) settles behind.
     func typeFast(ch: UInt32) -> Bool {
         guard let engine, !terminalOwnsKeys, !panelOwnsTyping else { return false }
-        // Only take the fast path once the core is already accepting text. When
-        // it is not — notably with a drag selection active — hand back to the
-        // full path, which knows to REPLACE the selection. Injecting "i" here
-        // would have silently dropped the selection instead of overwriting it.
-        guard suisei_engine_mode_is_insert(engine) != 0 else { return false }
+        // Fast path whenever the editor owns the keys. Editing is modeless now
+        // and the underlying insert REPLACES any selection, so a live drag
+        // selection no longer needs the slow path — it is overwritten correctly.
+        guard suisei_engine_editor_accepts_text(engine) != 0 else { return false }
         _ = suisei_engine_dispatch_key(engine, SuiseiKey.char_.rawValue, ch, 0, 0)
         // Autocomplete has to keep up WITH typing, not 120ms after it stops.
         // Probe cheaply and pull the popup only while there is one — this is
