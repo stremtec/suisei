@@ -141,6 +141,11 @@ pub struct App {
     /// Which-key delay + Space-leader path.
     pub which_key: crate::which_key::WhichKeyState,
     pub visual_anchor: Option<Position>,
+    /// GUI selection model (P0.2). Exclusive semantics, plural selections; the
+    /// primary head mirrors `buffer.cursor`. Independent of the vim
+    /// `visual_anchor`/`Mode` pair above, which stays for TUI compatibility —
+    /// the GUI face drives this through the semantic `caret_*` commands.
+    pub sel: crate::selection::SelectionSet,
     /// Last committed search pattern (used by n/N after leaving search mode).
     pub search_pattern: Option<String>,
     /// Live query while in Search mode (does not touch `search_pattern` until commit).
@@ -482,6 +487,7 @@ impl Default for App {
             pending_hints: Vec::new(),
             which_key: crate::which_key::WhichKeyState::default(),
             visual_anchor: None,
+            sel: crate::selection::SelectionSet::new(),
             search_pattern: None,
             search_input: String::new(),
             search_matches: Vec::new(),
@@ -5537,6 +5543,12 @@ impl App {
             self.modified = tab.modified;
             self.undo_stack = tab.undo_stack;
             self.file_mtime = tab.file_mtime;
+            // GUI selection is ephemeral across tabs (interim): collapse to a
+            // caret at the restored cursor. The cursor itself rides in the
+            // buffer clone, so it is already correct.
+            self.sel = crate::selection::SelectionSet::single(
+                crate::selection::Selection::caret(self.buffer.cursor()),
+            );
         }
     }
 

@@ -22,6 +22,7 @@ pub mod git_workbench;
 pub mod highlight;
 pub mod lsp;
 pub mod macros;
+pub mod gui_edit;
 pub mod multi_cursor;
 pub mod nav;
 pub mod ops;
