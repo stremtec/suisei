@@ -868,6 +868,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "suisei-daemon"
+version = "0.1.0"
+
+[[package]]
 name = "suisei-engine"
 version = "0.1.0"
 dependencies = [

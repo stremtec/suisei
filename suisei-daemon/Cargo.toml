@@ -1,0 +1,20 @@
+# suisei-daemon — the durable, headless owner of external tool processes
+# (rust-analyzer, debug adapters) and, later, authoritative editor state.
+#
+# Deliberately std-only (zero deps): the IPC is a Unix socket with a
+# length-prefixed binary frame, matching the project's no-serde, fixed-offset
+# ABI convention (see SUISEI-ARCHITECTURE-PLAN.md §1.3).
+[package]
+name = "suisei-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "suisei_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "suisei-daemon"
+path = "src/main.rs"

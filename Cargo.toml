@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["suisei-core", "suisei-engine"]
+members = ["suisei-core", "suisei-engine", "suisei-daemon"]
 
 # Single source of truth for the app version. The packaging script reads this
 # (`grep -m1 '^version' Cargo.toml`) into Info.plist. Suisei starts its own
