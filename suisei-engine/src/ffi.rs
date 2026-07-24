@@ -2151,6 +2151,74 @@ pub extern "C" fn suisei_engine_search_project(
 }
 
 // ---------------------------------------------------------------------------
+// Find All References — LSP textDocument/references.
+//
+// Asynchronous like hover: `request` posts to the server, then the face polls
+// `references` until `ready` flips. Same list shape as project search (rows +
+// cols + paths + a source-line preview), so the face can reuse that panel.
+// ---------------------------------------------------------------------------
+
+pub const SUISEI_MAX_REFS: usize = 500;
+pub const SUISEI_REF_PATH: usize = 512;
+pub const SUISEI_REF_LINE: usize = 240;
+
+#[repr(C)]
+pub struct SuiseiReferencesSnapshot {
+    pub count: u32,
+    /// 1 once the LSP has answered (so 0 references reads as "done", not "wait").
+    pub ready: u8,
+    /// Set when the result set hit `SUISEI_MAX_REFS` and was cut short.
+    pub truncated: u8,
+    pub _pad0: u8,
+    pub _pad1: u8,
+    pub rows: [u32; SUISEI_MAX_REFS],
+    pub cols: [u32; SUISEI_MAX_REFS],
+    pub paths: [[c_char; SUISEI_REF_PATH]; SUISEI_MAX_REFS],
+    pub lines: [[c_char; SUISEI_REF_LINE]; SUISEI_MAX_REFS],
+}
+
+/// Ask the language server for all references to the symbol under the cursor.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_request_references(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().request_references();
+        (*ptr).0.recompose_paint_only();
+    }
+}
+
+/// Poll the references result. `ready == 0` means the server has not answered
+/// yet; the face should keep polling. Returns 1 unless the args are null.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_references(
+    ptr: *const SuiseiEngine,
+    out: *mut SuiseiReferencesSnapshot,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let eng = unsafe { &*ptr };
+    let (refs, ready) = eng.0.app.references_result();
+    unsafe {
+        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiReferencesSnapshot>());
+    }
+    let o = unsafe { &mut *out };
+    o.ready = u8::from(ready);
+    o.truncated = u8::from(refs.len() > SUISEI_MAX_REFS);
+    let n = refs.len().min(SUISEI_MAX_REFS);
+    o.count = n as u32;
+    for (i, (loc, preview)) in refs.iter().take(n).enumerate() {
+        o.rows[i] = loc.row as u32;
+        o.cols[i] = loc.col as u32;
+        write_cstr(&mut o.paths[i], &loc.path);
+        write_cstr(&mut o.lines[i], preview);
+    }
+    1
+}
+
+// ---------------------------------------------------------------------------
 // Quick Help inspector — LSP hover.
 //
 // `request_hover` is asynchronous: it posts to the language server and the

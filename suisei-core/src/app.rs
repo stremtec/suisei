@@ -2914,6 +2914,35 @@ impl App {
         }
     }
 
+    /// The current "find references" result: each location with a trimmed
+    /// preview of its source line, plus whether the LSP has answered yet.
+    /// The preview is pulled from the open buffer when the location is in the
+    /// current file (so unsaved edits show), else read best-effort from disk
+    /// (deduplicated per file). `(empty, true)` means resolved with zero refs.
+    pub fn references_result(&self) -> (Vec<(crate::lsp::Location, String)>, bool) {
+        use std::collections::HashMap;
+        let ready = self.lsp.references_ready;
+        let cur = self.filename.as_ref().map(|p| p.display().to_string());
+        let mut disk: HashMap<String, Vec<String>> = HashMap::new();
+        let mut out = Vec::with_capacity(self.lsp.pending_references.len());
+        for loc in &self.lsp.pending_references {
+            let preview = if Some(&loc.path) == cur.as_ref() {
+                self.buffer.line(loc.row.min(self.buffer.line_count().saturating_sub(1)))
+                    .trim()
+                    .to_string()
+            } else {
+                let lines = disk.entry(loc.path.clone()).or_insert_with(|| {
+                    std::fs::read_to_string(&loc.path)
+                        .map(|s| s.lines().map(|l| l.to_string()).collect())
+                        .unwrap_or_default()
+                });
+                lines.get(loc.row).map(|l| l.trim().to_string()).unwrap_or_default()
+            };
+            out.push((loc.clone(), preview));
+        }
+        (out, ready)
+    }
+
     pub fn request_rename(&mut self, new_name: &str) {
         if new_name.is_empty() {
             self.message = String::from("Empty name");
@@ -5972,6 +6001,38 @@ mod tests {
             text_y: 0,
         };
         app
+    }
+
+    #[test]
+    fn references_result_enriches_with_preview_and_ready() {
+        let mut app = app_with("fn main() {\n    let x = foo();\n    foo();\n}");
+        app.filename = Some(PathBuf::from("/tmp/refs_test.rs"));
+        // Simulate the async LSP answer landing.
+        app.lsp.pending_references = vec![
+            crate::lsp::Location { path: "/tmp/refs_test.rs".into(), row: 1, col: 12 },
+            crate::lsp::Location { path: "/tmp/refs_test.rs".into(), row: 2, col: 4 },
+        ];
+        app.lsp.references_ready = true;
+
+        let (refs, ready) = app.references_result();
+        assert!(ready);
+        assert_eq!(refs.len(), 2);
+        // Preview is the TRIMMED source line from the open buffer (unsaved-safe).
+        assert_eq!(refs[0].1, "let x = foo();");
+        assert_eq!(refs[1].1, "foo();");
+        assert_eq!(refs[0].0.row, 1);
+        assert_eq!(refs[1].0.col, 4);
+    }
+
+    #[test]
+    fn references_result_reports_not_ready_before_answer() {
+        let mut app = app_with("x");
+        app.filename = Some(PathBuf::from("/tmp/x.rs"));
+        app.lsp.references_ready = false;
+        app.lsp.pending_references.clear();
+        let (refs, ready) = app.references_result();
+        assert!(!ready, "must read as pending until the server answers");
+        assert!(refs.is_empty());
     }
 
     #[test]

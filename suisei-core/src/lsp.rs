@@ -42,6 +42,9 @@ pub struct LspClient {
     pub pending_completions: Vec<CompletionItem>,
     pub pending_hover: Option<String>,
     pub pending_references: Vec<Location>,
+    /// True once a references response has landed (distinguishes "still waiting"
+    /// from "resolved, zero results" — a `Vec` alone cannot). Reset on request.
+    pub references_ready: bool,
     /// Legacy single-string edit message (status / no-op notes).
     pub pending_workspace_edit: Option<String>,
     /// Multi-file full-text edits ready to apply (path → new content).
@@ -210,6 +213,7 @@ impl Default for LspClient {
             pending_completions: Vec::new(),
             pending_hover: None,
             pending_references: Vec::new(),
+            references_ready: false,
             pending_workspace_edit: None,
             pending_edits: Vec::new(),
             pending_symbols: Vec::new(),
@@ -625,6 +629,8 @@ impl LspClient {
     }
 
     pub fn request_references(&mut self, path: &str, row: usize, col: usize) {
+        self.references_ready = false;
+        self.pending_references.clear();
         if !self.server_running {
             return;
         }
@@ -995,6 +1001,7 @@ impl LspClient {
             }
             PendingReq::References => {
                 self.pending_references = parse_locations(&msg.body);
+                self.references_ready = true;
             }
             PendingReq::Rename => {
                 let edits = parse_workspace_edit_ctx(

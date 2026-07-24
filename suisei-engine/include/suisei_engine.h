@@ -554,6 +554,29 @@ typedef struct SuiseiSearchHitsSnapshot {
 uint8_t suisei_engine_search_project(const char *root, const char *pattern,
                                      SuiseiSearchHitsSnapshot *out);
 
+/* Find All References — LSP textDocument/references. Asynchronous like hover:
+   request, then poll `references` until `ready` != 0 (0 refs then reads as
+   done, not still-waiting). Same list shape as project search. */
+#define SUISEI_MAX_REFS 500
+#define SUISEI_REF_PATH 512
+#define SUISEI_REF_LINE 240
+
+typedef struct SuiseiReferencesSnapshot {
+  uint32_t count;
+  uint8_t ready;
+  uint8_t truncated;
+  uint8_t _pad0;
+  uint8_t _pad1;
+  uint32_t rows[SUISEI_MAX_REFS];
+  uint32_t cols[SUISEI_MAX_REFS];
+  char paths[SUISEI_MAX_REFS][SUISEI_REF_PATH];
+  char lines[SUISEI_MAX_REFS][SUISEI_REF_LINE];
+} SuiseiReferencesSnapshot;
+
+void suisei_engine_request_references(SuiseiEngine *ptr);
+uint8_t suisei_engine_references(const SuiseiEngine *ptr,
+                                 SuiseiReferencesSnapshot *out);
+
 /* Quick Help inspector — LSP hover. Asynchronous: request, then poll. */
 #define SUISEI_HOVER_TEXT 4096
 
