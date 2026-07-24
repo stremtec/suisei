@@ -38,6 +38,11 @@ pub enum Opcode {
     /// Liveness probe / heartbeat.
     Ping = 4,
     Pong = 5,
+    /// Client → daemon: request the current daemon/LSP/DAP status snapshot
+    /// (empty payload). The menu-bar agent polls this.
+    StatusRequest = 6,
+    /// Daemon → client: a [`Status`] snapshot (see its layout).
+    StatusReport = 7,
     /// Reserved: anything the receiver does not recognise decodes to this and
     /// is dropped (with a Nak for requests), never misinterpreted.
     Unknown = 0xFFFF,
@@ -51,6 +56,8 @@ impl Opcode {
             3 => Opcode::HelloNak,
             4 => Opcode::Ping,
             5 => Opcode::Pong,
+            6 => Opcode::StatusRequest,
+            7 => Opcode::StatusReport,
             _ => Opcode::Unknown,
         }
     }
@@ -128,6 +135,74 @@ impl Frame {
     }
 }
 
+/// Fixed capacity of the project-path field in an encoded [`Status`].
+pub const STATUS_PROJECT_CAP: usize = 512;
+/// Total wire size of an encoded [`Status`] payload.
+pub const STATUS_LEN: usize = 16 + STATUS_PROJECT_CAP;
+
+/// The daemon's health snapshot, shown by the menu-bar agent. Fixed binary
+/// layout (no serde), like every payload:
+///
+/// ```text
+/// 0  u16 lsp_sessions   2 u8 lsp_state   3 u8 dap_state   4 u8 health
+/// 8  u64 uptime_secs    16 [u8;512] project (NUL-terminated UTF-8)
+/// ```
+///
+/// `lsp_state`: 0 none · 1 starting · 2 indexing · 3 ready · 4 error.
+/// `dap_state`: 0 none · 1 running · 2 paused.
+/// `health`:    0 starting · 1 healthy · 2 degraded.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Status {
+    pub lsp_sessions: u16,
+    pub lsp_state: u8,
+    pub dap_state: u8,
+    pub health: u8,
+    pub uptime_secs: u64,
+    /// Indexed project root; empty when none is loaded.
+    pub project: String,
+}
+
+impl Status {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = vec![0u8; STATUS_LEN];
+        out[0..2].copy_from_slice(&self.lsp_sessions.to_le_bytes());
+        out[2] = self.lsp_state;
+        out[3] = self.dap_state;
+        out[4] = self.health;
+        // bytes 5..8 are padding
+        out[8..16].copy_from_slice(&self.uptime_secs.to_le_bytes());
+        let p = self.project.as_bytes();
+        let n = p.len().min(STATUS_PROJECT_CAP - 1); // always leave a NUL
+        out[16..16 + n].copy_from_slice(&p[..n]);
+        out
+    }
+
+    pub fn decode(payload: &[u8]) -> Option<Status> {
+        if payload.len() < STATUS_LEN {
+            return None;
+        }
+        let uptime_secs = u64::from_le_bytes([
+            payload[8], payload[9], payload[10], payload[11], payload[12], payload[13],
+            payload[14], payload[15],
+        ]);
+        let raw = &payload[16..16 + STATUS_PROJECT_CAP];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        Some(Status {
+            lsp_sessions: u16::from_le_bytes([payload[0], payload[1]]),
+            lsp_state: payload[2],
+            dap_state: payload[3],
+            health: payload[4],
+            uptime_secs,
+            project: String::from_utf8_lossy(&raw[..end]).into_owned(),
+        })
+    }
+
+    /// Wrap this snapshot in a `StatusReport` frame.
+    pub fn to_frame(&self) -> Frame {
+        Frame::new(Opcode::StatusReport, self.encode())
+    }
+}
+
 /// Where the daemon listens and clients connect. Prefers `$XDG_RUNTIME_DIR`
 /// (per-user, tmpfs, auto-cleaned); falls back to the macOS app-support dir.
 /// The parent directory is the caller's responsibility to create.
@@ -198,6 +273,26 @@ mod tests {
         raw.extend_from_slice(&[1, 0, 1, 0]); // only 4 provided
         let mut cursor = std::io::Cursor::new(raw);
         assert!(Frame::read_from(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn status_round_trips_including_project_path() {
+        let s = Status {
+            lsp_sessions: 2,
+            lsp_state: 3,
+            dap_state: 1,
+            health: 1,
+            uptime_secs: 4242,
+            project: "/Users/asill/suisei".to_string(),
+        };
+        let bytes = s.encode();
+        assert_eq!(bytes.len(), STATUS_LEN);
+        assert_eq!(Status::decode(&bytes).unwrap(), s);
+    }
+
+    #[test]
+    fn status_decode_rejects_short_payload() {
+        assert!(Status::decode(&[0u8; 4]).is_none());
     }
 
     #[test]

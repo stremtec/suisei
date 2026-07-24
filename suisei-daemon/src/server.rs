@@ -6,9 +6,11 @@
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 
 use crate::protocol::{Frame, Opcode, PROTOCOL_VERSION};
+use crate::state::DaemonState;
 
 /// Bind the daemon socket, clearing a stale socket file from a prior run first
 /// (a leftover node refuses `bind` with `EADDRINUSE`). Creates the parent dir.
@@ -24,13 +26,16 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
     UnixListener::bind(path)
 }
 
-/// Accept connections forever, one handler thread per client. Blocks.
-pub fn serve(listener: UnixListener) {
+/// Accept connections forever, one handler thread per client. Blocks. Every
+/// handler shares the one [`DaemonState`], so a status query reflects the
+/// managers' live view.
+pub fn serve(listener: UnixListener, state: Arc<DaemonState>) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                let state = Arc::clone(&state);
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(stream) {
+                    if let Err(e) = handle_client(stream, state) {
                         if e.kind() != io::ErrorKind::UnexpectedEof {
                             eprintln!("suisei-daemon: client error: {e}");
                         }
@@ -45,7 +50,7 @@ pub fn serve(listener: UnixListener) {
 /// One connection: require a compatible `Hello`, then loop over frames until
 /// EOF. A version mismatch gets a `HelloNak` (carrying the daemon's version)
 /// and the connection closes — never a silent mis-decode.
-pub fn handle_client(mut stream: UnixStream) -> io::Result<()> {
+pub fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> io::Result<()> {
     let hello = Frame::read_from(&mut stream)?;
     if hello.opcode != Opcode::Hello || hello.version != PROTOCOL_VERSION {
         Frame::new(Opcode::HelloNak, PROTOCOL_VERSION.to_le_bytes().to_vec())
@@ -60,18 +65,19 @@ pub fn handle_client(mut stream: UnixStream) -> io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e),
         };
-        if let Some(reply) = handle_frame(&frame) {
+        if let Some(reply) = handle_frame(&frame, &state) {
             reply.write_to(&mut stream)?;
         }
     }
 }
 
-/// Map a request frame to an optional reply. LSP/DAP opcodes will be handled
-/// here once the managers land; for now it answers the heartbeat and ignores
-/// anything unrecognised (a stricter Nak comes with the request opcodes).
-fn handle_frame(frame: &Frame) -> Option<Frame> {
+/// Map a request frame to an optional reply. LSP/DAP request opcodes plug in
+/// here as the managers land; for now it answers the heartbeat and the status
+/// poll, and ignores anything unrecognised.
+fn handle_frame(frame: &Frame, state: &DaemonState) -> Option<Frame> {
     match frame.opcode {
         Opcode::Ping => Some(Frame::control(Opcode::Pong)),
+        Opcode::StatusRequest => Some(state.status().to_frame()),
         _ => None,
     }
 }
@@ -88,9 +94,21 @@ mod tests {
     }
 
     fn accept_one(listener: UnixListener) -> thread::JoinHandle<()> {
+        let state = DaemonState::new();
         thread::spawn(move || {
             if let Ok((stream, _)) = listener.accept() {
-                let _ = handle_client(stream);
+                let _ = handle_client(stream, state);
+            }
+        })
+    }
+
+    fn accept_one_with(
+        listener: UnixListener,
+        state: std::sync::Arc<DaemonState>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = handle_client(stream, state);
             }
         })
     }
@@ -130,6 +148,33 @@ mod tests {
             u16::from_le_bytes([reply.payload[0], reply.payload[1]]),
             PROTOCOL_VERSION
         );
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn status_request_returns_the_daemon_snapshot() {
+        use crate::protocol::Status;
+        let path = tmp_sock("status");
+        let listener = bind(&path).unwrap();
+        let state = DaemonState::new();
+        state.set_lsp(1, 3); // one session, ready
+        state.set_project("/Users/asill/suisei");
+        let server = accept_one_with(listener, std::sync::Arc::clone(&state));
+
+        let mut client = UnixStream::connect(&path).unwrap();
+        Frame::control(Opcode::Hello).write_to(&mut client).unwrap();
+        assert_eq!(Frame::read_from(&mut client).unwrap().opcode, Opcode::HelloAck);
+
+        Frame::control(Opcode::StatusRequest).write_to(&mut client).unwrap();
+        let reply = Frame::read_from(&mut client).unwrap();
+        assert_eq!(reply.opcode, Opcode::StatusReport);
+        let snap = Status::decode(&reply.payload).unwrap();
+        assert_eq!(snap.lsp_sessions, 1);
+        assert_eq!(snap.lsp_state, 3);
+        assert_eq!(snap.project, "/Users/asill/suisei");
+
+        drop(client);
         server.join().unwrap();
         let _ = std::fs::remove_file(&path);
     }
