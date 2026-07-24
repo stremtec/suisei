@@ -42,8 +42,8 @@ target:    Suisei.app (native client) ←IPC→ suisei-daemon (durable App state
      tests, and an open/edit/save/reopen smoke test pass on macOS.
 
 2. **Replace the GUI’s Vim-mode emulation with first-class editing commands.**
-   *(Largely done 2026-07-24. Single-cursor editing is fully modeless; only
-   multi-cursor RENDERING remains.)*
+   *(Done 2026-07-24. Editing is fully modeless and multi-cursor carets now
+   paint; only secondary-selection *fills* are deferred, pending ⌘-D.)*
    - DONE `Selection { anchor, head, goal_x }` + `SelectionSet` (`selection.rs`),
      exclusive, plural; `App.sel` is the single selection authority and
      `selected_range()` derives the legacy inclusive span from it.
@@ -59,14 +59,19 @@ target:    Suisei.app (native client) ←IPC→ suisei-daemon (durable App state
      through Swift. vim keyboard commands (`:` `/` space-leader `i` hjkl) no
      longer exist in the GUI — a bare key just types. Core vim machinery stays
      as dormant dead code, deletable incrementally.
-   - REMAINING: multi-cursor is inherent in the model and edits, but the render
-     paints only the primary selection/caret (`selected_range()` → one span).
-     Painting every caret + span needs a multi-span `SuiseiEditorLineC` — an ABI
-     layout change touching both hard-coded decoders (mind the offset trap), so
-     it is its own careful patch.
-   - Gate: Shift+arrow, typing-over-selection, IME composition, drag ✅ without a
-     mode-specific Swift workaround; multi-cursor works in the model, pending its
-     paint.
+   - DONE multi-cursor carets paint. `App::secondary_caret_positions()` feeds
+     every non-primary caret through the existing kind-250 span channel carrying
+     UTF-16 offsets (like the bracket hint, kind 254), and the face positions it
+     with CoreText and the primary caret’s cap-height geometry. No ABI change:
+     the hard-coded `SuiseiEditorLineC` decoders (the offset trap) are untouched,
+     avoiding a multi-span layout rewrite. Regression tests in `suisei-core`
+     (`secondary_caret_positions`) and `suisei-engine` (compose asserts a
+     kind-250 span at the right UTF-16 offset, incl. a CJK line).
+   - REMAINING (small): secondary-selection *fills* (a distinct span kind + a
+     pre-text draw pass) — dead until ⌘-D/add-next-occurrence creates non-empty
+     secondary selections, so folded into that feature.
+   - Gate: Shift+arrow, typing-over-selection, IME composition, drag, and
+     ⌘-click multi-cursor caret paint ✅ without a mode-specific Swift workaround.
 
 3. **Make unsaved work durable before expanding the feature surface.**
    - Implement Architecture Plan D0 first: append edit deltas to a shadow WAL
