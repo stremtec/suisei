@@ -19,7 +19,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RES="$ROOT/suisei-app/Resources"
 ICON_PKG="$RES/Suisei.icon"
-DESKTOP_ICON="${SUISEI_ICON_SRC:-$HOME/Desktop/suiseiicon.icon}"
+DESKTOP_ICON="${SUISEI_ICON_SRC:-$HOME/Desktop/suisei2.icon}"
 
 mkdir -p "$RES"
 

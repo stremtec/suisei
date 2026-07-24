@@ -7,6 +7,7 @@
 //! GUI's engine re-routes its LSP/DAP FFI through the socket. Owning the child
 //! processes here is what makes them leak-proof and warm across GUI restarts.
 
+pub mod agent;
 pub mod protocol;
 pub mod server;
 pub mod state;

@@ -87,8 +87,12 @@ struct DaemonStatusView: View {
             Text(client.connected ? "uptime \(uptimeText)" : "—")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             Spacer()
-            Button("Quit Agent") { NSApp.terminate(nil) }
-                .controlSize(.small)
+            // Stops the daemon too — the daemon supervises this agent, so
+            // quitting the agent alone would just respawn it.
+            Button(client.connected ? "Quit Daemon" : "Quit Agent") {
+                if client.connected { client.quit() } else { NSApp.terminate(nil) }
+            }
+            .controlSize(.small)
         }
     }
 

@@ -10,6 +10,7 @@ enum DaemonProto {
         case hello = 1, helloAck = 2, helloNak = 3
         case ping = 4, pong = 5
         case statusRequest = 6, statusReport = 7
+        case shutdown = 8
     }
 }
 
@@ -37,33 +38,47 @@ enum DaemonSocket {
     }
 
     static func fetchStatus(socketPath: String) -> DaemonStatus? {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
+        guard let fd = openConnected(socketPath) else { return nil }
         defer { close(fd) }
-
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let cap = MemoryLayout.size(ofValue: addr.sun_path)
-        let pathC = Array(socketPath.utf8CString) // includes NUL
-        guard pathC.count <= cap else { return nil } // sun_path overflow
-        withUnsafeMutablePointer(to: &addr.sun_path) { raw in
-            raw.withMemoryRebound(to: CChar.self, capacity: cap) { dst in
-                for (i, b) in pathC.enumerated() { dst[i] = b }
-            }
-        }
-        let connected = withUnsafePointer(to: &addr) { ap -> Int32 in
-            ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard connected == 0 else { return nil }
-
         guard writeFrame(fd, .hello, []),
               let ack = readFrame(fd), ack.op == .helloAck,
               writeFrame(fd, .statusRequest, []),
               let rep = readFrame(fd), rep.op == .statusReport
         else { return nil }
         return decodeStatus(rep.payload)
+    }
+
+    /// Ask the daemon to stop (the menu-bar "Quit"). Fire-and-forget: the daemon
+    /// exits without replying, taking its agent supervisor with it.
+    static func sendShutdown(socketPath: String) {
+        guard let fd = openConnected(socketPath) else { return }
+        defer { close(fd) }
+        _ = writeFrame(fd, .hello, [])
+        _ = readFrame(fd) // HelloAck (ignored)
+        _ = writeFrame(fd, .shutdown, [])
+    }
+
+    /// Open and connect a Unix stream socket, or nil. Caller closes the fd.
+    private static func openConnected(_ socketPath: String) -> Int32? {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let cap = MemoryLayout.size(ofValue: addr.sun_path)
+        let pathC = Array(socketPath.utf8CString) // includes NUL
+        guard pathC.count <= cap else { close(fd); return nil } // sun_path overflow
+        withUnsafeMutablePointer(to: &addr.sun_path) { raw in
+            raw.withMemoryRebound(to: CChar.self, capacity: cap) { dst in
+                for (i, b) in pathC.enumerated() { dst[i] = b }
+            }
+        }
+        let ok = withUnsafePointer(to: &addr) { ap -> Int32 in
+            ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if ok != 0 { close(fd); return nil }
+        return fd
     }
 
     // ── framing ───────────────────────────────────────────────────────────────

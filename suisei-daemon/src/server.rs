@@ -78,6 +78,11 @@ fn handle_frame(frame: &Frame, state: &DaemonState) -> Option<Frame> {
     match frame.opcode {
         Opcode::Ping => Some(Frame::control(Opcode::Pong)),
         Opcode::StatusRequest => Some(state.status().to_frame()),
+        Opcode::Shutdown => {
+            eprintln!("suisei-daemon: shutdown requested");
+            // Ends the daemon and, with it, the agent supervisor thread.
+            std::process::exit(0);
+        }
         _ => None,
     }
 }

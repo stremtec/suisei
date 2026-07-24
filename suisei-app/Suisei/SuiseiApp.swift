@@ -7,6 +7,12 @@ struct SuiseiApp: App {
     /// Single Core face shared by welcome + editor + Settings.
     @StateObject private var engine = EngineBridge()
 
+    init() {
+        // Bring up the durable daemon (crash-safe state + LSP/DAP owner) and,
+        // through it, the menu-bar status agent. Detached, so it survives us.
+        DaemonLauncher.ensureRunning()
+    }
+
     var body: some Scene {
         // MARK: Welcome (Xcode launch window)
         //

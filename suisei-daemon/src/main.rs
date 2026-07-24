@@ -2,7 +2,7 @@
 //! Started by a launchd LaunchAgent in production (arch plan §1.5); runnable by
 //! hand for development: `cargo run -p suisei-daemon`.
 
-use suisei_daemon::{protocol, server, state::DaemonState};
+use suisei_daemon::{agent, protocol, server, state::DaemonState};
 
 fn main() {
     let path = protocol::socket_path();
@@ -13,6 +13,8 @@ fn main() {
                 protocol::PROTOCOL_VERSION,
                 path.display()
             );
+            // The daemon owns the menu-bar agent's presence — launch and keep it.
+            agent::supervise_agent();
             server::serve(listener, DaemonState::new());
         }
         Err(e) => {

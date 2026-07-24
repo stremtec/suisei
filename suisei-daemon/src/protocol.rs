@@ -43,6 +43,10 @@ pub enum Opcode {
     StatusRequest = 6,
     /// Daemon → client: a [`Status`] snapshot (see its layout).
     StatusReport = 7,
+    /// Client → daemon: stop the daemon (and, with it, the supervised agent).
+    /// The menu-bar "Quit" sends this so quitting actually ends the daemon
+    /// rather than letting the supervisor respawn the agent.
+    Shutdown = 8,
     /// Reserved: anything the receiver does not recognise decodes to this and
     /// is dropped (with a Nak for requests), never misinterpreted.
     Unknown = 0xFFFF,
@@ -58,6 +62,7 @@ impl Opcode {
             5 => Opcode::Pong,
             6 => Opcode::StatusRequest,
             7 => Opcode::StatusReport,
+            8 => Opcode::Shutdown,
             _ => Opcode::Unknown,
         }
     }

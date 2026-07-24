@@ -25,6 +25,17 @@ final class DaemonClient: ObservableObject {
     /// Path shown in the UI so the user can see where the daemon lives.
     var socketDisplayPath: String { socketPath }
 
+    /// Stop the daemon, then quit the agent. Because the daemon supervises the
+    /// agent, quitting the agent alone would just get it respawned — so the
+    /// off-switch stops the daemon first.
+    func quit() {
+        let path = socketPath
+        DispatchQueue.global(qos: .userInitiated).async {
+            DaemonSocket.sendShutdown(socketPath: path)
+            DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
+        }
+    }
+
     func poll() {
         let path = socketPath
         DispatchQueue.global(qos: .utility).async {

@@ -49,6 +49,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/SettingsWindowView.swift"
   "$ROOT/suisei-app/Suisei/GlassChrome.swift"
   "$ROOT/suisei-app/Suisei/WindowChrome.swift"
+  "$ROOT/suisei-app/Suisei/DaemonLauncher.swift"
 )
 
 need_engine=0
@@ -101,7 +102,7 @@ else
     need_icon=1
   elif [[ ! -f "$ICON_CAR" || ! -f "$RES/Assets.car" ]]; then
     need_icon=1
-  elif [[ -d "$HOME/Desktop/suiseiicon.icon" ]] && [[ "$HOME/Desktop/suiseiicon.icon/icon.json" -nt "$ICON_ICNS" ]]; then
+  elif [[ -d "$HOME/Desktop/suisei2.icon" ]] && [[ "$HOME/Desktop/suisei2.icon/icon.json" -nt "$ICON_ICNS" ]]; then
     need_icon=1
   elif [[ -f "$ROOT/suisei-app/Resources/Suisei.icon/icon.json" && "$ROOT/suisei-app/Resources/Suisei.icon/icon.json" -nt "$ICON_ICNS" ]]; then
     need_icon=1
@@ -239,6 +240,24 @@ if [[ -d "$ICON_SRC_DIR/Suisei.icon" ]]; then
 fi
 
 echo -n "APPL????" > "$CONTENTS/PkgInfo"
+
+# ── Helpers: the durable daemon + its menu-bar agent ────────────────────────
+# Suisei.app spawns the daemon (detached) on launch; the daemon launches the
+# agent. Both live in Contents/Helpers so the app can find them by bundle path,
+# and `codesign --deep` below signs them in place.
+HELPERS="$CONTENTS/Helpers"
+mkdir -p "$HELPERS"
+echo "→ build + bundle daemon"
+cargo build --release -p suisei-daemon --manifest-path "$ROOT/Cargo.toml" >/dev/null 2>&1 \
+  && cp -f "$ROOT/target/release/suisei-daemon" "$HELPERS/suisei-daemon" \
+  || echo "  ⚠︎ daemon build failed — status agent will be unavailable"
+echo "→ build + bundle menu-bar agent"
+if "$ROOT/scripts/build-suisei-agent.sh" >/dev/null 2>&1; then
+  rm -rf "$HELPERS/SuiseiDaemonAgent.app"
+  cp -R "$ROOT/suisei-agent/.build/SuiseiDaemonAgent.app" "$HELPERS/SuiseiDaemonAgent.app"
+else
+  echo "  ⚠︎ agent build failed — menu-bar status will be unavailable"
+fi
 
 # Sign only when binary/dylib changed (slow otherwise)
 if [[ "$need_swift" == "1" || "$need_engine" == "1" || "$need_icon" == "1" ]]; then
