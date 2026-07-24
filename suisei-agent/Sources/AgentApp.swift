@@ -23,10 +23,10 @@ struct SuiseiDaemonAgentApp: App {
         let path = Bundle.main.path(forResource: "StatusIcon", ofType: "png")
         let img = (path.flatMap { NSImage(contentsOfFile: $0) }) ?? NSImage()
         img.isTemplate = true
-        // Fill the menu-bar height — the source is tight-cropped to the shape
-        // (alpha-thresholded, so the faint halo no longer defeats the crop),
-        // so the glyph reads large instead of as a speck in a padded frame.
-        img.size = NSSize(width: 22, height: 22)
+        // Standard menu-bar size: an 18pt frame. The PNG carries ~18% padding
+        // around the shape so the glyph sits at ~15pt with breathing room, like
+        // the neighbouring status items (not edge-to-edge, not a speck).
+        img.size = NSSize(width: 18, height: 18)
         return img
     }()
 }
