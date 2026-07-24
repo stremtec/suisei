@@ -146,6 +146,26 @@ impl SelectionSet {
         Self { selections: vec![sel], primary: 0 }
     }
 
+    /// Rebuild from a list of caret positions (one per prior selection), keeping
+    /// the caret at index `primary` as primary. Used after a multi-cursor edit
+    /// re-seats every caret.
+    pub fn carets(heads: &[Position], primary: usize) -> Self {
+        if heads.is_empty() {
+            return Self::new();
+        }
+        let mut set = Self {
+            selections: heads.iter().map(|&h| Selection::caret(h)).collect(),
+            primary: primary.min(heads.len() - 1),
+        };
+        set.normalise_keeping_primary();
+        set
+    }
+
+    /// Index of the primary within the current (sorted) selection list.
+    pub fn primary_index(&self) -> usize {
+        self.primary
+    }
+
     pub fn all(&self) -> &[Selection] {
         &self.selections
     }

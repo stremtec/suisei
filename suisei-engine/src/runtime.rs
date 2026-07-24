@@ -211,113 +211,60 @@ impl Engine {
         )
     }
 
-    /// Type a printable character at the cursor (GUI fast path).
+    /// Type a printable character at the caret(s) — GUI fast path.
     ///
-    /// Handles all mode transitions internally:
-    /// - Insert: types directly.
-    /// - Normal: enters Insert, then types.
-    /// - Visual*: `c` (change selection → Insert), then types.
-    /// - Other modes (Terminal, Palette, …): no-op (face routes elsewhere).
+    /// Delegates to the mode-independent Selection-model edit: replaces any
+    /// selection, types at every caret, no synthetic vim keystrokes. Typing
+    /// always types.
     pub fn gui_type_char(&mut self, ch: char) {
         if !self.is_editing_mode() {
             return;
         }
-        match self.app.mode {
-            Mode::Insert => {}
-            Mode::Normal => {
-                self.dispatch_key(KeyEvent::char('i'));
-            }
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
-                // `c` = delete selection + enter Insert (vim change operator).
-                self.dispatch_key(KeyEvent::char('c'));
-            }
-            _ => return,
-        }
-        self.dispatch_key(KeyEvent::char(ch));
+        self.app.gui_insert_text(&ch.to_string());
+        self.app.update_scroll();
+        self.recompose_scroll();
     }
 
-    /// Backspace / Delete with Mac selection semantics.
-    ///
-    /// - Visual*: delete selection, enter Insert.
-    /// - Insert: normal backspace.
-    /// - Normal: enter Insert, then backspace.
+    /// Backspace: delete the selection, or one grapheme before each caret.
     pub fn gui_delete_backward(&mut self) {
         if !self.is_editing_mode() {
             return;
         }
-        match self.app.mode {
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
-                self.dispatch_key(KeyEvent::char('d'));
-                // `d` in Visual leaves to Normal — enter Insert for continued typing.
-                if self.app.mode == Mode::Normal {
-                    self.dispatch_key(KeyEvent::char('i'));
-                }
-            }
-            Mode::Insert => {
-                self.dispatch_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-            }
-            Mode::Normal => {
-                self.dispatch_key(KeyEvent::char('i'));
-                self.dispatch_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-            }
-            _ => {}
-        }
+        self.app.gui_delete_backward();
+        self.app.update_scroll();
+        self.recompose_scroll();
     }
 
-    /// Forward-delete with Mac selection semantics (same as backspace but Del key).
+    /// Forward-delete: delete the selection, or one grapheme after each caret.
     pub fn gui_delete_forward(&mut self) {
         if !self.is_editing_mode() {
             return;
         }
-        match self.app.mode {
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
-                self.dispatch_key(KeyEvent::char('d'));
-                if self.app.mode == Mode::Normal {
-                    self.dispatch_key(KeyEvent::char('i'));
-                }
-            }
-            Mode::Insert => {
-                self.dispatch_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-            }
-            Mode::Normal => {
-                self.dispatch_key(KeyEvent::char('i'));
-                self.dispatch_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-            }
-            _ => {}
-        }
+        self.app.gui_delete_forward();
+        self.app.update_scroll();
+        self.recompose_scroll();
     }
 
-    /// Esc semantic: collapse overlays/selection, land in Insert.
-    ///
-    /// GUI contract: Esc never leaves the editor in Normal — it clears
-    /// selection/overlays and editing continues immediately.
+    /// Esc: collapse the selection and dismiss editor overlays. No mode dance,
+    /// no synthetic `i` — editing continues immediately.
     pub fn gui_escape(&mut self) {
-        if !self.is_editing_mode() {
-            return;
-        }
+        // Let the legacy Esc close overlays / clear any stray vim state; it is
+        // not intercepted, so it reaches the dispatch and does the housekeeping.
         self.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        // After Esc: Visual* → Normal, Insert → Normal (or stays Insert if
-        // an overlay consumed the Esc). Ensure Insert for continued typing.
-        if self.app.mode == Mode::Normal {
-            self.dispatch_key(KeyEvent::char('i'));
+        if self.is_editing_mode() {
+            self.app.caret_collapse();
         }
+        self.recompose_scroll();
     }
 
-    /// Enter Insert mode if not already there (click-to-type, open-file-to-type).
-    ///
-    /// Collapses any active selection first (Esc), then enters Insert.
+    /// Historically forced Insert mode for click-to-type. Typing is now
+    /// mode-independent, so there is nothing to ensure — this only clears a
+    /// stray vim visual selection (which the GUI should never enter) and never
+    /// inserts.
     pub fn gui_ensure_insert(&mut self) {
-        if !self.is_editing_mode() {
-            return;
-        }
-        if self.app.mode == Mode::Insert {
-            return;
-        }
         if self.is_visual_mode() {
-            self.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        }
-        if self.app.mode == Mode::Normal {
-            self.dispatch_key(KeyEvent::char('i'));
+            self.app.enter_normal();
+            self.app.sync_sel_to_cursor();
         }
     }
 
@@ -369,12 +316,46 @@ impl Engine {
         true
     }
 
+    /// Route a text-editing key (character, backspace, delete, enter) straight
+    /// to the semantic Selection-model edits — typing always types, with no
+    /// mode gate and no synthetic `i`. Returns true when it consumed the key.
+    ///
+    /// Control/Super combos are shortcuts (copy, save, …) and fall through to
+    /// the legacy dispatch; so do chrome panels and the terminal.
+    fn try_gui_edit(&mut self, ev: KeyEvent) -> bool {
+        if !matches!(self.app.mode, Mode::Insert | Mode::Normal) {
+            return false;
+        }
+        if self.app.terminal_window_focused() || self.app.explorer.open {
+            return false;
+        }
+        let m = ev.modifiers;
+        if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) {
+            return false; // shortcut, not text
+        }
+        match ev.code {
+            KeyCode::Char(c) => self.app.gui_insert_text(&c.to_string()),
+            KeyCode::Enter => self.app.gui_insert_newline("    "),
+            KeyCode::Backspace => self.app.gui_delete_backward(),
+            KeyCode::Delete => self.app.gui_delete_forward(),
+            _ => return false,
+        }
+        true
+    }
+
     pub fn dispatch_key(&mut self, ev: KeyEvent) {
-        // Pure-GUI navigation: arrows/home/end drive the Selection model
-        // directly (Shift = extend), never the vim command machine. The core
-        // stays modal internally but the face never surfaces it.
-        if self.try_gui_navigation(ev) {
-            self.app.update_scroll();
+        // Pure-GUI editing + navigation: characters, backspace, delete, enter,
+        // and the arrows drive the Selection model directly — never the vim
+        // command machine. The core stays modal internally; the face never
+        // surfaces a mode, and there is no synthetic `i`.
+        let caret_pre = self.app.buffer.cursor();
+        let ver_pre = self.app.buffer.version();
+        if self.try_gui_navigation(ev) || self.try_gui_edit(ev) {
+            // Only re-anchor the viewport when something actually moved — a
+            // no-op arrow at a document edge must not yank an absolute scroll.
+            if self.app.buffer.cursor() != caret_pre || self.app.buffer.version() != ver_pre {
+                self.app.update_scroll();
+            }
             self.recompose_scroll();
             return;
         }
@@ -1502,9 +1483,10 @@ mod tests {
     use suisei_core::key::{KeyCode, KeyEvent, KeyModifiers};
 
     fn eng_with_text(s: &str) -> Engine {
+        // Pure GUI: typing just types — no synthetic `i`/`Esc`. Each key routes
+        // through the Selection-model edits.
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.dispatch_key(KeyEvent::char('i'));
         for ch in s.chars() {
             if ch == '\n' {
                 eng.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1512,26 +1494,17 @@ mod tests {
                 eng.dispatch_key(KeyEvent::char(ch));
             }
         }
-        eng.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         eng
     }
 
     #[test]
-    fn key_i_then_char_updates_chrome() {
+    fn typing_a_char_updates_chrome() {
+        // Pure GUI: a character just types — no `i` to enter a mode first.
         let mut eng = Engine::new();
         eng.recompose();
-        eng.dispatch_key(KeyEvent::char('i'));
-        assert_eq!(
-            eng.last_diff.chrome.as_ref().unwrap().mode_label,
-            " INSERT "
-        );
         eng.dispatch_key(KeyEvent::char('a'));
         assert!(!eng.last_diff.chrome.as_ref().unwrap().welcome);
-        eng.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(
-            eng.last_diff.chrome.as_ref().unwrap().mode_label,
-            " NORMAL "
-        );
+        assert_eq!(eng.app.buffer.text(), "a");
     }
 
     #[test]
@@ -1560,18 +1533,13 @@ mod tests {
     }
 
     #[test]
-    fn click_moves_cursor_in_insert() {
-        let mut eng = Engine::new();
-        eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.dispatch_key(KeyEvent::char('i'));
-        for ch in "hello".chars() {
-            eng.dispatch_key(KeyEvent::char(ch));
-        }
+    fn click_moves_cursor() {
+        let mut eng = eng_with_text("hello");
         eng.click_at(0, 1, false);
         assert_eq!(eng.app.buffer.cursor.col, 1);
-        assert!(matches!(eng.app.mode, Mode::Insert));
+        assert!(eng.app.sel.primary().is_empty());
         eng.mouse_up();
-        assert!(matches!(eng.app.mode, Mode::Insert));
+        assert!(eng.app.sel.primary().is_empty());
     }
 
     #[test]
@@ -1796,44 +1764,7 @@ mod tests {
         assert!(matches!(eng.app.mode, Mode::Explorer));
     }
 
-    #[test]
-    fn colon_opens_xlc_in_frame() {
-        let mut eng = Engine::new();
-        eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.dispatch_key(KeyEvent::char(':'));
-        let c = eng.last_diff.chrome.as_ref().unwrap();
-        assert!(c.xlc.open, ": must open XLC via Core");
-        assert!(matches!(eng.app.mode, Mode::XlcInput));
-        eng.dispatch_key(KeyEvent::char('h'));
-        eng.dispatch_key(KeyEvent::char('e'));
-        eng.dispatch_key(KeyEvent::char('l'));
-        eng.dispatch_key(KeyEvent::char('p'));
-        let c2 = eng.last_diff.chrome.as_ref().unwrap();
-        assert_eq!(c2.xlc.input, "help");
-    }
-
-    #[test]
-    fn space_leader_shows_which_key_after_force_ready() {
-        let mut eng = Engine::new();
-        eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.app.key_hints = true;
-        // Space begins leader
-        eng.dispatch_key(KeyEvent::char(' '));
-        eng.app.which_key.force_ready();
-        // pending_hints should be set by dispatch; force recompose
-        eng.recompose();
-        // If leader path set hints, which_key_visible may be true
-        if eng.app.which_key_visible() {
-            let c = eng.last_diff.chrome.as_ref().unwrap();
-            assert!(c.which_key.open);
-            assert!(!c.which_key.hints.is_empty() || !c.which_key.title.is_empty());
-        } else {
-            // At minimum leader session is active after Space
-            assert!(eng.app.which_key.is_leader() || !eng.app.pending_hints.is_empty());
-        }
-    }
-
-    #[test]
+            #[test]
     fn insert_triggers_completions_scene() {
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
@@ -1882,17 +1813,7 @@ mod tests {
         assert!(matches!(eng.app.mode, Mode::Palette));
     }
 
-    #[test]
-    fn slash_opens_search_bar() {
-        let mut eng = eng_with_text("hello world");
-        eng.dispatch_key(KeyEvent::char('/'));
-        let c = eng.last_diff.chrome.as_ref().unwrap();
-        assert!(c.search.open);
-        assert!(c.search.forward);
-        assert!(matches!(eng.app.mode, Mode::Search));
-    }
-
-    #[test]
+        #[test]
     fn goto_tab_switches_buffer() {
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
@@ -2330,7 +2251,7 @@ mod tests {
     #[test]
     fn search_input_typing_updates_scene() {
         let mut eng = eng_with_text("alpha beta gamma");
-        eng.dispatch_key(KeyEvent::char('/'));
+        eng.find_open(); // GUI trigger (Cmd+F), not the vim '/'
         for ch in "bet".chars() {
             eng.dispatch_key(KeyEvent::char(ch));
         }
@@ -2397,7 +2318,8 @@ mod tests {
             "band must still cover the viewport below (last={last})"
         );
         // Caret move after absolute scroll must not re-anchor the window upward.
-        eng.dispatch_key(KeyEvent::char('j'));
+        // Down at the last line is a no-op → scroll must stay put.
+        eng.dispatch_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert!(
             eng.app.scroll <= 201,
             "caret move must not yank scroll (got {})",
@@ -2436,7 +2358,8 @@ mod tests {
         );
         // Caret op after sync must not yank the viewport backwards.
         eng.app.buffer.cursor = Position::new(125, 0);
-        eng.dispatch_key(KeyEvent::char('j'));
+        eng.app.sync_sel_to_cursor();
+        eng.dispatch_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert!(
             eng.app.scroll >= 118 && eng.app.scroll <= 127,
             "scroll {} should stay near the synced viewport",

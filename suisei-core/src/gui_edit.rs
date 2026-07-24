@@ -188,6 +188,125 @@ impl App {
         Position::new(row, col)
     }
 
+    // ── Semantic edits (mode-independent) ──────────────────────────────────
+    //
+    // These replace the vim insert/delete path for the GUI. Each maps over
+    // ALL selections (multi-cursor is inherent) processing them last-first so
+    // an earlier edit never shifts a not-yet-processed span, and re-seats every
+    // caret afterwards. A non-empty selection is replaced (type-over). There is
+    // no mode gate: typing always types.
+
+    /// Selection indices ordered latest-first by document position.
+    fn selections_last_first(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.sel.len()).collect();
+        order.sort_by(|&a, &b| self.sel.all()[b].start().cmp(&self.sel.all()[a].start()));
+        order
+    }
+
+    /// Insert `text` at every caret, replacing any non-empty selection first.
+    pub fn gui_insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.push_undo();
+        let mut heads = vec![Position::zero(); self.sel.len()];
+        for i in self.selections_last_first() {
+            let s = self.sel.all()[i];
+            let at = if s.is_empty() {
+                s.head
+            } else {
+                self.buffer.delete_range(s.start(), s.end());
+                s.start()
+            };
+            self.buffer.cursor = at;
+            self.buffer.insert_str(text);
+            heads[i] = self.buffer.cursor;
+        }
+        let primary = self.sel.primary_index();
+        self.sel = crate::selection::SelectionSet::carets(&heads, primary);
+        self.buffer.cursor = self.sel.primary().head;
+    }
+
+    /// Insert a smart-indented newline at every caret (Return).
+    pub fn gui_insert_newline(&mut self, indent_unit: &str) {
+        self.push_undo();
+        let mut heads = vec![Position::zero(); self.sel.len()];
+        for i in self.selections_last_first() {
+            let s = self.sel.all()[i];
+            let at = if s.is_empty() {
+                s.head
+            } else {
+                self.buffer.delete_range(s.start(), s.end());
+                s.start()
+            };
+            self.buffer.cursor = at;
+            self.buffer.insert_newline_smart(indent_unit);
+            heads[i] = self.buffer.cursor;
+        }
+        let primary = self.sel.primary_index();
+        self.sel = crate::selection::SelectionSet::carets(&heads, primary);
+        self.buffer.cursor = self.sel.primary().head;
+    }
+
+    /// Backspace: delete the selection, or one grapheme before each caret.
+    pub fn gui_delete_backward(&mut self) {
+        self.push_undo();
+        let mut heads = vec![Position::zero(); self.sel.len()];
+        for i in self.selections_last_first() {
+            let s = self.sel.all()[i];
+            let caret = if !s.is_empty() {
+                self.buffer.delete_range(s.start(), s.end());
+                s.start()
+            } else {
+                let h = s.head;
+                if h.col > 0 {
+                    let prev = crate::buffer::grapheme_prev_col(self.buffer.line(h.row), h.col);
+                    self.buffer.delete_range(Position::new(h.row, prev), h);
+                    Position::new(h.row, prev)
+                } else if h.row > 0 {
+                    let prev_len = self.buffer.line(h.row - 1).chars().count();
+                    self.buffer
+                        .delete_range(Position::new(h.row - 1, prev_len), h);
+                    Position::new(h.row - 1, prev_len)
+                } else {
+                    h
+                }
+            };
+            heads[i] = caret;
+        }
+        let primary = self.sel.primary_index();
+        self.sel = crate::selection::SelectionSet::carets(&heads, primary);
+        self.buffer.cursor = self.sel.primary().head;
+    }
+
+    /// Forward delete: delete the selection, or one grapheme after each caret.
+    pub fn gui_delete_forward(&mut self) {
+        self.push_undo();
+        let mut heads = vec![Position::zero(); self.sel.len()];
+        for i in self.selections_last_first() {
+            let s = self.sel.all()[i];
+            let caret = if !s.is_empty() {
+                self.buffer.delete_range(s.start(), s.end());
+                s.start()
+            } else {
+                let h = s.head;
+                let len = self.buffer.line(h.row).chars().count();
+                if h.col < len {
+                    let next = crate::buffer::grapheme_next_col(self.buffer.line(h.row), h.col);
+                    self.buffer.delete_range(h, Position::new(h.row, next));
+                } else if h.row + 1 < self.buffer.line_count() {
+                    // Join the next line up.
+                    self.buffer.delete_range(h, Position::new(h.row + 1, 0));
+                }
+                h
+            };
+            heads[i] = caret;
+        }
+        let primary = self.sel.primary_index();
+        self.sel = crate::selection::SelectionSet::carets(&heads, primary);
+        self.buffer.cursor = self.sel.primary().head;
+    }
+
     /// Collapse the GUI selection to a caret at the current buffer cursor.
     /// Used to keep `sel` coherent when a non-GUI path (the legacy dispatch,
     /// typing) moved `buffer.cursor` on its own.
@@ -332,6 +451,96 @@ mod tests {
         app.caret_place(Position::new(0, 3));
         assert!(!app.has_selection());
         assert_eq!(app.selected_range(), None);
+    }
+
+    #[test]
+    fn insert_at_caret_types_text() {
+        let mut app = app_with("helloworld");
+        app.caret_place(Position::new(0, 5));
+        app.gui_insert_text(" ");
+        assert_eq!(app.buffer.text(), "hello world");
+        assert_eq!(app.sel.primary().head, Position::new(0, 6));
+        assert!(app.sel.primary().is_empty());
+    }
+
+    #[test]
+    fn typing_over_a_selection_replaces_it() {
+        let mut app = app_with("hello world");
+        // select "hello"
+        app.caret_place(Position::new(0, 0));
+        for _ in 0..5 {
+            app.caret_extend(Motion::Right);
+        }
+        app.gui_insert_text("HI");
+        assert_eq!(app.buffer.text(), "HI world");
+        assert!(app.sel.primary().is_empty());
+        assert_eq!(app.sel.primary().head, Position::new(0, 2));
+    }
+
+    #[test]
+    fn backspace_deletes_grapheme_or_selection() {
+        let mut app = app_with("héllo"); // é one grapheme
+        app.caret_place(Position::new(0, 2)); // after é
+        app.gui_delete_backward();
+        assert_eq!(app.buffer.text(), "hllo");
+        // now delete a selection
+        app.caret_place(Position::new(0, 0));
+        app.caret_extend(Motion::Right);
+        app.caret_extend(Motion::Right);
+        app.gui_delete_backward();
+        assert_eq!(app.buffer.text(), "lo");
+    }
+
+    #[test]
+    fn backspace_at_line_start_joins_previous() {
+        let mut app = app_with("ab\ncd");
+        app.caret_place(Position::new(1, 0));
+        app.gui_delete_backward();
+        assert_eq!(app.buffer.text(), "abcd");
+        assert_eq!(app.sel.primary().head, Position::new(0, 2));
+    }
+
+    #[test]
+    fn forward_delete_removes_next_or_joins() {
+        let mut app = app_with("ab\ncd");
+        app.caret_place(Position::new(0, 2)); // end of "ab"
+        app.gui_delete_forward(); // join next line
+        assert_eq!(app.buffer.text(), "abcd");
+        app.caret_place(Position::new(0, 0));
+        app.gui_delete_forward(); // delete 'a'
+        assert_eq!(app.buffer.text(), "bcd");
+    }
+
+    #[test]
+    fn newline_splits_the_line() {
+        let mut app = app_with("abcd");
+        app.caret_place(Position::new(0, 2));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(0), "ab");
+        assert_eq!(app.buffer.line(1), "cd");
+        assert_eq!(app.sel.primary().head.row, 1);
+    }
+
+    #[test]
+    fn multi_cursor_insert_types_at_every_caret() {
+        let mut app = app_with("a\nb\nc");
+        app.caret_place(Position::new(0, 1));
+        app.caret_add(Position::new(1, 1));
+        app.caret_add(Position::new(2, 1));
+        assert_eq!(app.sel.len(), 3);
+        app.gui_insert_text("!");
+        assert_eq!(app.buffer.text(), "a!\nb!\nc!");
+        assert_eq!(app.sel.len(), 3, "still three carets");
+    }
+
+    #[test]
+    fn multi_cursor_backspace_deletes_at_every_caret() {
+        let mut app = app_with("aX\nbX\ncX");
+        app.caret_place(Position::new(0, 2));
+        app.caret_add(Position::new(1, 2));
+        app.caret_add(Position::new(2, 2));
+        app.gui_delete_backward();
+        assert_eq!(app.buffer.text(), "a\nb\nc");
     }
 
     #[test]

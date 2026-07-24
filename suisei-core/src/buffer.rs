@@ -260,6 +260,66 @@ impl Buffer {
         self.cursor.col = last_col;
     }
 
+    /// Delete the half-open span `[start, end)` (document order) and leave the
+    /// cursor at `start`. Returns the removed text. The foundation the GUI
+    /// selection edits (`gui_insert_text`, `gui_delete_*`) build on — one
+    /// range delete instead of the vim-mode-specific slicing.
+    pub fn delete_range(&mut self, start: Position, end: Position) -> String {
+        if start >= end {
+            self.cursor = start;
+            return String::new();
+        }
+        self.touch();
+        let last = self.lines.len().saturating_sub(1);
+        let s = Position::new(start.row.min(last), start.col);
+        let e = Position::new(end.row.min(last), end.col);
+
+        if s.row == e.row {
+            let line = &mut self.lines[s.row];
+            let from = char_to_byte(s.col.min(line.chars().count()), line);
+            let to = char_to_byte(e.col.min(line.chars().count()), line);
+            let removed = line[from..to].to_string();
+            line.replace_range(from..to, "");
+            self.cursor = s;
+            return removed;
+        }
+
+        // Multi-row: head of the first line + tail of the last line survive.
+        let head: String = {
+            let line = &self.lines[s.row];
+            let from = char_to_byte(s.col.min(line.chars().count()), line);
+            line[..from].to_string()
+        };
+        let tail: String = {
+            let line = &self.lines[e.row];
+            let to = char_to_byte(e.col.min(line.chars().count()), line);
+            line[to..].to_string()
+        };
+        // Collect what we remove for the return value (best-effort, newline-joined).
+        let mut removed = String::new();
+        {
+            let line = &self.lines[s.row];
+            let from = char_to_byte(s.col.min(line.chars().count()), line);
+            removed.push_str(&line[from..]);
+        }
+        for row in (s.row + 1)..e.row {
+            removed.push('\n');
+            removed.push_str(&self.lines[row]);
+        }
+        removed.push('\n');
+        {
+            let line = &self.lines[e.row];
+            let to = char_to_byte(e.col.min(line.chars().count()), line);
+            removed.push_str(&line[..to]);
+        }
+
+        let mut merged = head;
+        merged.push_str(&tail);
+        self.lines.splice(s.row..=e.row, std::iter::once(merged));
+        self.cursor = s;
+        removed
+    }
+
     pub fn insert_char_pair(&mut self, open: char, close: char) {
         self.touch();
         let line = &mut self.lines[self.cursor.row];
