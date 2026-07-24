@@ -755,29 +755,33 @@ impl Engine {
             return;
         }
         let pos = self.pos_from_click(buffer_row, visual_col);
-        self.app.buffer.cursor = pos;
 
         if matches!(self.app.mode, Mode::Palette | Mode::Explorer) {
             self.app.palette.close();
             self.app.mode = Mode::Normal;
         }
+        // A click leaves any keyboard-vim visual selection — the GUI model
+        // (`app.sel`) is authoritative from here, and a lingering
+        // `visual_anchor` would otherwise show through `selected_range`.
+        if matches!(
+            self.app.mode,
+            Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+        ) {
+            self.app.enter_normal();
+            self.app.message.clear();
+        }
 
         if select_word {
-            self.app.select_word_under_cursor();
+            // Double-click: select the word into the GUI model.
+            self.app.select_word_gui(pos);
             self.app.mouse.dragging = false;
             self.app.mouse.drag_anchor = None;
             self.pointer_down = false;
             self.pointer_moved = false;
         } else {
-            // Pure click: leave any prior Visual (xei left-click without drag
-            // also repositions; if already Visual, collapse unless shift later).
-            if matches!(
-                self.app.mode,
-                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-            ) {
-                self.app.enter_normal();
-                self.app.message.clear();
-            }
+            // Down: place a caret (collapses any selection). The anchor for a
+            // subsequent drag is this cell.
+            self.app.caret_place(pos);
             self.app.mouse.dragging = true;
             self.app.mouse.drag_anchor = Some(pos);
             self.pointer_down = true;
@@ -807,27 +811,17 @@ impl Engine {
         }
 
         if !self.pointer_moved {
-            // Still on same cell — no Visual yet (avoids sticky VISUAL on click).
-            self.app.buffer.cursor = pos;
+            // Still on the down cell — a caret, no selection yet.
+            self.app.caret_place(pos);
             self.recompose_scroll();
             return;
         }
 
-        // Enter Visual once, then keep extending (xei mouse drag).
-        if matches!(self.app.mode, Mode::Normal | Mode::Insert) {
-            self.app.visual_anchor = Some(anchor);
-            self.app.mode = Mode::Visual;
-            self.app.message = String::from("-- VISUAL --");
-            self.app.completions.deactivate();
-        }
-
-        if matches!(
-            self.app.mode,
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-        ) {
-            self.app.buffer.cursor = pos;
-        }
-
+        // Moved: extend the GUI selection from the down cell (its anchor) to the
+        // pointer. `caret_drag_to` keeps the anchor `caret_place` set on down.
+        let _ = anchor;
+        self.app.completions.deactivate();
+        self.app.caret_drag_to(pos);
         self.app.mouse.dragging = true;
         self.app.update_scroll();
         self.recompose_scroll();
@@ -1516,68 +1510,52 @@ mod tests {
     }
 
     #[test]
-    fn drag_enters_visual_with_nonempty_selection() {
+    fn drag_builds_gui_selection() {
+        // Mouse drag now drives the GUI SelectionSet (exclusive), not vim
+        // Visual mode. The painted span must still equal the yank slice.
         let mut eng = eng_with_text("abcdef");
         eng.click_at(0, 1, false);
-        // still same cell — not Visual
-        eng.drag_to(0, 1);
-        assert!(matches!(eng.app.mode, Mode::Normal));
-        // move away to col 4 (inclusive end char 'e' at index 4)
-        eng.drag_to(0, 4);
-        assert!(matches!(eng.app.mode, Mode::Visual));
+        eng.drag_to(0, 1); // same cell — still a caret
+        assert!(eng.app.sel.primary().is_empty());
+        eng.drag_to(0, 4); // exclusive head at col 4 → covers chars 1,2,3
+        assert!(!eng.app.sel.primary().is_empty());
+        assert!(!matches!(eng.app.mode, Mode::Visual)); // no vim mode
+
         let (s, e) = eng.app.selected_range().expect("selection");
-        assert_eq!(s.row, 0);
-        assert_eq!(e.row, 0);
-        assert_eq!(s.col, 1, "anchor at first click");
-        assert_eq!(e.col, 4, "cursor at drag end (inclusive)");
-        assert!(e.col > s.col, "non-empty inclusive range");
+        assert_eq!((s.row, s.col), (0, 1), "anchor at first click");
+        assert_eq!((e.row, e.col), (0, 3), "inclusive end = one before excl head");
 
         let line = &eng.last_diff.chrome.as_ref().unwrap().lines[0];
         let v0 = line.sel_v0.expect("sel_v0");
         let v1 = line.sel_v1.expect("sel_v1");
-        assert!(v1 > v0, "exclusive paint end past start");
-        // Painted slice must equal yank-style inclusive slice [s.col, e.col]
-        let painted: String = line
-            .text
-            .chars()
-            .skip(v0 as usize)
-            .take((v1 - v0) as usize)
-            .collect();
+        let painted: String =
+            line.text.chars().skip(v0 as usize).take((v1 - v0) as usize).collect();
         let chars: Vec<char> = eng.app.buffer.line(0).chars().collect();
         let yanked: String = chars[s.col..=e.col].iter().collect();
-        assert_eq!(
-            painted, yanked,
-            "paint span must include last selected char (yank uses end.col+1 exclusive)"
-        );
+        assert_eq!(painted, yanked, "paint span must equal yank slice");
+        assert_eq!(yanked, "bcd");
 
         eng.mouse_up();
-        assert!(matches!(eng.app.mode, Mode::Visual));
-        assert!(eng.app.selected_range().is_some());
+        assert!(eng.app.selected_range().is_some(), "selection survives mouse up");
     }
 
     #[test]
-    fn painted_selection_matches_yank_slice_single_char() {
+    fn painted_selection_matches_yank_slice() {
         let mut eng = eng_with_text("hello");
         eng.click_at(0, 2, false);
         eng.drag_to(0, 2);
-        // same cell → no Visual
-        assert!(matches!(eng.app.mode, Mode::Normal));
-        eng.drag_to(0, 3);
-        assert!(matches!(eng.app.mode, Mode::Visual));
+        assert!(eng.app.sel.primary().is_empty());
+        eng.drag_to(0, 4); // exclusive [2,4) → chars 2,3
         let (s, e) = eng.app.selected_range().unwrap();
         let line = &eng.last_diff.chrome.as_ref().unwrap().lines[0];
         let v0 = line.sel_v0.unwrap();
         let v1 = line.sel_v1.unwrap();
-        let painted: String = line
-            .text
-            .chars()
-            .skip(v0 as usize)
-            .take((v1 - v0) as usize)
-            .collect();
+        let painted: String =
+            line.text.chars().skip(v0 as usize).take((v1 - v0) as usize).collect();
         let chars: Vec<char> = eng.app.buffer.line(0).chars().collect();
         let yanked: String = chars[s.col..=e.col].iter().collect();
         assert_eq!(painted, yanked);
-        assert_eq!(yanked, "ll"); // cols 2..=3 of "hello"
+        assert_eq!(yanked, "ll");
     }
 
     #[test]
@@ -1585,24 +1563,25 @@ mod tests {
         let mut eng = eng_with_text("aa\nbb\ncc");
         eng.click_at(0, 0, false);
         eng.drag_to(2, 1);
-        assert!(matches!(eng.app.mode, Mode::Visual));
+        assert!(!eng.app.sel.primary().is_empty());
         let sel = eng.app.selected_range().unwrap();
         assert_eq!(sel.0.row, 0);
         assert_eq!(sel.1.row, 2);
         eng.mouse_up();
-        assert!(matches!(eng.app.mode, Mode::Visual));
+        assert!(eng.app.selected_range().is_some());
     }
 
     #[test]
-    fn esc_after_drag_clears_visual() {
+    fn plain_click_collapses_a_mouse_selection() {
         let mut eng = eng_with_text("abcdef");
         eng.click_at(0, 0, false);
         eng.drag_to(0, 5);
-        assert!(matches!(eng.app.mode, Mode::Visual));
         eng.mouse_up();
-        eng.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(eng.app.mode, Mode::Normal));
+        assert!(eng.app.selected_range().is_some(), "drag made a selection");
+        // A fresh plain click collapses it to a caret (GUI convention).
+        eng.click_at(0, 2, false);
         assert!(eng.app.selected_range().is_none());
+        assert!(eng.app.sel.primary().is_empty());
     }
 
     #[test]
@@ -1667,8 +1646,11 @@ mod tests {
         let mut eng = eng_with_text("foo bar baz");
         // place on 'b' of bar — visual col depends on expand; "foo " = 4
         eng.click_at(0, 4, true);
-        assert!(matches!(eng.app.mode, Mode::Visual));
-        assert!(eng.app.selected_range().is_some());
+        assert!(!eng.app.sel.primary().is_empty(), "word selected into GUI model");
+        let (s, e) = eng.app.selected_range().expect("selection");
+        let chars: Vec<char> = eng.app.buffer.line(0).chars().collect();
+        let word: String = chars[s.col..=e.col].iter().collect();
+        assert_eq!(word, "bar");
     }
 
     #[test]

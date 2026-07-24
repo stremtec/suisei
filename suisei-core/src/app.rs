@@ -2915,7 +2915,9 @@ impl App {
     /// Copy current visual selection, or the current line in Normal mode, to
     /// the system clipboard (Cmd+C / Ctrl+C style).
     pub fn clipboard_copy(&mut self) {
-        if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
+        // Gate on the SELECTION, not the mode: a GUI mouse/keyboard selection
+        // lives in `self.sel` and never enters vim Visual mode.
+        if self.has_selection() {
             self.yank_selection();
             // yank_selection already store_yank → system
             self.message = String::from("Copied to clipboard");
@@ -4380,7 +4382,42 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Is there a selection to copy/delete — from either source?
+    pub fn has_selection(&self) -> bool {
+        !self.sel.primary().is_empty()
+            || matches!(
+                self.mode,
+                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            )
+    }
+
+    /// Convert the GUI selection's exclusive `[start, end)` span into the
+    /// **inclusive** `(start, last_selected)` pair the legacy vim consumers
+    /// (yank/delete/render) expect, so a single source (`self.sel`) feeds all
+    /// of them. `end` points one grapheme past the last selected character;
+    /// stepping back one grapheme — or, at a line start, to the end of the
+    /// previous row — yields the inclusive end.
+    fn exclusive_to_inclusive(&self, start: Position, end: Position) -> (Position, Position) {
+        if end.col > 0 {
+            let col = crate::buffer::grapheme_prev_col(self.buffer.line(end.row), end.col);
+            (start, Position::new(end.row, col))
+        } else if end.row > 0 {
+            let prev = end.row - 1;
+            (start, Position::new(prev, self.buffer.line(prev).chars().count()))
+        } else {
+            (start, end)
+        }
+    }
+
+    /// The active selection as an **inclusive** `(start, end)` span (vim
+    /// convention), preferring the GUI model when it holds a real selection.
+    /// Returns `None` for a bare caret with no vim visual mode.
     pub fn selected_range(&self) -> Option<(Position, Position)> {
+        let gui = self.sel.primary();
+        if !gui.is_empty() {
+            let (s, e) = gui.range();
+            return Some(self.exclusive_to_inclusive(s, e));
+        }
         let anchor = self.visual_anchor?;
         let cursor = self.buffer.cursor();
         if self.mode == Mode::VisualLine {

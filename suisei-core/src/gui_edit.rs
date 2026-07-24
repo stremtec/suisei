@@ -154,6 +154,23 @@ impl App {
         self.buffer.cursor = self.sel.primary().head;
     }
 
+    /// Select the word under `pos` (double-click) into the GUI model.
+    pub fn select_word_gui(&mut self, pos: Position) {
+        let clamped = self.clamp_to_document(pos);
+        let saved = self.buffer.cursor;
+        self.buffer.cursor = clamped;
+        let range = crate::ops::range_for_textobject(&self.buffer, crate::ops::TextObject::InnerWord);
+        self.buffer.cursor = saved;
+        if let Some(r) = range {
+            // `range_for_textobject` end is exclusive already — exactly the GUI
+            // head. anchor = word start, head = one past the word.
+            self.sel = crate::selection::SelectionSet::single(Selection::new(r.start, r.end));
+            self.buffer.cursor = r.end;
+        } else {
+            self.caret_place(clamped);
+        }
+    }
+
     /// Select the whole document.
     pub fn select_all_gui(&mut self) {
         let last = self.buffer.line_count().saturating_sub(1);
@@ -280,6 +297,34 @@ mod tests {
         let mut app = app_with("hi");
         app.caret_place(Position::new(99, 99));
         assert_eq!(app.sel.primary().head, Position::new(0, 2));
+    }
+
+    #[test]
+    fn gui_selection_feeds_copy_and_selected_range() {
+        // The whole point of the single-source bridge: a GUI selection made by
+        // the caret commands is what copy yanks, with no vim Visual mode.
+        let mut app = app_with("hello world");
+        app.caret_place(Position::new(0, 0));
+        for _ in 0..5 {
+            app.caret_extend(Motion::Right); // select "hello"
+        }
+        assert!(app.has_selection());
+        assert!(!matches!(app.mode, crate::app::Mode::Visual));
+        app.clipboard_copy();
+        assert_eq!(app.yank_buffer.as_deref(), Some("hello"));
+        // selected_range is the inclusive bridge: [0,0]..[0,4] for "hello".
+        assert_eq!(
+            app.selected_range(),
+            Some((Position::new(0, 0), Position::new(0, 4)))
+        );
+    }
+
+    #[test]
+    fn caret_with_no_selection_has_no_range() {
+        let mut app = app_with("hello");
+        app.caret_place(Position::new(0, 3));
+        assert!(!app.has_selection());
+        assert_eq!(app.selected_range(), None);
     }
 
     #[test]
