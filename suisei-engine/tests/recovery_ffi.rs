@@ -69,6 +69,25 @@ fn recovery_count_after_crash() {
 }
 
 #[test]
+fn recovery_roundtrips_cursor_and_scroll() {
+    // The P0.3 gate requires cursor AND scroll to survive a crash. Assert the
+    // WAL write → scan → parse round-trip preserves all three, deterministically
+    // — independent of the post-accept recompose that keeps the caret on-screen
+    // (which can legitimately adjust `scroll` for a tiny doc).
+    let dir = tmp_wal_dir("viewport");
+    simulate_crash(&dir, "/tmp/viewport_test.rs", "a\nb\nc\nd\ne\nf\n", 4, 1, 2);
+    let engine = engine_with_journal(&dir);
+    let entry = engine
+        .journal
+        .recovery_entry(0)
+        .expect("one recovery entry after crash");
+    assert_eq!(entry.cursor_row, 4, "cursor row round-trips through the WAL");
+    assert_eq!(entry.cursor_col, 1, "cursor col round-trips through the WAL");
+    assert_eq!(entry.scroll, 2, "scroll round-trips through the WAL");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn recovery_path_returns_filepath() {
     let dir = tmp_wal_dir("path");
     simulate_crash(&dir, "/tmp/path_test.rs", "content", 0, 0, 0);
@@ -129,6 +148,25 @@ fn recovery_accept_restores_buffer_and_clears_entry() {
         .filter(|e| e.path().extension().map(|x| x == "wal").unwrap_or(false))
         .count();
     assert_eq!(wal_count, 0, "WAL file should be deleted after accept");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn recovery_accept_clamps_cursor_col_past_line_end() {
+    // A col recovered from a crash may land past the end of a now-shorter line.
+    // Accept must clamp it, never leave the caret out of bounds (a later edit
+    // or paint would then panic).
+    let dir = tmp_wal_dir("clamp");
+    simulate_crash(&dir, "/tmp/clamp_test.rs", "hi\n", 0, 99, 0);
+    let mut engine = engine_with_journal(&dir);
+    let mptr = &mut engine as *mut _ as *mut SuiseiEngine;
+    assert_eq!(suisei_engine_recovery_accept(mptr, 0), 1);
+    let len = engine.app.buffer.line(engine.app.buffer.cursor.row).chars().count();
+    assert!(
+        engine.app.buffer.cursor.col <= len,
+        "col {} must clamp to line length {len}",
+        engine.app.buffer.cursor.col
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -2342,7 +2342,16 @@ pub extern "C" fn suisei_engine_recovery_accept(ptr: *mut SuiseiEngine, idx: u32
     eng.0.app.buffer = suisei_core::buffer::Buffer::from_string(&entry.text);
     eng.0.app.buffer.cursor.row = (entry.cursor_row as usize)
         .min(eng.0.app.buffer.line_count().saturating_sub(1));
-    eng.0.app.buffer.cursor.col = entry.cursor_col as usize;
+    // Clamp col too (row is already clamped): a shorter recovered line would
+    // otherwise leave the caret past the end and panic on the next edit/paint.
+    let line_len = eng
+        .0
+        .app
+        .buffer
+        .line(eng.0.app.buffer.cursor.row)
+        .chars()
+        .count();
+    eng.0.app.buffer.cursor.col = (entry.cursor_col as usize).min(line_len);
     eng.0.app.scroll = entry.scroll as usize;
     eng.0.app.modified = true;
     eng.0.app.message = format!("Recovered unsaved changes: {}", entry.file_path);

@@ -41,7 +41,7 @@ pub struct RecoveryEntry {
     pub text: String,
 }
 
-/// Shadow WAL journal — owns the `~/.xei/journal/` directory.
+/// Shadow WAL journal — owns the `~/.suisei/journal/` directory.
 pub struct Journal {
     wal_dir: PathBuf,
     /// file_path → journal file name (hash-based).
@@ -207,8 +207,12 @@ impl Journal {
     }
 
     fn wal_dir() -> PathBuf {
+        // Suisei-owned, NOT `~/.xei`: the standalone app must not share (and
+        // clobber, since names are a path hash) the xei TUI's recovery journal.
+        // The rest of the forked state (session/undo/breakpoints) still lives in
+        // `~/.xei` — migrating that is a separate independence patch.
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".xei").join("journal")
+        PathBuf::from(home).join(".suisei").join("journal")
     }
 
     /// Deterministic file name from path (FNV-1a hash → hex).
