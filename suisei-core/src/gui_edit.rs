@@ -188,6 +188,13 @@ impl App {
         Position::new(row, col)
     }
 
+    /// Collapse the GUI selection to a caret at the current buffer cursor.
+    /// Used to keep `sel` coherent when a non-GUI path (the legacy dispatch,
+    /// typing) moved `buffer.cursor` on its own.
+    pub fn sync_sel_to_cursor(&mut self) {
+        self.sel = crate::selection::SelectionSet::single(Selection::caret(self.buffer.cursor()));
+    }
+
     /// The primary selection's normalised range, or `None` for a bare caret.
     /// Exclusive: `end` is the boundary past the last selected grapheme.
     pub fn gui_selection_range(&self) -> Option<(Position, Position)> {

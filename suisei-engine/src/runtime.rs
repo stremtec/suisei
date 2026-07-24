@@ -321,7 +321,63 @@ impl Engine {
         }
     }
 
+    /// Route a caret-navigation key straight to the Selection model, bypassing
+    /// the vim command machine. Returns true when it consumed the key.
+    ///
+    /// Only fires when the editor itself owns the keyboard (plain editing, no
+    /// chrome panel or terminal focused), so palette/explorer/search arrows are
+    /// untouched. Shift extends the selection; Alt makes it a word motion; the
+    /// bare arrow moves the caret and collapses any selection.
+    fn try_gui_navigation(&mut self, ev: KeyEvent) -> bool {
+        use suisei_core::gui_edit::Motion;
+        if !matches!(self.app.mode, Mode::Insert | Mode::Normal) {
+            return false;
+        }
+        if self.app.terminal_window_focused() || self.app.explorer.open {
+            return false;
+        }
+        let m = ev.modifiers;
+        let word = m.contains(KeyModifiers::ALT);
+        let to_line_or_doc = m.contains(KeyModifiers::SUPER);
+        let motion = match ev.code {
+            KeyCode::Left if word => Motion::WordLeft,
+            KeyCode::Left if to_line_or_doc => Motion::LineStart,
+            KeyCode::Left => Motion::Left,
+            KeyCode::Right if word => Motion::WordRight,
+            KeyCode::Right if to_line_or_doc => Motion::LineEnd,
+            KeyCode::Right => Motion::Right,
+            KeyCode::Up if to_line_or_doc => Motion::DocStart,
+            KeyCode::Up => Motion::Up,
+            KeyCode::Down if to_line_or_doc => Motion::DocEnd,
+            KeyCode::Down => Motion::Down,
+            KeyCode::Home => Motion::LineStart,
+            KeyCode::End => Motion::LineEnd,
+            _ => return false,
+        };
+        // A prior legacy path may have moved the cursor; make the selection's
+        // primary head agree before we move it.
+        if self.app.sel.primary().is_empty()
+            && self.app.sel.primary().head != self.app.buffer.cursor()
+        {
+            self.app.sync_sel_to_cursor();
+        }
+        if m.contains(KeyModifiers::SHIFT) {
+            self.app.caret_extend(motion);
+        } else {
+            self.app.caret_move(motion);
+        }
+        true
+    }
+
     pub fn dispatch_key(&mut self, ev: KeyEvent) {
+        // Pure-GUI navigation: arrows/home/end drive the Selection model
+        // directly (Shift = extend), never the vim command machine. The core
+        // stays modal internally but the face never surfaces it.
+        if self.try_gui_navigation(ev) {
+            self.app.update_scroll();
+            self.recompose_scroll();
+            return;
+        }
         // Hard rule: chrome-only keys (explorer / XLC / settings / SCM / git wb)
         // must not call update_scroll or clobber caret/scroll.
         let caret_before = self.app.buffer.cursor();
@@ -351,6 +407,15 @@ impl Engine {
             || file_before != file_after;
         if buffer_or_caret_changed {
             self.app.update_scroll();
+            // Coherence: a non-navigation key (typing, edit) moved the cursor
+            // through the legacy path. Collapse the GUI selection to a caret
+            // there so the next Shift+Arrow starts from the right place — and
+            // so a stale highlight never lingers after typing.
+            if matches!(self.app.mode, Mode::Insert | Mode::Normal)
+                && self.app.sel.primary().head != self.app.buffer.cursor()
+            {
+                self.app.sync_sel_to_cursor();
+            }
         } else {
             // Restore in case a side-effect nudged them (mode toggles).
             self.app.buffer.cursor = caret_before;
@@ -1582,6 +1647,67 @@ mod tests {
         eng.click_at(0, 2, false);
         assert!(eng.app.selected_range().is_none());
         assert!(eng.app.sel.primary().is_empty());
+    }
+
+    #[test]
+    fn shift_arrow_extends_selection_via_keyboard() {
+        let mut eng = eng_with_text("hello world");
+        eng.click_at(0, 0, false);
+        eng.mouse_up();
+        eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        assert!(!eng.app.sel.primary().is_empty());
+        assert!(!matches!(eng.app.mode, Mode::Visual), "no vim mode");
+        let (s, e) = eng.app.selected_range().unwrap();
+        assert_eq!((s.row, s.col), (0, 0));
+        assert_eq!((e.row, e.col), (0, 1)); // exclusive head at 2 → inclusive 1 ("he")
+    }
+
+    #[test]
+    fn plain_arrow_collapses_selection_to_edge() {
+        let mut eng = eng_with_text("hello");
+        eng.click_at(0, 0, false);
+        eng.mouse_up();
+        eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        assert!(!eng.app.sel.primary().is_empty());
+        // Plain Right collapses to the far edge without moving further.
+        eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(eng.app.sel.primary().is_empty());
+        assert_eq!(eng.app.buffer.cursor.col, 2);
+    }
+
+    #[test]
+    fn legacy_cursor_move_collapses_gui_selection() {
+        // Coherence guard for the de-vim transition: any legacy path that
+        // moves the cursor on its own (here a vim `l`, which the GUI nav
+        // interceptor does NOT claim) collapses the GUI selection so it never
+        // lingers stale. Once typing is fully de-moded this also covers
+        // type-over.
+        let mut eng = eng_with_text("hello"); // Normal mode
+        eng.click_at(0, 0, false);
+        eng.mouse_up();
+        eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
+        assert!(!eng.app.sel.primary().is_empty());
+        eng.dispatch_key(KeyEvent::char('l')); // vim right — moves the cursor
+        assert!(eng.app.sel.primary().is_empty(), "selection collapsed");
+        assert_eq!(eng.app.sel.primary().head, eng.app.buffer.cursor());
+    }
+
+    #[test]
+    fn shift_alt_right_selects_a_word() {
+        let mut eng = eng_with_text("foo bar");
+        eng.click_at(0, 0, false);
+        eng.mouse_up();
+        eng.dispatch_key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::SHIFT.union(KeyModifiers::ALT),
+        ));
+        assert!(!eng.app.sel.primary().is_empty());
+        let (s, _e) = eng.app.selected_range().unwrap();
+        assert_eq!((s.row, s.col), (0, 0));
+        assert!(eng.app.sel.primary().head.col >= 3, "past 'foo'");
     }
 
     #[test]
