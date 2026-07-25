@@ -68,7 +68,14 @@ struct EditorHost: NSViewRepresentable {
                 comment: NSColor(theme.color(theme.comment)),
                 number: NSColor(theme.color(theme.number)),
                 typeName: NSColor(theme.color(theme.typeName)),
-                function: NSColor(theme.color(theme.function))
+                function: NSColor(theme.color(theme.function)),
+                macroName: NSColor(theme.color(theme.macroName)),
+                namespace: NSColor(theme.color(theme.namespace)),
+                parameter: NSColor(theme.color(theme.parameter)),
+                property: NSColor(theme.color(theme.property)),
+                constant: NSColor(theme.color(theme.constant)),
+                operatorColor: NSColor(theme.color(theme.operatorColor)),
+                punctuation: NSColor(theme.color(theme.punctuation))
             )
         )
     }
@@ -379,6 +386,13 @@ final class EditorCanvasView: NSView {
         var number: NSColor
         var typeName: NSColor
         var function: NSColor
+        var macroName: NSColor
+        var namespace: NSColor
+        var parameter: NSColor
+        var property: NSColor
+        var constant: NSColor
+        var operatorColor: NSColor
+        var punctuation: NSColor
     }
 
     weak var engine: EngineBridge?
@@ -393,7 +407,10 @@ final class EditorCanvasView: NSView {
         accent: .controlAccentColor, sel: .selectedTextBackgroundColor,
         caret: .textColor, gutter: .tertiaryLabelColor, cursorLine: .quaternaryLabelColor,
         keyword: .systemCyan, string: .systemGreen, comment: .systemGray,
-        number: .systemOrange, typeName: .systemTeal, function: .systemYellow
+        number: .systemOrange, typeName: .systemTeal, function: .systemYellow,
+        macroName: .systemPink, namespace: .systemMint, parameter: .labelColor,
+        property: .systemTeal, constant: .systemOrange, operatorColor: .labelColor,
+        punctuation: .secondaryLabelColor
     )
 
     var isLiveScrolling = false
@@ -963,6 +980,17 @@ final class EditorCanvasView: NSView {
         case 4: return colors.number
         case 5: return colors.typeName
         case 6: return colors.function
+        // 7-14 used to fall through to plain foreground: the tokenizer
+        // classified macros, namespaces, properties and the rest, the engine
+        // sent the kind, the theme had a colour for each — and the face painted
+        // them all as body text.
+        case 7: return colors.macroName
+        case 8: return colors.namespace
+        case 9: return colors.parameter
+        case 10: return colors.property
+        case 11: return colors.constant
+        case 13: return colors.operatorColor
+        case 14: return colors.punctuation
         default: return colors.fg
         }
     }

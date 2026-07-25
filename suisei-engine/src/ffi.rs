@@ -1542,6 +1542,13 @@ pub struct SuiseiThemeSnapshot {
     pub number: u32,
     pub type_name: u32,
     pub function: u32,
+    pub macro_name: u32,
+    pub namespace: u32,
+    pub parameter: u32,
+    pub property: u32,
+    pub constant: u32,
+    pub operator: u32,
+    pub punctuation: u32,
 }
 
 #[unsafe(no_mangle)]
@@ -1613,6 +1620,13 @@ pub extern "C" fn suisei_engine_theme(
     o.number = t.number;
     o.type_name = t.type_name;
     o.function = t.function;
+    o.macro_name = t.macro_name;
+    o.namespace = t.namespace;
+    o.parameter = t.parameter;
+    o.property = t.property;
+    o.constant = t.constant;
+    o.operator = t.operator;
+    o.punctuation = t.punctuation;
     1
 }
 

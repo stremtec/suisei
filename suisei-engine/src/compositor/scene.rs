@@ -185,6 +185,13 @@ pub struct ThemeScene {
     pub number: u32,
     pub type_name: u32,
     pub function: u32,
+    pub macro_name: u32,
+    pub namespace: u32,
+    pub parameter: u32,
+    pub property: u32,
+    pub constant: u32,
+    pub operator: u32,
+    pub punctuation: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1296,6 +1303,13 @@ fn build_theme(app: &App) -> ThemeScene {
         number: color_u32(t.number),
         type_name: color_u32(t.type_name),
         function: color_u32(t.function),
+        macro_name: color_u32(t.macro_name),
+        namespace: color_u32(t.namespace),
+        parameter: color_u32(t.parameter),
+        property: color_u32(t.property),
+        constant: color_u32(t.constant),
+        operator: color_u32(t.operator),
+        punctuation: color_u32(t.punctuation),
     }
 }
 

@@ -363,13 +363,21 @@ struct ThemeSnap: Equatable {
     var number: UInt32
     var typeName: UInt32
     var function: UInt32
+    var macroName: UInt32
+    var namespace: UInt32
+    var parameter: UInt32
+    var property: UInt32
+    var constant: UInt32
+    var operatorColor: UInt32
+    var punctuation: UInt32
 
     static let empty = ThemeSnap(
         name: "ocean",
         editorBg: 0x0F111A, fg: 0xC8D2DC, dim: 0x525C72, accent: 0x6BB8C4,
         selection: 0x2A3A55, caret: 0xC8E08C, statusBg: 0x0A0C14,
         keyword: 0x00DCFF, string: 0x96E6B4, comment: 0x606C7A,
-        number: 0xFFB482, typeName: 0x64C8FF, function: 0xFFDC78
+        number: 0xFFB482, typeName: 0x64C8FF, function: 0xFFDC78,
+        macroName: 0xFD8F3F, namespace: 0x9EF1DD, parameter: 0xC8C8CD, property: 0x78C3B4, constant: 0xD0BF69, operatorColor: 0xDDDDDD, punctuation: 0x94949B
     )
 
     /// Theme colours arrive packed as `0xAARRGGBB`. Alpha is real: chrome
@@ -3147,7 +3155,14 @@ final class EngineBridge: ObservableObject {
             comment: snap.comment,
             number: snap.number,
             typeName: snap.type_name,
-            function: snap.function
+            function: snap.function,
+            macroName: snap.macro_name,
+            namespace: snap.namespace,
+            parameter: snap.parameter,
+            property: snap.property,
+            constant: snap.constant,
+            operatorColor: snap.operator,
+            punctuation: snap.punctuation
         )
     }
 

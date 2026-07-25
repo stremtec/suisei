@@ -389,6 +389,13 @@ typedef struct SuiseiThemeSnapshot {
   uint32_t number;
   uint32_t type_name;
   uint32_t function;
+  uint32_t macro_name;
+  uint32_t namespace;
+  uint32_t parameter;
+  uint32_t property;
+  uint32_t constant;
+  uint32_t operator;
+  uint32_t punctuation;
 } SuiseiThemeSnapshot;
 
 uint8_t suisei_engine_completions(const SuiseiEngine *ptr, SuiseiCompletionsSnapshot *out);

@@ -151,14 +151,26 @@ leaving `terminal_focused: bool`.
 the editor still types while it is open. Solve the double-capture trap in the
 first one.
 
-### R4 — Theme surface to what the GUI uses
-Cut the 50 unread fields; keep the 13 plus whatever new chrome tokens the face
-actually consumes. **Gate:** all themes render identically before/after.
+### R4 — Theme surface — **PARTLY DONE 2026-07-25**
+The audit turned up something better than a deletion: the tokenizer classifies
+14 kinds, the engine sends all 14, the theme has a colour for each — and the
+face's `colorForKind` only handled 1–6, so macros, namespaces, parameters,
+properties, constants, operators and punctuation were painted as body text.
+Those seven are now wired through scene → FFI → C header → `Colors`, guarded by
+`syntax_kinds_past_function_reach_the_face`.
+Still to do: cut the genuinely dead *chrome* fields (`explorer_*`, `terminal_*`,
+`panel_*`, `xlc_*`, `mode_*`, `git_*_bg`, `muted`, `success`, `warning`,
+`error`, `accent_fg`, `search_bg`, `completion_*`, `bg`, `status_fg`) — none has
+a consumer in either crate.
 
-### R5 — Drop `ratatui`
-Retype `term.rs` cell colours as `Rgba`. **Gate:** ANSI colours, bold/dim and
-256-colour output identical in the terminal panel; `ratatui` out of
-`Cargo.toml`.
+### R5 — Drop `ratatui` — **DONE 2026-07-25**
+`term.rs` maps ANSI straight to `Rgba`; the crate and its 487 lockfile lines are
+gone. Verified live: `ls --color` still paints directories blue.
+
+**R5b, newly found:** `visible_rows_sgr` re-encodes each row as truecolor SGR
+escapes which the face parses back — the terminal panel round-trips ANSI inside
+the process, an encode and a parse per row per frame. Handing the face
+`(text, fg, bg)` runs directly is an FFI change; not done.
 
 ### R6 — Pixel viewport *(largest; already P1.5)*
 `EditorViewport` in points, not cells. Unlocks soft wrap, variable line height,

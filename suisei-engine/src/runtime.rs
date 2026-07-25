@@ -2266,6 +2266,31 @@ mod tests {
         );
     }
 
+    /// The tokenizer classifies fourteen kinds and the theme has a colour for
+    /// each, but the face only ever painted the first six — macros, namespaces,
+    /// properties, constants, operators and punctuation came out as body text.
+    /// Guards that the kinds past `function` still reach the scene.
+    #[test]
+    fn syntax_kinds_past_function_reach_the_face() {
+        let dir = std::env::temp_dir().join("suisei_kind_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("kinds.rs");
+        std::fs::write(&path, "#[derive(Clone)]\nstruct S { field: u32 }\nfn f() { println!(\"x\"); }\n").unwrap();
+        let mut eng = Engine::new();
+        eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
+        eng.app = App::open_file(path.to_str().unwrap());
+        eng.sync_viewport_public();
+        eng.recompose();
+        let c = eng.last_diff.chrome.as_ref().unwrap();
+        let kinds: std::collections::HashSet<u8> =
+            c.lines.iter().flat_map(|l| l.spans.iter().map(|s| s.kind)).collect();
+        assert!(
+            kinds.iter().any(|k| (7..=14).contains(k)),
+            "no span kind past `function` reached the scene: {kinds:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The tick is the GUI's only pump for the language services — without
     /// this call the LSP never finishes its handshake and no result is ever
     /// applied. A queued hover answer standing in for "a reply arrived".
