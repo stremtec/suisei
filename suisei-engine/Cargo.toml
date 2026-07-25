@@ -12,4 +12,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 suisei-core = { path = "../suisei-core" }
+# Wire protocol only (Status layout + socket path) so the engine can report its
+# live LSP/DAP/project state to the daemon. The daemon crate is std-only, so
+# this adds no third-party dependency, and the direction is one-way: the daemon
+# never depends on the engine.
+suisei-daemon = { path = "../suisei-daemon" }
 unicode-width = "0.2"

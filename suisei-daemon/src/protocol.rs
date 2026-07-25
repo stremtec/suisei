@@ -47,6 +47,14 @@ pub enum Opcode {
     /// The menu-bar "Quit" sends this so quitting actually ends the daemon
     /// rather than letting the supervisor respawn the agent.
     Shutdown = 8,
+    /// Editor → daemon: "here is my live LSP/DAP/project state". Payload is the
+    /// same [`Status`] layout the daemon reports back, and there is no reply.
+    ///
+    /// The daemon does not own the language servers yet (that is the D1
+    /// migration), so it cannot observe any of this itself — without this
+    /// opcode every field it reports is a placeholder zero. `uptime_secs` is
+    /// ignored on the way in: uptime belongs to the daemon, not the reporter.
+    ReportStatus = 9,
     /// Reserved: anything the receiver does not recognise decodes to this and
     /// is dropped (with a Nak for requests), never misinterpreted.
     Unknown = 0xFFFF,
@@ -63,6 +71,7 @@ impl Opcode {
             6 => Opcode::StatusRequest,
             7 => Opcode::StatusReport,
             8 => Opcode::Shutdown,
+            9 => Opcode::ReportStatus,
             _ => Opcode::Unknown,
         }
     }
@@ -205,6 +214,12 @@ impl Status {
     /// Wrap this snapshot in a `StatusReport` frame.
     pub fn to_frame(&self) -> Frame {
         Frame::new(Opcode::StatusReport, self.encode())
+    }
+
+    /// Wrap this snapshot in a `ReportStatus` frame — the editor's push toward
+    /// the daemon. Same bytes, opposite direction.
+    pub fn to_report_frame(&self) -> Frame {
+        Frame::new(Opcode::ReportStatus, self.encode())
     }
 }
 

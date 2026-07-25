@@ -88,6 +88,11 @@ pub struct LspClient {
     pub enabled: bool,
     /// Per-language command overrides (from ~/.suisei.toml `lsp.*`).
     pub server_overrides: HashMap<String, String>,
+    /// Open `$/progress` tokens (`begin` seen, `end` not yet). rust-analyzer's
+    /// indexing / metadata / build-script passes each hold one; while any is
+    /// open the server is still building its picture of the project and its
+    /// answers are thin.
+    progress_open: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +247,7 @@ impl Default for LspClient {
             last_semantic_req_version: 0,
             enabled: true,
             server_overrides: HashMap::new(),
+            progress_open: std::collections::HashSet::new(),
         }
     }
 }
@@ -880,6 +886,8 @@ impl LspClient {
                     Err(TryRecvError::Disconnected) => {
                         self.server_running = false;
                         self.initialized = false;
+                        // A dead server is not "still indexing".
+                        self.progress_open.clear();
                         self.error = Some("LSP server disconnected".into());
                         handled = true;
                         break;
@@ -927,6 +935,55 @@ impl LspClient {
         handled
     }
 
+    /// Spawned, but the `initialize` reply has not landed yet. `server_running`
+    /// only goes true once the handshake finishes, so this is the window a
+    /// status surface should call "starting" rather than "none".
+    pub fn is_starting(&self) -> bool {
+        self.stdin.is_some() && !self.server_running
+    }
+
+    /// True while the server has at least one open `$/progress` work item —
+    /// rust-analyzer's indexing pass, its metadata fetch, its build scripts.
+    /// Distinct from `initialized`: the handshake completes long before the
+    /// project is actually queryable.
+    pub fn is_busy(&self) -> bool {
+        !self.progress_open.is_empty()
+    }
+
+    /// Test hook: open (`true`) or close (`false`) a `$/progress` token without
+    /// a live server, so crates downstream of this one can exercise the busy
+    /// window. Production state only ever moves through `handle_progress`.
+    #[doc(hidden)]
+    pub fn set_progress_open_for_test(&mut self, token: &str, open: bool) {
+        if open {
+            self.progress_open.insert(token.to_string());
+        } else {
+            self.progress_open.remove(token);
+        }
+    }
+
+    /// Track one `$/progress` notification. Only `begin`/`end` change anything;
+    /// `report` (percentage ticks) is bookkeeping we do not surface yet.
+    fn handle_progress(&mut self, body: &str) {
+        let Some(token) = progress_token(body) else {
+            return;
+        };
+        // `kind` lives inside `value`; scoping to it keeps a token that happens
+        // to contain the word from being mistaken for the kind.
+        let Some(value) = body.split("\"value\"").nth(1) else {
+            return;
+        };
+        match extract_str(value, "\"kind\":\"").as_deref() {
+            Some("begin") => {
+                self.progress_open.insert(token);
+            }
+            Some("end") => {
+                self.progress_open.remove(&token);
+            }
+            _ => {}
+        }
+    }
+
     fn handle_raw(&mut self, msg: RawMsg) {
         // Notifications
         if let Some(method) = msg.method.as_deref() {
@@ -940,6 +997,19 @@ impl LspClient {
                     // Keep row-sorted so `diagnostics_for_row` can binary-search.
                     diags.sort_by_key(|d| d.row);
                     self.diagnostics = diags; // empty clears
+                }
+                return;
+            }
+            if method == "$/progress" {
+                self.handle_progress(&msg.body);
+                return;
+            }
+            // Server → client *request*: it wants a progress token created. The
+            // spec makes this a request, so it expects a reply; answering keeps
+            // rust-analyzer's reporter from stalling on us.
+            if method == "window/workDoneProgress/create" {
+                if let Some(id) = msg.id {
+                    self.send_raw(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":null}}"#));
                 }
                 return;
             }
@@ -1171,6 +1241,7 @@ impl LspClient {
         self.initialized = false;
         self.pending.clear();
         self.pending_didopen = None;
+        self.progress_open.clear();
         self.diagnostics.clear();
         self.semantic_tokens.clear();
         self.semantic_token_types.clear();
@@ -2186,7 +2257,11 @@ fn build_initialize_request(id: u64, pid: u32, root_uri: &str, folder_name: &str
             r#""inlayHint":{{"resolveSupport":{{"properties":["label.tooltip"]}}}},"#,
             r#""semanticTokens":{{"requests":{{"full":true}},"tokenTypes":{token_types},"tokenModifiers":{token_mods},"formats":["relative"],"overlappingTokenSupport":false,"multilineTokenSupport":true}}"#,
             r#"}},"#, // end textDocument object + comma
-            r#""workspace":{{"workspaceFolders":true,"symbol":{{}},"applyEdit":true}}"#,
+            r#""workspace":{{"workspaceFolders":true,"symbol":{{}},"applyEdit":true}},"#,
+            // Without this the server never sends `$/progress` at all —
+            // rust-analyzer gates every progress report on the capability, so
+            // "indexing" is unobservable until we ask for it.
+            r#""window":{{"workDoneProgress":true}}"#,
             // Close: capabilities, params, root object (each `}}` → one `}` in format!)
             r#"}}}}}}"#
         ),
@@ -2261,6 +2336,14 @@ fn extract_str(text: &str, prefix: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// A `$/progress` token is `string | integer` in the spec; normalise both to one
+/// key so `begin` and `end` match whichever form the server chose.
+fn progress_token(body: &str) -> Option<String> {
+    extract_str(body, "\"token\":\"").or_else(|| {
+        extract_int(body, "\"token\":").map(|n| n.to_string())
+    })
 }
 
 fn extract_int(text: &str, prefix: &str) -> Option<i64> {
@@ -2737,6 +2820,103 @@ mod tests {
     }
 
     /// The bug this guards: `initialized` + `didOpen` are sent from `poll()`,
+    /// The initialize request must advertise `window.workDoneProgress`, or
+    /// rust-analyzer never sends `$/progress` and indexing stays invisible.
+    #[test]
+    fn initialize_asks_for_work_done_progress() {
+        let req = build_initialize_request(1, 42, "file:///tmp/suisei", "suisei");
+        assert!(
+            req.contains(r#""window":{"workDoneProgress":true}"#),
+            "capability missing — the server would report no progress at all: {req}"
+        );
+    }
+
+    #[test]
+    fn progress_begin_and_end_bracket_the_busy_window() {
+        let mut lsp = LspClient::new();
+        assert!(!lsp.is_busy());
+
+        lsp.handle_raw(RawMsg {
+            id: None,
+            method: Some("$/progress".to_string()),
+            body: r#"{"jsonrpc":"2.0","method":"$/progress","params":{"token":"rustAnalyzer/Indexing","value":{"kind":"begin","title":"Indexing","cancellable":false}}}"#.to_string(),
+        });
+        assert!(lsp.is_busy(), "a begin opens the work window");
+
+        lsp.handle_raw(RawMsg {
+            id: None,
+            method: Some("$/progress".to_string()),
+            body: r#"{"jsonrpc":"2.0","method":"$/progress","params":{"token":"rustAnalyzer/Indexing","value":{"kind":"report","percentage":42}}}"#.to_string(),
+        });
+        assert!(lsp.is_busy(), "a percentage tick does not close it");
+
+        lsp.handle_raw(RawMsg {
+            id: None,
+            method: Some("$/progress".to_string()),
+            body: r#"{"jsonrpc":"2.0","method":"$/progress","params":{"token":"rustAnalyzer/Indexing","value":{"kind":"end"}}}"#.to_string(),
+        });
+        assert!(!lsp.is_busy(), "an end closes it");
+    }
+
+    /// Two overlapping passes (indexing + build scripts) must not have the
+    /// first `end` declare the server idle.
+    #[test]
+    fn overlapping_progress_tokens_are_counted_separately() {
+        let mut lsp = LspClient::new();
+        let begin = |token: &str| RawMsg {
+            id: None,
+            method: Some("$/progress".to_string()),
+            body: format!(
+                r#"{{"jsonrpc":"2.0","method":"$/progress","params":{{"token":"{token}","value":{{"kind":"begin","title":"x"}}}}}}"#
+            ),
+        };
+        let end = |token: &str| RawMsg {
+            id: None,
+            method: Some("$/progress".to_string()),
+            body: format!(
+                r#"{{"jsonrpc":"2.0","method":"$/progress","params":{{"token":"{token}","value":{{"kind":"end"}}}}}}"#
+            ),
+        };
+        lsp.handle_raw(begin("rustAnalyzer/Indexing"));
+        lsp.handle_raw(begin("rustAnalyzer/cachePriming"));
+        lsp.handle_raw(end("rustAnalyzer/Indexing"));
+        assert!(lsp.is_busy(), "one pass finishing leaves the other running");
+        lsp.handle_raw(end("rustAnalyzer/cachePriming"));
+        assert!(!lsp.is_busy());
+    }
+
+    /// The spec allows an integer token; `begin` and `end` must still pair up.
+    #[test]
+    fn an_integer_progress_token_still_pairs() {
+        let mut lsp = LspClient::new();
+        lsp.handle_raw(RawMsg {
+            id: None,
+            method: Some("$/progress".to_string()),
+            body: r#"{"jsonrpc":"2.0","method":"$/progress","params":{"token":7,"value":{"kind":"begin","title":"Indexing"}}}"#.to_string(),
+        });
+        assert!(lsp.is_busy());
+        lsp.handle_raw(RawMsg {
+            id: None,
+            method: Some("$/progress".to_string()),
+            body: r#"{"jsonrpc":"2.0","method":"$/progress","params":{"token":7,"value":{"kind":"end"}}}"#.to_string(),
+        });
+        assert!(!lsp.is_busy());
+    }
+
+    /// A crashed server must not be left looking permanently busy.
+    #[test]
+    fn a_disconnect_clears_the_busy_window() {
+        let mut lsp = LspClient::new();
+        lsp.handle_raw(RawMsg {
+            id: None,
+            method: Some("$/progress".to_string()),
+            body: r#"{"jsonrpc":"2.0","method":"$/progress","params":{"token":"t","value":{"kind":"begin","title":"Indexing"}}}"#.to_string(),
+        });
+        assert!(lsp.is_busy());
+        lsp.shutdown_quiet();
+        assert!(!lsp.is_busy());
+    }
+
     /// so a frontend that never polls leaves the server spawned, un-handshaked
     /// and permanently idle — every request then resolves empty. Asserts both
     /// halves: an undrained client makes no progress, and one poll after the

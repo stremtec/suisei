@@ -125,6 +125,9 @@ fn write_cstr(dst: &mut [c_char], s: &str) {
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_new() -> *mut SuiseiEngine {
     let mut engine = Engine::new();
+    // Only the real app reports; a test run must not push into the developer's
+    // running daemon.
+    engine.start_daemon_reporting();
     engine.recompose();
     Box::into_raw(Box::new(SuiseiEngine(engine)))
 }
@@ -276,12 +279,7 @@ pub extern "C" fn suisei_engine_editor_accepts_text(ptr: *const SuiseiEngine) ->
     // editor (not a chrome panel or the terminal) owns the keys. A selection is
     // fine — the fast path replaces it. Was `mode_is_insert`, which pinned the
     // fast path to a vim Insert mode the GUI never enters.
-    unsafe {
-        u8::from(matches!(
-            (*ptr).0.app().mode,
-            suisei_core::app::Mode::Editor | suisei_core::app::Mode::Editor
-        ))
-    }
+    unsafe { u8::from(matches!((*ptr).0.app().mode, suisei_core::app::Mode::Editor)) }
 }
 
 /// Drain side-effects; returns current `frame_gen` (face should paint only when it changes).

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
-use crate::protocol::{Frame, Opcode, PROTOCOL_VERSION};
+use crate::protocol::{Frame, Opcode, Status, PROTOCOL_VERSION};
 use crate::state::DaemonState;
 
 /// Bind the daemon socket, clearing a stale socket file from a prior run first
@@ -73,11 +73,19 @@ pub fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> io::Res
 
 /// Map a request frame to an optional reply. LSP/DAP request opcodes plug in
 /// here as the managers land; for now it answers the heartbeat and the status
-/// poll, and ignores anything unrecognised.
+/// poll, adopts the editor's status push, and ignores anything unrecognised.
 fn handle_frame(frame: &Frame, state: &DaemonState) -> Option<Frame> {
     match frame.opcode {
         Opcode::Ping => Some(Frame::control(Opcode::Pong)),
         Opcode::StatusRequest => Some(state.status().to_frame()),
+        Opcode::ReportStatus => {
+            // Fire-and-forget: the editor must not block its tick on us. A
+            // payload we cannot decode is dropped rather than half-applied.
+            if let Some(reported) = Status::decode(&frame.payload) {
+                state.apply_report(&reported);
+            }
+            None
+        }
         Opcode::Shutdown => {
             eprintln!("suisei-daemon: shutdown requested");
             // Ends the daemon and, with it, the agent supervisor thread.
@@ -178,6 +186,77 @@ mod tests {
         assert_eq!(snap.lsp_sessions, 1);
         assert_eq!(snap.lsp_state, 3);
         assert_eq!(snap.project, "/Users/asill/suisei");
+
+        drop(client);
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The editor's push is the only way any of these fields become real: the
+    /// daemon does not own the language servers, so nothing else can fill them.
+    #[test]
+    fn a_reported_status_lands_in_the_next_snapshot() {
+        let path = tmp_sock("report");
+        let listener = bind(&path).unwrap();
+        let state = DaemonState::new();
+        let server = accept_one_with(listener, std::sync::Arc::clone(&state));
+
+        let mut client = UnixStream::connect(&path).unwrap();
+        Frame::control(Opcode::Hello).write_to(&mut client).unwrap();
+        assert_eq!(Frame::read_from(&mut client).unwrap().opcode, Opcode::HelloAck);
+
+        // Before: the placeholder zeros the menu bar renders as "none".
+        Frame::control(Opcode::StatusRequest).write_to(&mut client).unwrap();
+        let before = Status::decode(&Frame::read_from(&mut client).unwrap().payload).unwrap();
+        assert_eq!(before.lsp_state, 0);
+        assert!(before.project.is_empty());
+
+        Status {
+            lsp_sessions: 1,
+            lsp_state: 2, // indexing
+            dap_state: 1, // running
+            project: "/Users/asill/suisei".to_string(),
+            ..Status::default()
+        }
+        .to_report_frame()
+        .write_to(&mut client)
+        .unwrap();
+
+        // A report draws no reply, so the next read must be the status we ask
+        // for — if the daemon answered the push, this read would desync.
+        Frame::control(Opcode::StatusRequest).write_to(&mut client).unwrap();
+        let after = Frame::read_from(&mut client).unwrap();
+        assert_eq!(after.opcode, Opcode::StatusReport);
+        let snap = Status::decode(&after.payload).unwrap();
+        assert_eq!(snap.lsp_sessions, 1);
+        assert_eq!(snap.lsp_state, 2);
+        assert_eq!(snap.dap_state, 1);
+        assert_eq!(snap.project, "/Users/asill/suisei");
+
+        drop(client);
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A short/garbled report must be dropped whole, never half-applied over
+    /// good state.
+    #[test]
+    fn a_truncated_report_is_ignored() {
+        let path = tmp_sock("badreport");
+        let listener = bind(&path).unwrap();
+        let state = DaemonState::new();
+        state.set_project("/Users/asill/suisei");
+        let server = accept_one_with(listener, std::sync::Arc::clone(&state));
+
+        let mut client = UnixStream::connect(&path).unwrap();
+        Frame::control(Opcode::Hello).write_to(&mut client).unwrap();
+        assert_eq!(Frame::read_from(&mut client).unwrap().opcode, Opcode::HelloAck);
+
+        Frame::new(Opcode::ReportStatus, vec![0u8; 8]).write_to(&mut client).unwrap();
+
+        Frame::control(Opcode::StatusRequest).write_to(&mut client).unwrap();
+        let snap = Status::decode(&Frame::read_from(&mut client).unwrap().payload).unwrap();
+        assert_eq!(snap.project, "/Users/asill/suisei", "state must survive garbage");
 
         drop(client);
         server.join().unwrap();

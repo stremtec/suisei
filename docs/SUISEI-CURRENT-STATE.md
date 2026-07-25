@@ -150,6 +150,18 @@ target:    Suisei.app (native client) ←IPC→ suisei-daemon (durable App state
      this from its main loop; the GUI never had an equivalent.
      `App::poll_language_services` (`pump.rs`) is that equivalent, plus the
      throttled post-edit `didChange` the GUI edit path never sent.
+   - DONE (2026-07-26) the daemon reports **real** state. Its `DaemonState`
+     setters had no production caller, so the menu-bar agent drew
+     `LSP none · DAP none · Project none` in every session — and nothing else
+     could fill them, because the daemon owns no language server (that is D1).
+     A `ReportStatus` opcode (client → daemon, same fixed `Status` layout, no
+     reply) is the missing writer; the engine tick builds the snapshot from
+     live `App` state and a background thread pushes it, never blocking the
+     tick. Reported fields expire after 12 s so a killed editor stops claiming
+     a live server. "Indexing" was separately unobservable: the client never
+     advertised `window.workDoneProgress`, so rust-analyzer sent no
+     `$/progress` at all — now it does, and `LspClient::is_busy()` brackets the
+     window.
    - Finish Go to Definition, hover, code actions, rename, format, diagnostics
      navigation, workspace search/replace, and semantic-token presentation —
      now against a language server that actually answers.

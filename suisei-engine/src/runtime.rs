@@ -12,8 +12,38 @@ use crate::compositor::{compose, FrameDiff, ShellState};
 /// and only a changed buffer pays the O(file) join.
 const LSP_SYNC_TICKS: u32 = 3;
 
+/// Ticks between daemon status reports. At the 50 ms tick this is ~1 s, which
+/// bounds the cost of building the status (`project_root` walks the filesystem)
+/// while still feeling live in the menu bar. The reporter itself then skips
+/// anything unchanged — see `daemon_report::ReportGate`.
+const DAEMON_REPORT_TICKS: u32 = 20;
+
 /// One indent level, inserted by Tab and by auto-indent on Enter.
 const INDENT: &str = "    ";
+
+/// `Status::lsp_state`: 0 none · 1 starting · 2 indexing · 3 ready · 4 error.
+fn lsp_state_code(lsp: &suisei_core::lsp::LspClient) -> u8 {
+    if lsp.error.is_some() {
+        return 4;
+    }
+    if lsp.server_running {
+        // Handshaked, but rust-analyzer answers thinly until its indexing,
+        // metadata and build-script passes close — that window is `$/progress`.
+        return if lsp.is_busy() { 2 } else { 3 };
+    }
+    u8::from(lsp.is_starting())
+}
+
+/// `Status::dap_state`: 0 none · 1 running · 2 paused.
+fn dap_state_code(state: suisei_core::dap::DapState) -> u8 {
+    use suisei_core::dap::DapState;
+    match state {
+        DapState::Idle => 0,
+        DapState::Starting | DapState::Running | DapState::Ending => 1,
+        // Stopped at a breakpoint or step — a live session, just not advancing.
+        DapState::Stopped => 2,
+    }
+}
 
 /// One row in the Breakpoints navigator (face FFI).
 #[derive(Debug, Clone)]
@@ -50,6 +80,10 @@ pub struct Engine {
     active_terminal: usize,
     /// Shadow WAL — crash-recovery journal for unsaved buffers (D0).
     pub journal: crate::journal::Journal,
+    /// Pushes LSP/DAP/project state to the daemon for the menu-bar agent.
+    /// `None` outside the real app — tests must not report into the developer's
+    /// running daemon, so only the FFI constructor turns it on.
+    reporter: Option<crate::daemon_report::Reporter>,
 }
 
 impl Engine {
@@ -111,6 +145,43 @@ impl Engine {
             parked_terminals: Vec::new(),
             active_terminal: 0,
             journal: crate::journal::Journal::new(),
+            reporter: None,
+        }
+    }
+
+    /// Start pushing status to the daemon. Called once from the FFI
+    /// constructor: only the real app should report, never a test run.
+    pub fn start_daemon_reporting(&mut self) {
+        if self.reporter.is_none() {
+            self.reporter = Some(crate::daemon_report::Reporter::spawn());
+        }
+    }
+
+    /// What the menu-bar agent should say about this editor. Built from live
+    /// `App` state; the daemon fills in its own uptime and health.
+    pub fn daemon_status(&self) -> suisei_daemon::protocol::Status {
+        suisei_daemon::protocol::Status {
+            lsp_sessions: u16::from(self.app.lsp.server_running),
+            lsp_state: lsp_state_code(&self.app.lsp),
+            dap_state: dap_state_code(self.app.dap.state),
+            // Both are the daemon's own and are ignored on the way in.
+            health: 0,
+            uptime_secs: 0,
+            project: self.daemon_project_root(),
+        }
+    }
+
+    /// The project the status should name. Prefers the navigator's root (what
+    /// the user actually opened) over the walked-up root of the current file,
+    /// and reports nothing rather than guessing: `App::project_root` falls back
+    /// to the process cwd, which for a launched `.app` is `/`.
+    fn daemon_project_root(&self) -> String {
+        if !self.app.explorer.entries.is_empty() {
+            return self.app.explorer.cwd.display().to_string();
+        }
+        match self.app.filename {
+            Some(_) => self.app.project_root().display().to_string(),
+            None => String::new(),
         }
     }
 
@@ -555,6 +626,15 @@ impl Engine {
         if lang.any() {
             self.shell.dirty = true;
             need_full |= lang.chrome;
+        }
+        // Tell the daemon what we are doing. Nothing else can: the daemon owns
+        // no language server, so without this push the menu-bar agent draws
+        // "none" for every field forever. Never blocks the tick.
+        if self.tick_count % DAEMON_REPORT_TICKS == 0 && self.reporter.is_some() {
+            let status = self.daemon_status();
+            if let Some(r) = self.reporter.as_mut() {
+                r.offer(status);
+            }
         }
         // completions / palette need live paint while open
         if self.shell.dirty
@@ -2398,6 +2478,74 @@ mod tests {
     }
 
     /// The tick is the GUI's only pump for the language services — without
+    // ── Daemon status reporting ──────────────────────────────────────────────
+
+    /// The menu bar showed `LSP none · DAP none · Project none` for every
+    /// session because nothing ever built this. Each field must follow real
+    /// `App` state.
+    #[test]
+    fn daemon_status_follows_the_language_server() {
+        let mut eng = eng_with_text("fn main() {}");
+        assert_eq!(eng.daemon_status().lsp_state, 0, "no server → none");
+        assert_eq!(eng.daemon_status().lsp_sessions, 0);
+
+        eng.app.lsp.server_running = true;
+        let s = eng.daemon_status();
+        assert_eq!(s.lsp_state, 3, "handshaked and idle → ready");
+        assert_eq!(s.lsp_sessions, 1);
+
+        eng.app.lsp.error = Some("boom".into());
+        assert_eq!(eng.daemon_status().lsp_state, 4, "a hard failure → error");
+    }
+
+    /// "Indexing" is the state a user actually waits on, and it was
+    /// unobservable: the client never asked for `$/progress`.
+    #[test]
+    fn daemon_status_reports_indexing_while_progress_is_open() {
+        let mut eng = eng_with_text("fn main() {}");
+        eng.app.lsp.server_running = true;
+        assert_eq!(eng.daemon_status().lsp_state, 3);
+
+        eng.app.lsp.set_progress_open_for_test("rustAnalyzer/Indexing", true);
+        assert_eq!(eng.daemon_status().lsp_state, 2, "open progress → indexing");
+
+        eng.app.lsp.set_progress_open_for_test("rustAnalyzer/Indexing", false);
+        assert_eq!(eng.daemon_status().lsp_state, 3, "closed progress → ready");
+    }
+
+    #[test]
+    fn daemon_status_follows_the_debugger() {
+        use suisei_core::dap::DapState;
+        let mut eng = eng_with_text("x");
+        assert_eq!(eng.daemon_status().dap_state, 0);
+        eng.app.dap.state = DapState::Running;
+        assert_eq!(eng.daemon_status().dap_state, 1);
+        eng.app.dap.state = DapState::Stopped;
+        assert_eq!(eng.daemon_status().dap_state, 2, "stopped at a breakpoint → paused");
+    }
+
+    /// The navigator root is what the user opened; the walked-up root of the
+    /// current file is the fallback. Neither may degrade into the process cwd,
+    /// which for a launched `.app` is `/`.
+    #[test]
+    fn daemon_status_names_the_open_project_and_never_guesses() {
+        let mut eng = Engine::new();
+        assert!(
+            eng.daemon_status().project.is_empty(),
+            "an empty editor must report no project, not `/`"
+        );
+
+        let dir = std::env::temp_dir().join("suisei_daemon_root");
+        let _ = std::fs::create_dir_all(&dir);
+        eng.app.explorer.cwd = dir.clone();
+        eng.app.explorer.entries.push(suisei_core::explorer::ExplorerEntry {
+            name: "a.txt".into(),
+            path: dir.join("a.txt"),
+            is_dir: false,
+        });
+        assert_eq!(eng.daemon_status().project, dir.display().to_string());
+    }
+
     /// this call the LSP never finishes its handshake and no result is ever
     /// applied. A queued hover answer standing in for "a reply arrived".
     #[test]

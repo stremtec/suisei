@@ -502,6 +502,7 @@ name = "suisei-engine"
 version = "0.1.0"
 dependencies = [
  "suisei-core",
+ "suisei-daemon",
  "unicode-width",
 ]
 

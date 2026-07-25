@@ -8,6 +8,7 @@
 
 pub mod bridge;
 pub mod compositor;
+pub mod daemon_report;
 pub mod ffi;
 pub mod journal;
 pub mod runtime;
