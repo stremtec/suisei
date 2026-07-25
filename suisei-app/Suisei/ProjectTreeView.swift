@@ -1,10 +1,14 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// Xcode-style hierarchical Project navigator (disclosure triangles, nest, icons, filter).
 struct ProjectTreeView: View {
     /// Background warm-up of the project's code files (biggest first).
     @ObservedObject var index: ProjectIndex
+    /// Needed for file operations: create / rename / move / trash all report
+    /// back to the core so open tabs follow the path.
+    @ObservedObject var engine: EngineBridge
     let rootPath: String
     let accent: Color
     let fg: Color
@@ -41,11 +45,10 @@ struct ProjectTreeView: View {
                     : []
                 ScrollView(.vertical, showsIndicators: true) {
                     // `LazyVStack` creates rows on demand and does NOT run
-                    // insertion transitions — that is why expanding a folder
-                    // looked instant no matter what animation was attached. A
-                    // plain VStack animates properly; laziness is only kept for
-                    // trees big enough that building every row would cost more
-                    // than the animation is worth.
+                    // insertion transitions, so above this threshold expanding
+                    // is deliberately instant: past a few hundred visible rows,
+                    // building every one of them eagerly costs more than the
+                    // animation is worth. Below it, a plain VStack animates.
                     TreeRowStack(useLazy: rows.count > 400) {
                         treeRow(
                             name: rootName.isEmpty ? (rootPath as NSString).lastPathComponent : rootName,
@@ -153,6 +156,15 @@ struct ProjectTreeView: View {
 
     // MARK: - Row
 
+    /// Inline rename, the way Finder and Xcode do it: the row itself becomes a
+    /// text field. A sheet would have been less code, but "the tree feels
+    /// thin" is exactly the impression a modal for every rename creates.
+    @State private var draggingPath: String? = nil
+    @State private var dropTarget: String? = nil
+    @State private var renamingPath: String? = nil
+    @State private var draftName: String = ""
+    @FocusState private var renameFocused: Bool
+
     private func treeRow(
         name: String,
         path: String,
@@ -168,14 +180,16 @@ struct ProjectTreeView: View {
         return Button {
             selectedPath = path
             if isDir {
-                withAnimation(.smooth(duration: 0.26)) {
-                    if expanded.contains(path) {
-                        expanded.remove(path)
-                    } else {
-                        expanded.insert(path)
-                        // Load children into cache
-                        _ = children(of: path)
-                    }
+                if expanded.contains(path) {
+                    withAnimation(.smooth(duration: 0.26)) { expanded.remove(path) }
+                } else {
+                    // Read the directory BEFORE the animation starts. This was
+                    // inside the `withAnimation` block, so the first frame had
+                    // to wait on a synchronous `contentsOfDirectory` — on any
+                    // real folder that ate the whole 0.26s and the rows just
+                    // appeared, which is why the expand looked instant.
+                    _ = children(of: path)
+                    withAnimation(.smooth(duration: 0.26)) { expanded.insert(path) }
                 }
             } else {
                 onOpenFile(path)
@@ -215,11 +229,25 @@ struct ProjectTreeView: View {
                                              ? Color.secondary.opacity(0.55) : accent.opacity(0.85))
                     }
 
-                    Text(name)
-                        .fontWeight(isDir && index.masterPath == path ? .semibold : .regular)
-                        .font(.system(size: 12, weight: isRoot ? .semibold : .regular))
-                        .foregroundStyle(markColor(mark) ?? fg)
-                        .lineLimit(1)
+                    if renamingPath == path {
+                        TextField("", text: $draftName)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12))
+                            .focused($renameFocused)
+                            .onSubmit { commitRename(path) }
+                            .onExitCommand { renamingPath = nil }
+                            .onAppear {
+                                draftName = name
+                                renameFocused = true
+                            }
+                            .frame(maxWidth: 220)
+                    } else {
+                        Text(name)
+                            .fontWeight(isDir && index.masterPath == path ? .semibold : .regular)
+                            .font(.system(size: 12, weight: isRoot ? .semibold : .regular))
+                            .foregroundStyle(markColor(mark) ?? fg)
+                            .lineLimit(1)
+                    }
 
                     Spacer(minLength: 2)
 
@@ -238,17 +266,70 @@ struct ProjectTreeView: View {
                 .background(
                     RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                         .fill(
-                            isSelected
-                                ? Color.primary.opacity(0.12)
-                                : Color.clear
+                            dropTarget == path
+                                ? accent.opacity(0.25)
+                                : (isSelected ? Color.primary.opacity(0.12) : Color.clear)
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                        .strokeBorder(
+                            dropTarget == path ? accent : .clear, lineWidth: 1
                         )
                 )
                 .contentShape(RoundedRectangle(cornerRadius: Radius.row, style: .continuous))
             }
         }
         .buttonStyle(.plain)
+        // Drag the row out as a file URL — the same payload Finder sends, so a
+        // drag out of Suisei lands correctly in other apps too.
+        .onDrag {
+            draggingPath = path
+            return NSItemProvider(contentsOf: URL(fileURLWithPath: path))
+                ?? NSItemProvider()
+        }
+        // Only folders take a drop. A file row would have to guess whether the
+        // user meant "into its folder" or "replace it", and both guesses are
+        // destructive.
+        .onDrop(
+            of: [UTType.fileURL],
+            isTargeted: Binding(
+                get: { dropTarget == path },
+                set: { hit in
+                    if hit, isDir, canDrop(onto: path) {
+                        dropTarget = path
+                    } else if dropTarget == path {
+                        dropTarget = nil
+                    }
+                }
+            )
+        ) { providers in
+            guard isDir else { return false }
+            return accept(providers, into: path)
+        }
         .padding(.horizontal, 4)
         .contextMenu {
+            if isDir {
+                Button("New File") { newEntry(in: path, folder: false) }
+                Button("New Folder") { newEntry(in: path, folder: true) }
+                Divider()
+            } else {
+                Button("New File") {
+                    newEntry(in: (path as NSString).deletingLastPathComponent, folder: false)
+                }
+                Button("New Folder") {
+                    newEntry(in: (path as NSString).deletingLastPathComponent, folder: true)
+                }
+                Divider()
+            }
+            if !isRoot {
+                Button("Rename") {
+                    draftName = name
+                    renamingPath = path
+                }
+                Button("Move to Trash") { trash(path) }
+                Divider()
+            }
             if isDir {
                 if index.masterPath == path {
                     // Already the master — offer to leave, not to re-set.
@@ -272,6 +353,77 @@ struct ProjectTreeView: View {
                 rebuild()
             }
         }
+    }
+
+    // MARK: - Drag and drop
+
+    /// A folder can take the drop unless it is the source, the source's current
+    /// parent (nothing would change), or inside the source's own subtree —
+    /// which would detach the moved folder from the tree entirely.
+    private func canDrop(onto folder: String) -> Bool {
+        guard let src = draggingPath else { return true }
+        return EngineBridge.moveIsSane(from: src, to: (folder as NSString).appendingPathComponent(
+            (src as NSString).lastPathComponent
+        ))
+    }
+
+    private func accept(_ providers: [NSItemProvider], into folder: String) -> Bool {
+        dropTarget = nil
+        // ⌥ copies, the macOS convention; a plain drag moves.
+        let copy = NSEvent.modifierFlags.contains(.option)
+        var handled = false
+        for provider in providers {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                DispatchQueue.main.async {
+                    guard EngineBridge.moveIsSane(
+                        from: url.path,
+                        to: (folder as NSString).appendingPathComponent(url.lastPathComponent)
+                    ) else { return }
+                    if engine.movePath(url.path, into: folder, copy: copy) != nil {
+                        Self.invalidateCache()
+                        withAnimation(.smooth(duration: 0.26)) { expanded.insert(folder) }
+                        onRefresh()
+                    }
+                }
+            }
+            handled = true
+        }
+        draggingPath = nil
+        return handled
+    }
+
+    // MARK: - File actions
+
+    /// Create, then drop straight into inline rename — one path for "new" and
+    /// "rename", and the same gesture Finder gives you.
+    private func newEntry(in directory: String, folder: Bool) {
+        let made = folder
+            ? engine.createFolder(in: directory)
+            : engine.createFile(in: directory)
+        guard let made else { return }
+        Self.invalidateCache()
+        withAnimation(.smooth(duration: 0.26)) { expanded.insert(directory) }
+        onRefresh()
+        selectedPath = made
+        draftName = (made as NSString).lastPathComponent
+        renamingPath = made
+    }
+
+    private func commitRename(_ path: String) {
+        let name = draftName
+        renamingPath = nil
+        guard let moved = engine.renamePath(path, to: name) else { return }
+        Self.invalidateCache()
+        onRefresh()
+        selectedPath = moved
+    }
+
+    private func trash(_ path: String) {
+        engine.trashPath(path)
+        Self.invalidateCache()
+        onRefresh()
+        if selectedPath == path { selectedPath = "" }
     }
 
     // MARK: - Tree model

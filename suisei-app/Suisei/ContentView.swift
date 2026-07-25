@@ -1359,6 +1359,7 @@ struct ContentView: View {
                 engine.projectIndex = projectIndex
                 return projectIndex
             }(),
+            engine: engine,
             rootPath: engine.projectRoot.isEmpty ? engine.chrome.explorer.cwd : engine.projectRoot,
             accent: Color.accentColor,
             fg: Color.primary,
