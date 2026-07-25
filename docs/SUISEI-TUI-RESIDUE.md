@@ -108,7 +108,6 @@ Never referenced by the compositor, the FFI, or Swift:
 | `rebase.rs` | 339 |
 | `plugin_store.rs` | 220 |
 | `snippets.rs` | 182 |
-| `git_graph.rs` | 388 |
 
 Their `Mode` variants and key handlers were deleted with vim; the modules
 remain. `peek.rs` (75) and `hooks.rs` (405) reach `App` but never the face.
@@ -129,16 +128,18 @@ remain. `peek.rs` (75) and `hooks.rs` (405) reach `App` but never the face.
 Ordered by risk, not by size: each step must leave the app shippable, and the
 first step of each group establishes the pattern the rest follow.
 
-### R1 — Finish the state split from xei *(small, removes a live data-loss class)*
+### R1 — Finish the state split from xei — **DONE 2026-07-25**
 Move `session`, `undo`, `breakpoints`, `update_check`, `hooks.toml` to
 `~/.suisei/`, adopting the existing files once, exactly as config did.
 **Gate:** run both editors on one file; neither sees the other's breakpoints,
 undo spill or session.
 
-### R2 — Delete the unreachable surfaces *(mechanical, ~2,300 lines)*
-`pr_review`, `screensaver`, `rebase`, `plugin_store`, `snippets`, `git_graph`,
-and the `App` fields feeding them. **Gate:** tests green, packaged app
-unchanged. Do it before R3 so there is less to convert.
+### R2 — Delete the unreachable surfaces — **DONE 2026-07-25**, 1,997 lines
+`pr_review`, `screensaver`, `rebase`, `plugin_store`, `snippets` and the `App`
+fields feeding them, plus the orphaned webview/ext-panel state.
+*Correction to the table above: `git_graph.rs` is NOT unreachable — the initial
+probe searched scene.rs for the module name, but the SCM graph reaches the face
+as `GraphRow`, via `git_workbench` and `scm`. It stays.*
 
 ### R3 — Key ownership → responder chain *(the big one, 1,556 lines)*
 One panel at a time; each step converts a panel to native focus + semantic

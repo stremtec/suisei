@@ -174,17 +174,6 @@ pub struct App {
     pub metrics: ProcMetrics,
     /// Latest `:bench` results (shown in `Mode::Bench`).
     pub bench_report: Option<crate::bench::BenchReport>,
-    /// Plugin store surface state (`Mode::PluginStore`).
-    pub plugin_store: crate::plugin_store::PluginStore,
-    /// Extensions sidebar panel (`Mode::ExtPanel`) — a left column listing
-    /// loaded extensions and their runnable commands.
-    pub ext_panel_open: bool,
-    pub ext_panel_sel: usize,
-    /// Webview display (`Mode::Webview`): HTML awaiting a headless render (set by
-    /// core, consumed by the frontend), the rendered Kitty image, and its title.
-    pub webview_pending_html: Option<String>,
-    pub webview_title: String,
-    pub webview_image: Option<crate::media::ImageAsset>,
     /// VSCode-compatible extension host sidecar (v2, feature = "extensions").
     /// Lazily spawned on first use; `None` until then / when Node is absent.
     #[cfg(feature = "extensions")]
@@ -248,7 +237,6 @@ pub struct App {
     /// Workspace find/replace panel
     pub workspace_search: crate::workspace_search::WorkspaceSearch,
     /// `:screensaver` xeifetch overlay
-    pub screensaver: crate::screensaver::Screensaver,
     /// Desktop pet GIF overlay
     pub pet: crate::pet::PetState,
     /// Pane hit regions filled each frame: (x, y, w, h, pane_idx)
@@ -290,9 +278,7 @@ pub struct App {
     /// Call hierarchy panel (gC / SPC l c).
     pub call_hierarchy: crate::call_hierarchy::CallHierarchyState,
     /// Interactive rebase planner.
-    pub rebase: crate::rebase::RebaseState,
     /// PR review (files + comments + diff).
-    pub pr_review: crate::pr_review::PrReviewState,
     /// Plugin hooks (`~/.suisei/hooks.toml`).
     pub hooks: crate::hooks::HooksConfig,
     /// Release check + self-update (welcome notice · :update).
@@ -498,12 +484,6 @@ impl Default for App {
             show_metrics: false,
             metrics: ProcMetrics::default(),
             bench_report: None,
-            plugin_store: crate::plugin_store::PluginStore::default(),
-            ext_panel_open: false,
-            ext_panel_sel: 0,
-            webview_pending_html: None,
-            webview_title: String::new(),
-            webview_image: None,
             #[cfg(feature = "extensions")]
             ext: None,
             pending_to_mod: None,
@@ -537,7 +517,6 @@ impl Default for App {
             split: crate::split::SplitState::new(),
             peek: crate::peek::PeekState::new(),
             workspace_search: crate::workspace_search::WorkspaceSearch::new(),
-            screensaver: crate::screensaver::Screensaver::new(),
             pet: crate::pet::PetState::new(),
             pane_hit_regions: Vec::new(),
             split_sep_hit: None,
@@ -558,8 +537,6 @@ impl Default for App {
             key_hints: true,
             dap: crate::dap::DapClient::new(),
             call_hierarchy: crate::call_hierarchy::CallHierarchyState::new(),
-            rebase: crate::rebase::RebaseState::new(),
-            pr_review: crate::pr_review::PrReviewState::new(),
             hooks: crate::hooks::HooksConfig::load(),
             update: crate::update::UpdateState::new(),
             hook_msg_tx,
@@ -799,59 +776,6 @@ impl App {
 
     /// Open the plugin store (`SPC x` / `Ctrl+Shift+X` / `:plugins`).
     #[cfg(feature = "extensions")]
-    pub fn ext_panel_rows(&self) -> Vec<crate::plugin_store::ExtRow> {
-        use crate::plugin_store::ExtRow;
-        let mut rows = Vec::new();
-        // Cached (refreshed when the panel opens / on install) — no per-frame fs.
-        for inst in &self.plugin_store.installed {
-            let loaded = self
-                .ext
-                .as_ref()
-                .and_then(|e| e.loaded.iter().find(|l| l.id == inst.id));
-            let failed = self
-                .ext
-                .as_ref()
-                .and_then(|e| e.failed.iter().find(|(id, _)| *id == inst.id));
-            let badge = if loaded.is_some() {
-                '✓'
-            } else if failed.is_some() {
-                '✗'
-            } else {
-                '⋯'
-            };
-            rows.push(ExtRow {
-                is_header: true,
-                primary: format!("{badge} {}", inst.id),
-                secondary: format!("v{}", inst.version),
-                command: None,
-            });
-            if let Some(le) = loaded {
-                for c in &le.commands {
-                    let title = if c.title.is_empty() { c.command.clone() } else { c.title.clone() };
-                    rows.push(ExtRow {
-                        is_header: false,
-                        primary: title,
-                        secondary: c.command.clone(),
-                        command: Some(c.command.clone()),
-                    });
-                }
-            } else if let Some((_, err)) = failed {
-                let short: String = err.chars().take(48).collect();
-                rows.push(ExtRow {
-                    is_header: false,
-                    primary: format!("⚠ {short}"),
-                    secondary: String::new(),
-                    command: None,
-                });
-            }
-        }
-        rows
-    }
-
-    #[cfg(not(feature = "extensions"))]
-    pub fn ext_panel_rows(&self) -> Vec<crate::plugin_store::ExtRow> {
-        Vec::new()
-    }
 
 
 
@@ -1658,15 +1582,6 @@ impl App {
     }
 
 
-    pub fn run_rebase_plan(&mut self) {
-        match self.rebase.run() {
-            Ok(msg) => {
-                self.mode = Mode::Editor;
-                self.message = msg;
-            }
-            Err(e) => self.message = e,
-        }
-    }
 
 
 
@@ -3927,27 +3842,7 @@ impl App {
     }
 
 
-    fn open_in_place(&mut self, path: &str) {
-        self.open_new_tab(path);
-    }
 
-    fn move_file(&mut self, dest: &str) {
-        if let Some(ref path) = self.filename {
-            let dest_path = PathBuf::from(dest);
-            match fs::rename(path, &dest_path) {
-                Ok(_) => {
-                    self.filename = Some(dest_path);
-                    self.message = format!("Moved to: {}", dest);
-                    self.set_message(&format!("Moved to: {}", dest));
-                }
-                Err(e) => {
-                    self.set_message(&format!("Error moving: {}", e));
-                }
-            }
-        } else {
-            self.set_message("No file to move.");
-        }
-    }
 
     /// Recompute matches for `pattern`. If `jump`, move cursor to nearest match
     /// in the active search direction from origin/cursor.
