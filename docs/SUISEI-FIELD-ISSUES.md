@@ -172,8 +172,16 @@ cells — so the clamp lands on the last glyph rather than near it.
 ### E2 · Tab bar switching feels wrong · OPEN
 No motion continuity between the outgoing and incoming tab.
 
-### E3 · Left sidebar open/close animation is wrong · OPEN
-Both directions. Compare against the inspector, whose pill work already landed.
+### E3 · Left sidebar open/close animation is wrong · FIXED (2026-07-26)
+It was not wrong, it was **absent** — depending on how you asked. The top bar's
+toggle wrapped the flag flip in `animatePanels` (a private helper in
+`ContentView`); the menu commands ⌘0 / ⌥⌘0 / ⇧⌘Y and every "reveal this
+navigator" menu item flipped the same flags raw. Frame capture: one changed
+frame for ⌘0 against eight for the button.
+
+The motion now lives on `EngineBridge.animatingPanels`, so every entry point
+shares it — including the Inspector and Debug Area, which had the same split.
+Re-captured after: ⌘0 glides across eight frames like the button.
 
 ### E4 · The travelling pill's *colour* transition is awkward while it moves ·
 FIXED (2026-07-26)

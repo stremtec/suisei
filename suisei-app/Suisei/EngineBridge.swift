@@ -600,6 +600,31 @@ final class EngineBridge: ObservableObject {
     var windowLiveResizing = false
 
     /// Apply the final editor size after a live window resize.
+    /// Run a docked-panel show/hide with the panel motion, from **any** entry
+    /// point.
+    ///
+    /// This lived privately in `ContentView`, so the top bar's toggles glided
+    /// and the menu commands (⌘0, ⌥⌘0) snapped — the same panel behaved
+    /// differently depending on how you asked for it. On the bridge, every
+    /// caller gets the motion, including the next one added.
+    ///
+    /// `windowLiveResizing` is held across the animation because the editor is
+    /// an `NSViewRepresentable`: without it, each of the ~18 animation frames
+    /// pushes a resize into the engine and recomposes.
+    func animatingPanels(_ body: () -> Void) {
+        windowLiveResizing = true
+        // `.smooth`, not `.snappy`: snappy carries bounce, and a full-height
+        // panel that wobbles as it leaves reads as flippant. Panels glide.
+        withAnimation(.smooth(duration: 0.3)) {
+            body()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) { [weak self] in
+            guard let self else { return }
+            self.windowLiveResizing = false
+            self.settleEditorResize()
+        }
+    }
+
     func settleEditorResize() {
         resizePendingFull = false
         resizeDebounceWork?.cancel()

@@ -506,17 +506,9 @@ struct ContentView: View {
 
     /// Run a panel show/hide animation without per-frame engine resizes —
     /// the 240-row recompose at 30Hz read as stutter, especially on big files.
+    /// The motion itself lives on the bridge so the menu commands share it.
     private func animatePanels(_ body: () -> Void) {
-        engine.windowLiveResizing = true
-        // `.smooth`, not `.snappy`: snappy carries bounce, and a full-height
-        // panel that wobbles as it leaves reads as flippant. Panels glide.
-        withAnimation(.smooth(duration: 0.3)) {
-            body()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) {
-            engine.windowLiveResizing = false
-            engine.settleEditorResize()
-        }
+        engine.animatingPanels(body)
     }
 
     private func syncNavFromCore() {

@@ -83,18 +83,22 @@ struct SuiseiApp: App {
         standardCommands
 
         CommandGroup(after: .sidebar) {
+            // Every panel toggle goes through `animatingPanels`. These used to
+            // flip the flags raw, so a panel glided when its top-bar button was
+            // clicked and snapped when the same action was keyed.
             Button(engine.uiNavVisible ? "Hide Navigator" : "Show Navigator") {
-                engine.uiNavVisible.toggle()
+                engine.animatingPanels { engine.uiNavVisible.toggle() }
             }
             .keyboardShortcut("0", modifiers: .command)
 
             Button(engine.uiInspectorVisible ? "Hide Inspector" : "Show Inspector") {
-                engine.uiInspectorVisible.toggle()
+                engine.animatingPanels { engine.uiInspectorVisible.toggle() }
             }
             .keyboardShortcut("0", modifiers: [.command, .option])
 
             Button(engine.uiDebugVisible ? "Hide Debug Area" : "Show Debug Area") {
-                engine.setDebugArea(!engine.uiDebugVisible)
+                let next = !engine.uiDebugVisible
+                engine.animatingPanels { engine.setDebugArea(next) }
             }
             .keyboardShortcut("y", modifiers: [.command, .shift])
 
@@ -104,25 +108,25 @@ struct SuiseiApp: App {
         // View — chrome panels (roles, not ad-hoc chords only).
         CommandMenu("View") {
             Button("File Explorer") {
-                engine.uiNavVisible = true
+                engine.animatingPanels { engine.uiNavVisible = true }
                 NotificationCenter.default.post(name: .suiseiNavProject, object: nil)
             }
             .keyboardShortcut("f", modifiers: .control)
 
             Button("Source Control") {
-                engine.uiNavVisible = true
+                engine.animatingPanels { engine.uiNavVisible = true }
                 engine.ensureScm()
                 NotificationCenter.default.post(name: .suiseiNavScm, object: nil)
             }
             .keyboardShortcut("g", modifiers: .control)
 
             Button("Find Navigator") {
-                engine.uiNavVisible = true
+                engine.animatingPanels { engine.uiNavVisible = true }
                 NotificationCenter.default.post(name: .suiseiNavFind, object: nil)
             }
 
             Button("Breakpoints") {
-                engine.uiNavVisible = true
+                engine.animatingPanels { engine.uiNavVisible = true }
                 engine.refreshBreakpoints()
                 NotificationCenter.default.post(name: .suiseiNavBreakpoints, object: nil)
             }
@@ -315,7 +319,7 @@ struct SuiseiApp: App {
             Button("Find Previous") { engine.findStep(forward: false) }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
             Button("Find in Project…") {
-                engine.uiNavVisible = true
+                engine.animatingPanels { engine.uiNavVisible = true }
                 NotificationCenter.default.post(name: .suiseiNavFind, object: nil)
             }
             .keyboardShortcut("f", modifiers: [.command, .shift])
