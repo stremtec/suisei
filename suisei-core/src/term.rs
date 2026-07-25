@@ -108,28 +108,34 @@ pub enum Color {
 }
 
 impl Color {
-    fn to_ratatui(self) -> ratatui::style::Color {
-        match self {
-            // Default → pure black so agent TUIs don't sit on a grey "frame"
-            Color::Default => ratatui::style::Color::Rgb(0, 0, 0),
-            Color::Black => ratatui::style::Color::Rgb(0, 0, 0),
-            Color::Red => ratatui::style::Color::Red,
-            Color::Green => ratatui::style::Color::Green,
-            Color::Yellow => ratatui::style::Color::Yellow,
-            Color::Blue => ratatui::style::Color::Blue,
-            Color::Magenta => ratatui::style::Color::Magenta,
-            Color::Cyan => ratatui::style::Color::Cyan,
-            Color::White => ratatui::style::Color::White,
-            Color::BrightBlack => ratatui::style::Color::Gray,
-            Color::BrightRed => ratatui::style::Color::LightRed,
-            Color::BrightGreen => ratatui::style::Color::LightGreen,
-            Color::BrightYellow => ratatui::style::Color::LightYellow,
-            Color::BrightBlue => ratatui::style::Color::LightBlue,
-            Color::BrightMagenta => ratatui::style::Color::LightMagenta,
-            Color::BrightCyan => ratatui::style::Color::LightCyan,
-            Color::BrightWhite => ratatui::style::Color::White,
-            Color::Rgb(r, g, b) => ratatui::style::Color::Rgb(r, g, b),
-        }
+    /// The sRGB this ANSI colour paints as. `Default` is the caller's choice
+    /// (see `to_rgba_fg`), so it returns `None` here.
+    ///
+    /// This replaced a two-hop `ANSI -> ratatui::style::Color -> rgb` walk; the
+    /// palette below is the one that walk resolved to, unchanged.
+    fn to_rgba(self) -> Option<crate::theme::Rgba> {
+        use crate::theme::rgb;
+        Some(match self {
+            // Default -> pure black so agent TUIs don't sit on a grey "frame".
+            Color::Default => rgb(0, 0, 0),
+            Color::Black => rgb(0, 0, 0),
+            Color::Red => rgb(205, 49, 49),
+            Color::Green => rgb(13, 188, 121),
+            Color::Yellow => rgb(229, 229, 16),
+            Color::Blue => rgb(36, 114, 200),
+            Color::Magenta => rgb(188, 63, 188),
+            Color::Cyan => rgb(17, 168, 205),
+            Color::White => rgb(229, 229, 229),
+            Color::BrightBlack => rgb(102, 102, 102),
+            Color::BrightRed => rgb(241, 76, 76),
+            Color::BrightGreen => rgb(35, 209, 139),
+            Color::BrightYellow => rgb(245, 245, 67),
+            Color::BrightBlue => rgb(59, 142, 234),
+            Color::BrightMagenta => rgb(214, 112, 214),
+            Color::BrightCyan => rgb(41, 184, 219),
+            Color::BrightWhite => rgb(255, 255, 255),
+            Color::Rgb(r, g, b) => rgb(r, g, b),
+        })
     }
 }
 
@@ -936,21 +942,21 @@ impl Terminal {
     fn row_cells_to_spans(
         row: &[Cell],
         force_black_bg: bool,
-    ) -> Vec<(String, Option<ratatui::style::Color>, Option<ratatui::style::Color>)> {
+    ) -> Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)> {
         // Run-group consecutive same-style cells: a typical row collapses from
         // ~200 one-char Strings to a handful of spans (this runs every frame).
-        let mut out: Vec<(String, Option<ratatui::style::Color>, Option<ratatui::style::Color>)> =
+        let mut out: Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)> =
             Vec::new();
         let mut i = 0;
         while i < row.len() {
             let cell = &row[i];
             let w = UnicodeWidthChar::width(cell.ch).unwrap_or(1).max(1);
             // Always resolve so empty cells paint pure black
-            let fg = Some(cell.fg.unwrap_or(Color::Default).to_ratatui_fg());
+            let fg = cell.fg.unwrap_or(Color::Default).to_rgba_fg();
             let bg = if force_black_bg {
-                Some(Color::Default.to_ratatui())
+                Color::Default.to_rgba()
             } else {
-                Some(cell.bg.unwrap_or(Color::Default).to_ratatui())
+                cell.bg.unwrap_or(Color::Default).to_rgba()
             };
             match out.last_mut() {
                 Some((run, rfg, rbg)) if *rfg == fg && *rbg == bg => run.push(cell.ch),
@@ -963,14 +969,19 @@ impl Terminal {
 
     pub fn visible_rows(
         &self,
-    ) -> Vec<Vec<(String, Option<ratatui::style::Color>, Option<ratatui::style::Color>)>> {
+    ) -> Vec<Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)>> {
         self.rows
             .iter()
             .map(|row| Self::row_cells_to_spans(row, false))
             .collect()
     }
 
-    /// Visible rows re-encoded with truecolor SGR for non-ratatui faces (Suisei).
+    /// Visible rows re-encoded as truecolor SGR strings.
+    ///
+    /// The face then parses those escapes back into colours — the panel
+    /// round-trips ANSI *inside the process*. Handing the face `(text, fg, bg)`
+    /// runs directly would drop an encode and a parse per row per frame; that
+    /// is an FFI change, tracked separately in `SUISEI-TUI-RESIDUE.md`.
     pub fn visible_rows_sgr(&self) -> Vec<String> {
         self.visible_rows()
             .into_iter()
@@ -979,8 +990,8 @@ impl Terminal {
                 let mut last_fg: Option<(u8, u8, u8)> = None;
                 let mut last_bg: Option<(u8, u8, u8)> = None;
                 for (frag, fg, bg) in row {
-                    let fgr = fg.and_then(ratatui_to_rgb);
-                    let bgr = bg.and_then(ratatui_to_rgb);
+                    let fgr = fg.map(|c| (c.r, c.g, c.b));
+                    let bgr = bg.map(|c| (c.r, c.g, c.b));
                     if fgr != last_fg {
                         if let Some((r, g, b)) = fgr {
                             s.push_str(&format!("\u{1b}[38;2;{r};{g};{b}m"));
@@ -1064,7 +1075,7 @@ impl Terminal {
 
     pub fn visible_scrollback(
         &self,
-    ) -> Vec<Vec<(String, Option<ratatui::style::Color>, Option<ratatui::style::Color>)>> {
+    ) -> Vec<Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)>> {
         if self.alt_screen {
             return Vec::new();
         }
@@ -1084,10 +1095,11 @@ impl Terminal {
 }
 
 impl Color {
-    fn to_ratatui_fg(self) -> ratatui::style::Color {
+    /// Foreground variant: an unset foreground is light grey, not black.
+    fn to_rgba_fg(self) -> Option<crate::theme::Rgba> {
         match self {
-            Color::Default => ratatui::style::Color::Rgb(200, 200, 200),
-            other => other.to_ratatui(),
+            Color::Default => Some(crate::theme::rgb(200, 200, 200)),
+            other => other.to_rgba(),
         }
     }
 }
@@ -1180,48 +1192,6 @@ fn index_to_color(i: i32) -> Color {
     }
 }
 
-fn ratatui_to_rgb(c: ratatui::style::Color) -> Option<(u8, u8, u8)> {
-    use ratatui::style::Color::*;
-    Some(match c {
-        Reset => return None,
-        Black => (0, 0, 0),
-        Red => (205, 49, 49),
-        Green => (13, 188, 121),
-        Yellow => (229, 229, 16),
-        Blue => (36, 114, 200),
-        Magenta => (188, 63, 188),
-        Cyan => (17, 168, 205),
-        Gray => (180, 180, 180),
-        DarkGray => (102, 102, 102),
-        LightRed => (241, 76, 76),
-        LightGreen => (35, 209, 139),
-        LightYellow => (245, 245, 67),
-        LightBlue => (59, 142, 234),
-        LightMagenta => (214, 112, 214),
-        LightCyan => (41, 184, 219),
-        White => (229, 229, 229),
-        Rgb(r, g, b) => (r, g, b),
-        Indexed(i) => match index_to_color(i as i32) {
-            Color::Rgb(r, g, b) => (r, g, b),
-            Color::Black | Color::Default => (0, 0, 0),
-            Color::Red => (205, 49, 49),
-            Color::Green => (13, 188, 121),
-            Color::Yellow => (229, 229, 16),
-            Color::Blue => (36, 114, 200),
-            Color::Magenta => (188, 63, 188),
-            Color::Cyan => (17, 168, 205),
-            Color::White => (229, 229, 229),
-            Color::BrightBlack => (102, 102, 102),
-            Color::BrightRed => (241, 76, 76),
-            Color::BrightGreen => (35, 209, 139),
-            Color::BrightYellow => (245, 245, 67),
-            Color::BrightBlue => (59, 142, 234),
-            Color::BrightMagenta => (214, 112, 214),
-            Color::BrightCyan => (41, 184, 219),
-            Color::BrightWhite => (255, 255, 255),
-        },
-    })
-}
 
 #[cfg(test)]
 mod tests {

@@ -9,7 +9,6 @@ keywords = ["editor", "gui", "core", "headless"]
 
 [dependencies]
 unicode-width = "0.2"
-ratatui = { version = "0.29", features = ["underline-color"] }
 portable-pty = "0.8"
 image = { version = "0.25", default-features = false, features = ["gif", "png", "jpeg", "webp", "bmp"] }
 tree-sitter = "0.24"
