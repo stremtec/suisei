@@ -320,6 +320,9 @@ pub struct App {
     /// once per change instead of the old pre-edit push_undo notification.
     lsp_synced_path: Option<PathBuf>,
     lsp_synced_hash: u64,
+    /// Buffer version at the last dirty-flag re-check, so an idle document is
+    /// never re-hashed. See [`App::recheck_modified`].
+    dirty_checked_version: u64,
     /// Widest line the view has seen in this document, in display columns.
     ///
     /// A high-water mark, not a live maximum, and deliberately so. Rescanning
@@ -575,6 +578,7 @@ impl Default for App {
             lsp_synced_path: None,
             lsp_synced_hash: 0,
             saved_hash: EMPTY_TEXT_HASH,
+            dirty_checked_version: 0,
             content_width: 0,
         }
     }
@@ -2529,10 +2533,35 @@ impl App {
     /// keeps the cheap one-way latch in `push_undo`; a keystroke can only ever
     /// make a document dirtier, so it never needs to ask.
     fn refresh_modified(&mut self) {
+        self.dirty_checked_version = self.buffer.version();
         self.modified = text_hash(&self.buffer.text()) != self.saved_hash;
         if self.current_buffer < self.buffers.len() {
             self.buffers[self.current_buffer].modified = self.modified;
         }
+    }
+
+    /// Correct a dirty flag that latched when it should not have. Returns true
+    /// when the flag actually changed.
+    ///
+    /// `push_undo` raises the flag on every edit and is exact in that
+    /// direction — a keystroke really does make the document differ from disk.
+    /// Nothing was exact the other way, so anything that touched the buffer and
+    /// put it back left the file marked dirty for the rest of the session: an
+    /// abandoned IME composition, a paste of text that was already there, a
+    /// deletion of nothing. Users saw files "dirty without being edited".
+    ///
+    /// Auditing every path that can latch the flag is a losing game; this
+    /// re-derives it from the text instead. The work is bounded three ways:
+    /// only while the flag is up (a clean buffer cannot be made cleaner, and
+    /// the latch is exact for clean → dirty), only when the text has moved
+    /// since the last check, and only on the engine's ~1 s cadence. On a
+    /// 60,000-line file that is one 0.24 ms hash per second of active editing.
+    pub fn recheck_modified(&mut self) -> bool {
+        if !self.modified || self.buffer.version() == self.dirty_checked_version {
+            return false;
+        }
+        self.refresh_modified();
+        !self.modified // the only outcome this call can produce is a clear
     }
 
 

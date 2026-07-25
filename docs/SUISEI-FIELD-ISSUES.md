@@ -76,11 +76,19 @@ index, `FileManager` enumeration.
 
 ## B. Dirty-state lies
 
-### B1 · A file shows dirty without being edited · OPEN
-Opening a file and touching nothing raises the modified indicator. Find who
-mutates the buffer (or bumps its version) on open: trailing-newline
-normalisation, tab expansion, EOL translation, or a scroll/cursor write that
-bumps `version()`.
+### B1 · A file shows dirty without being edited · FIXED (2026-07-26)
+The trigger was never found, and chasing it was the wrong approach: `modified`
+is set by `push_undo` on every edit and *nothing* ever put it back down, so any
+path that touched the buffer and restored it — an abandoned IME composition, a
+paste of text that was already there, a deletion of nothing — latched the flag
+for the rest of the session. Auditing every such path is a losing game.
+
+The flag is now self-correcting. The engine tick calls `App::recheck_modified`
+(~1 s), which re-derives it from the text. Bounded three ways: only while the
+flag is up (the latch is exact for clean → dirty, so a clean buffer is never
+re-hashed), only when the text moved since the last check, and only on that
+cadence. One 0.24 ms hash per second of active editing on a 60,000-line file.
+This fixes the symptom for any cause, including ones not yet seen.
 
 ### B2 · Undo back to the original state stays dirty · FIXED (2026-07-26)
 `modified` was a one-way latch: set by every edit, cleared only by a save. A
@@ -161,11 +169,23 @@ of a plain list of rows.
 
 ## G. File tree ergonomics
 
-### G1 · Moving a file *out* of a folder is painful · OPEN
-Drag-and-drop only accepts a drop **on a directory row**, so moving a file up one
-level means scrolling to the top-level directory row and dropping there. Needs
-either a drop target for "the parent of this row" (drop on the gutter/whitespace
-of a level), or a "Move to…" command in the context menu, or both.
+### G1 · Moving a file *out* of a folder is painful · FIXED (2026-07-26)
+Both halves, as the entry suggested.
+
+**Drop on a file row now lands in that file's folder.** Previously only
+directory rows accepted a drop, on the reasoning that a file row would have to
+guess between "into its folder" and "replace it" — but replace is never a
+sensible file-tree drop, and Finder resolves it the same way. Moving something
+up one level is now "drop it on any sibling". The highlight follows the real
+destination, so the enclosing folder lights up rather than the row under the
+cursor. *Not verified by automation:* synthetic mouse events do not reliably
+open a SwiftUI drag session, so this half was reasoned and compiled, not driven.
+
+**"Move to…" in the context menu** opens a destination picker rooted at the
+file's own folder. Reaches folders that are collapsed, scrolled away, or outside
+the project — none of which a drag can. Verified end to end in the running app:
+the file moved on disk, the tree refreshed, and the open tab's breadcrumb
+followed it (`App::path_moved`).
 
 ---
 

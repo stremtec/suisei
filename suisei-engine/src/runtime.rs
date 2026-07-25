@@ -12,6 +12,12 @@ use crate::compositor::{compose, FrameDiff, ShellState};
 /// and only a changed buffer pays the O(file) join.
 const LSP_SYNC_TICKS: u32 = 3;
 
+/// Ticks between dirty-flag re-checks (~1 s at the 50 ms tick). `App::modified`
+/// is exact for clean → dirty but was a latch the other way, so a buffer put
+/// back to its on-disk text stayed marked dirty; this re-derives it. Costs one
+/// hash, and only while dirty and only when the text moved.
+const DIRTY_RECHECK_TICKS: u32 = 20;
+
 /// Ticks between daemon status reports. At the 50 ms tick this is ~1 s, which
 /// bounds the cost of building the status (`project_root` walks the filesystem)
 /// while still feeling live in the menu bar. The reporter itself then skips
@@ -626,6 +632,12 @@ impl Engine {
         if lang.any() {
             self.shell.dirty = true;
             need_full |= lang.chrome;
+        }
+        // Correct a dirty flag that latched when it should not have. Cheap by
+        // construction — see `App::recheck_modified`.
+        if self.tick_count % DIRTY_RECHECK_TICKS == 0 && self.app.recheck_modified() {
+            self.shell.dirty = true;
+            need_full = true;
         }
         // Tell the daemon what we are doing. Nothing else can: the daemon owns
         // no language server, so without this push the menu-bar agent draws
@@ -2491,6 +2503,46 @@ mod tests {
 
     /// The tick is the GUI's only pump for the language services — without
     // ── Daemon status reporting ──────────────────────────────────────────────
+
+    /// A buffer put back to its on-disk text used to stay marked dirty for the
+    /// rest of the session — `modified` only ever went up. Users read that as
+    /// "dirty without being edited", because the edit that latched it was
+    /// something they never saw land (an abandoned composition, a paste of what
+    /// was already there).
+    #[test]
+    fn the_tick_clears_a_dirty_flag_that_should_not_be_up() {
+        let mut eng = eng_with_text("hello");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_recheck.rs"));
+        eng.app.mark_clean();
+
+        // An edit and its exact reversal, without going through undo — the
+        // latch has no way to know the text came back.
+        eng.app.push_undo();
+        eng.app.buffer.insert_char('!');
+        eng.app.buffer.backspace();
+        assert!(eng.app.modified, "the latch is up and nothing has corrected it");
+
+        for _ in 0..DIRTY_RECHECK_TICKS {
+            eng.tick(50);
+        }
+        assert!(!eng.app.modified, "the tick must re-derive it from the text");
+    }
+
+    /// The correction must not undo itself: a genuinely edited buffer stays
+    /// dirty however many times the tick looks at it.
+    #[test]
+    fn the_tick_leaves_a_genuinely_edited_buffer_dirty() {
+        let mut eng = eng_with_text("hello");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_recheck2.rs"));
+        eng.app.mark_clean();
+        eng.app.push_undo();
+        eng.app.buffer.insert_char('!');
+
+        for _ in 0..(DIRTY_RECHECK_TICKS * 3) {
+            eng.tick(50);
+        }
+        assert!(eng.app.modified);
+    }
 
     /// The menu bar showed `LSP none · DAP none · Project none` for every
     /// session because nothing ever built this. Each field must follow real

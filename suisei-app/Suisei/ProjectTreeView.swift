@@ -295,24 +295,27 @@ struct ProjectTreeView: View {
             return NSItemProvider(contentsOf: URL(fileURLWithPath: path))
                 ?? NSItemProvider()
         }
-        // Only folders take a drop. A file row would have to guess whether the
-        // user meant "into its folder" or "replace it", and both guesses are
-        // destructive.
+        // A folder row takes the drop itself; a FILE row hands it to the folder
+        // that contains it. That is what Finder does, and it is the only way to
+        // move something *out* of a folder without walking all the way up to
+        // the top-level directory and dropping there — which was the whole
+        // complaint. The highlight follows the real destination, so the user
+        // sees the enclosing folder light up, not the file they are hovering.
         .onDrop(
             of: [UTType.fileURL],
             isTargeted: Binding(
                 get: { dropTarget == path },
                 set: { hit in
-                    if hit, isDir, canDrop(onto: path) {
-                        dropTarget = path
-                    } else if dropTarget == path {
+                    let destination = isDir ? path : (path as NSString).deletingLastPathComponent
+                    if hit, canDrop(onto: destination) {
+                        dropTarget = destination
+                    } else if dropTarget == destination {
                         dropTarget = nil
                     }
                 }
             )
         ) { providers in
-            guard isDir else { return false }
-            return accept(providers, into: path)
+            accept(providers, into: isDir ? path : (path as NSString).deletingLastPathComponent)
         }
         .padding(.horizontal, 4)
         .contextMenu {
@@ -334,6 +337,10 @@ struct ProjectTreeView: View {
                     draftName = name
                     renamingPath = path
                 }
+                // Drag-and-drop only reaches what is on screen. Moving a file
+                // to a folder that is scrolled away, collapsed, or outside the
+                // project needs a destination picker.
+                Button("Move to…") { moveElsewhere(path) }
                 Button("Move to Trash") { trash(path) }
                 Divider()
             }
@@ -429,6 +436,30 @@ struct ProjectTreeView: View {
     private func trash(_ path: String) {
         engine.trashPath(path)
         Self.invalidateCache()
+        onRefresh()
+        if selectedPath == path { selectedPath = "" }
+    }
+
+    /// Pick a destination folder and move there. The dragging path can only
+    /// reach folders that happen to be visible and expanded; this reaches any
+    /// of them, including out of the project entirely.
+    private func moveElsewhere(_ path: String) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Move"
+        panel.message = "Move “\((path as NSString).lastPathComponent)” to:"
+        // Start where the file lives, so one click up is one click away.
+        panel.directoryURL = URL(
+            fileURLWithPath: (path as NSString).deletingLastPathComponent
+        )
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        guard engine.movePath(path, into: destination.path) != nil else { return }
+        Self.invalidateCache()
+        // Reveal the destination if it is inside the tree, so the moved item is
+        // visible where it landed rather than seeming to vanish.
+        withAnimation(.smooth(duration: 0.26)) { expanded.insert(destination.path) }
         onRefresh()
         if selectedPath == path { selectedPath = "" }
     }
