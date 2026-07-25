@@ -852,11 +852,14 @@ impl Engine {
             self.recompose_scroll();
             return;
         }
-        if delta_cols < 0 {
-            self.app.hscroll = self.app.hscroll.saturating_sub((-delta_cols) as usize);
+        // Clamped by `set_hscroll`: without a right-hand limit a trackpad pan
+        // ran off past the end of the text into empty space, forever.
+        let next = if delta_cols < 0 {
+            self.app.hscroll.saturating_sub((-delta_cols) as usize)
         } else {
-            self.app.hscroll = self.app.hscroll.saturating_add(delta_cols as usize);
-        }
+            self.app.hscroll.saturating_add(delta_cols as usize)
+        };
+        self.app.set_hscroll(next);
         self.app.sync_focused_pane_viewport();
         self.recompose_scroll();
     }
@@ -2742,11 +2745,24 @@ mod tests {
         assert_eq!(eng.app.scroll, 40);
         eng.scroll_to(0, 0);
         assert_eq!(eng.app.scroll, 0);
-        // hscroll only when wrap is off
+        // hscroll only when wrap is off — and only as far as the text goes.
+        // These rows are 3 columns wide in an ~88-column viewport, so there is
+        // nothing to pan to: the clamp pins it at the single column of slack.
         eng.app.wrap_lines = false;
         eng.scroll_to(10, 15);
         assert_eq!(eng.app.scroll, 10);
+        assert_eq!(eng.app.hscroll, 1, "no content to the right of a 3-column row");
+
+        // Give it a line worth panning across and the request goes through.
+        eng.app.buffer = suisei_core::buffer::Buffer::from_string(&format!(
+            "{}\n{}",
+            "x".repeat(400),
+            "row\n".repeat(99)
+        ));
+        eng.app.content_cols(); // re-measure now that a wide line is on screen
+        eng.scroll_to(0, 15);
         assert_eq!(eng.app.hscroll, 15);
+
         eng.app.wrap_lines = true;
         eng.scroll_to(10, 99);
         assert_eq!(eng.app.hscroll, 0);

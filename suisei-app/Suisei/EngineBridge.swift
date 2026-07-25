@@ -2117,6 +2117,14 @@ final class EngineBridge: ObservableObject {
         return data
     }
 
+    /// Width of the document in display columns — the horizontal scroll extent.
+    /// A high-water mark on the engine side (see `App::content_width`), so it
+    /// never shrinks under a scroll in progress.
+    func contentCols() -> UInt32 {
+        guard let engine else { return 0 }
+        return suisei_engine_content_cols(engine)
+    }
+
     /// Move the caret without a full pointer session (context-menu placement).
     func placeCaret(row: UInt32, col: UInt32) {
         guard let engine else { return }

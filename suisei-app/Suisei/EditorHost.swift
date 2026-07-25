@@ -212,8 +212,12 @@ final class EditorScrollView: NSScrollView {
         let docH = max(bounds.height, CGFloat(count) * lineH + 8)
         var docW = max(bounds.width, 1)
         if !wrapLines {
-            // Generous fixed budget — precise max width isn't known without a scan.
-            let cols = max(400, Int(hScroll) + 160)
+            // The engine owns the extent now. The old budget was
+            // `max(400, hScroll + 160)` — a width that GREW WITH THE SCROLL
+            // POSITION, so every pan to the right made the document wider and
+            // the pan could never reach an end. That was the "infinite
+            // horizontal scroll".
+            let cols = Int(engine?.contentCols() ?? 0)
             docW = max(docW, CGFloat(cols) * cell + EditorMetrics.gutter + 32)
         }
         let newSize = NSSize(width: docW, height: docH)

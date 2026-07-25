@@ -320,6 +320,14 @@ pub struct App {
     /// once per change instead of the old pre-edit push_undo notification.
     lsp_synced_path: Option<PathBuf>,
     lsp_synced_hash: u64,
+    /// Widest line the view has seen in this document, in display columns.
+    ///
+    /// A high-water mark, not a live maximum, and deliberately so. Rescanning
+    /// the whole file would be O(file) on the typing path; letting the extent
+    /// *shrink* as short lines scroll into view would resize the scroller thumb
+    /// under the user's hand. So it only grows, and resets when the document
+    /// does. See [`App::max_hscroll`].
+    content_width: usize,
     /// Fingerprint of the text as it stands on disk (at load, and after each
     /// save). `modified` is a one-way latch — set by every edit, cleared only
     /// by a save — so undoing back to the original state left the file marked
@@ -567,12 +575,29 @@ impl Default for App {
             lsp_synced_path: None,
             lsp_synced_hash: 0,
             saved_hash: EMPTY_TEXT_HASH,
+            content_width: 0,
         }
     }
 }
 
 /// FNV-1a over the whole document — cheap enough per sync tick, and unlike a
 /// sampled fingerprint it cannot miss an edit.
+/// Display columns a line occupies: tabs advance to the next stop, wide glyphs
+/// (CJK, emoji) take two cells. Matches what the editor actually paints, so a
+/// scroll clamp derived from it lands on the last glyph rather than near it.
+fn display_width(line: &str, tab_width: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    let mut col = 0usize;
+    for ch in line.chars() {
+        col += if ch == '\t' {
+            tab_width - (col % tab_width)
+        } else {
+            ch.width().unwrap_or(0)
+        };
+    }
+    col
+}
+
 /// `text_hash("")` — the clean fingerprint of a brand-new empty buffer. A
 /// literal so `App::default()` stays a plain struct expression.
 const EMPTY_TEXT_HASH: u64 = 0xcbf2_9ce4_8422_2325;
@@ -2486,6 +2511,9 @@ impl App {
     /// Records the fingerprint so a later undo back to this text can clear the
     /// dirty flag again.
     pub fn mark_clean(&mut self) {
+        // A load or a save means the text underneath the high-water mark
+        // changed; let it be re-measured from what is on screen.
+        self.content_width = 0;
         self.saved_hash = text_hash(&self.buffer.text());
         self.modified = false;
         if self.current_buffer < self.buffers.len() {
@@ -4238,7 +4266,31 @@ impl App {
             self.hscroll = 0;
             return;
         }
-        self.hscroll = cols;
+        let limit = self.max_hscroll();
+        self.hscroll = cols.min(limit);
+    }
+
+    /// Furthest right the view may pan. Horizontal scrolling had no clamp at
+    /// all, so a trackpad pan ran off past the end of the text into empty space
+    /// forever — nothing anywhere knew where the content ended. One extra
+    /// column of slack so the last glyph is not flush against the edge.
+    pub fn max_hscroll(&mut self) -> usize {
+        let width = usize::from(self.viewport.width.max(1));
+        self.content_cols().saturating_sub(width).saturating_add(1)
+    }
+
+    /// Width of the document in display columns, as [`App::content_width`]
+    /// defines it: raised by whatever is on screen now, never lowered.
+    pub fn content_cols(&mut self) -> usize {
+        let first = self.scroll;
+        let last = (first + usize::from(self.viewport.height.max(1))).min(self.buffer.line_count());
+        let tab = self.tab_width.max(1);
+        let visible = (first..last)
+            .map(|row| display_width(self.buffer.line(row), tab))
+            .max()
+            .unwrap_or(0);
+        self.content_width = self.content_width.max(visible);
+        self.content_width
     }
 
     pub fn update_scroll(&mut self) {
@@ -4570,6 +4622,7 @@ impl App {
             self.scroll = tab.scroll;
             self.modified = tab.modified;
             self.saved_hash = tab.saved_hash;
+            self.content_width = 0; // different document, different extent
             self.undo_stack = tab.undo_stack;
             self.file_mtime = tab.file_mtime;
             // GUI selection is ephemeral across tabs (interim): collapse to a
@@ -5124,6 +5177,68 @@ mod tests {
     /// `modified` was a one-way latch: set by every edit, cleared only by a
     /// save. Undoing back to the original text left the file marked dirty
     /// forever, so the tab dot lied and closing prompted about nothing.
+    /// The horizontal pan had no right-hand limit anywhere: core never clamped
+    /// it, and the face sized its scroll canvas as `hscroll + 160`, so each pan
+    /// widened the document and the end receded forever.
+    #[test]
+    fn horizontal_scroll_stops_at_the_end_of_the_text() {
+        let mut app = app_with("short\na much longer line of text here\nmid");
+        app.wrap_lines = false;
+        app.viewport.width = 10;
+        app.viewport.height = 3;
+
+        let widest = "a much longer line of text here".chars().count();
+        assert_eq!(app.content_cols(), widest);
+        assert_eq!(app.max_hscroll(), widest - 10 + 1);
+
+        app.set_hscroll(100_000);
+        assert_eq!(app.hscroll, widest - 10 + 1, "panning past the text is clamped");
+    }
+
+    /// Tabs advance to the next stop and CJK takes two cells — the extent has
+    /// to agree with what is painted or the clamp lands short of the last glyph.
+    #[test]
+    fn the_scroll_extent_counts_display_columns_not_characters() {
+        let mut app = app_with("\t\tab");
+        app.wrap_lines = false;
+        app.tab_width = 4;
+        app.viewport.width = 4;
+        app.viewport.height = 1;
+        assert_eq!(app.content_cols(), 10, "two tab stops plus two letters");
+
+        let mut cjk = app_with("한글이다");
+        cjk.wrap_lines = false;
+        cjk.viewport.width = 2;
+        cjk.viewport.height = 1;
+        assert_eq!(cjk.content_cols(), 8, "four wide glyphs, two cells each");
+    }
+
+    /// The extent must not shrink while the user scrolls, or the scroller thumb
+    /// resizes under their hand — so it is a high-water mark within a document.
+    #[test]
+    fn the_scroll_extent_never_shrinks_within_a_document() {
+        let mut app = app_with("a very long first line indeed\nx\ny\nz");
+        app.wrap_lines = false;
+        app.viewport.width = 8;
+        app.viewport.height = 1;
+
+        let wide = app.content_cols();
+        assert_eq!(wide, "a very long first line indeed".chars().count());
+
+        app.scroll = 2; // only the one-character lines are on screen now
+        assert_eq!(app.content_cols(), wide, "still the widest line seen");
+    }
+
+    #[test]
+    fn wrapped_lines_have_no_horizontal_scroll_at_all() {
+        let mut app = app_with("a very long line that would otherwise pan");
+        app.wrap_lines = true;
+        app.viewport.width = 5;
+        app.viewport.height = 1;
+        app.set_hscroll(50);
+        assert_eq!(app.hscroll, 0);
+    }
+
     #[test]
     fn undoing_back_to_the_saved_text_clears_the_dirty_flag() {
         let mut app = app_with("hello");

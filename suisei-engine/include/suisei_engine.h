@@ -137,6 +137,8 @@ uint8_t suisei_engine_dispatch_key(
 uint8_t suisei_engine_editor_accepts_text(const SuiseiEngine *ptr);
 /* Cheap probe: completion popup open? (typing fast path) */
 uint8_t suisei_engine_completions_open(const SuiseiEngine *ptr);
+/* Document width in display columns — the face's horizontal scroll extent. */
+uint32_t suisei_engine_content_cols(SuiseiEngine *ptr);
 /* Face acted on the scroll intent — clear it. */
 void suisei_engine_clear_scroll_intent(SuiseiEngine *ptr);
 /* Project auto-indexing: pre-parse a file into the syntax cache. */

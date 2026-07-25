@@ -282,6 +282,20 @@ pub extern "C" fn suisei_engine_editor_accepts_text(ptr: *const SuiseiEngine) ->
     unsafe { u8::from(matches!((*ptr).0.app().mode, suisei_core::app::Mode::Editor)) }
 }
 
+/// Width of the document in display columns (tabs expanded, wide glyphs
+/// counted double). The face sizes its horizontal scroll canvas from this.
+///
+/// Its previous "generous budget" was `max(400, hscroll + 160)` — a width that
+/// **grew with the scroll position**, so every pan to the right made the
+/// document wider and the pan could never reach an end.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_content_cols(ptr: *mut SuiseiEngine) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).0.app_mut().content_cols() as u32 }
+}
+
 /// Drain side-effects; returns current `frame_gen` (face should paint only when it changes).
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_tick(ptr: *mut SuiseiEngine, dt_ms: u32) -> u64 {

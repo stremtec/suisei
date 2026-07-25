@@ -112,9 +112,21 @@ The shell's startup banner is already scrolled past before the first paint.
 
 ## D. Scrolling
 
-### D1 · Horizontal scrolling is infinite · OPEN
-The h-scroll has no content-width clamp, so a trackpad pan runs off into empty
-space forever. `scroll_h_by` clamps only at 0 on the left.
+### D1 · Horizontal scrolling is infinite · FIXED (2026-07-26)
+Two halves, and the second was the treadmill. Core never clamped `hscroll` on
+the right at all. Worse, the face sized its scroll canvas as
+`max(400, hScroll + 160)` columns — **a width that grew with the scroll
+position**, so every pan to the right made the document wider and the end
+receded forever.
+
+`App::content_cols()` is now the single answer, exposed as
+`suisei_engine_content_cols` and used by both `set_hscroll` and the canvas
+sizing. It is a **high-water mark**: raised by the widest line currently on
+screen, never lowered, reset when the document changes. Rescanning the whole
+file per keystroke would be O(file) on the typing path, and letting the extent
+shrink as short lines scrolled into view would resize the scroller thumb under
+the user's hand. Widths are display columns — tabs to the next stop, CJK two
+cells — so the clamp lands on the last glyph rather than near it.
 
 ---
 
