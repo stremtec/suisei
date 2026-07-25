@@ -2169,6 +2169,13 @@ final class EngineBridge: ObservableObject {
         refreshChrome()
     }
 
+    /// Scroll the terminal panel through its scrollback; positive = older.
+    func terminalScroll(_ rows: Int32) {
+        guard let engine, rows != 0 else { return }
+        suisei_engine_terminal_scroll(engine, rows)
+        refreshChrome()
+    }
+
     /// Size the PTY grid to the terminal panel (cells).
     func terminalResize(cols: Int, rows: Int) {
         guard let engine, cols > 0, rows > 0 else { return }

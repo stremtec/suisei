@@ -976,6 +976,39 @@ impl Terminal {
             .collect()
     }
 
+    /// The rows the panel should actually draw: the live grid, or a window into
+    /// the scrollback when the user has scrolled up.
+    ///
+    /// [`Terminal::visible_rows`] is the live grid **alone**, and it is what the
+    /// GUI scene has always sent — so `scroll_up` moved an offset nothing read
+    /// and the panel's scrollback was unreachable. Scrolling up showed the same
+    /// screen back.
+    pub fn viewport_rows(
+        &self,
+    ) -> Vec<Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)>> {
+        let offset = self.scroll();
+        if offset == 0 {
+            return self.visible_rows();
+        }
+        let height = self.rows.len();
+        let from_scrollback = offset.min(self.scrollback.len());
+        let start = self.scrollback.len() - from_scrollback;
+        let mut out: Vec<_> = self.scrollback[start..]
+            .iter()
+            .take(height)
+            .map(|row| Self::row_cells_to_spans(row, true))
+            .collect();
+        // Fill the rest of the window from the top of the live grid.
+        let remaining = height.saturating_sub(out.len());
+        out.extend(
+            self.rows
+                .iter()
+                .take(remaining)
+                .map(|row| Self::row_cells_to_spans(row, false)),
+        );
+        out
+    }
+
     /// Visible rows re-encoded as truecolor SGR strings.
     ///
     /// The face then parses those escapes back into colours — the panel
@@ -983,7 +1016,7 @@ impl Terminal {
     /// runs directly would drop an encode and a parse per row per frame; that
     /// is an FFI change, tracked separately in `SUISEI-TUI-RESIDUE.md`.
     pub fn visible_rows_sgr(&self) -> Vec<String> {
-        self.visible_rows()
+        self.viewport_rows()
             .into_iter()
             .map(|row| {
                 let mut s = String::new();
@@ -1249,5 +1282,39 @@ mod tests {
         t.process_output(b"\x1b[2J");
         assert_eq!(t.rows[9][4].ch, ' ');
         assert_eq!(t.cursor_row, 0);
+    }
+
+    /// The GUI scene sends `visible_rows_sgr`, which returned the live grid
+    /// alone — so `scroll_up` moved an offset nothing read and the panel's
+    /// 5,000-row scrollback was unreachable. Scrolling up showed the same
+    /// screen back.
+    #[test]
+    fn scrolling_up_shows_the_scrollback_not_the_same_screen() {
+        let mut t = Terminal::new();
+        t.resize(20, 3);
+        // Push more rows than the grid holds, so the early ones must spill.
+        for i in 0..8 {
+            t.process_output(format!("line{i}\r\n").as_bytes());
+        }
+        let live = t.visible_rows_sgr();
+        assert!(
+            live.iter().any(|r| r.contains("line7")),
+            "the newest output is on screen: {live:?}"
+        );
+        assert!(
+            !live.iter().any(|r| r.contains("line0")),
+            "the oldest output has scrolled off: {live:?}"
+        );
+
+        t.scroll_up(6);
+        let back = t.visible_rows_sgr();
+        assert_ne!(back, live, "scrolling up must change what is drawn");
+        assert!(
+            back.iter().any(|r| r.contains("line0")),
+            "the oldest output is reachable again: {back:?}"
+        );
+
+        t.scroll_down(99);
+        assert_eq!(t.visible_rows_sgr(), live, "scrolling back down returns to live");
     }
 }

@@ -1570,7 +1570,10 @@ fn build_terminal(app: &App) -> TerminalScene {
         };
     }
     // Truecolor SGR lines from Core PTY cells (see Terminal::visible_rows_sgr).
-    let max_rows = if app.terminal.full_panel { 120 } else { 48 };
+    // One budget for both shapes. The side panel used to get 48 rows, so
+    // dragging it taller than that silently cut the bottom off — the panel drew
+    // rows the scene never sent. The real ceiling is the snapshot's.
+    let max_rows = crate::ffi::SUISEI_MAX_TERM_LINES;
     let mut lines: Vec<String> = app
         .terminal
         .visible_rows_sgr()

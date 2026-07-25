@@ -328,8 +328,9 @@ void suisei_engine_palette_select(SuiseiEngine *ptr, uint32_t index);
 #define SUISEI_HINT_DESC 48
 #define SUISEI_MAX_COMP 20
 #define SUISEI_COMP_LABEL 64
-#define SUISEI_MAX_TERM_LINES 120
-#define SUISEI_TERM_LINE 256
+#define SUISEI_MAX_TERM_LINES 200
+/* BYTES per row, not columns: rows carry truecolor SGR escapes. */
+#define SUISEI_TERM_LINE 1536
 
 
 typedef struct SuiseiCompletionsSnapshot {
@@ -403,6 +404,8 @@ typedef struct SuiseiThemeSnapshot {
 
 uint8_t suisei_engine_completions(const SuiseiEngine *ptr, SuiseiCompletionsSnapshot *out);
 uint8_t suisei_engine_terminal(const SuiseiEngine *ptr, SuiseiTerminalSnapshot *out);
+/* Scroll the terminal panel through its scrollback; positive = older output. */
+void suisei_engine_terminal_scroll(SuiseiEngine *ptr, int32_t delta_rows);
 uint8_t suisei_engine_status_extra(const SuiseiEngine *ptr, SuiseiStatusExtra *out);
 uint8_t suisei_engine_settings(const SuiseiEngine *ptr, SuiseiSettingsSnapshot *out);
 uint8_t suisei_engine_theme(const SuiseiEngine *ptr, SuiseiThemeSnapshot *out);

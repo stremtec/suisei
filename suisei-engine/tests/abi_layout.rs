@@ -14,9 +14,9 @@ use std::mem::{offset_of, size_of};
 // Re-export the FFI types from the engine crate.
 use suisei_engine::ffi::{
     SuiseiChromeSnapshot, SuiseiEditorLineC, SuiseiPaneC, SuiseiSpanC,
-    SUISEI_LINE_CAP, SUISEI_MAX_LINES, SUISEI_MAX_PANES, SUISEI_MAX_SPANS,
-    SUISEI_MAX_TABS, SUISEI_MODE_CAP, SUISEI_MSG_CAP, SUISEI_PATH_CAP,
-    SUISEI_TITLE_CAP,
+    SuiseiTerminalSnapshot, SUISEI_LINE_CAP, SUISEI_MAX_LINES, SUISEI_MAX_PANES,
+    SUISEI_MAX_SPANS, SUISEI_MAX_TABS, SUISEI_MAX_TERM_LINES, SUISEI_MODE_CAP,
+    SUISEI_MSG_CAP, SUISEI_PATH_CAP, SUISEI_TERM_LINE, SUISEI_TITLE_CAP,
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -34,6 +34,12 @@ fn constants_match_c_header() {
     assert_eq!(SUISEI_MSG_CAP, 256);
     assert_eq!(SUISEI_PATH_CAP, 512);
     assert_eq!(SUISEI_MODE_CAP, 24);
+    // Terminal snapshot. `SUISEI_TERM_LINE` is BYTES per row, not columns —
+    // rows carry truecolor SGR escapes, so a colour change costs up to 19 bytes
+    // on top of the character. Too small a value silently truncates output
+    // mid-line, which is what the old 256 did.
+    assert_eq!(SUISEI_MAX_TERM_LINES, 200);
+    assert_eq!(SUISEI_TERM_LINE, 1536);
 }
 
 // ─── SuiseiSpanC ──────────────────────────────────────────────────────────────
@@ -162,6 +168,13 @@ fn chrome_snapshot_is_stack_friendly() {
         "SuiseiChromeSnapshot is {} bytes — too large for safe stack allocation",
         size,
     );
+    // The terminal snapshot is a second stack allocation on the same path.
+    let term = size_of::<SuiseiTerminalSnapshot>();
+    assert!(
+        term < 1024 * 1024,
+        "SuiseiTerminalSnapshot is {term} bytes — the face zero-fills this per refresh",
+    );
+    println!("SuiseiTerminalSnapshot: {} bytes ({:.1} KiB)", term, term as f64 / 1024.0);
     // Print for visibility in CI logs.
     println!("SuiseiChromeSnapshot: {} bytes ({:.1} KiB)", size, size as f64 / 1024.0);
     println!("SuiseiEditorLineC:    {} bytes", size_of::<SuiseiEditorLineC>());

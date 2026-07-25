@@ -104,17 +104,43 @@ the cheap latch stays on the hot path.
 
 ## C. Terminal panel
 
-### C1 · Resizing the panel clips the terminal · OPEN
-The PTY is resized from the editor viewport (`ensure_terminal_started` uses
-`app.viewport`), and the panel's own height is not propagated back on drag, so
-rows fall outside the drawn area.
+### C1 · Resizing the panel clips the terminal · FIXED (2026-07-26)
+Not the propagation — the face does report the panel size. Two fixed caps:
 
-### C2 · Terminal scrollback is clipped · OPEN
-Same root suspicion as C1: the visible row window and the PTY's row count
-disagree.
+* `SUISEI_TERM_LINE` was **256 bytes** per row, and rows are truecolor SGR
+  strings, so one colour change costs up to 19 bytes on top of the character it
+  colours. A wide `ls --color` or build log ran out of budget after roughly a
+  dozen colour changes and the rest of the line was dropped. Now 1536.
+* The scene gave the side-panel terminal **48 rows** and the full panel 120.
+  Dragging the side panel taller than 48 rows drew rows the scene never sent.
+  Both now use the snapshot's own ceiling, raised to 200.
 
-### C3 · A new terminal opens scrolled to the bottom, hiding the greeting · OPEN
-The shell's startup banner is already scrolled past before the first paint.
+Both are in `abi_layout.rs` now, so they cannot drift from the C header. While
+there: the snapshot builder stopped zero-filling all 300 KiB per refresh — every
+header field is assigned and a row only needs its first byte cleared to read as
+an empty C string, so that is 200 stores instead of a 300 KiB memset.
+
+### C2 · Terminal scrollback is clipped · FIXED (2026-07-26)
+It was not clipped, it was **unreachable**. Core keeps 5,000 rows of scrollback
+and a `scroll_offset`, and neither had a consumer: the scene sent
+`visible_rows_sgr`, which returned the live grid alone, and there was no FFI
+entry to move the offset and no gesture bound to one. Scrolling the panel
+showed the same screen back.
+
+`Terminal::viewport_rows` now windows over scrollback + live grid, and
+`visible_rows_sgr` uses it. `suisei_engine_terminal_scroll` moves the offset.
+The panel's `TermScroll` is an `NSScrollView`, so native scrolling still wins
+whenever the grid has content to move; only the part that runs off an end is
+forwarded to core. Verified in the running app: `seq 1 200` then scrolling up
+walked 179 → 139 and back down to live.
+
+### C3 · A new terminal opens scrolled to the bottom, hiding the greeting · FIXED (2026-07-26)
+The PTY was spawned sized from the **editor viewport** (~40 rows) and then
+resized a moment later to the panel's real height (~17). Shrinking a grid pushes
+its top rows into scrollback, so the shell's greeting had already scrolled away
+before the first paint. The engine now remembers the grid the face measures —
+`terminal_resize` records it even while the panel is closed — and spawns at that
+size, falling back to the viewport only when the face has not measured yet.
 
 ---
 

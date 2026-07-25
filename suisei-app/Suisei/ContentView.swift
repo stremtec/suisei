@@ -2118,7 +2118,8 @@ struct ContentView: View {
                 cursorCol: engine.chrome.terminal.cursorCol,
                 fontSize: 12,
                 bg: NSColor(mixColor(editorBg, .black, isLightTheme ? 0.035 : 0.18)),
-                fg: NSColor(fg)
+                fg: NSColor(fg),
+                onScrollback: { engine.terminalScroll($0) }
             )
             .frame(width: geo.size.width, height: geo.size.height)
             .contentShape(Rectangle())
@@ -4991,6 +4992,8 @@ private struct TerminalGridView: NSViewRepresentable {
     var fontSize: CGFloat
     var bg: NSColor
     var fg: NSColor
+    /// Wheel past the ends of the live grid; positive = older output.
+    var onScrollback: (Int32) -> Void = { _ in }
 
     func makeNSView(context: Context) -> TermScroll {
         TermScroll()
@@ -4999,6 +5002,7 @@ private struct TerminalGridView: NSViewRepresentable {
     func updateNSView(_ view: TermScroll, context: Context) {
         view.cursorRow = cursorRow
         view.cursorCol = cursorCol
+        view.onScrollback = onScrollback
         view.apply(lines: lines, fontSize: fontSize, bg: bg, fg: fg)
     }
 }
@@ -5007,6 +5011,39 @@ private final class TermScroll: NSScrollView {
     var cursorRow: Int = 0 { didSet { canvas.setCursor(row: cursorRow, col: cursorCol) } }
     var cursorCol: Int = 0 { didSet { canvas.setCursor(row: cursorRow, col: cursorCol) } }
     let canvas = TermCanvas()
+    /// Positive = reveal older output.
+    var onScrollback: ((Int32) -> Void)?
+    /// Sub-row remainder, so a slow trackpad drag eventually moves instead of
+    /// rounding every delta away.
+    private var scrollbackResidue: CGFloat = 0
+
+    /// The grid this view holds is the LIVE SCREEN — core sizes the PTY to the
+    /// panel, so there is usually nothing here to scroll natively at all. The
+    /// 5,000 rows of history live on the other side of the ABI, and until this
+    /// existed nothing could ask for them: scrolling the terminal panel did
+    /// nothing whatsoever. Native scrolling still wins whenever there IS
+    /// content to move; only the part that runs off an end is forwarded.
+    override func scrollWheel(with event: NSEvent) {
+        let dy = event.scrollingDeltaY
+        guard dy != 0 else {
+            super.scrollWheel(with: event)
+            return
+        }
+        let scrollable = canvas.frame.height > contentView.bounds.height + 1
+        let atTop = !scrollable || documentVisibleRect.minY <= 0.5
+        let atBottom = !scrollable || documentVisibleRect.maxY >= canvas.frame.height - 0.5
+        guard (dy > 0 && atTop) || (dy < 0 && atBottom) else {
+            super.scrollWheel(with: event)
+            return
+        }
+        // A notched wheel reports whole lines; a trackpad reports pixels.
+        let perRow: CGFloat = event.hasPreciseScrollingDeltas ? 16 : 1
+        scrollbackResidue += dy / perRow
+        let rows = scrollbackResidue.rounded(.towardZero)
+        guard rows != 0 else { return }
+        scrollbackResidue -= rows
+        onScrollback?(Int32(rows))
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)

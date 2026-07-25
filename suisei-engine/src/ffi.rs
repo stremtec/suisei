@@ -944,6 +944,18 @@ pub extern "C" fn suisei_engine_focus_terminal(ptr: *mut SuiseiEngine, on: u8) {
 }
 
 /// Multi-session shell list (VS Code-style).
+/// Scroll the terminal panel through its scrollback; positive reveals older
+/// output. Nothing in the GUI could reach the scrollback before this.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_terminal_scroll(ptr: *mut SuiseiEngine, delta_rows: i32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.terminal_scroll(delta_rows);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_terminal_sessions(ptr: *const SuiseiEngine) -> u32 {
     if ptr.is_null() {
@@ -1426,8 +1438,15 @@ pub const SUISEI_HINT_KEY: usize = 16;
 pub const SUISEI_HINT_DESC: usize = 48;
 pub const SUISEI_MAX_COMP: usize = 20;
 pub const SUISEI_COMP_LABEL: usize = 64;
-pub const SUISEI_MAX_TERM_LINES: usize = 120;
-pub const SUISEI_TERM_LINE: usize = 256;
+/// Rows the terminal snapshot can carry. Was 120; a full-panel terminal on a
+/// tall display asks for more than that, and rows past the cap simply vanished.
+pub const SUISEI_MAX_TERM_LINES: usize = 200;
+/// **Bytes** per terminal row — not columns. Each row is a truecolor SGR string
+/// (`Terminal::visible_rows_sgr`), so one colour change costs up to 19 bytes on
+/// top of the character it colours. At the old 256 a wide `ls --color` or build
+/// log ran out of budget after roughly a dozen colour changes and the rest of
+/// the line was dropped: the reported "terminal gets cut off".
+pub const SUISEI_TERM_LINE: usize = 1536;
 
 
 #[repr(C)]
@@ -1502,15 +1521,20 @@ pub extern "C" fn suisei_engine_terminal(
         return 0;
     };
     let t = &chrome.terminal;
-    unsafe {
-        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiTerminalSnapshot>());
-    }
+    // Deliberately NOT a blanket `write_bytes(.., 0, size_of::<..>())`: this
+    // struct is 300 KiB and the face pulls it on every refresh while the
+    // terminal is open. Every header field is assigned below, and a row only
+    // needs its first byte cleared to read as an empty C string — `write_cstr`
+    // zeroes the rows it fills. That turns a 300 KiB memset into 200 stores.
     let o = unsafe { &mut *out };
     o.open = u8::from(t.open);
     o.full_panel = u8::from(t.full_panel);
     o.pane_bound = t.pane_bound.unwrap_or(u32::MAX);
     let n = t.lines.len().min(SUISEI_MAX_TERM_LINES);
     o.count = n as u32;
+    for row in o.lines.iter_mut().skip(n) {
+        row[0] = 0;
+    }
     // Shell cursor, so the face can actually draw a caret in the terminal.
     // NOTE: cursor_position() returns (COL, ROW) — reading it as (row, col)
     // put the caret on the wrong line, which read as "no cursor at all".
