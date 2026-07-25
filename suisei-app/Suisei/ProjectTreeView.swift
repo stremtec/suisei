@@ -82,6 +82,13 @@ struct ProjectTreeView: View {
                             }
                         }
                     }
+                    // Implicit, bound to the row count — the same mechanism the
+                    // disclosure chevron uses, and the only one measured to
+                    // actually run here. The explicit `withAnimation` around
+                    // `expanded` never reached these rows: frame-by-frame
+                    // capture showed the chevron mid-rotation while every new
+                    // row was already at its final position.
+                    .animation(.smooth(duration: 0.26), value: rows.count)
                     .padding(.top, 2)
                     .padding(.bottom, 6)
                 }
@@ -707,13 +714,21 @@ struct ProjectTreeView: View {
 /// size.
 private struct TreeRowStack<Content: View>: View {
     let useLazy: Bool
-    @ViewBuilder var content: Content
+    /// A CLOSURE, not a stored `Content`.
+    ///
+    /// As `@ViewBuilder var content: Content` the rows were built once, at this
+    /// wrapper's init, and handed in already resolved — so the insertion
+    /// transitions on them never joined the `withAnimation` transaction that
+    /// expanding a folder starts. Measured: the disclosure chevron rotated
+    /// smoothly while every new row was already at its final position in the
+    /// first frame. Building inside each branch restores it.
+    @ViewBuilder let content: () -> Content
 
     var body: some View {
         if useLazy {
-            LazyVStack(alignment: .leading, spacing: 0) { content }
+            LazyVStack(alignment: .leading, spacing: 0) { content() }
         } else {
-            VStack(alignment: .leading, spacing: 0) { content }
+            VStack(alignment: .leading, spacing: 0) { content() }
         }
     }
 }

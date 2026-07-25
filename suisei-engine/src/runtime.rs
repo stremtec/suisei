@@ -1288,50 +1288,16 @@ impl Engine {
         self.recompose();
     }
 
-    /// Where an untitled buffer would be saved: the project root, or the
-    /// current file's folder, or the home directory — never a relative path.
-    /// Numbered so a second new tab does not silently target the first's file.
-    fn untitled_path(&self) -> std::path::PathBuf {
-        let root = if !self.app.explorer.cwd.as_os_str().is_empty() {
-            self.app.explorer.cwd.clone()
-        } else if let Some(parent) = self.app.filename.as_ref().and_then(|p| p.parent()) {
-            parent.to_path_buf()
-        } else {
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
-        };
-        let taken = |p: &std::path::Path| {
-            p.exists() || self.app.buffers.iter().any(|b| b.filename.as_deref() == Some(p))
-        };
-        let first = root.join("Untitled.txt");
-        if !taken(&first) {
-            return first;
-        }
-        for n in 2..1000 {
-            let c = root.join(format!("Untitled {n}.txt"));
-            if !taken(&c) {
-                return c;
-            }
-        }
-        first
-    }
-
     pub fn open_blank_tab(&mut self) {
         self.app.open_blank_tab();
-        // A blank tab still needs a path: `filename == None` with an empty
-        // buffer is how the face recognises cold-start Welcome, and the tab
-        // chip has nothing to show.
+        // A blank tab has NO path, and must not be given one.
         //
-        // It must be an ABSOLUTE one. This used to be the bare relative
-        // `"Untitled"`, which saves against the process working directory —
-        // `/` for an `.app` launched from Finder. The answer to "where does
-        // this file go?" was the filesystem root, or `$TMPDIR` via the face's
-        // fallback: two different wrong answers. Anchor it in the project.
-        if self.app.filename.is_none() {
-            self.app.filename = Some(self.untitled_path());
-            if let Some(tab) = self.app.buffers.get_mut(self.app.current_buffer) {
-                tab.filename = self.app.filename.clone();
-            }
-        }
+        // It used to get the bare relative `"Untitled"`, which saves against
+        // the process working directory — `/` for an `.app` launched from
+        // Finder. Anchoring it at the project root instead was no better: a
+        // session rooted at `/` produced `/Untitled.txt`, and `/` is a
+        // read-only filesystem, so Save simply failed. A buffer that has never
+        // been written has no location yet; the face asks for one on save.
         self.app.update_scroll();
         self.recompose();
     }
@@ -2303,28 +2269,21 @@ mod tests {
     /// saves against the process working directory — `/` for an `.app` launched
     /// from Finder. Anchoring it in the project is the difference between
     /// "Save" landing in the project and landing at the filesystem root.
+    /// A blank tab must carry NO path. The relative `"Untitled"` saved against
+    /// the process CWD (`/` under Finder), and anchoring it at the project root
+    /// was worse: a session rooted at `/` gave `/Untitled.txt` on a read-only
+    /// filesystem, so Save failed outright. No path means the face asks.
     #[test]
-    fn a_blank_tab_is_anchored_in_the_project() {
+    fn a_blank_tab_has_no_path_to_save_to() {
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.app.explorer.cwd = std::path::PathBuf::from("/tmp/suisei_untitled_probe");
+        eng.app.explorer.cwd = std::path::PathBuf::from("/");
         eng.open_blank_tab();
-        let p = eng.app.filename.clone().expect("blank tab needs a path");
-        assert!(p.is_absolute(), "relative path saves against the CWD: {p:?}");
-        assert!(p.starts_with("/tmp/suisei_untitled_probe"), "got {p:?}");
-    }
-
-    /// Two new tabs must not both target the same file.
-    #[test]
-    fn a_second_blank_tab_gets_its_own_name() {
-        let mut eng = Engine::new();
-        eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.app.explorer.cwd = std::path::PathBuf::from("/tmp/suisei_untitled_probe2");
-        eng.open_blank_tab();
-        let first = eng.app.filename.clone().unwrap();
-        eng.open_blank_tab();
-        let second = eng.app.filename.clone().unwrap();
-        assert_ne!(first, second);
+        assert!(
+            eng.app.filename.is_none(),
+            "a never-saved buffer must not claim a location: {:?}",
+            eng.app.filename
+        );
     }
 
     /// The tokenizer classifies fourteen kinds and the theme has a colour for

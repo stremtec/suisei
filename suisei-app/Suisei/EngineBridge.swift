@@ -1870,8 +1870,9 @@ final class EngineBridge: ObservableObject {
 
     func save() {
         guard let engine else { return }
-        // Unnamed or relative placeholder ("Untitled" from blank tabs) must go
-        // through the panel — a bare core save would write to the process cwd.
+        // A buffer that has never been written has no location yet, so ask.
+        // (It must not be given a fabricated one: a relative name saves against
+        // the process cwd, and the project root can itself be unwritable.)
         let f = chrome.filename
         if f.isEmpty || f == "[No Name]" || !f.hasPrefix("/") {
             saveAsPanel()
@@ -1890,6 +1891,15 @@ final class EngineBridge: ObservableObject {
     func saveAsPanel() {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
+        // Open where the user is working rather than wherever the panel was
+        // last: an untitled buffer almost always belongs in the project.
+        let root = projectRoot.isEmpty ? chrome.explorer.cwd : projectRoot
+        if !root.isEmpty, root != "/" {
+            panel.directoryURL = URL(fileURLWithPath: root, isDirectory: true)
+        }
+        if chrome.filename.isEmpty || !chrome.filename.hasPrefix("/") {
+            panel.nameFieldStringValue = "Untitled.txt"
+        }
         panel.begin { [weak self] result in
             guard result == .OK, let url = panel.url, let self else { return }
             DispatchQueue.main.async {

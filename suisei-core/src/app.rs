@@ -4101,18 +4101,15 @@ impl App {
                     self.record_mtime();
                     self.refresh_git();
                     self.save_session();
-                    self.message = format!("✓ Saved: {}", path.display());
                     self.set_message(&format!("✓ Saved: {}", path.display()));
                     self.fire_hook(crate::hooks::HookEvent::Save);
                 }
                 Err(e) => {
-                    self.message = format!("✗ Error: {}", e);
                     self.set_message(&format!("✗ Error: {}", e));
                 }
             }
         } else {
-            self.message = String::from("No filename. Use :w <filename>");
-            self.set_message("No filename. Use: w <path>");
+            self.set_message("Untitled — choose a location to save it");
         }
     }
 
