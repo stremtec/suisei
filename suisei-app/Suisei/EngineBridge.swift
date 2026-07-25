@@ -906,8 +906,17 @@ final class EngineBridge: ObservableObject {
     func insertChar(_ c: Character) {
         guard let scalar = c.unicodeScalars.first else { return }
         if !terminalOwnsKeys, !panelOwnsTyping, let engine {
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            defer {
+                PerfProbe.record(
+                    "insertChar (whole keystroke)",
+                    Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+                )
+            }
             // Semantic: mode transition + selection replace handled by engine.
-            suisei_engine_gui_type_char(engine, scalar.value)
+            PerfProbe.measure("  engine_gui_type_char") {
+                suisei_engine_gui_type_char(engine, scalar.value)
+            }
             refreshEditorPaintOnly()
             scheduleChromeSettle()
         } else {
@@ -2075,6 +2084,13 @@ final class EngineBridge: ObservableObject {
         if chrome.bufferVersion == minimapCacheVersion, let cached = minimapCache {
             return cached
         }
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        defer {
+            PerfProbe.record(
+                "minimapData (cache miss)",
+                Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+            )
+        }
         var snap = SuiseiMinimapC()
         guard suisei_engine_minimap(engine, &snap) != 0 else { return nil }
         let n = Int(snap.buckets)
@@ -2831,9 +2847,17 @@ final class EngineBridge: ObservableObject {
     /// Light path: editor lines + status/caret/tabs/mode — **no** explorer/outline/scm/git/settings FFI.
     /// Used for typing, scroll, mid-resize. Full shell uses `refreshChrome()`.
     func refreshEditorPaintOnly() {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        defer {
+            PerfProbe.record(
+                "refreshEditorPaintOnly",
+                Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+            )
+        }
         guard let engine else { return }
-        var snap = SuiseiChromeSnapshot()
-        guard suisei_engine_chrome(engine, &snap) != 0 else { return }
+        var snap = PerfProbe.measure("  snapshot alloc (180KiB)") { SuiseiChromeSnapshot() }
+        guard PerfProbe.measure("  suisei_engine_chrome", { suisei_engine_chrome(engine, &snap) }) != 0
+        else { return }
         if snap.frame_gen == lastFrameGen { return }
 
         var tabs: [TabItem] = []
@@ -2854,19 +2878,24 @@ final class EngineBridge: ObservableObject {
             }
         }
 
-        let (lines, split) = decodeEditorLinesAndSplit(from: snap)
+        let (lines, split) = PerfProbe.measure("  decodeEditorLinesAndSplit") {
+            decodeEditorLinesAndSplit(from: snap)
+        }
         lastFrameGen = snap.frame_gen
         let frac = CGFloat(snap.scroll_frac)
 
-        var txn = Transaction()
-        txn.disablesAnimations = true
-        withTransaction(txn) {
-            if abs(frac - editorScrollFrac) > 0.0001 { editorScrollFrac = frac }
-            if snap.hscroll != editorHScroll { editorHScroll = snap.hscroll }
-            let wrap = snap.wrap_lines != 0
-            if wrap != wrapLines { wrapLines = wrap }
-            if lines != editorLines { editorLines = lines }
-            if split != editorSplit { editorSplit = split }
+        let linesDiffer = PerfProbe.measure("  lines != editorLines") { lines != editorLines }
+        PerfProbe.measure("  publish") {
+            var txn = Transaction()
+            txn.disablesAnimations = true
+            withTransaction(txn) {
+                if abs(frac - editorScrollFrac) > 0.0001 { editorScrollFrac = frac }
+                if snap.hscroll != editorHScroll { editorHScroll = snap.hscroll }
+                let wrap = snap.wrap_lines != 0
+                if wrap != wrapLines { wrapLines = wrap }
+                if linesDiffer { editorLines = lines }
+                if split != editorSplit { editorSplit = split }
+            }
         }
         // Preview can open/close without full shell rebuild — but only re-pull
         // when its inputs changed (a full 8k-line copy per keystroke flickered).
@@ -3018,6 +3047,13 @@ final class EngineBridge: ObservableObject {
     }
 
     func refreshChrome() {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        defer {
+            PerfProbe.record(
+                "refreshChrome (full shell)",
+                Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+            )
+        }
         guard let engine else { return }
         var snap = SuiseiChromeSnapshot()
         guard suisei_engine_chrome(engine, &snap) != 0 else { return }

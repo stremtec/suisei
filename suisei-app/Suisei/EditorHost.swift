@@ -630,6 +630,13 @@ final class EditorCanvasView: NSView {
     // MARK: - Draw
 
     override func draw(_ dirtyRect: NSRect) {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        defer {
+            PerfProbe.record(
+                "EditorCanvasView.draw",
+                Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+            )
+        }
         colors.bg.setFill()
         dirtyRect.fill()
 

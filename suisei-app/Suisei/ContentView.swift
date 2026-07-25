@@ -4908,6 +4908,13 @@ struct MinimapStrip: View {
 
         var body: some View {
             Canvas { ctx, size in
+                let t0 = DispatchTime.now().uptimeNanoseconds
+                defer {
+                    PerfProbe.record(
+                        "MinimapBars canvas fill",
+                        Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+                    )
+                }
                 guard let data, data.totalLines > 0, !data.len.isEmpty else { return }
                 let n = data.len.count
                 let barH = max(0.8, min(2.0, rowH * 0.62))

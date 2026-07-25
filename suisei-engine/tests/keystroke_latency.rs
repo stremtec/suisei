@@ -74,6 +74,44 @@ fn empty_buffer_keystroke_cost() {
     println!();
 }
 
+/// The tick runs at 20 Hz whether or not anyone is typing, so anything O(file)
+/// inside it is a permanent tax on every large document — invisible to the
+/// keystroke measurements above, which never call it.
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn idle_tick_cost_by_file_size() {
+    println!();
+    println!("=== cost of ONE idle tick (the face calls this at 20Hz) ===");
+    for lines in [200usize, 2_000, 20_000] {
+        for dirty in [false, true] {
+            let mut engine = Engine::new();
+            engine.resize(1600.0, 1000.0, 18.0, 8.0, 2.0);
+            engine.app.buffer = suisei_core::buffer::Buffer::from_string(
+                &"let x = some_function(argument, another);\n".repeat(lines),
+            );
+            engine.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_tick_cost.rs"));
+            engine.app.modified = dirty;
+            for _ in 0..5 {
+                engine.tick(50); // warm
+            }
+            let mut samples = Vec::with_capacity(60);
+            for _ in 0..60 {
+                let t = Instant::now();
+                engine.tick(50);
+                samples.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            report(
+                &format!("{lines:>6} lines · {}", if dirty { "dirty" } else { "clean" }),
+                samples,
+            );
+        }
+    }
+    println!();
+    println!("A clean buffer should cost near zero: nothing needs the document.");
+    println!("If it scales with line count, something is rebuilding the whole text.");
+    println!();
+}
+
 #[test]
 #[ignore = "measurement, not an assertion"]
 fn large_buffer_typing_cost() {

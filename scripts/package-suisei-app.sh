@@ -50,6 +50,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/GlassChrome.swift"
   "$ROOT/suisei-app/Suisei/WindowChrome.swift"
   "$ROOT/suisei-app/Suisei/DaemonLauncher.swift"
+  "$ROOT/suisei-app/Suisei/PerfProbe.swift"
 )
 
 need_engine=0
