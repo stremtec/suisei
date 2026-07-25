@@ -210,6 +210,7 @@ void suisei_engine_save_as(SuiseiEngine *ptr, const char *path);
 void suisei_engine_undo(SuiseiEngine *ptr);
 void suisei_engine_redo(SuiseiEngine *ptr);
 void suisei_engine_set_system_appearance(SuiseiEngine *ptr, uint8_t is_dark);
+uint32_t suisei_engine_path_moved(SuiseiEngine *ptr, const char *old_path, const char *new_path);
 void suisei_engine_select_all(SuiseiEngine *ptr);
 
 /* ── GUI semantic editing commands ──────────────────────────────────── */

@@ -769,6 +769,31 @@ pub extern "C" fn suisei_engine_set_system_appearance(ptr: *mut SuiseiEngine, is
     }
 }
 
+/// Tell the engine a path moved on disk, so open tabs, the active file and the
+/// language server follow it. The face performs the filesystem call — it has
+/// native Trash and native drag payloads — and reports the result here.
+/// Returns how many buffers were repointed.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_path_moved(
+    ptr: *mut SuiseiEngine,
+    old: *const c_char,
+    new: *const c_char,
+) -> u32 {
+    if ptr.is_null() || old.is_null() || new.is_null() {
+        return 0;
+    }
+    let old = unsafe { CStr::from_ptr(old) }.to_string_lossy().to_string();
+    let new = unsafe { CStr::from_ptr(new) }.to_string_lossy().to_string();
+    unsafe {
+        let n = (*ptr)
+            .0
+            .app_mut()
+            .path_moved(std::path::Path::new(&old), std::path::Path::new(&new));
+        (*ptr).0.recompose_paint_only();
+        n as u32
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_select_all(ptr: *mut SuiseiEngine) {
     if ptr.is_null() {

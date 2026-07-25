@@ -1469,19 +1469,154 @@ final class EngineBridge: ObservableObject {
     /// Leave welcome with a fresh blank buffer (still untitled).
     func createNewProject() {
         cancelPointerSession()
-        // Prefer blank tab in-session (no temp-file pollution under `/tmp`).
         openBlankTab()
-        // If still on welcome for any reason, force a named scratch file.
+        // With no project open there is nowhere sensible to put it, so ask.
+        // This used to silently create `$TMPDIR/suisei-new/Untitled.txt` — a
+        // file the user could not find and the system would eventually delete.
         if chrome.welcome {
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("suisei-new", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let file = dir.appendingPathComponent("Untitled.txt")
-            if !FileManager.default.fileExists(atPath: file.path) {
-                FileManager.default.createFile(atPath: file.path, contents: Data(), attributes: nil)
-            }
-            openPath(file.path)
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "Untitled.txt"
+            panel.canCreateDirectories = true
+            panel.prompt = "Create"
+            panel.message = "Where should the new file go?"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: nil)
+            openPath(url.path)
         }
+    }
+
+    // MARK: - File operations
+    //
+    // The filesystem call lives here, not in the core: Trash is an AppKit
+    // service and drag payloads arrive as `NSItemProvider`. The core is then
+    // TOLD, so open tabs, the active file and the language server follow the
+    // path instead of pointing at something that no longer exists.
+
+    /// Create an empty file, returning its path. Numbers the name on collision
+    /// rather than overwriting.
+    @discardableResult
+    func createFile(in directory: String, named base: String = "Untitled.txt") -> String? {
+        let url = Self.unusedURL(in: directory, base: base)
+        guard FileManager.default.createFile(atPath: url.path, contents: Data()) else {
+            presentFileError("Could not create \(url.lastPathComponent)")
+            return nil
+        }
+        return url.path
+    }
+
+    @discardableResult
+    func createFolder(in directory: String, named base: String = "untitled folder") -> String? {
+        let url = Self.unusedURL(in: directory, base: base)
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+            return url.path
+        } catch {
+            presentFileError("Could not create \(url.lastPathComponent): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Rename in place. Refuses to clobber an existing entry.
+    @discardableResult
+    func renamePath(_ path: String, to newName: String) -> String? {
+        let src = URL(fileURLWithPath: path)
+        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !name.contains("/") else { return nil }
+        let dst = src.deletingLastPathComponent().appendingPathComponent(name)
+        if dst.path == src.path { return path }
+        guard !FileManager.default.fileExists(atPath: dst.path) else {
+            presentFileError("“\(name)” already exists")
+            return nil
+        }
+        do {
+            try FileManager.default.moveItem(at: src, to: dst)
+            notePathMoved(from: src.path, to: dst.path)
+            return dst.path
+        } catch {
+            presentFileError("Could not rename: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Move `path` into `directory`. Returns the new path.
+    @discardableResult
+    func movePath(_ path: String, into directory: String, copy: Bool = false) -> String? {
+        let src = URL(fileURLWithPath: path)
+        let dst = URL(fileURLWithPath: directory).appendingPathComponent(src.lastPathComponent)
+        guard Self.moveIsSane(from: src.path, to: dst.path) else { return nil }
+        guard !FileManager.default.fileExists(atPath: dst.path) else {
+            // Refuse rather than auto-rename: in an editor, silently making
+            // "file 2.rs" is a worse surprise than being told no.
+            presentFileError("“\(src.lastPathComponent)” already exists there")
+            return nil
+        }
+        do {
+            if copy {
+                try FileManager.default.copyItem(at: src, to: dst)
+            } else {
+                try FileManager.default.moveItem(at: src, to: dst)
+                notePathMoved(from: src.path, to: dst.path)
+            }
+            return dst.path
+        } catch {
+            presentFileError("Could not move: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Delete to the Trash — never `removeItem`. A tree row is one click away
+    /// from a directory, and an editor has no business making that unrecoverable.
+    func trashPath(_ path: String) {
+        var resulting: NSURL?
+        do {
+            try FileManager.default.trashItem(
+                at: URL(fileURLWithPath: path), resultingItemURL: &resulting
+            )
+            notePathMoved(from: path, to: resulting?.path ?? path)
+        } catch {
+            presentFileError("Could not move to Trash: \(error.localizedDescription)")
+        }
+    }
+
+    /// A move is sane when it is not onto itself and not into its own subtree —
+    /// dropping a folder inside itself detaches it from the tree entirely.
+    static func moveIsSane(from src: String, to dst: String) -> Bool {
+        if src == dst { return false }
+        let srcDir = (src as NSString).standardizingPath
+        let dstDir = ((dst as NSString).deletingLastPathComponent as NSString).standardizingPath
+        if srcDir == dstDir { return false }            // already there
+        return !(dstDir + "/").hasPrefix(srcDir + "/")  // into its own descendant
+    }
+
+    private static func unusedURL(in directory: String, base: String) -> URL {
+        let dir = URL(fileURLWithPath: directory, isDirectory: true)
+        let ext = (base as NSString).pathExtension
+        let stem = (base as NSString).deletingPathExtension
+        var candidate = dir.appendingPathComponent(base)
+        var n = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let name = ext.isEmpty ? "\(stem) \(n)" : "\(stem) \(n).\(ext)"
+            candidate = dir.appendingPathComponent(name)
+            n += 1
+        }
+        return candidate
+    }
+
+    private func notePathMoved(from old: String, to new: String) {
+        guard let engine else { return }
+        old.withCString { o in
+            new.withCString { n in
+                _ = suisei_engine_path_moved(engine, o, n)
+            }
+        }
+        refreshChrome()
+    }
+
+    private func presentFileError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 
     func openProjectFolder() {

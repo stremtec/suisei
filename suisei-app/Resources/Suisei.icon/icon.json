@@ -3,26 +3,7 @@
     {
       "value" : {
         "linear-gradient" : [
-          "srgb:0.01680,0.19835,1.00000,1.00000",
-          "srgb:1.00000,0.95716,0.86523,1.00000"
-        ],
-        "orientation" : {
-          "start" : {
-            "x" : 0.5,
-            "y" : 0
-          },
-          "stop" : {
-            "x" : 0.5,
-            "y" : 0.7
-          }
-        }
-      }
-    },
-    {
-      "appearance" : "dark",
-      "value" : {
-        "linear-gradient" : [
-          "srgb:0.22896,0.22896,0.22896,1.00000",
+          "srgb:1.00000,1.00000,1.00000,1.00000",
           "srgb:0.00000,0.00000,0.00000,1.00000"
         ],
         "orientation" : {
@@ -36,39 +17,32 @@
           }
         }
       }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+      }
     }
   ],
   "groups" : [
     {
       "layers" : [
         {
+          "blend-mode" : "hard-light",
           "fill" : {
-            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
           },
           "glass" : false,
           "hidden" : false,
-          "image-name" : "제목을 입력해주세요. (10).png",
-          "name" : "제목을 입력해주세요. (10)",
+          "image-name" : "stars-only-1024.png",
+          "name" : "stars-only-1024",
+          "opacity" : 0.33,
           "position" : {
-            "scale" : 0.16,
+            "scale" : 1.58,
             "translation-in-points" : [
-              -114.56574006551637,
-              -127.74142759604399
-            ]
-          }
-        },
-        {
-          "fill" : {
-            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-          },
-          "glass" : false,
-          "image-name" : "제목을 입력해주세요. (8).png",
-          "name" : "제목을 입력해주세요. (8)",
-          "position" : {
-            "scale" : 0.46,
-            "translation-in-points" : [
-              -290.5057400655163,
-              -240.621427596044
+              -249,
+              81
             ]
           }
         },
@@ -77,62 +51,341 @@
             "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
           },
           "glass" : false,
-          "image-name" : "제목을 입력해주세요. (8).png",
-          "name" : "제목을 입력해주세요. (8)",
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (13).png",
+          "name" : "제목을 입력해주세요. (13)",
+          "opacity" : 0.69,
           "position" : {
-            "scale" : 0.46,
+            "scale" : 0.5,
             "translation-in-points" : [
-              93,
-              -240.621427596044
+              -116.8404517560532,
+              324.2947207419817
             ]
           }
         },
         {
           "fill" : {
-            "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
+            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
           },
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
-          "image-name" : "제목을 입력해주세요. (7).png",
-          "name" : "제목을 입력해주세요. (7)",
+          "image-name" : "제목을 입력해주세요. (13).png",
+          "name" : "제목을 입력해주세요. (13)",
+          "opacity" : 1,
           "position" : {
-            "scale" : 1.99,
+            "scale" : 0.5,
             "translation-in-points" : [
-              -32.09074006551634,
-              1600
+              -18.23362274009918,
+              -229.4516127995156
             ]
           }
         },
         {
           "fill" : {
-            "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
+            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
           },
-          "glass" : true,
-          "hidden" : false,
-          "image-name" : "제목을 입력해주세요. (7).png",
-          "name" : "제목을 입력해주세요. (7)",
-          "opacity" : 0,
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (13).png",
+          "name" : "제목을 입력해주세요. (13)",
+          "opacity" : 1,
           "position" : {
-            "scale" : 1.99,
+            "scale" : 0.5,
             "translation-in-points" : [
-              0.9950000000000045,
-              -959.7828570685028
+              -18.23362274009918,
+              -229.4516127995156
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -81.23362274009918,
+              485.8205377821117
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -80.23362274009918,
+              542.7572964637617
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -123.60538851371945,
+              542.7572964637617
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -179.84045175605314,
+              542.7572964637617
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -415.9314838934457,
+              431.09509755084673
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -415.9314838934457,
+              431.09509755084673
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -395,
+              484.4178047660363
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -352.3404517560531,
+              526.0616537578516
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -382.8559194081905,
+              526.0616537578516
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : true,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.78,
+            "translation-in-points" : [
+              -352.3404517560531,
+              484.4178047660363
             ]
           }
         },
         {
           "fill" : {
-            "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
+            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
           },
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
-          "image-name" : "제목을 입력해주세요. (7).png",
-          "name" : "제목을 입력해주세요. (7)",
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
           "position" : {
-            "scale" : 1.99,
+            "scale" : 0.78,
             "translation-in-points" : [
-              0.9950000000000045,
-              1246.7573244972891
+              -265.59045175605314,
+              -244.25161279951556
+            ]
+          }
+        },
+        {
+          "blend-mode" : "overlay",
+          "fill" : "none",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "blackhole-silhouette-1024 (1).png",
+          "name" : "blackhole-silhouette-1024 (1)",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 2.28,
+            "translation-in-points" : [
+              572.7547858050675,
+              439.39999999999986
             ]
           }
         }

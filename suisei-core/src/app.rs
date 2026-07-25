@@ -1164,6 +1164,47 @@ impl App {
     }
 
     /// `:mbb` — fresh blank tab landing on the welcome screen.
+    /// A path on disk moved (rename, drag in the tree, or a folder move).
+    ///
+    /// The face owns the filesystem call — it has native Trash and native drag
+    /// payloads — but the core owns every reference to that path: open tabs,
+    /// the active filename, the language server's open document, and the crash
+    /// journal (whose filename is a hash of the path). Without this the tab
+    /// stays pointed at a file that no longer exists and the next save
+    /// resurrects it at the old location.
+    ///
+    /// Matches by prefix so moving a folder carries every file open beneath it.
+    /// Returns how many buffers were repointed.
+    pub fn path_moved(&mut self, old: &Path, new: &Path) -> usize {
+        let repoint = |p: &Path| -> Option<PathBuf> {
+            if p == old {
+                return Some(new.to_path_buf());
+            }
+            p.strip_prefix(old).ok().map(|rest| new.join(rest))
+        };
+        let mut n = 0;
+        for tab in &mut self.buffers {
+            if let Some(cur) = tab.filename.clone() {
+                if let Some(next) = repoint(&cur) {
+                    tab.filename = Some(next);
+                    n += 1;
+                }
+            }
+        }
+        if let Some(cur) = self.filename.clone() {
+            if let Some(next) = repoint(&cur) {
+                self.filename = Some(next.clone());
+                // The server has the old URI open; re-open under the new one so
+                // diagnostics and definitions keep resolving.
+                let text = self.buffer.text();
+                self.lsp.auto_start_with_text(&next.display().to_string(), Some(&text));
+                self.lsp_synced_path = Some(next);
+                self.lsp_synced_hash = 0;
+            }
+        }
+        n
+    }
+
     pub fn open_blank_tab(&mut self) {
         self.save_state_to_tab();
         let buffer = Buffer::new();
@@ -4834,6 +4875,44 @@ mod tests {
             text_y: 0,
         };
         app
+    }
+
+    #[test]
+    fn a_rename_repoints_the_open_tab() {
+        let mut app = App::new();
+        app.buffers[0].filename = Some(PathBuf::from("/p/src/a.rs"));
+        app.filename = Some(PathBuf::from("/p/src/a.rs"));
+        let n = app.path_moved(Path::new("/p/src/a.rs"), Path::new("/p/src/b.rs"));
+        assert_eq!(n, 1);
+        assert_eq!(app.filename.as_deref(), Some(Path::new("/p/src/b.rs")));
+    }
+
+    /// Moving a folder has to carry every file open beneath it, or those tabs
+    /// keep pointing at paths that no longer exist.
+    #[test]
+    fn a_folder_move_carries_the_files_open_under_it() {
+        let mut app = App::new();
+        // Set the live filename first: `open_blank_tab` flushes it into the
+        // current tab before pushing the new one.
+        app.filename = Some(PathBuf::from("/p/old/deep/a.rs"));
+        app.open_blank_tab();
+        app.buffers[1].filename = Some(PathBuf::from("/p/old/b.rs"));
+        app.filename = Some(PathBuf::from("/p/old/deep/a.rs"));
+        let n = app.path_moved(Path::new("/p/old"), Path::new("/p/new"));
+        assert_eq!(n, 2);
+        assert_eq!(
+            app.buffers[0].filename.as_deref(),
+            Some(Path::new("/p/new/deep/a.rs"))
+        );
+        assert_eq!(app.buffers[1].filename.as_deref(), Some(Path::new("/p/new/b.rs")));
+    }
+
+    #[test]
+    fn an_unrelated_path_is_left_alone() {
+        let mut app = App::new();
+        app.buffers[0].filename = Some(PathBuf::from("/other/a.rs"));
+        assert_eq!(app.path_moved(Path::new("/p/old"), Path::new("/p/new")), 0);
+        assert_eq!(app.buffers[0].filename.as_deref(), Some(Path::new("/other/a.rs")));
     }
 
     #[test]
