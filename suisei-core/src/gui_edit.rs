@@ -394,6 +394,107 @@ fn word_range_at(buf: &crate::buffer::Buffer, pos: Position) -> Option<(Position
     Some((Position::new(pos.row, start), Position::new(pos.row, end)))
 }
 
+impl App {
+    /// The identifier being typed at the primary caret, if any.
+    fn prefix_at_caret(&self) -> String {
+        let c = self.sel.primary().head;
+        let chars: Vec<char> = self.buffer.line(c.row).chars().collect();
+        let mut start = c.col.min(chars.len());
+        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            start -= 1;
+        }
+        chars[start..c.col.min(chars.len())].iter().collect()
+    }
+
+    /// Keep the completion popup in step with what was just typed.
+    ///
+    /// Autocomplete has never actually worked in the GUI: the only thing that
+    /// opened the popup was a `Ctrl+A` chord, because the typing trigger lived
+    /// in the vim insert handler — a code path the GUI never reached, since it
+    /// never entered vim's Insert mode. Typing has to drive it.
+    ///
+    /// Only a real identifier prefix opens it; anything else closes it, so
+    /// punctuation and whitespace dismiss rather than leave a stale list.
+    /// Multi-caret is deliberately excluded: one popup cannot describe several
+    /// different prefixes.
+    pub fn completion_after_typing(&mut self) {
+        if self.sel.len() > 1 {
+            self.completions.deactivate();
+            return;
+        }
+        let prefix = self.prefix_at_caret();
+        if prefix.len() < Self::COMPLETION_MIN_PREFIX {
+            self.completions.deactivate();
+            return;
+        }
+        let ext = self.file_extension();
+        if self.completions.active {
+            self.completions.refine(&prefix);
+            // `refine` only narrows; a fresh activate re-widens when the user
+            // deletes back to a shorter prefix.
+            if !self.completions.active {
+                self.completions.activate(&prefix, ext.as_deref());
+            }
+        } else {
+            self.completions.activate(&prefix, ext.as_deref());
+        }
+        self.request_lsp_completions();
+    }
+
+    /// Two characters, not one: a popup on every single letter is noise, and
+    /// the suggestion list for a one-character prefix is never useful.
+    const COMPLETION_MIN_PREFIX: usize = 2;
+
+    fn request_lsp_completions(&mut self) {
+        if !self.lsp.server_running {
+            return;
+        }
+        self.sync_lsp_document();
+        let Some(path) = self.filename.as_ref().map(|p| p.display().to_string()) else {
+            return;
+        };
+        let c = self.buffer.cursor();
+        self.lsp.request_completion(&path, c.row, c.col);
+    }
+
+    /// Insert the selected suggestion, replacing the typed prefix.
+    /// Returns false when nothing was open to accept.
+    pub fn completion_accept(&mut self) -> bool {
+        if !self.completions.active {
+            return false;
+        }
+        let Some(text) = self
+            .completions
+            .selected_suggestion()
+            .map(|s| s.insert_text.clone())
+        else {
+            self.completions.deactivate();
+            return false;
+        };
+        let prefix_len = self.prefix_at_caret().chars().count();
+        self.completions.deactivate();
+        // Delete what was typed, then insert the full suggestion — one undo
+        // group, so a rejected completion comes back in a single step.
+        for _ in 0..prefix_len {
+            self.gui_delete_backward();
+        }
+        self.gui_insert_text(&text);
+        true
+    }
+
+    pub fn completion_move(&mut self, forward: bool) -> bool {
+        if !self.completions.active {
+            return false;
+        }
+        if forward {
+            self.completions.next();
+        } else {
+            self.completions.prev();
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

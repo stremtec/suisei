@@ -330,6 +330,30 @@ impl Engine {
     ///
     /// Control/Super combos are shortcuts (copy, save, …) and fall through to
     /// the legacy dispatch; so do chrome panels and the terminal.
+    /// While the completion popup is up it owns confirm and up/down — but
+    /// nothing else, and only while it is up. Without this the popup could be
+    /// opened and never accepted: the accept path lived in the vim insert
+    /// handler, so the GUI had no way to take a suggestion at all.
+    fn try_completion_keys(&mut self, ev: KeyEvent) -> bool {
+        if !self.app.completions.active || !self.editor_owns_keys() {
+            return false;
+        }
+        let m = ev.modifiers;
+        if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) {
+            return false;
+        }
+        match ev.code {
+            KeyCode::Tab | KeyCode::Enter => self.app.completion_accept(),
+            KeyCode::Down => self.app.completion_move(true),
+            KeyCode::Up => self.app.completion_move(false),
+            KeyCode::Esc => {
+                self.app.completions.deactivate();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn try_gui_edit(&mut self, ev: KeyEvent) -> bool {
         if !self.editor_owns_keys() {
             return false;
@@ -339,9 +363,15 @@ impl Engine {
             return false; // shortcut, not text
         }
         match ev.code {
-            KeyCode::Char(c) => self.app.gui_insert_text(&c.to_string()),
+            KeyCode::Char(c) => {
+                self.app.gui_insert_text(&c.to_string());
+                self.app.completion_after_typing();
+            }
             KeyCode::Enter => self.app.gui_insert_newline(INDENT),
-            KeyCode::Backspace => self.app.gui_delete_backward(),
+            KeyCode::Backspace => {
+                self.app.gui_delete_backward();
+                self.app.completion_after_typing();
+            }
             KeyCode::Delete => self.app.gui_delete_forward(),
             // Tab indents. It used to reach vim's `handle_normal`, where Tab is
             // the jumplist-forward command (`Ctrl+I`) — pressing Tab in the
@@ -385,7 +415,7 @@ impl Engine {
         // surfaces a mode, and there is no synthetic `i`.
         let caret_pre = self.app.buffer.cursor();
         let ver_pre = self.app.buffer.version();
-        if self.try_gui_navigation(ev) || self.try_gui_edit(ev) {
+        if self.try_completion_keys(ev) || self.try_gui_navigation(ev) || self.try_gui_edit(ev) {
             // Only re-anchor the viewport when something actually moved — a
             // no-op arrow at a document edge must not yank an absolute scroll.
             if self.app.buffer.cursor() != caret_pre || self.app.buffer.version() != ver_pre {
@@ -2284,6 +2314,62 @@ mod tests {
             "a never-saved buffer must not claim a location: {:?}",
             eng.app.filename
         );
+    }
+
+    /// Autocomplete never opened from typing: the only trigger was a `Ctrl+A`
+    /// chord, because the typing trigger lived in the vim insert handler the
+    /// GUI never reached.
+    #[test]
+    fn typing_an_identifier_opens_the_completion_popup() {
+        let mut eng = eng_with_text("");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_completion.rs"));
+        assert!(!eng.app.completions.active);
+        for ch in "st".chars() {
+            eng.dispatch_key(KeyEvent::char(ch));
+        }
+        assert!(
+            eng.app.completions.active,
+            "typing an identifier prefix must open the popup"
+        );
+    }
+
+    #[test]
+    fn punctuation_dismisses_the_popup() {
+        let mut eng = eng_with_text("");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_completion.rs"));
+        for ch in "st".chars() {
+            eng.dispatch_key(KeyEvent::char(ch));
+        }
+        assert!(eng.app.completions.active);
+        eng.dispatch_key(KeyEvent::char('('));
+        assert!(!eng.app.completions.active, "a non-identifier char must close it");
+    }
+
+    /// And it must be acceptable — the popup used to be un-confirmable.
+    #[test]
+    fn tab_accepts_the_selected_suggestion() {
+        let mut eng = eng_with_text("");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_completion.rs"));
+        for ch in "st".chars() {
+            eng.dispatch_key(KeyEvent::char(ch));
+        }
+        let want = eng
+            .app
+            .completions
+            .selected_suggestion()
+            .map(|s| s.insert_text.clone())
+            .expect("a suggestion");
+        eng.dispatch_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(eng.app.buffer.line(0), want, "the prefix must be replaced");
+        assert!(!eng.app.completions.active, "accepting closes the popup");
+    }
+
+    /// Tab must still indent when nothing is open.
+    #[test]
+    fn tab_still_indents_with_no_popup() {
+        let mut eng = eng_with_text("x");
+        eng.dispatch_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(eng.app.buffer.line(0), "x    ");
     }
 
     /// The tokenizer classifies fourteen kinds and the theme has a colour for
