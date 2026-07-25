@@ -500,8 +500,23 @@ struct ContentView: View {
         engine.uiInspectorVisible && !engine.chrome.gitWb.open
     }
 
+    /// Is this one of OUR document windows?
+    ///
+    /// Structural, not a title-string test. `w.title != "Settings"` was true of
+    /// every AppKit auxiliary window as well — popovers, sheets, tooltips, the
+    /// open panel, SwiftUI's own helper windows — and most of those carry no
+    /// titlebar at all. `applyWindowAppearance` walks `NSApp.windows`, so it
+    /// handed one to `styleTrafficLights`, whose first act is to read
+    /// `titlebarAccessoryViewControllers`; that throws on a window without a
+    /// titlebar, and AppKit escalates a throw during layout straight into
+    /// `+[NSApplication _crashOnException:]`.
+    ///
+    /// That is the intermittent crash (report 2026-07-26 08:07): intermittent
+    /// because it depends on which auxiliary windows happen to exist at the
+    /// moment the appearance sync runs.
     private func isEditorWindow(_ w: NSWindow) -> Bool {
-        w.title != "Settings" && w.title != "Welcome"
+        guard w.styleMask.contains(.titled), !(w is NSPanel) else { return false }
+        return w.title != "Settings" && w.title != "Welcome"
     }
 
     /// Run a panel show/hide animation without per-frame engine resizes —
@@ -2127,7 +2142,7 @@ struct ContentView: View {
     /// Keep the PTY grid in sync with the visible panel (fixes mis-wrapped output).
     private func reportTerminalCells(_ size: CGSize) {
         let cell = max(6, ("M" as NSString).size(withAttributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            .font: EditorMetrics.monospaced(12, weight: .regular)
         ]).width)
         let lineH: CGFloat = 12 + 4
         let cols = Int((size.width - 20) / cell)
@@ -2153,29 +2168,31 @@ struct ContentView: View {
             NSApp.appearance = appearance
         }
         let bg = NSColor(shellBase)
+        // Appearance is safe to push at any window; background and movability
+        // are not — restyling an open panel or a popover is both wrong and, for
+        // the titlebar work below, fatal. See `isEditorWindow`.
         for window in NSApp.windows where window.title != "Welcome" {
             if window.appearance?.name != name {
                 window.appearance = appearance
             }
+            guard isEditorWindow(window) else { continue }
             if window.backgroundColor != bg {
                 window.backgroundColor = bg
             }
             window.isMovableByWindowBackground = false
-            if isEditorWindow(window) {
-                if !window.styleMask.contains(.fullSizeContentView) {
-                    window.styleMask.insert(.fullSizeContentView)
-                }
-                if window.titleVisibility != .hidden {
-                    window.titleVisibility = .hidden
-                }
-                if !window.titlebarAppearsTransparent {
-                    window.titlebarAppearsTransparent = true
-                }
-                if window.titlebarSeparatorStyle != .none {
-                    window.titlebarSeparatorStyle = .none
-                }
-                ContentView.styleTrafficLights(window)
+            if !window.styleMask.contains(.fullSizeContentView) {
+                window.styleMask.insert(.fullSizeContentView)
             }
+            if window.titleVisibility != .hidden {
+                window.titleVisibility = .hidden
+            }
+            if !window.titlebarAppearsTransparent {
+                window.titlebarAppearsTransparent = true
+            }
+            if window.titlebarSeparatorStyle != .none {
+                window.titlebarSeparatorStyle = .none
+            }
+            ContentView.styleTrafficLights(window)
         }
     }
 
@@ -2208,6 +2225,10 @@ struct ContentView: View {
     /// re-asserted from the resize notifications (same finding as VS Code's
     /// Tahoe alignment issue).
     static func styleTrafficLights(_ window: NSWindow) {
+        // Reading `titlebarAccessoryViewControllers` on a window without a
+        // titlebar THROWS, and a throw during layout is a crash. The callers
+        // filter, but this is the one place the AppKit contract lives.
+        guard window.styleMask.contains(.titled) else { return }
         let spacerID = NSUserInterfaceItemIdentifier("suisei.lights.spacer")
         if !window.titlebarAccessoryViewControllers.contains(where: { $0.identifier == spacerID }) {
             let vc = NSTitlebarAccessoryViewController()
@@ -2224,6 +2245,7 @@ struct ContentView: View {
     /// Re-asserted after every resize: horizontal nudge for the lights AND the
     /// interaction clamp for the titlebar container.
     static func applyTrafficLightInset(_ window: NSWindow) {
+        guard window.styleMask.contains(.titled) else { return }
         // Equal-axis offset from the card corner: the card sits panelGap off
         // the window, the lights sit lightsCornerGap off the card in BOTH x
         // and y (y comes from topBandHeight's derivation).
@@ -5115,7 +5137,7 @@ private final class TermCanvas: NSView {
         dirtyRect.fill()
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
         let lineH = fontSize + 5
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let font = EditorMetrics.monospaced(fontSize, weight: .regular)
         let r0 = max(0, Int(floor(dirtyRect.minY / lineH)))
         let r1 = min(lines.count - 1, Int(ceil(dirtyRect.maxY / lineH)))
         guard r1 >= r0 else { return }

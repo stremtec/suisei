@@ -13,56 +13,52 @@ Opened 2026-07-26 from a single usability pass.
 
 ## A. Editing performance — the loudest problem
 
-### A1 · Large files are slow to edit; typing lags · CAUSE (partly)
+### A1 · Large files are slow to edit; typing lags · CAUSE FOUND, LARGELY FIXED
 
-**Measured 2026-07-26. Most of the obvious suspects are innocent** — recorded
-here so nobody re-suspects them.
+**Where it fundamentally goes.** Every measurement below is a **release** build,
+a ~5,700-line file, ~59 visible lines. The Rust side is not involved: one
+keystroke costs it 0.038 ms and the worst tick after an edit is 4.5 ms at
+60,000 lines (`tick_breakdown`, `keystroke_latency`). Neither is the bridge —
+the C ABI call is 0.006 ms, the 180 KiB snapshot allocation 0.001 ms, the line
+decode 0.083 ms, the published-value compare 0.007 ms.
 
-Rust side (`tests/tick_breakdown.rs`, `tests/keystroke_latency.rs`, release):
+**It is all in `EditorCanvasView.draw`, and the reason is that the renderer had
+no idea what changed.** Any repaint re-shaped and re-drew the entire viewport.
 
-| | 2k lines | 20k | 60k |
-|---|---|---|---|
-| `dispatch_key` (one keystroke, 6k-line file) | — | 0.038 ms | — |
-| `buffer.text()` | 0.008 ms | 0.077 ms | 0.238 ms |
-| `build_outline` | 0.364 ms | 0.731 ms | 0.727 ms |
-| idle tick | 0.008 ms | 0.094 ms | 0.239 ms |
-| worst tick after an edit | 0.623 ms | 2.066 ms | 4.514 ms |
-
-Face side (`PerfProbe`, **-Onone debug** build so these are inflated, 5,700-line
-file, per keystroke):
-
-| | mean | max |
+| per keystroke | before | after |
 |---|---|---|
-| `EditorCanvasView.draw` | 1.64 ms | 2.47 ms |
-| `refreshEditorPaintOnly` | 1.69 ms | 1.78 ms |
-| ⤷ `decodeEditorLinesAndSplit` | 0.82 ms | 0.91 ms |
-| ⤷ `suisei_engine_chrome` (the FFI call) | 0.006 ms | |
-| ⤷ 180 KiB snapshot alloc | 0.014 ms | |
-| ⤷ `lines != editorLines` compare | 0.024 ms | |
-| ⤷ `@Published` assignment | 0.027 ms | |
-| `refreshChrome` (full shell) | 1.74 ms | 6.23 ms |
-| `minimapData` | **1 miss per 25 keystrokes** | |
+| `EditorCanvasView.draw` | **1.58–1.70 ms** | **0.40–0.48 ms** |
+| lines shaped per repaint | 59 | 2 |
+| gutter number, per line | 0.011 ms | 0.003 ms |
 
-Cleared of suspicion: the Rust engine (two orders of magnitude under budget),
-the C ABI call, the 180 KiB snapshot copy, the line decode/compare/publish, and
-the minimap (its version cache holds).
+Three causes, all now fixed:
 
-**Found and fixed:** the shadow-WAL call site built the entire document on
-*every* tick — 20×/second, dirty or clean — for a value the 250 ms/4 KiB policy
-throws away most of the time. Now a closure, called only on an actual flush.
+1. **The gutter had no cache.** Line numbers were drawn with
+   `NSString.draw(at:withAttributes:)` — build a framesetter, shape the digits —
+   once per visible line per repaint. 0.65 ms of the 1.6 ms, spent re-shaping
+   digits that change only when the view scrolls. The *text* lines had a CTLine
+   cache all along (it hits 3304 times out of 3305); the gutter did not. Now it
+   does.
+2. **The bracket-match flash repainted the whole viewport at 60 Hz.**
+   `startBracketFade` set `needsDisplay = true` sixty times a second for 0.9 s.
+   At 1.6 ms a repaint that is ~96 ms of main-thread work per second of flash —
+   and writing code retriggers it on nearly every keystroke. It now invalidates
+   only the rows the hint is painted into.
+3. **`EditorMetrics.cellWidth` built a font and measured a string on every
+   read**, and `gutter` reads it, and `draw` reads both. Cached per font size.
+   (This one was also a crash — see the crash section.)
 
-**Still open — the real remainder.** Nothing measured above scales the way the
-complaint does, and two things are still unmeasured:
-1. **SwiftUI's own re-render** after `@Published chrome` fires. The probe stops
-   at the assignment; body evaluation, layout and diffing of the whole shell
-   (tab bar, breadcrumb, outline list, status bar, project tree) happen after.
-   `refreshChrome` runs 120 ms after every typing pause via `scheduleChromeSettle`.
-2. **A release-build number.** Everything above on the face side is `-Onone`;
-   real latency needs `./scripts/package-suisei-app.sh` without `SUISEI_FAST`.
-Next step: instrument SwiftUI body evaluation (or Instruments' SwiftUI template)
-against a release build, and re-measure with rust-analyzer live — the user notes
-the lag persists after indexing completes, which points at the diagnostics /
-semantic-token republish path rather than at indexing itself.
+**Cleared of suspicion, so nobody re-suspects them:** the Rust engine, the C ABI
+call, the 180 KiB snapshot copy, the line decode/compare/publish, the minimap
+(its version cache holds — one miss per 25 keystrokes), and `cacheKey`'s string
+building (0.001 ms/line; it looked expensive and is not).
+
+**Still open.** `refreshEditorPaintOnly` shows an occasional 16–28 ms spike that
+its instrumented children do not account for. The tail does five more FFI pulls
+(palette, search, completions, terminal, outline) and a deep `Equatable` compare
+of the whole chrome per keystroke; those measure at 0.02–0.03 ms each, so the
+spike is elsewhere — most likely SwiftUI's own re-render after the `@Published`
+assignment, which no probe on this side can see.
 
 Gate: a 6,000-line file types at frame budget with the LSP live.
 
@@ -240,6 +236,38 @@ file's own folder. Reaches folders that are collapsed, scrolled away, or outside
 the project — none of which a drag can. Verified end to end in the running app:
 the file moved on disk, the tree refreshed, and the open tab's breadcrumb
 followed it (`App::path_moved`).
+
+---
+
+## I. Crashes
+
+### I1 · Uncaught exception during window styling · FIXED (2026-07-26)
+Crash report 2026-07-26 08:07, `EXC_BREAKPOINT` via
+`+[NSApplication _crashOnException:]` inside `_NSViewLayout`. Symbolicated:
+`ContentView.styleTrafficLights` → `-[NSWindow titlebarAccessoryViewControllers]`
+→ `objc_exception_throw`.
+
+`isEditorWindow` was a title-string test — `w.title != "Settings" && w.title !=
+"Welcome"` — which is true of every AppKit auxiliary window as well: popovers,
+sheets, tooltips, the open panel, SwiftUI's own helpers. Most carry no titlebar,
+and reading `titlebarAccessoryViewControllers` on such a window throws. It is
+intermittent because it depends on which auxiliary windows exist at the moment
+the appearance sync runs. The test is structural now (`.titled`, not an
+`NSPanel`), and both titlebar helpers refuse an untitled window themselves.
+
+### I2 · Nil font reaching CoreText · FIXED (2026-07-26)
+Caught live under a typing load: `NSInvalidArgumentException … attempt to insert
+nil object from objects[0]`, thrown from `CTLineCreateWithAttributedString`
+under `EditorMetrics.cellWidth`.
+
+`NSFont.monospacedSystemFont(ofSize:weight:)` is imported into Swift as
+**non-optional**, but the AppKit call behind it can return nil when the font
+cannot be created. Swift carries that nil along as an ordinary reference; it
+detonates much later, when CoreText copies it into an attributes dictionary,
+with a stack pointing at whoever happened to be drawing rather than at the font.
+`cellWidth` called it on every read — several times per draw — so the exposure
+was continuous. It is now created once per size through
+`EditorMetrics.monospaced`, which checks for the bridged nil and falls back.
 
 ---
 

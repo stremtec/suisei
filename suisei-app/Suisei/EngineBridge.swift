@@ -468,9 +468,47 @@ enum EditorMetrics {
         return min(44, max(32, max(total, scaled)))
     }
 
+    /// The monospaced system font, cached, and never nil.
+    ///
+    /// `NSFont.monospacedSystemFont(ofSize:weight:)` is imported into Swift as
+    /// **non-optional**, but the AppKit call behind it can return nil when the
+    /// font cannot be created — under font-server pressure, or across a font
+    /// cache flush. Swift carries that nil along as an ordinary reference and
+    /// it only detonates much later, when CoreText copies it into an attributes
+    /// dictionary: `NSInvalidArgumentException … attempt to insert nil object
+    /// from objects[0]`, with a stack pointing at whoever happened to be
+    /// drawing rather than at the font. That is one of the intermittent
+    /// crashes (caught 2026-07-26 with the app under a typing load).
+    ///
+    /// Caching also removes the reason it was ever likely: this used to run on
+    /// every access, and `cellWidth`/`gutter` are read several times per draw.
+    static func monospaced(_ size: CGFloat, weight: NSFont.Weight) -> NSFont {
+        let key = FontKey(size: size, weight: weight.rawValue)
+        if let hit = fontCache[key] { return hit }
+        var font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+        if unsafeBitCast(font, to: UnsafeRawPointer?.self) == nil {
+            font = NSFont.userFixedPitchFont(ofSize: size) ?? NSFont.systemFont(ofSize: size)
+        }
+        fontCache[key] = font
+        return font
+    }
+
+    private struct FontKey: Hashable {
+        let size: CGFloat
+        let weight: CGFloat
+    }
+    private static var fontCache: [FontKey: NSFont] = [:]
+    private static var cellWidthCache: [CGFloat: CGFloat] = [:]
+
+    /// Width of one monospaced cell. Measured once per font size — this was a
+    /// computed property that built a font and ran `sizeWithAttributes` on
+    /// every read, and `gutter` reads it, and `draw` reads both.
     static var cellWidth: CGFloat {
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .medium)
-        return max(7, ceil(("M" as NSString).size(withAttributes: [.font: font]).width))
+        if let hit = cellWidthCache[fontSize] { return hit }
+        let font = monospaced(fontSize, weight: .medium)
+        let w = max(7, ceil(("M" as NSString).size(withAttributes: [.font: font]).width))
+        cellWidthCache[fontSize] = w
+        return w
     }
 
     static var lineHeight: CGFloat { fontSize + linePad * 2 }
@@ -478,6 +516,9 @@ enum EditorMetrics {
     @discardableResult
     static func adjustFont(delta: CGFloat) -> CGFloat {
         fontSize = min(maxFontSize, max(minFontSize, fontSize + delta))
+        // Keyed by size, so nothing is stale — but a zoom run would otherwise
+        // grow the caches one entry per step.
+        cellWidthCache.removeAll(keepingCapacity: true)
         UserDefaults.standard.set(Double(fontSize), forKey: "suisei.fontSize")
         return fontSize
     }
@@ -2961,21 +3002,32 @@ final class EngineBridge: ObservableObject {
         next.lines = lines
         next.split = split
         // Cheap open-flag probes only (empty payload when closed).
-        let palette = loadPalette(engine)
-        next.palette = palette.open ? palette : .empty
-        let search = loadSearch(engine)
-        next.search = search.open ? search : .empty
-        let completions = loadCompletions(engine)
-        next.completions = completions.open ? completions : .empty
-        let terminal = loadTerminal(engine)
-        next.terminal = terminal.open ? terminal : .empty
+        PerfProbe.measure("  loadPalette") {
+            let palette = loadPalette(engine)
+            next.palette = palette.open ? palette : .empty
+        }
+        PerfProbe.measure("  loadSearch") {
+            let search = loadSearch(engine)
+            next.search = search.open ? search : .empty
+        }
+        PerfProbe.measure("  loadCompletions") {
+            let completions = loadCompletions(engine)
+            next.completions = completions.open ? completions : .empty
+        }
+        PerfProbe.measure("  loadTerminal (300KiB)") {
+            let terminal = loadTerminal(engine)
+            next.terminal = terminal.open ? terminal : .empty
+        }
         // Outline is cheap to copy and the engine refreshes it on idle ticks —
         // keep it live on the light path too (typing never does a full pull).
-        let outline = loadOutline(engine)
-        if outline != next.outline { next.outline = outline }
+        PerfProbe.measure("  loadOutline") {
+            let outline = loadOutline(engine)
+            if outline != next.outline { next.outline = outline }
+        }
 
-        if next != chrome {
-            chrome = next
+        let differs = PerfProbe.measure("  chrome deep compare") { next != chrome }
+        if differs {
+            PerfProbe.measure("  chrome publish") { chrome = next }
         }
     }
 

@@ -623,6 +623,44 @@ final class EditorCanvasView: NSView {
             && a.typeName == b.typeName && a.function == b.function
     }
 
+    /// Line numbers, laid out once each.
+    ///
+    /// They were drawn with `NSString.draw(at:withAttributes:)` — which builds
+    /// a framesetter and shapes the glyphs from scratch — once per visible line
+    /// per repaint. Measured in a release build that was 0.011 ms × 59 lines =
+    /// **0.65 ms of the draw's 1.6 ms**, spent re-shaping digits that change
+    /// only when the view scrolls. The text lines had a cache all along; the
+    /// gutter did not.
+    private struct GutterKey: Hashable {
+        let number: UInt32
+        let isCursor: Bool
+        let colorGen: UInt64
+    }
+    private var gutterCache: [GutterKey: (line: CTLine, width: CGFloat)] = [:]
+
+    private func gutterLine(_ number: UInt32, isCursor: Bool, font: NSFont)
+        -> (line: CTLine, width: CGFloat)
+    {
+        let key = GutterKey(number: number, isCursor: isCursor, colorGen: colorGen)
+        if let hit = gutterCache[key] { return hit }
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: isCursor
+                ? colors.accent.withAlphaComponent(0.92) : colors.gutter,
+        ]
+        let ct = CTLineCreateWithAttributedString(
+            NSAttributedString(string: "\(number)", attributes: attrs)
+        )
+        let width = CGFloat(CTLineGetTypographicBounds(ct, nil, nil, nil))
+        // A document can be long; cap the cache the same way the text one is.
+        if gutterCache.count > 4000 {
+            gutterCache.removeAll(keepingCapacity: true)
+        }
+        let entry = (line: ct, width: width)
+        gutterCache[key] = entry
+        return entry
+    }
+
     private func cacheKey(for line: EditorLine) -> String {
         var sp = "\(line.lineNo)|\(line.text.count)|\(line.text.hashValue)|\(colorGen)"
         for s in line.spans {
@@ -648,7 +686,7 @@ final class EditorCanvasView: NSView {
         let gutter = EditorMetrics.gutter
         let fontSize = EditorMetrics.fontSize
         let cell = EditorMetrics.cellWidth
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let font = EditorMetrics.monospaced(fontSize, weight: .regular)
         let ascent = font.ascender
         let gap = EditorMetrics.gutterTextGap
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
@@ -656,6 +694,8 @@ final class EditorCanvasView: NSView {
         let r0 = max(0, Int(floor(dirtyRect.minY / lineH)))
         let r1 = max(r0, Int(ceil(dirtyRect.maxY / lineH)))
         let band = rows(r0, r1)
+        // Rebuilt below by whichever rows carry a hint this pass.
+        bracketRects.removeAll(keepingCapacity: true)
 
         // Wrapped primaries in this band (tails are clipped, marked with ⋯).
         var wrapped: Set<UInt32> = []
@@ -686,17 +726,18 @@ final class EditorCanvasView: NSView {
                 drawBookmark(at: y, lineH: lineH)
             }
 
-            let lnAttrs: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: line.isCursor
-                    ? colors.accent.withAlphaComponent(0.92) : colors.gutter,
-            ]
-            let lnStr = "\(line.lineNo)" as NSString
-            let lnSize = lnStr.size(withAttributes: lnAttrs)
-            lnStr.draw(
-                at: CGPoint(x: max(4, gutter - gap - lnSize.width), y: y + (lineH - fontSize) * 0.5 - 1),
-                withAttributes: lnAttrs
-            )
+            PerfProbe.measure("    gutter number") {
+                let ln = gutterLine(line.lineNo, isCursor: line.isCursor, font: font)
+                cg.saveGState()
+                cg.textMatrix = .identity
+                cg.translateBy(
+                    x: max(4, gutter - gap - ln.width),
+                    y: y + (lineH - fontSize) * 0.5 - 1 + ascent
+                )
+                cg.scaleBy(x: 1, y: -1)
+                CTLineDraw(ln.line, cg)
+                cg.restoreGState()
+            }
 
             cg.saveGState()
             cg.clip(to: CGRect(x: gutter, y: y, width: max(0, bounds.width - gutter), height: lineH))
@@ -704,7 +745,7 @@ final class EditorCanvasView: NSView {
             // Built before the selection fill: both the highlight and the caret
             // are positioned by measuring THIS line, not the core's cell grid.
             let textY = y + (lineH - fontSize) * 0.5 - 1
-            let ct = ctLine(for: line, font: font)
+            let ct = PerfProbe.measure("   ctLine total") { ctLine(for: line, font: font) }
 
             if line.hasSelection {
                 // Same reason as the caret: measure against the drawn line so
@@ -716,12 +757,14 @@ final class EditorCanvasView: NSView {
                 CGRect(x: x0, y: y, width: w, height: lineH).fill()
             }
 
-            cg.saveGState()
-            cg.textMatrix = .identity
-            cg.translateBy(x: gutter, y: textY + ascent)
-            cg.scaleBy(x: 1, y: -1)
-            CTLineDraw(ct, cg)
-            cg.restoreGState()
+            PerfProbe.measure("    CTLineDraw") {
+                cg.saveGState()
+                cg.textMatrix = .identity
+                cg.translateBy(x: gutter, y: textY + ascent)
+                cg.scaleBy(x: 1, y: -1)
+                CTLineDraw(ct, cg)
+                cg.restoreGState()
+            }
 
             // Soft-wrap tail exists but can't stack in the absolute row model —
             // show a clipped-content marker at the right edge.
@@ -826,6 +869,8 @@ final class EditorCanvasView: NSView {
                     x: x0 - 1, y: y + 1,
                     width: max(cell, x1 - x0) + 2, height: lineH - 2
                 )
+                // The fade timer repaints exactly this, and nothing else.
+                bracketRects.append(rowRect)
                 // Grow about the centre so the pop does not drift sideways.
                 let box = base.insetBy(
                     dx: -base.width * (scale - 1) / 2,
@@ -843,7 +888,7 @@ final class EditorCanvasView: NSView {
                     ns.substring(with: range).draw(
                         at: CGPoint(x: x0, y: textY),
                         withAttributes: [
-                            .font: NSFont.monospacedSystemFont(ofSize: fontSize, weight: .bold),
+                            .font: EditorMetrics.monospaced(fontSize, weight: .bold),
                             .foregroundColor: NSColor.black.withAlphaComponent(fade),
                         ]
                     )
@@ -925,8 +970,12 @@ final class EditorCanvasView: NSView {
     }
 
     private func ctLine(for line: EditorLine, font: NSFont) -> CTLine {
-        let key = cacheKey(for: line)
-        if let cached = ctCache[key] { return cached }
+        let key = PerfProbe.measure("    cacheKey") { cacheKey(for: line) }
+        if let cached = ctCache[key] {
+            PerfProbe.record("    ctLine HIT", 0)
+            return cached
+        }
+        PerfProbe.record("    ctLine MISS", 0)
         let attr = attributedLine(line, font: font)
         let ct = CTLineCreateWithAttributedString(attr)
         ctCache[key] = ct
@@ -1180,21 +1229,42 @@ final class EditorCanvasView: NSView {
     }
 
 
+    /// Repaint the bracket hint's own rows for the length of its flash.
+    ///
+    /// This used to set `needsDisplay = true` — the WHOLE viewport — sixty
+    /// times a second for 0.9 s. A full repaint measured 1.6 ms in a release
+    /// build, so every matched bracket cost ~96 ms of main-thread work per
+    /// second of flash, and writing code retriggers it on nearly every
+    /// keystroke. The hint covers two cells.
     private func startBracketFade() {
         bracketFadeTimer?.invalidate()
         let started = bracketShownAt
         let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
-            self.needsDisplay = true
+            self.invalidateBracketRows()
             if CACurrentMediaTime() - started >= Self.bracketFlashDuration {
                 timer.invalidate()
                 self.bracketFadeTimer = nil
                 // One last pass with the hint expired, so it clears.
-                self.needsDisplay = true
+                self.invalidateBracketRows()
             }
         }
         RunLoop.main.add(t, forMode: .common)
         bracketFadeTimer = t
+    }
+
+    /// Rows a bracket hint was painted into on the last draw. Empty before the
+    /// first paint, which is the one case that still needs the whole view.
+    private var bracketRects: [CGRect] = []
+
+    private func invalidateBracketRows() {
+        guard !bracketRects.isEmpty else {
+            needsDisplay = true
+            return
+        }
+        for r in bracketRects {
+            setNeedsDisplay(r)
+        }
     }
 
 
@@ -1287,7 +1357,7 @@ final class EditorCanvasView: NSView {
         let band = rows(row, row)
         guard let line = band.first(where: { Int($0.lineNo) - 1 == row && !$0.isWrapContinuation })
         else { return nil }
-        let font = NSFont.monospacedSystemFont(ofSize: EditorMetrics.fontSize, weight: .regular)
+        let font = EditorMetrics.monospaced(EditorMetrics.fontSize, weight: .regular)
         let ct = ctLine(for: line, font: font)
         let x = docPoint.x - EditorMetrics.gutter
         let idx = CTLineGetStringIndexForPosition(ct, CGPoint(x: max(0, x), y: 0))
