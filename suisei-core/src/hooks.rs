@@ -1,6 +1,6 @@
 //! Limited plugin hooks — run shell commands on editor events.
 //!
-//! Config: `~/.xei/hooks.toml`
+//! Config: `~/.suisei/hooks.toml`
 //!
 //! ```toml
 //! # Placeholders: {file} {path} {dir} {ext} {event}  (shell-quoted automatically)
@@ -94,12 +94,7 @@ impl HooksConfig {
 }
 
 fn dirs_fallback() -> PathBuf {
-    if let Some(h) =
-        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-    {
-        return PathBuf::from(h).join(".xei");
-    }
-    PathBuf::from(".xei")
+    crate::fs_atomic::state_dir()
 }
 
 fn parse_hooks_toml(text: &str) -> HooksConfig {

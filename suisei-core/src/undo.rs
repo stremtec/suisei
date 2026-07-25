@@ -4,7 +4,7 @@
 //! - each history entry is a **line-range delta** (changed lines only)
 //! - one full snapshot (`last`, Arc-shared) anchors the live end of the chain
 //! - only the newest [`IN_RAM_MAX`] deltas stay in RAM; older ones spill to
-//!   `~/.xei/undo/<fnv(path)>.undo` and stream back in on deep undo
+//!   `~/.suisei/undo/<fnv(path)>.undo` and stream back in on deep undo
 //! - `undo_caching = true` keeps the spill file on close (plus a `.meta`
 //!   content hash) so reopening the same, unchanged file resumes its history;
 //!   `false` (default) deletes it
@@ -336,10 +336,7 @@ fn fnv64(s: &str) -> u64 {
 }
 
 fn undo_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".xei").join("undo")
+    crate::fs_atomic::state_path("undo")
 }
 
 fn spill_file_for(path: &Path) -> PathBuf {

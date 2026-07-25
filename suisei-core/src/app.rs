@@ -1,6 +1,5 @@
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::buffer::{Buffer, Position};
@@ -211,7 +210,7 @@ pub struct App {
     pub relative_number: bool,
     /// Soft-wrap long lines; false = horizontal scroll via `hscroll`.
     pub wrap_lines: bool,
-    /// Persist undo history to ~/.xei/undo on close (config `undo_caching`).
+    /// Persist undo history to ~/.suisei/undo on close (config `undo_caching`).
     pub undo_caching: bool,
     /// Per-feature GPU toggles under `gpu_acc`.
     pub gpu_graphics: bool,
@@ -294,7 +293,7 @@ pub struct App {
     pub rebase: crate::rebase::RebaseState,
     /// PR review (files + comments + diff).
     pub pr_review: crate::pr_review::PrReviewState,
-    /// Plugin hooks (`~/.xei/hooks.toml`).
+    /// Plugin hooks (`~/.suisei/hooks.toml`).
     pub hooks: crate::hooks::HooksConfig,
     /// Release check + self-update (welcome notice · :update).
     pub update: crate::update::UpdateState,
@@ -1056,7 +1055,7 @@ impl App {
         app
     }
 
-    /// Restore tabs/cursors from `~/.xei/session` (used when started with no file args).
+    /// Restore tabs/cursors from `~/.suisei/session` (used when started with no file args).
     pub fn restore_session(&mut self) {
         let session = session::load();
         if session.files.is_empty() {

@@ -217,7 +217,7 @@ pub fn help_entries() -> &'static [HelpEntry] {
             is_header: false,
         },
         HelpEntry {
-            keys: "~/.xei/hooks.toml",
+            keys: "~/.suisei/hooks.toml",
             desc: "Plugin hooks: on_save / on_open / on_quit",
             is_header: false,
         },
@@ -658,7 +658,7 @@ pub fn help_entries() -> &'static [HelpEntry] {
         },
         HelpEntry {
             keys: "s",
-            desc: "Save ~/.xei.toml",
+            desc: "Save ~/.suisei.toml",
             is_header: false,
         },
         HelpEntry {
@@ -1015,7 +1015,7 @@ impl SettingsPanel {
                         self.draft.undo_caching = !self.draft.undo_caching;
                         self.dirty = true;
                         self.status = Some(if self.draft.undo_caching {
-                            "undo_caching = true  (history survives close · ~/.xei/undo)".into()
+                            "undo_caching = true  (history survives close · ~/.suisei/undo)".into()
                         } else {
                             "undo_caching = false  (history discarded on close)".into()
                         });
@@ -1132,7 +1132,7 @@ impl SettingsPanel {
     pub fn save(&mut self) {
         config::save(&self.draft);
         self.dirty = false;
-        self.status = Some("Saved ~/.xei.toml".into());
+        self.status = Some("Saved ~/.suisei.toml".into());
     }
 
     pub fn version_string() -> String {

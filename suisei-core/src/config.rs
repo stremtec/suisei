@@ -1,4 +1,4 @@
-//! User config at `~/.xei.toml` (simple line-oriented, no extra deps).
+//! User config at `~/.suisei.toml` (simple line-oriented, no extra deps).
 
 use std::collections::HashMap;
 use std::fs;

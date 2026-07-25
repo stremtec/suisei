@@ -82,3 +82,70 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+/// Suisei's own state directory, `~/.suisei/`.
+///
+/// The fork inherited `~/.xei/` and kept writing there, so two editors shared
+/// one session file, one breakpoint list and one undo-spill directory keyed by
+/// a path hash — silent cross-clobbering. The journal was split out first when
+/// that collision was found, then the config when a `theme` left by the TUI
+/// pinned the GUI light on a dark desktop. This is the rest.
+pub fn state_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home).join(".suisei")
+}
+
+/// Path inside the state dir, adopting the matching `~/.xei/` entry once so an
+/// existing setup is not reset. Adoption is a copy, not a move: the TUI keeps
+/// working, and from here the two diverge.
+pub fn state_path(name: &str) -> std::path::PathBuf {
+    let ours = state_dir().join(name);
+    if !ours.exists() {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        let theirs = std::path::PathBuf::from(home).join(".xei").join(name);
+        if theirs.exists() {
+            let _ = std::fs::create_dir_all(state_dir());
+            if theirs.is_dir() {
+                copy_dir(&theirs, &ours);
+            } else {
+                let _ = std::fs::copy(&theirs, &ours);
+            }
+        }
+    }
+    ours
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    let _ = std::fs::create_dir_all(to);
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let dst = to.join(e.file_name());
+        if e.path().is_dir() {
+            copy_dir(&e.path(), &dst);
+        } else {
+            let _ = std::fs::copy(e.path(), dst);
+        }
+    }
+}
+
+#[cfg(test)]
+mod state_dir_tests {
+    use super::*;
+
+    #[test]
+    fn state_paths_live_under_suisei_not_xei() {
+        let p = state_path("breakpoints");
+        assert!(p.ends_with(".suisei/breakpoints"), "got {}", p.display());
+        assert!(
+            !p.to_string_lossy().contains("/.xei/"),
+            "state must not be shared with the xei TUI: {}",
+            p.display()
+        );
+    }
+}

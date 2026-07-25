@@ -86,7 +86,7 @@ pub struct LspClient {
     last_semantic_req_version: i64,
     /// Master switch from config.
     pub enabled: bool,
-    /// Per-language command overrides (from ~/.xei.toml `lsp.*`).
+    /// Per-language command overrides (from ~/.suisei.toml `lsp.*`).
     pub server_overrides: HashMap<String, String>,
 }
 

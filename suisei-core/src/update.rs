@@ -2,7 +2,7 @@
 //!
 //! On startup (when `update_check = true`, default) a background thread asks
 //! GitHub for the latest release tag — non-blocking, silent on any failure,
-//! throttled to one network hit per ~4h via `~/.xei/update_check` (which
+//! throttled to one network hit per ~4h via `~/.suisei/update_check` (which
 //! caches the found version so throttled launches still banner). When a newer version
 //! exists the welcome screen shows a notice and `:update` swaps the running
 //! binary in place (download → gunzip → atomic rename over `current_exe`),
@@ -169,10 +169,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
 }
 
 fn xei_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".xei")
+    crate::fs_atomic::state_dir()
 }
 
 enum Throttle {

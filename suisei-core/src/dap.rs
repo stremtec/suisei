@@ -459,13 +459,10 @@ impl DapClient {
     }
 
     fn breakpoints_path() -> PathBuf {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(".xei").join("breakpoints")
+        crate::fs_atomic::state_path("breakpoints")
     }
 
-    /// Persist BPs to `~/.xei/breakpoints` (`path|line[:cond][:log=msg]`).
+    /// Persist BPs to `~/.suisei/breakpoints` (`path|line[:cond][:log=msg]`).
     pub fn persist_breakpoints(&self) -> Result<(), String> {
         let path = Self::breakpoints_path();
         if let Some(parent) = path.parent() {
@@ -486,7 +483,7 @@ impl DapClient {
         std::fs::write(path, out).map_err(|e| e.to_string())
     }
 
-    /// Load BPs from `~/.xei/breakpoints` (merge into current map).
+    /// Load BPs from `~/.suisei/breakpoints` (merge into current map).
     pub fn load_persisted_breakpoints(&mut self) {
         let Ok(text) = std::fs::read_to_string(Self::breakpoints_path()) else {
             return;

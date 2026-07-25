@@ -1,7 +1,6 @@
 //! Token kinds, theme styling, and line-based fallback tokenizer.
 
 
-use crate::theme::Theme;
 
 /// Rich highlight categories (tree-sitter captures + LSP semantic tokens).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

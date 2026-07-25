@@ -17,13 +17,10 @@ pub struct Session {
 }
 
 fn session_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".xei").join("session")
+    crate::fs_atomic::state_path("session")
 }
 
-/// Load session from `~/.xei/session`. Returns empty session if missing.
+/// Load session from `~/.suisei/session`. Returns empty session if missing.
 pub fn load() -> Session {
     let mut session = Session::default();
     let Ok(text) = fs::read_to_string(session_path()) else {
@@ -58,7 +55,7 @@ pub fn load() -> Session {
     session
 }
 
-/// Persist session to `~/.xei/session`.
+/// Persist session to `~/.suisei/session`.
 pub fn save(session: &Session) {
     let path = session_path();
     if let Some(parent) = path.parent() {
