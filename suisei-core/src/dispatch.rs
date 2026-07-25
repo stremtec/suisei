@@ -602,12 +602,9 @@ fn handle_palette(app: &mut App, code: KeyCode) {
             app.message = String::new();
         }
         KeyCode::Enter => app.execute_palette_selection(),
-        KeyCode::Down | KeyCode::Char('j') if app.palette.query.is_empty() => {
-            app.palette.move_down();
-        }
-        KeyCode::Up | KeyCode::Char('k') if app.palette.query.is_empty() => {
-            app.palette.move_up();
-        }
+        // `j`/`k` used to move the selection while the query was empty — vim
+        // habit that made those two letters untypeable as the first character
+        // of a filter. Arrows move; letters always type.
         KeyCode::Down => app.palette.move_down(),
         KeyCode::Up => app.palette.move_up(),
         KeyCode::Backspace => app.palette.pop_char(),

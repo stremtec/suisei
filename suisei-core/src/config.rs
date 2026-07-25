@@ -107,6 +107,12 @@ fn config_path() -> PathBuf {
 }
 
 /// One-time adoption of the old shared file, so an existing setup is not reset.
+///
+/// `theme` is deliberately NOT carried over. Whatever is in the xei config is
+/// the *TUI's* choice, and a terminal editor has no system appearance to
+/// follow — carrying a `theme = "light"` across is exactly what left the GUI
+/// light on a dark desktop. Adoption starts at `system`; every other setting
+/// (tab width, LSP servers, hooks) transfers as-is.
 fn migrate_from_xei() {
     let ours = config_path();
     if ours.exists() {
@@ -114,7 +120,12 @@ fn migrate_from_xei() {
     }
     let theirs = home_dir().join(".xei.toml");
     if let Ok(content) = fs::read_to_string(&theirs) {
-        let _ = fs::write(&ours, content);
+        let kept: String = content
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("theme"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let _ = fs::write(&ours, format!("# suisei config\ntheme = \"system\"\n{kept}"));
     }
 }
 
@@ -287,5 +298,28 @@ pub fn load_theme() -> Option<String> {
         None
     } else {
         Some(cfg.theme)
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    /// The xei config's `theme` is the *TUI's* choice and has no notion of
+    /// following the system. Carrying it over is what put the GUI in light mode
+    /// on a dark desktop — twice.
+    #[test]
+    fn adoption_drops_the_theme_and_keeps_the_rest() {
+        let src = "# xei config\ntheme = \"light\"\ntab_width = 2\nlsp_enabled = true\n";
+        let kept: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("theme"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let out = format!("# suisei config\ntheme = \"system\"\n{kept}");
+        assert!(out.contains("theme = \"system\""));
+        assert!(!out.contains("theme = \"light\""));
+        assert!(out.contains("tab_width = 2"));
+        assert!(out.contains("lsp_enabled = true"));
     }
 }

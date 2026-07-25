@@ -196,16 +196,18 @@ impl Palette {
         if q.is_empty() {
             self.filtered = (0..self.items.len()).collect();
         } else {
-            self.filtered = self
+            let mut scored: Vec<(i32, usize)> = self
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(_, it)| {
+                .filter_map(|(i, it)| {
                     let hay = format!("{} {}", it.label, it.detail).to_lowercase();
-                    fuzzy_match(&hay, &q)
+                    fuzzy_score(&hay, &q).map(|s| (s, i))
                 })
-                .map(|(i, _)| i)
                 .collect();
+            // Best first; original order breaks ties so the list is stable.
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            self.filtered = scored.into_iter().map(|(_, i)| i).collect();
         }
         if self.selected >= self.filtered.len() {
             self.selected = self.filtered.len().saturating_sub(1);
@@ -255,19 +257,58 @@ impl Palette {
     }
 }
 
-fn fuzzy_match(hay: &str, needle: &str) -> bool {
-    // subsequence match (vscode-ish)
-    let mut it = hay.chars();
-    for nc in needle.chars() {
-        loop {
-            match it.next() {
-                Some(hc) if hc == nc => break,
-                Some(_) => continue,
-                None => return false,
-            }
-        }
+/// Score a subsequence match, or `None` when `needle` does not fit in `hay`.
+/// Higher is better.
+///
+/// A bare subsequence test — which this was — matches nearly every long
+/// absolute path, and with no score the results stayed in filesystem-walk
+/// order. Since the face only renders the first 40, the file you wanted could
+/// be match #500 and simply never appear. Scoring is what makes "type three
+/// letters, hit Enter" work.
+fn fuzzy_score(hay: &str, needle: &str) -> Option<i32> {
+    let h: Vec<char> = hay.chars().collect();
+    let n: Vec<char> = needle.chars().collect();
+    if n.is_empty() {
+        return Some(0);
     }
-    true
+    // Where the basename starts — a hit there is worth far more than one
+    // buried in a directory component.
+    let base = hay.rfind('/').map(|i| hay[..i].chars().count() + 1).unwrap_or(0);
+
+    let mut score = 0i32;
+    let mut hi = 0usize;
+    let mut prev_hit: Option<usize> = None;
+    for &nc in &n {
+        let start = hi;
+        loop {
+            if hi >= h.len() {
+                return None;
+            }
+            if h[hi] == nc {
+                break;
+            }
+            hi += 1;
+        }
+        // Consecutive characters are the strongest signal.
+        if prev_hit == Some(hi.wrapping_sub(1)) {
+            score += 15;
+        }
+        // Start of a path/word component.
+        let boundary = hi == 0 || matches!(h[hi - 1], '/' | '_' | '-' | '.' | ' ');
+        if boundary {
+            score += 10;
+        }
+        if hi >= base {
+            score += 12;
+        }
+        // Prefer hits that did not need a long skip.
+        score -= ((hi - start) as i32).min(10);
+        prev_hit = Some(hi);
+        hi += 1;
+    }
+    // Shorter candidates win ties: `lsp.rs` over `.../vendor/lsp.rs`.
+    score -= (h.len() as i32) / 24;
+    Some(score)
 }
 
 fn builtin_commands() -> Vec<PaletteItem> {
@@ -365,8 +406,8 @@ mod tests {
 
     #[test]
     fn fuzzy_subsequence() {
-        assert!(fuzzy_match("src/main.rs", "smr"));
-        assert!(!fuzzy_match("src/main.rs", "xyz"));
+        assert!(fuzzy_score("src/main.rs", "smr").is_some());
+        assert!(fuzzy_score("src/main.rs", "xyz").is_none());
     }
 
     #[test]
@@ -376,5 +417,64 @@ mod tests {
         p.query = "save".into();
         p.refilter();
         assert!(!p.filtered.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fuzzy_tests {
+    use super::*;
+
+    fn item(label: &str) -> PaletteItem {
+        PaletteItem {
+            label: label.into(),
+            detail: String::new(),
+            action: PaletteAction::Command("noop"),
+        }
+    }
+
+    fn ranked(files: &[&str], query: &str) -> Vec<String> {
+        let mut p = Palette::new();
+        p.items = files.iter().map(|f| item(f)).collect();
+        p.query = query.into();
+        p.refilter();
+        p.filtered.iter().map(|&i| p.items[i].label.clone()).collect()
+    }
+
+    /// The bug this replaces: an unranked subsequence test left the wanted file
+    /// wherever the filesystem walk happened to put it, and the face only draws
+    /// the first 40.
+    #[test]
+    fn the_real_file_outranks_incidental_path_matches() {
+        let out = ranked(
+            &[
+                "var/tmp/sysdiagnose_2026_macOS_gu_i_edit_junk/acdi.log",
+                "suisei-core/src/gui_edit.rs",
+                "var/folders/g/u/i/e/d/i/t/cache",
+            ],
+            "gui_edit",
+        );
+        assert_eq!(out.first().map(String::as_str), Some("suisei-core/src/gui_edit.rs"));
+    }
+
+    #[test]
+    fn a_basename_hit_beats_a_directory_hit() {
+        let out = ranked(&["lsp/src/other.rs", "core/src/lsp.rs"], "lsp");
+        assert_eq!(out.first().map(String::as_str), Some("core/src/lsp.rs"));
+    }
+
+    #[test]
+    fn consecutive_characters_win_over_scattered_ones() {
+        let out = ranked(&["a/p/p/l/e/x.rs", "src/apple.rs"], "apple");
+        assert_eq!(out.first().map(String::as_str), Some("src/apple.rs"));
+    }
+
+    #[test]
+    fn a_needle_that_does_not_fit_is_dropped() {
+        assert!(ranked(&["src/main.rs"], "zzz").is_empty());
+    }
+
+    #[test]
+    fn an_empty_query_keeps_everything_in_order() {
+        assert_eq!(ranked(&["b.rs", "a.rs"], ""), vec!["b.rs", "a.rs"]);
     }
 }
