@@ -1019,10 +1019,16 @@ struct ContentView: View {
                 // tabs spilled across the sidebar). Before the first
                 // measurement arrives, take the full allowance rather than the
                 // floor — a 60pt strip reads as a broken tab bar.
+                // Viewport pinned to the chips' own height so there is no
+                // spare vertical room for a horizontal `ScrollView` to align
+                // content within. (This was not the cause of the "+" sitting
+                // low — that was type metrics, see `plusInkNudge` — but an
+                // ambiguous viewport is worth removing anyway.)
                 .frame(
                     width: tabStripContentWidth > 0
                         ? min(maxWidth, tabStripContentWidth)
-                        : maxWidth
+                        : maxWidth,
+                    height: Self.tabLabelFrameH
                 )
                 // Clipped ends melt away instead of hard-cutting.
                 .mask(
@@ -1213,35 +1219,53 @@ struct ContentView: View {
     // was hand-measured at one font size, in the wrong direction, and left the
     // glyph about 1.2pt low.
     private static let plusPointSize: CGFloat = 20
-    private static let plusFrameH: CGFloat = 26
+    /// Same box as a tab chip, so the two are centred by the same rule and only
+    /// the glyph-ink difference below is left to correct.
+    private static let plusFrameH: CGFloat = 24
     private static let tabLabelPointSize: CGFloat = 12
     private static let tabLabelFrameH: CGFloat = 24
 
-    /// Nudge that lands the "+" ink on the tab labels' ink line.
+    /// Nudge that lands the "+" on the tab labels' optical line.
     ///
-    /// SwiftUI centres a `Text` by its LINE BOX (ascender…descender), not by
-    /// the glyph's ink — and the distance between those two scales with font
-    /// size. The "+" is 20pt and a tab label 12pt, so centring both leaves them
-    /// visibly out of line even though each is "centred". Measuring the two ink
-    /// boxes and taking the difference is the only version of this that stays
-    /// correct if either size is ever changed.
+    /// Three attempts, and the useful part is what each ruled out. Frame height
+    /// is irrelevant: it cancels out of `(H - lineH)/2 + ascender - H/2`, so
+    /// matching box sizes changed nothing. Deriving from the label's INK box
+    /// (−0.50…−0.70pt) still read low — brackets and descenders stretch that box
+    /// below where the eye puts the line. Deriving from the baseline–cap band
+    /// (−1.57pt) overshot high.
+    ///
+    /// Those two bracket it. The optical centre of mixed-case text sits between
+    /// its x-height and cap-height midpoints — the usual reference for centring
+    /// a symbol against running text — and a "+" is drawn on the maths axis, so
+    /// its own ink centre already is its optical centre. That derivation gives
+    /// −1.03pt, which read very slightly high; the bracket is now
+    /// −0.70 (low) … −1.03 (slightly high), and `opticalTrim` takes the
+    /// remainder. It is the one number here that is observed rather than
+    /// derived, which is why it is named and isolated instead of folded into
+    /// the formula.
     private static let plusInkNudge: CGFloat = {
-        func inkOffsetFromFrameCentre(_ text: String, size: CGFloat, frameH: CGFloat) -> CGFloat {
-            let font = NSFont.systemFont(ofSize: size, weight: .regular)
-            let line = CTLineCreateWithAttributedString(
-                NSAttributedString(string: text, attributes: [.font: font])
-            )
-            let ink = CTLineGetImageBounds(line, nil)
-            let lineH = font.ascender - font.descender
-            let baselineFromTop = (frameH - lineH) / 2 + font.ascender
-            return (baselineFromTop - ink.midY) - frameH / 2
+        /// How far below a centred `Text`'s frame centre its baseline sits.
+        func baselineBelowCentre(_ size: CGFloat) -> CGFloat {
+            let f = NSFont.systemFont(ofSize: size, weight: .regular)
+            return f.ascender - (f.ascender - f.descender) / 2
         }
-        // "Xy" stands in for a tab title: a cap and a descender, so the ink box
-        // matches what a real filename produces.
-        let label = inkOffsetFromFrameCentre("Xy", size: tabLabelPointSize, frameH: tabLabelFrameH)
-        let plus = inkOffsetFromFrameCentre("+", size: plusPointSize, frameH: plusFrameH)
-        return label - plus
+        let labelFont = NSFont.systemFont(ofSize: tabLabelPointSize, weight: .regular)
+        let opticalBand = (labelFont.capHeight / 2 + labelFont.xHeight / 2) / 2
+        let labelCentre = baselineBelowCentre(tabLabelPointSize) - opticalBand
+
+        let plusFont = NSFont.systemFont(ofSize: plusPointSize, weight: .regular)
+        let plusLine = CTLineCreateWithAttributedString(
+            NSAttributedString(string: "+", attributes: [.font: plusFont])
+        )
+        let plusCentre = baselineBelowCentre(plusPointSize)
+            - CTLineGetImageBounds(plusLine, nil).midY
+
+        return labelCentre - plusCentre + opticalTrim
     }()
+
+    /// Residual from eyeballing on a Retina display: the derived value sat a
+    /// touch high. Positive moves the glyph down.
+    private static let opticalTrim: CGFloat = 0.2
 
     private func applyNavMode(_ mode: NavMode) {
         switch mode {
