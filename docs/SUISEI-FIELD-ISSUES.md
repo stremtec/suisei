@@ -150,9 +150,29 @@ No motion continuity between the outgoing and incoming tab.
 Both directions. Compare against the inspector, whose pill work already landed.
 
 ### E4 · The travelling pill's *colour* transition is awkward while it moves ·
-OPEN
-Both sidebars. The geometry now animates (that was the earlier inspector-border
-fix); the fill/label colour still cuts rather than crossfades.
+FIXED (2026-07-26)
+Frame capture settled it in one look. Through the flight the pill went
+**accent → pale → pure white → pale → accent**: while travelling, the solid
+accent pill is hidden and a `LiquidGlassPill` drawn instead, and that glass was
+applied to `Color.clear`. Untinted glass over the rail's light chrome is white,
+so the selection appeared to vanish and a white smear crossed the strip.
+
+The glass now carries `.regular.tint(.accentColor)`, so the indicator keeps its
+identity for the whole journey. Two follow-ons fell out of that:
+
+* The icon ink now keys off the pill's *travel* rather than the click.
+  `navMode` changes one frame before the flight begins, so the destination icon
+  flashed white, dimmed for the whole journey, then snapped back. The origin now
+  hands its ink over as the pill leaves and the destination takes it as the pill
+  arrives — legible only because the pill is tinted.
+* A slot the pill merely *crosses* on a two-slot jump used to sit in unselected
+  grey while solid accent slid across it; lighting is now a triangular window
+  over the whole span, not just its endpoints.
+
+Capture method, for the next one of these: `screencapture -x -R <x,y,w,h>` in a
+loop (~76 ms/frame) while clicking, then diff consecutive frames to find the
+transition. Region coordinates are points; the computer-use screenshot is scaled
+(1389 px wide for a 2048-point display, ×1.474).
 
 ---
 

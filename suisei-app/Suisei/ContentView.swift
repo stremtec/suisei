@@ -759,7 +759,8 @@ struct ContentView: View {
                                     ?? CGFloat(selectionFrom) * (modesW / modes),
                                 to: pillDragX ?? CGFloat(selectionTo) * (modesW / modes),
                                 width: modesW / modes,
-                                height: NavStrip.iconH
+                                height: NavStrip.iconH,
+                                tint: .accentColor
                             ))
                         }
                         .shadow(color: .black.opacity(0.16), radius: 6, y: 2)
@@ -782,13 +783,7 @@ struct ContentView: View {
                             }
                             focused = true
                         } label: {
-                            // White ink only while the SOLID pill is beneath —
-                            // white on the light glass was invisible, and the
-                            // origin icon "vanished" for the whole flight.
-                            navStripIcon(
-                                mode.systemImage,
-                                on: engine.uiNavVisible && navMode == mode && !pillLiquid
-                            )
+                            navStripIcon(mode.systemImage, lit: navSlotLit(mode))
                         }
                         .buttonStyle(.plain)
                         .help(mode.title)
@@ -936,10 +931,35 @@ struct ContentView: View {
     /// icons spread, the blue pill has to spread with them or it reads as a
     /// button that forgot to grow (Xcode's does grow). `iconW` survives only as
     /// the floor the toggle shrinks to once the pill splits.
-    private func navStripIcon(_ systemImage: String, on: Bool) -> some View {
+    /// How lit a slot's icon is, 0 (unselected grey) … 1 (white on the pill).
+    ///
+    /// Tied to the pill's own travel, not to the click. Keying it off `navMode`
+    /// flipped both icons the instant the button was pressed, and `navMode`
+    /// changes one frame before the flight starts: the destination flashed
+    /// white, dimmed for the whole journey, then snapped back. Now the origin
+    /// hands its ink over as the pill leaves and the destination takes it as
+    /// the pill arrives — which is only legible because the travelling pill
+    /// carries the accent tint now (see `LiquidGlassPill.tint`).
+    private func navSlotLit(_ mode: NavMode) -> Double {
+        guard engine.uiNavVisible,
+              let slot = NavMode.allCases.firstIndex(of: mode) else { return 0 }
+        guard pillLiquid, selectionTo != selectionFrom else {
+            return navMode == mode ? 1 : 0
+        }
+        // Light whatever the pill is passing over, not only its endpoints: on a
+        // two-slot jump the slot in the middle sat in unselected grey while
+        // solid accent slid across it. `t` is the progress at which the pill is
+        // centred on this slot; `reach` is one slot's worth of progress.
+        let span = Double(selectionTo - selectionFrom)
+        let t = (Double(slot) - Double(selectionFrom)) / span
+        let reach = 1 / abs(span)
+        return max(0, 1 - abs(Double(selectionProgress) - t) / reach)
+    }
+
+    private func navStripIcon(_ systemImage: String, lit: Double) -> some View {
         Image(systemName: systemImage)
             .font(.system(size: 12.5, weight: .medium))
-            .foregroundStyle(on ? Color.white : Color.secondary)
+            .foregroundStyle(Color.secondary.mix(with: .white, by: lit))
             .frame(maxWidth: .infinity)
             .frame(height: NavStrip.iconH)
             .contentShape(Rectangle())
@@ -948,7 +968,7 @@ struct ContentView: View {
     /// The Debug Area toggle keeps its OWN fill: it is not part of the mode
     /// sequence, so the travelling indicator must never visit it.
     private func navStripToggleIcon(_ systemImage: String, on: Bool) -> some View {
-        navStripIcon(systemImage, on: on)
+        navStripIcon(systemImage, lit: on ? 1 : 0)
             .background(
                 Capsule(style: .continuous).fill(on ? Color.accentColor : Color.clear)
             )
@@ -3202,7 +3222,8 @@ struct ContentView: View {
                             from: CGFloat(inspectorFrom) * slot,
                             to: CGFloat(inspectorTo) * slot,
                             width: slot,
-                            height: 22
+                            height: 22,
+                            tint: .accentColor
                         ))
                     }
                     .shadow(color: .black.opacity(0.16), radius: 6, y: 2)
@@ -4538,6 +4559,12 @@ private struct LiquidGlassPill: ViewModifier, Animatable {
     var to: CGFloat
     var width: CGFloat
     var height: CGFloat
+    /// Carried through the flight so the indicator keeps its identity.
+    /// Untinted, this glass is clear — over the rail's light chrome the
+    /// travelling pill turned **white** for most of its journey (frame capture,
+    /// 2026-07-26: accent → pale → pure white → pale → accent), which reads as
+    /// the selection vanishing and a smear crossing the strip.
+    var tint: Color
     /// How far the liquid outgrows the resting pill.
     private static let swell: CGFloat = 8
 
@@ -4558,7 +4585,7 @@ private struct LiquidGlassPill: ViewModifier, Animatable {
             // lensing smears glyphs at this 30pt scale — and regular is the
             // variant that carries Apple's full rim highlight + lighting
             // treatment, which `.clear` largely forgoes.
-            .glassEffect(.regular.interactive(), in: Capsule())
+            .glassEffect(.regular.tint(tint).interactive(), in: Capsule())
             .glassEffectTransition(.materialize)
             .position(x: g.centre, y: height / 2)
     }
