@@ -1198,20 +1198,50 @@ struct ContentView: View {
             // which sits ~1-2px ABOVE where text visually reads — that was the
             // persistent "+ too high". Text has no such offset to fight.
             Text("+")
-                .font(.system(size: 20, weight: .regular))
+                .font(.system(size: Self.plusPointSize, weight: .regular))
                 .foregroundStyle(.secondary)
-                .frame(width: 22, height: 26)
-                // SF Pro draws "+" exactly 1 device px ABOVE its own line-box
-                // centre (measured: glyph ink mid 55 vs tab-label ink mid 56 on
-                // a 2x display; constant across font size and frame height, so
-                // it is a glyph metric, not a layout bug). Half a point puts the
-                // ink dead level with the tab labels.
-                .offset(y: 0.5)
+                .frame(width: 22, height: Self.plusFrameH)
+                .offset(y: Self.plusInkNudge)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("Tabs · ⌃⇥ cycle · split editors")
     }
+
+    // Type metrics for the tab strip's "+". Kept next to the button they
+    // correct, and DERIVED rather than eyeballed: the previous constant here
+    // was hand-measured at one font size, in the wrong direction, and left the
+    // glyph about 1.2pt low.
+    private static let plusPointSize: CGFloat = 20
+    private static let plusFrameH: CGFloat = 26
+    private static let tabLabelPointSize: CGFloat = 12
+    private static let tabLabelFrameH: CGFloat = 24
+
+    /// Nudge that lands the "+" ink on the tab labels' ink line.
+    ///
+    /// SwiftUI centres a `Text` by its LINE BOX (ascender…descender), not by
+    /// the glyph's ink — and the distance between those two scales with font
+    /// size. The "+" is 20pt and a tab label 12pt, so centring both leaves them
+    /// visibly out of line even though each is "centred". Measuring the two ink
+    /// boxes and taking the difference is the only version of this that stays
+    /// correct if either size is ever changed.
+    private static let plusInkNudge: CGFloat = {
+        func inkOffsetFromFrameCentre(_ text: String, size: CGFloat, frameH: CGFloat) -> CGFloat {
+            let font = NSFont.systemFont(ofSize: size, weight: .regular)
+            let line = CTLineCreateWithAttributedString(
+                NSAttributedString(string: text, attributes: [.font: font])
+            )
+            let ink = CTLineGetImageBounds(line, nil)
+            let lineH = font.ascender - font.descender
+            let baselineFromTop = (frameH - lineH) / 2 + font.ascender
+            return (baselineFromTop - ink.midY) - frameH / 2
+        }
+        // "Xy" stands in for a tab title: a cap and a descender, so the ink box
+        // matches what a real filename produces.
+        let label = inkOffsetFromFrameCentre("Xy", size: tabLabelPointSize, frameH: tabLabelFrameH)
+        let plus = inkOffsetFromFrameCentre("+", size: plusPointSize, frameH: plusFrameH)
+        return label - plus
+    }()
 
     private func applyNavMode(_ mode: NavMode) {
         switch mode {
@@ -3159,13 +3189,20 @@ struct ContentView: View {
         }
         .frame(height: 22)
         .padding(2)
+        // Fill AND border in one background, the way the navigator rail does
+        // it. As an `.overlay` the border drew ON TOP of the travelling pill,
+        // and being a translucent `separatorColor` the pill showed straight
+        // through it whenever it slid under the capsule's edge — visible only
+        // mid-animation, which is why it survived so long.
         .background(
             Capsule(style: .continuous)
                 .fill(Color.primary.opacity(isLightTheme ? 0.035 : 0.06))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1)
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(
+                            Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1
+                        )
+                )
         )
         .padding(.horizontal, 10)
         .padding(.top, 8)
