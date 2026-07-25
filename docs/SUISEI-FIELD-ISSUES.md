@@ -13,27 +13,64 @@ Opened 2026-07-26 from a single usability pass.
 
 ## A. Editing performance — the loudest problem
 
-### A1 · Large files are slow to edit; typing lags · OPEN
-Typing latency grows with file size, and indexing finishing does not help.
-Suspects, in the order they should be measured (**measure before touching
-anything** — the last three "obvious" performance guesses in this project were
-all wrong):
-- `Vec<String>` buffer + full-text rebuilds. Every consumer that wants the
-  document joins the lines again. `sync_lsp_document` sends **whole-file**
-  `didChange` on a 3-tick throttle; on a large file that is a full `String`
-  build plus JSON-escape per sync.
-- Syntax re-parse per keystroke (`app.syntax`), no incremental edit path.
-- `recompose()` cost: the engine tick chooses full vs light recompose, but
-  chrome-dirty ticks force the full path.
-- The journal (`journal.rs`) writes the whole dirty buffer on a 250 ms / 4 KiB
-  policy — another full-text build.
-This is the `SUISEI-CURRENT-STATE.md` P1.4 delta work arriving as a real
-complaint. Gate: a 6,000-line file types at frame budget with the LSP live.
+### A1 · Large files are slow to edit; typing lags · CAUSE (partly)
+
+**Measured 2026-07-26. Most of the obvious suspects are innocent** — recorded
+here so nobody re-suspects them.
+
+Rust side (`tests/tick_breakdown.rs`, `tests/keystroke_latency.rs`, release):
+
+| | 2k lines | 20k | 60k |
+|---|---|---|---|
+| `dispatch_key` (one keystroke, 6k-line file) | — | 0.038 ms | — |
+| `buffer.text()` | 0.008 ms | 0.077 ms | 0.238 ms |
+| `build_outline` | 0.364 ms | 0.731 ms | 0.727 ms |
+| idle tick | 0.008 ms | 0.094 ms | 0.239 ms |
+| worst tick after an edit | 0.623 ms | 2.066 ms | 4.514 ms |
+
+Face side (`PerfProbe`, **-Onone debug** build so these are inflated, 5,700-line
+file, per keystroke):
+
+| | mean | max |
+|---|---|---|
+| `EditorCanvasView.draw` | 1.64 ms | 2.47 ms |
+| `refreshEditorPaintOnly` | 1.69 ms | 1.78 ms |
+| ⤷ `decodeEditorLinesAndSplit` | 0.82 ms | 0.91 ms |
+| ⤷ `suisei_engine_chrome` (the FFI call) | 0.006 ms | |
+| ⤷ 180 KiB snapshot alloc | 0.014 ms | |
+| ⤷ `lines != editorLines` compare | 0.024 ms | |
+| ⤷ `@Published` assignment | 0.027 ms | |
+| `refreshChrome` (full shell) | 1.74 ms | 6.23 ms |
+| `minimapData` | **1 miss per 25 keystrokes** | |
+
+Cleared of suspicion: the Rust engine (two orders of magnitude under budget),
+the C ABI call, the 180 KiB snapshot copy, the line decode/compare/publish, and
+the minimap (its version cache holds).
+
+**Found and fixed:** the shadow-WAL call site built the entire document on
+*every* tick — 20×/second, dirty or clean — for a value the 250 ms/4 KiB policy
+throws away most of the time. Now a closure, called only on an actual flush.
+
+**Still open — the real remainder.** Nothing measured above scales the way the
+complaint does, and two things are still unmeasured:
+1. **SwiftUI's own re-render** after `@Published chrome` fires. The probe stops
+   at the assignment; body evaluation, layout and diffing of the whole shell
+   (tab bar, breadcrumb, outline list, status bar, project tree) happen after.
+   `refreshChrome` runs 120 ms after every typing pause via `scheduleChromeSettle`.
+2. **A release-build number.** Everything above on the face side is `-Onone`;
+   real latency needs `./scripts/package-suisei-app.sh` without `SUISEI_FAST`.
+Next step: instrument SwiftUI body evaluation (or Instruments' SwiftUI template)
+against a release build, and re-measure with rust-analyzer live — the user notes
+the lag persists after indexing completes, which points at the diagnostics /
+semantic-token republish path rather than at indexing itself.
+
+Gate: a 6,000-line file types at frame budget with the LSP live.
 
 ### A2 · Intermittent stalls ("자꾸 렉걸린다") · OPEN
-Distinct from A1: hitches during ordinary use, not only in big files. Look for
-synchronous work on the tick — git refresh, explorer refresh, project index,
-`FileManager` enumeration on the main actor.
+Distinct from A1: hitches during ordinary use, not only in big files. The Rust
+tick is ruled out (worst post-edit tick is 4.5 ms at 60,000 lines). Remaining:
+synchronous work on the main actor — git refresh, explorer refresh, project
+index, `FileManager` enumeration.
 
 ---
 
@@ -45,11 +82,15 @@ mutates the buffer (or bumps its version) on open: trailing-newline
 normalisation, tab expansion, EOL translation, or a scroll/cursor write that
 bumps `version()`.
 
-### B2 · Undo back to the original state stays dirty · OPEN
-`modified` is a latch, not a comparison. The fix is a saved-version watermark:
-record `buffer.version()` at load/save and clear `modified` whenever the current
-version equals it. Undo must restore the *version*, not just the text, or the
-watermark never matches again.
+### B2 · Undo back to the original state stays dirty · FIXED (2026-07-26)
+`modified` was a one-way latch: set by every edit, cleared only by a save. A
+version watermark does not work — `Buffer::restore` calls `touch()`, so undo
+produces a *fresh* version even when the text is identical. `App` now keeps
+`saved_hash`, the fingerprint of the text as it stands on disk, recorded by
+`mark_clean()` at load and after each save. Undo and redo call
+`refresh_modified()`, which compares. That comparison is O(file), which is why
+it is confined to undo/redo: typing can only ever make a document dirtier, so
+the cheap latch stays on the hot path.
 
 ---
 
@@ -135,3 +176,23 @@ being "fixed" by the third guess. For each one: reproduce in the running app,
 find the mechanism, state the mechanism in the commit, then fix. Frame-by-frame
 capture beat reasoning twice already (the folder-expand animation, the `+`
 optical centre) — reach for it early.
+
+For anything that feels *slow*, measure both sides before touching code:
+
+```bash
+cargo test -p suisei-engine --release --test tick_breakdown -- --ignored --nocapture
+```
+
+```bash
+cargo test -p suisei-engine --release --test keystroke_latency -- --ignored --nocapture
+```
+
+```bash
+SUISEI_PERF=1 ./suisei-app/.build/Suisei.app/Contents/MacOS/Suisei
+```
+
+The last one prints a per-label mean/max/total to stderr every 2 s (see
+`PerfProbe.swift`); launching the binary directly rather than via `open` is what
+puts stderr on the terminal. It is compiled into every build and costs nothing
+when the variable is unset. A1 above is what that tooling found — and what it
+cleared.

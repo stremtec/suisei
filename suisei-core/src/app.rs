@@ -320,6 +320,12 @@ pub struct App {
     /// once per change instead of the old pre-edit push_undo notification.
     lsp_synced_path: Option<PathBuf>,
     lsp_synced_hash: u64,
+    /// Fingerprint of the text as it stands on disk (at load, and after each
+    /// save). `modified` is a one-way latch — set by every edit, cleared only
+    /// by a save — so undoing back to the original state left the file marked
+    /// dirty forever. This is what lets `undo` put the flag back down; see
+    /// [`App::refresh_modified`].
+    saved_hash: u64,
 }
 
 #[derive(Clone)]
@@ -328,6 +334,9 @@ pub struct BufferTab {
     pub filename: Option<PathBuf>,
     pub scroll: usize,
     pub modified: bool,
+    /// Per-tab twin of [`App::saved_hash`], so switching tabs carries each
+    /// document's on-disk fingerprint with it.
+    pub saved_hash: u64,
     pub undo_stack: UndoStack,
     pub file_mtime: Option<std::time::SystemTime>,
 }
@@ -431,7 +440,7 @@ impl Default for App {
             running: true,
             mode: Mode::Editor,
             buffer: Buffer::new(),
-            message: String::from("Welcome to xei! i=insert :=XLC h/j/k/l=move"),
+            message: String::from("Suisei"),
             filename: None,
             scroll: 0,
             scroll_frac: 0.0,
@@ -474,6 +483,7 @@ impl Default for App {
                 filename: None,
                 scroll: 0,
                 modified: false,
+                saved_hash: EMPTY_TEXT_HASH,
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
             }],
@@ -556,12 +566,17 @@ impl Default for App {
             rename_pending: false,
             lsp_synced_path: None,
             lsp_synced_hash: 0,
+            saved_hash: EMPTY_TEXT_HASH,
         }
     }
 }
 
 /// FNV-1a over the whole document — cheap enough per sync tick, and unlike a
 /// sampled fingerprint it cannot miss an edit.
+/// `text_hash("")` — the clean fingerprint of a brand-new empty buffer. A
+/// literal so `App::default()` stays a plain struct expression.
+const EMPTY_TEXT_HASH: u64 = 0xcbf2_9ce4_8422_2325;
+
 fn text_hash(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in s.as_bytes() {
@@ -942,6 +957,7 @@ impl App {
                 .join(&pathbuf)
         };
         let content = fs::read_to_string(&abs_path).unwrap_or_default();
+        let on_disk_hash = text_hash(&content);
         let message = format!("Opened: {}", abs_path.display());
         let buffer = Buffer::from_string(&content);
         let mut undo = UndoStack::new();
@@ -959,6 +975,7 @@ impl App {
                 filename: Some(abs_path.clone()),
                 scroll: 0,
                 modified: false,
+                saved_hash: on_disk_hash,
                 undo_stack: undo,
                 file_mtime: mtime,
             }],
@@ -994,11 +1011,12 @@ impl App {
                 self.buffer.cursor.row = f.row.min(self.buffer.line_count().saturating_sub(1));
                 let line_len = self.buffer.line(self.buffer.cursor.row).chars().count();
                 self.buffer.cursor.col = f.col.min(line_len);
-                self.modified = false;
+                self.mark_clean();
                 if !self.buffers.is_empty() {
                     self.buffers[0].buffer = self.buffer.clone();
                     self.buffers[0].filename = self.filename.clone();
                     self.buffers[0].modified = false;
+                    self.buffers[0].saved_hash = self.saved_hash;
                 }
             } else {
                 self.open_new_tab(&f.path);
@@ -1215,6 +1233,7 @@ impl App {
             filename: None,
             scroll: 0,
             modified: false,
+            saved_hash: EMPTY_TEXT_HASH,
             undo_stack: undo,
             file_mtime: None,
         });
@@ -2445,6 +2464,7 @@ impl App {
         let current = self.buffer.snapshot();
         if let Some(snap) = self.undo_stack.undo(current) {
             self.buffer.restore(&snap);
+            self.refresh_modified();
             self.message = String::from("UNDO");
         } else {
             self.message = String::from("Already at oldest change");
@@ -2455,10 +2475,35 @@ impl App {
         let current = self.buffer.snapshot();
         if let Some(snap) = self.undo_stack.redo(current) {
             self.buffer.restore(&snap);
-            self.modified = true;
+            self.refresh_modified();
             self.message = String::from("REDO");
         } else {
             self.message = String::from("Already at newest change");
+        }
+    }
+
+    /// The buffer now matches what is on disk — just loaded, or just saved.
+    /// Records the fingerprint so a later undo back to this text can clear the
+    /// dirty flag again.
+    pub fn mark_clean(&mut self) {
+        self.saved_hash = text_hash(&self.buffer.text());
+        self.modified = false;
+        if self.current_buffer < self.buffers.len() {
+            self.buffers[self.current_buffer].modified = false;
+            self.buffers[self.current_buffer].saved_hash = self.saved_hash;
+        }
+    }
+
+    /// Recompute the dirty flag from the text itself.
+    ///
+    /// O(file), so this is deliberately **only** called from undo and redo —
+    /// the two operations that can make a dirty buffer clean again. Typing
+    /// keeps the cheap one-way latch in `push_undo`; a keystroke can only ever
+    /// make a document dirtier, so it never needs to ask.
+    fn refresh_modified(&mut self) {
+        self.modified = text_hash(&self.buffer.text()) != self.saved_hash;
+        if self.current_buffer < self.buffers.len() {
+            self.buffers[self.current_buffer].modified = self.modified;
         }
     }
 
@@ -3562,7 +3607,7 @@ impl App {
                 self.buffer.cursor.col = cursor.col;
                 self.buffer.clamp_col();
                 self.scroll = scroll.min(self.buffer.line_count().saturating_sub(1));
-                self.modified = false;
+                self.mark_clean();
                 self.record_mtime();
                 self.undo_stack = UndoStack::new();
                 self.undo_stack.push(self.buffer.snapshot());
@@ -4093,9 +4138,8 @@ impl App {
         if let Some(path) = self.filename.clone() {
             match atomic_write_file(&path, self.buffer.text()) {
                 Ok(_) => {
-                    self.modified = false;
+                    self.mark_clean();
                     if self.current_buffer < self.buffers.len() {
-                        self.buffers[self.current_buffer].modified = false;
                         self.buffers[self.current_buffer].filename = Some(path.clone());
                     }
                     self.record_mtime();
@@ -4489,7 +4533,7 @@ impl App {
         self.buffer.cursor.col = cursor.col;
         self.buffer.clamp_col();
         self.scroll = scroll.min(self.buffer.line_count().saturating_sub(1));
-        self.modified = false;
+        self.mark_clean();
         self.file_mtime = Some(mtime);
         self.undo_stack = UndoStack::new();
         self.undo_stack.push(self.buffer.snapshot());
@@ -4512,6 +4556,7 @@ impl App {
             tab.filename = self.filename.clone();
             tab.scroll = self.scroll;
             tab.modified = self.modified;
+            tab.saved_hash = self.saved_hash;
             tab.undo_stack = self.undo_stack.clone();
             tab.file_mtime = self.file_mtime;
         }
@@ -4524,6 +4569,7 @@ impl App {
             self.filename = tab.filename;
             self.scroll = tab.scroll;
             self.modified = tab.modified;
+            self.saved_hash = tab.saved_hash;
             self.undo_stack = tab.undo_stack;
             self.file_mtime = tab.file_mtime;
             // GUI selection is ephemeral across tabs (interim): collapse to a
@@ -4570,6 +4616,7 @@ impl App {
             filename: Some(abs_path.clone()),
             scroll: 0,
             modified: false,
+            saved_hash: text_hash(&content),
             undo_stack: undo,
             file_mtime: mtime,
         });
@@ -4756,6 +4803,7 @@ impl App {
                     {
                         tab.buffer = crate::buffer::Buffer::from_string(&edit.text);
                         tab.modified = false;
+                        tab.saved_hash = text_hash(&edit.text);
                     }
                 }
             }
@@ -4826,6 +4874,7 @@ impl App {
             self.filename = None;
             self.scroll = 0;
             self.modified = false;
+            self.saved_hash = EMPTY_TEXT_HASH;
             self.undo_stack = UndoStack::new();
             self.undo_stack.push(self.buffer.snapshot());
             self.file_mtime = None;
@@ -4834,6 +4883,7 @@ impl App {
                 filename: None,
                 scroll: 0,
                 modified: false,
+                saved_hash: EMPTY_TEXT_HASH,
                 undo_stack: self.undo_stack.clone(),
                 file_mtime: None,
             };
@@ -5069,6 +5119,82 @@ mod tests {
             "code actions: {}",
             app.message
         );
+    }
+
+    /// `modified` was a one-way latch: set by every edit, cleared only by a
+    /// save. Undoing back to the original text left the file marked dirty
+    /// forever, so the tab dot lied and closing prompted about nothing.
+    #[test]
+    fn undoing_back_to_the_saved_text_clears_the_dirty_flag() {
+        let mut app = app_with("hello");
+        app.mark_clean();
+        assert!(!app.modified);
+
+        app.push_undo();
+        app.buffer.insert_char('!');
+        app.modified = true;
+        assert!(app.modified, "an edit is dirty");
+
+        app.undo();
+        assert_eq!(app.buffer.line(0), "hello");
+        assert!(!app.modified, "back at the saved text — not dirty any more");
+        assert!(
+            !app.buffers[app.current_buffer].modified,
+            "the tab's own flag has to follow, it is what the tab dot reads"
+        );
+    }
+
+    /// The other direction: redo must put the flag back up. It used to set
+    /// `modified = true` unconditionally, which is right by luck here and wrong
+    /// as soon as a redo lands back on the saved text.
+    #[test]
+    fn redo_away_from_the_saved_text_is_dirty_again() {
+        let mut app = app_with("hello");
+        app.buffer.cursor = Position::new(0, 5);
+        app.mark_clean();
+        app.push_undo();
+        app.buffer.insert_char('!');
+        app.modified = true;
+        app.undo();
+        assert!(!app.modified);
+
+        app.redo();
+        assert_eq!(app.buffer.line(0), "hello!");
+        assert!(app.modified, "redo moves away from disk again");
+    }
+
+    /// A partial undo is still a difference from disk.
+    #[test]
+    fn undoing_only_part_of_the_way_back_stays_dirty() {
+        let mut app = app_with("a");
+        app.buffer.cursor = Position::new(0, 1);
+        app.mark_clean();
+        for c in ['b', 'c'] {
+            app.push_undo();
+            app.buffer.insert_char(c);
+            app.modified = true;
+        }
+        assert_eq!(app.buffer.line(0), "abc");
+        app.undo();
+        assert_eq!(app.buffer.line(0), "ab");
+        assert!(app.modified, "one step back is still not the saved text");
+    }
+
+    /// Saving re-anchors the fingerprint: undoing past a save must go dirty,
+    /// not clean, because the file on disk moved.
+    #[test]
+    fn saving_re_anchors_what_counts_as_clean() {
+        let mut app = app_with("a");
+        app.buffer.cursor = Position::new(0, 1);
+        app.mark_clean();
+        app.push_undo();
+        app.buffer.insert_char('b');
+        app.modified = true;
+        app.mark_clean(); // stands in for a successful save of "ab"
+
+        app.undo();
+        assert_eq!(app.buffer.line(0), "a");
+        assert!(app.modified, "the original text is no longer what is on disk");
     }
 
     #[test]
