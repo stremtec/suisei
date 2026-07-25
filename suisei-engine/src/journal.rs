@@ -118,15 +118,23 @@ impl Journal {
     /// Called every tick. Flushes the journal if the buffer is dirty and the
     /// flush policy is satisfied.
     ///
+    /// `buffer_text` is a **closure**, not a string, and that is the point: this
+    /// runs 20 times a second, but the policy above flushes at most every
+    /// 250 ms and only while dirty. Taking the text eagerly meant building the
+    /// whole document — a `Vec<String>` join plus its allocation and free — on
+    /// every tick of every session, clean or not: 0.24 ms per tick on a
+    /// 60,000-line file, for a value thrown away 90% of the time
+    /// (`tests/tick_breakdown.rs`).
+    ///
     /// - `file_path`: current buffer path (empty = untitled).
-    /// - `buffer_text`: full buffer content.
+    /// - `buffer_text`: builds the full buffer content, called only on a flush.
     /// - `buffer_version`: monotonically increasing edit counter.
     /// - `cursor_row`, `cursor_col`, `scroll`: viewport state to restore.
     /// - `dirty`: true if buffer has unsaved changes.
     pub fn on_tick(
         &mut self,
         file_path: &str,
-        buffer_text: &str,
+        buffer_text: impl FnOnce() -> String,
         buffer_version: u64,
         cursor_row: u32,
         cursor_col: u32,
@@ -157,7 +165,7 @@ impl Journal {
             return;
         }
 
-        self.flush(file_path, buffer_text, cursor_row, cursor_col, scroll);
+        self.flush(file_path, &buffer_text(), cursor_row, cursor_col, scroll);
     }
 
     /// Called on explicit save (⌘S / :w) — the file is now durable, delete WAL.

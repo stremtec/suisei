@@ -650,18 +650,27 @@ impl Engine {
         }
         // Shadow WAL: flush dirty buffer to journal if policy is satisfied.
         {
-            let file_path = self.app.filename
+            // Borrow the path rather than allocating a String every tick, and
+            // hand the journal a *closure* for the text: it only wants the
+            // document on an actual flush (250 ms / 4 KiB, dirty only), and
+            // building it eagerly taxed every tick of every session.
+            let file_path = self
+                .app
+                .filename
                 .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
+                .map(|p| p.to_string_lossy())
+                .unwrap_or(std::borrow::Cow::Borrowed(""));
             let dirty = self.app.modified;
             let version = self.app.buffer.version();
             let cursor = self.app.buffer.cursor();
             let scroll = self.app.scroll;
-            let text = self.app.buffer.text();
             self.journal.on_tick(
-                &file_path, &text, version,
-                cursor.row as u32, cursor.col as u32, scroll as u32,
+                &file_path,
+                || self.app.buffer.text(),
+                version,
+                cursor.row as u32,
+                cursor.col as u32,
+                scroll as u32,
                 dirty,
             );
         }
