@@ -24,12 +24,27 @@ struct WelcomeView: View {
     /// Hero icon — Xcode’s hammer sits ~128–136pt visual.
     private static let brandIconSize: CGFloat = 132
 
-    // Xcode dark welcome: left slightly deeper, right a hair lighter.
-    private let panelLeft = Color(red: 0.145, green: 0.145, blue: 0.150)
-    private let panelRight = Color(red: 0.175, green: 0.175, blue: 0.182)
-    private let buttonFill = Color.white.opacity(0.075)
-    private let label = Color.white.opacity(0.94)
-    private let muted = Color.white.opacity(0.40)
+    // Elevation, the way Xcode's welcome reads it: the content column is the
+    // raised surface and the Recents list is recessed. The old values had it
+    // backwards (Recents *brighter* than the content) with blue-tinted literals
+    // that matched neither macOS nor the app's own theme, which is what made
+    // this look cheap. Text and separators use system semantics so they stay
+    // correct in both appearances; the two surfaces are explicit because the
+    // stock `underPageBackground` is a mid grey in light mode.
+    @Environment(\.colorScheme) private var scheme
+
+    private var panelLeft: Color {
+        scheme == .dark ? Color(red: 40 / 255, green: 40 / 255, blue: 40 / 255) : .white
+    }
+    private var panelRight: Color {
+        scheme == .dark
+            ? Color(red: 30 / 255, green: 30 / 255, blue: 30 / 255)
+            : Color(red: 246 / 255, green: 246 / 255, blue: 247 / 255)
+    }
+    private let hairline = Color(nsColor: .separatorColor)
+    private let buttonFill = Color.primary.opacity(0.075)
+    private let label = Color(nsColor: .labelColor)
+    private let muted = Color(nsColor: .secondaryLabelColor)
 
     @State private var appeared = false
 
@@ -43,7 +58,7 @@ struct WelcomeView: View {
                             panelLeft
                             // Faint comet glow behind the brand (subtle, not a poster).
                             RadialGradient(
-                                colors: [Color(red: 0.45, green: 0.55, blue: 0.95).opacity(0.16), .clear],
+                                colors: [Color(nsColor: .controlAccentColor).opacity(0.14), .clear],
                                 center: .init(x: 0.5, y: 0.30),
                                 startRadius: 10,
                                 endRadius: 260
@@ -51,10 +66,10 @@ struct WelcomeView: View {
                         }
                     )
 
-                // Soft split only (Xcode: no hard 1px white rule).
                 rightPane
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(panelRight)
+                    .overlay(alignment: .leading) { hairline.frame(width: 1) }
             }
 
             Button(role: .cancel, action: onClose) {
@@ -74,7 +89,6 @@ struct WelcomeView: View {
         .compositingGroup()
         .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .gesture(WindowDragGesture())
-        .preferredColorScheme(.dark)
         .background(WelcomeWindowChrome(cornerRadius: Self.cornerRadius))
         .onAppear {
             withAnimation(.smooth(duration: 0.45)) { appeared = true }

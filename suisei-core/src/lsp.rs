@@ -863,7 +863,14 @@ impl LspClient {
         }
     }
 
-    pub fn poll(&mut self) {
+    /// Drain the reader thread and advance the handshake. **A frontend that
+    /// never calls this leaves the server spawned but un-handshaked**: the
+    /// `initialize` reply is never parsed, so the `initialized` notification and
+    /// the first `didOpen` below are never sent and the server never starts
+    /// indexing. Returns whether anything was actually processed, so the caller
+    /// can skip a repaint on the (usual) empty tick.
+    pub fn poll(&mut self) -> bool {
+        let mut handled = false;
         let mut batch = Vec::new();
         if let Some(ref rx) = self.rx {
             loop {
@@ -874,12 +881,14 @@ impl LspClient {
                         self.server_running = false;
                         self.initialized = false;
                         self.error = Some("LSP server disconnected".into());
+                        handled = true;
                         break;
                     }
                 }
             }
         }
 
+        handled |= !batch.is_empty();
         for msg in batch {
             self.handle_raw(msg);
         }
@@ -887,6 +896,7 @@ impl LspClient {
         // After initialize succeeded, send initialized + didOpen
         if self.initialized {
             if let Some((path, lang, text)) = self.pending_didopen.take() {
+                handled = true;
                 self.send_raw(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
                 self.doc_version = 1;
                 self.current_uri = path_to_uri(&path);
@@ -914,6 +924,7 @@ impl LspClient {
         if self.semantic_dirty && self.server_running {
             self.maybe_request_semantic_tokens();
         }
+        handled
     }
 
     fn handle_raw(&mut self, msg: RawMsg) {
@@ -2723,6 +2734,107 @@ mod tests {
         } // drop → Drop → shutdown_quiet → kill + wait
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(!running(), "child must be reaped when the client is dropped");
+    }
+
+    /// The bug this guards: `initialized` + `didOpen` are sent from `poll()`,
+    /// so a frontend that never polls leaves the server spawned, un-handshaked
+    /// and permanently idle — every request then resolves empty. Asserts both
+    /// halves: an undrained client makes no progress, and one poll after the
+    /// initialize reply consumes the queued didOpen.
+    #[test]
+    fn poll_completes_the_handshake_and_sends_did_open() {
+        let mut lsp = LspClient::new();
+        // Stand-in "server": accepts stdin, never answers. The reply is
+        // injected below so the test does not depend on a real language server.
+        lsp.server_overrides
+            .insert("rust".to_string(), "sleep 30".to_string());
+        lsp.auto_start_with_text("/tmp/suisei_pump_handshake.rs", Some("fn main() {}"));
+        assert!(
+            lsp.pending_didopen.is_some(),
+            "start must queue didOpen for after the handshake"
+        );
+        assert!(!lsp.server_running);
+
+        // No reply yet: polling is a no-op and nothing advances.
+        assert!(!lsp.poll(), "an empty drain must report no work");
+        assert!(lsp.pending_didopen.is_some());
+        assert!(!lsp.server_running);
+
+        // The initialize reply lands (id 1 — the first id `alloc_id` hands out).
+        lsp.handle_raw(RawMsg {
+            id: Some(1),
+            method: None,
+            body: r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#.to_string(),
+        });
+        assert!(lsp.server_running, "initialize reply brings the server up");
+        assert!(
+            lsp.pending_didopen.is_some(),
+            "didOpen is still owed until the next poll"
+        );
+
+        assert!(lsp.poll(), "the poll that finishes the handshake did work");
+        assert!(
+            lsp.pending_didopen.is_none(),
+            "poll must send initialized + didOpen"
+        );
+    }
+
+    /// End-to-end against a real rust-analyzer: the handshake alone leaves it
+    /// idle, and only a polled client gets it far enough to analyse the file
+    /// and publish diagnostics. Runs against a throwaway crate in a temp dir —
+    /// pointing it at this workspace deadlocks on the `target/` lock the
+    /// running `cargo test` already holds. Ignored by default (seconds of
+    /// wall clock, hundreds of MB of RSS); run with
+    /// `cargo test -p suisei-core rust_analyzer -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "spawns a real rust-analyzer and waits for an index run"]
+    fn rust_analyzer_indexes_only_once_polled() {
+        if !command_exists("rust-analyzer") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("suisei-ra-{}", std::process::id()));
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).expect("temp crate dir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"ra_probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        // A syntax error, so rust-analyzer's own parser reports it without
+        // needing a `cargo check` flycheck round.
+        let file = src.join("lib.rs");
+        std::fs::write(&file, "pub fn probe() { let x = ; }\n").unwrap();
+
+        let dir_s = dir.display().to_string();
+        let file_s = file.display().to_string();
+        let mut lsp = LspClient::new();
+        lsp.start("rust-analyzer", &dir_s, &file_s);
+
+        // Un-polled, the client cannot get past `initialize` — the exact state
+        // the GUI was stuck in.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let stuck = lsp.server_running;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut indexed = false;
+        while std::time::Instant::now() < deadline {
+            lsp.poll();
+            if lsp.server_running && lsp.pending_didopen.is_none() && !lsp.diagnostics.is_empty() {
+                indexed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let owed = lsp.pending_didopen.is_some();
+        let running = lsp.server_running;
+        drop(lsp); // reap the server before the assertions can unwind
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!stuck, "without a poll the handshake cannot complete");
+        assert!(
+            indexed,
+            "rust-analyzer never published diagnostics (running={running}, didOpen owed={owed})"
+        );
     }
 
     #[test]

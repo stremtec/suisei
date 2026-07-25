@@ -305,10 +305,19 @@ render layer only (`drawn_caret_col` in `scene.rs`).
     unfinished work is a coherent UI flow (especially definition/hover) and
     semantic-token paint, not a blank FFI boundary. Suggested order: go-to-
     definition → hover → code actions → rename/format.
+    *(2026-07-25: none of it could work before — the GUI never pumped the LSP.
+    See the "an async client is dead until something drains it" trap below.
+    The pump also applies definition jumps, workspace edits and code actions,
+    so those FFI entry points now complete a round trip.)*
 13. **DAP has Core state and breakpoint FFI, but no complete GUI workflow.**
     Launch/attach, stack, scopes, variables, console, and continue/stop remain
     unreachable as a dependable IDE surface.
-14. **Completion data is too thin** for an Xcode-grade list:
+14. **Auto-pairing and completion-accept never worked in the GUI.** Both lived
+    in the vim insert-mode handler, which the GUI never reached (it stayed in
+    vim Normal). Removing that handler in the 2026-07-25 vim sweep deleted the
+    dead implementations; the popup still opens (Ctrl+A) with no way to accept
+    it. Re-implement on the Selection-model edit path, not by reviving a mode.
+15. **Completion data is too thin** for an Xcode-grade list:
     `Suggestion { label, detail, insert_text }` — no kind (icons), no
     documentation, no sort/filter score, no snippet placeholders, no trigger
     characters.
@@ -325,11 +334,26 @@ render layer only (`drawn_caret_col` in `scene.rs`).
 
 ## Traps that cost hours — do not relearn
 
-- **`package-suisei-app.sh` currently watches `xei-core`, not `suisei-core`.**
-  A core-only edit can therefore package an old dylib and make a fix appear to
-  do nothing. Repair the dependency scan; until then force
-  `build-suisei-engine.sh` after core-only edits and check the embedded dylib's
-  timestamp.
+- **Key routing must be gated on `Mode`, never on a panel's `open` flag.**
+  `explorer.open` means the docked Project navigator *has entries*
+  (`suisei_engine_open_path` sets it on every open, deliberately without taking
+  focus); keyboard focus is `Mode::Explorer`. `try_gui_edit` /
+  `try_gui_navigation` gated on `explorer.open`, so from the moment a project
+  was opened every keystroke fell past the modeless edit path into the vim
+  command machine — typing did nothing and `z` opened the vim fold prefix.
+  Fixed 2026-07-25. The failure is silent: the editor looks normal and just
+  stops taking text. Tell-tale: a vim which-key hint in the status line.
+- **An async client is dead until something drains it.** `LspClient`/`DapClient`
+  write to a child's stdin and a reader thread fills a channel; `poll()` is the
+  drain — and for the LSP it is *also* what sends `initialized` + `didOpen`
+  after the `initialize` reply. The GUI engine tick never called it, so every
+  rust-analyzer it spawned answered `initialize` and then sat at ~10 MB RSS
+  forever while every LSP surface returned empty. Fixed 2026-07-25 by
+  `App::poll_language_services` (`suisei-core/src/pump.rs`), called from
+  `Engine::tick`. Symptom to recognise next time: **the server process exists
+  and its RSS never climbs.**
+- ~~`package-suisei-app.sh` watches `xei-core`, not `suisei-core`.~~ Fixed —
+  the dependency scan covers both `suisei-engine` and `suisei-core`.
 - **The Swift row decoder reads `SuiseiEditorLineC` by hard-coded byte offsets.**
   Adding a field means shifting `sel_v0/sel_v1/sel_u0/sel_u1/text/spanBaseOff` in
   BOTH decoders.

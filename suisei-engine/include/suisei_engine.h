@@ -209,6 +209,7 @@ void suisei_engine_save_as(SuiseiEngine *ptr, const char *path);
 /* GUI-editor commands (standard Mac chords). */
 void suisei_engine_undo(SuiseiEngine *ptr);
 void suisei_engine_redo(SuiseiEngine *ptr);
+void suisei_engine_set_system_appearance(SuiseiEngine *ptr, uint8_t is_dark);
 void suisei_engine_select_all(SuiseiEngine *ptr);
 
 /* ── GUI semantic editing commands ──────────────────────────────────── */
@@ -255,15 +256,8 @@ typedef struct SuiseiExplorerSnapshot {
   char names[SUISEI_MAX_EXPLORER][SUISEI_EXPLORER_NAME];
 } SuiseiExplorerSnapshot;
 
-typedef struct SuiseiXlcSnapshot {
-  uint8_t open;
-  char input[SUISEI_XLC_INPUT];
-  uint32_t out_count;
-  char output[SUISEI_MAX_XLC_OUT][SUISEI_XLC_LINE];
-} SuiseiXlcSnapshot;
 
 uint8_t suisei_engine_explorer(const SuiseiEngine *ptr, SuiseiExplorerSnapshot *out);
-uint8_t suisei_engine_xlc(const SuiseiEngine *ptr, SuiseiXlcSnapshot *out);
 void suisei_engine_explorer_activate(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_explorer_select(SuiseiEngine *ptr, uint32_t index);
 /* Docked Project nav: refresh tree without Mode::Explorer (editor keeps Normal keys). */
@@ -334,13 +328,6 @@ void suisei_engine_palette_select(SuiseiEngine *ptr, uint32_t index);
 #define SUISEI_MAX_TERM_LINES 120
 #define SUISEI_TERM_LINE 256
 
-typedef struct SuiseiWhichKeySnapshot {
-  uint8_t open;
-  uint32_t count;
-  char title[32];
-  char keys[SUISEI_MAX_HINTS][SUISEI_HINT_KEY];
-  char descs[SUISEI_MAX_HINTS][SUISEI_HINT_DESC];
-} SuiseiWhichKeySnapshot;
 
 typedef struct SuiseiCompletionsSnapshot {
   uint8_t open;
@@ -396,9 +383,6 @@ typedef struct SuiseiThemeSnapshot {
   uint32_t selection;
   uint32_t caret;
   uint32_t status_bg;
-  uint32_t mode_normal;
-  uint32_t mode_insert;
-  uint32_t mode_visual;
   uint32_t keyword;
   uint32_t string_col;
   uint32_t comment;
@@ -407,7 +391,6 @@ typedef struct SuiseiThemeSnapshot {
   uint32_t function;
 } SuiseiThemeSnapshot;
 
-uint8_t suisei_engine_which_key(const SuiseiEngine *ptr, SuiseiWhichKeySnapshot *out);
 uint8_t suisei_engine_completions(const SuiseiEngine *ptr, SuiseiCompletionsSnapshot *out);
 uint8_t suisei_engine_terminal(const SuiseiEngine *ptr, SuiseiTerminalSnapshot *out);
 uint8_t suisei_engine_status_extra(const SuiseiEngine *ptr, SuiseiStatusExtra *out);

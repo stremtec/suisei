@@ -47,7 +47,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            theme: "ocean".into(),
+            theme: "system".into(),
             tab_width: 4,
             clipboard_sync: true,
             relative_number: false,
@@ -91,14 +91,35 @@ pub fn lsp_lang_catalog() -> &'static [(&'static str, &'static str, &'static str
     ]
 }
 
-fn config_path() -> PathBuf {
+fn home_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".xei.toml")
+    PathBuf::from(home)
+}
+
+/// Suisei's own config. It used to be `~/.xei.toml`, shared with the xei TUI —
+/// so changing the theme in one silently changed it in the other, and a `light`
+/// left there by the TUI is what made the GUI ignore macOS dark mode. The
+/// journal was separated for the same reason; this finishes the job.
+fn config_path() -> PathBuf {
+    home_dir().join(".suisei.toml")
+}
+
+/// One-time adoption of the old shared file, so an existing setup is not reset.
+fn migrate_from_xei() {
+    let ours = config_path();
+    if ours.exists() {
+        return;
+    }
+    let theirs = home_dir().join(".xei.toml");
+    if let Ok(content) = fs::read_to_string(&theirs) {
+        let _ = fs::write(&ours, content);
+    }
 }
 
 pub fn load() -> Config {
+    migrate_from_xei();
     let mut cfg = Config::default();
     let Ok(content) = fs::read_to_string(config_path()) else {
         return cfg;

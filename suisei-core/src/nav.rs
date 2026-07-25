@@ -1,42 +1,10 @@
-//! Marks, jumplist, and last f/t/T for `;` / `,` repeat.
+//! Jumplist for Back / Forward navigation (go-to-definition, search jumps).
 
 use crate::buffer::Position;
 use std::path::PathBuf;
 
-#[derive(Clone, Debug)]
-pub struct Mark {
-    pub pos: Position,
-    pub path: Option<PathBuf>,
-}
 
-#[derive(Clone, Debug, Default)]
-pub struct Marks {
-    /// File-local marks `a`–`z`.
-    slots: [Option<Mark>; 26],
-}
 
-impl Marks {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn set(&mut self, name: char, pos: Position, path: Option<PathBuf>) -> bool {
-        if !name.is_ascii_lowercase() {
-            return false;
-        }
-        let idx = (name as u8 - b'a') as usize;
-        self.slots[idx] = Some(Mark { pos, path });
-        true
-    }
-
-    pub fn get(&self, name: char) -> Option<&Mark> {
-        if !name.is_ascii_lowercase() {
-            return None;
-        }
-        let idx = (name as u8 - b'a') as usize;
-        self.slots[idx].as_ref()
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct Jump {
@@ -120,42 +88,12 @@ impl JumpList {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FindKind {
-    Find,  // f
-    Till,  // t
-}
 
-#[derive(Clone, Copy, Debug)]
-pub struct LastFind {
-    pub ch: char,
-    pub kind: FindKind,
-    /// true = original was forward (f/t), false = F/T
-    pub forward: bool,
-}
 
-impl LastFind {
-    pub fn repeat(&self, reverse: bool) -> (FindKind, bool, char) {
-        let forward = if reverse {
-            !self.forward
-        } else {
-            self.forward
-        };
-        (self.kind, forward, self.ch)
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn marks_roundtrip() {
-        let mut m = Marks::new();
-        m.set('a', Position::new(3, 2), None);
-        let got = m.get('a').unwrap();
-        assert_eq!(got.pos, Position::new(3, 2));
-    }
 
     #[test]
     fn jumplist_back_forward() {
@@ -181,16 +119,4 @@ mod tests {
         assert_eq!(fwd.pos.row, 20);
     }
 
-    #[test]
-    fn last_find_reverse() {
-        let lf = LastFind {
-            ch: 'x',
-            kind: FindKind::Find,
-            forward: true,
-        };
-        let (k, fwd, ch) = lf.repeat(true);
-        assert_eq!(k, FindKind::Find);
-        assert!(!fwd);
-        assert_eq!(ch, 'x');
-    }
 }

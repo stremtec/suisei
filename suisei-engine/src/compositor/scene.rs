@@ -128,14 +128,6 @@ pub struct OutlineItemScene {
 }
 
 #[derive(Debug, Clone)]
-pub struct XlcScene {
-    pub open: bool,
-    pub input: String,
-    /// Newest lines last; face shows a tail.
-    pub output: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct PaletteItemScene {
     pub label: String,
     pub detail: String,
@@ -157,13 +149,6 @@ pub struct SearchScene {
     pub input: String,
     pub match_count: u32,
     pub match_index: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct WhichKeyScene {
-    pub open: bool,
-    pub title: String,
-    pub hints: Vec<(String, String)>, // key, desc
 }
 
 #[derive(Debug, Clone)]
@@ -194,9 +179,6 @@ pub struct ThemeScene {
     pub selection: u32,
     pub caret: u32,
     pub status_bg: u32,
-    pub mode_normal: u32,
-    pub mode_insert: u32,
-    pub mode_visual: u32,
     pub keyword: u32,
     pub string: u32,
     pub comment: u32,
@@ -311,10 +293,8 @@ pub struct ChromeScene {
     /// Empty when unsplit; when split, one entry per pane (lines packed for FFI).
     pub panes: Vec<PaneScene>,
     pub explorer: ExplorerScene,
-    pub xlc: XlcScene,
     pub palette: PaletteScene,
     pub search: SearchScene,
-    pub which_key: WhichKeyScene,
     pub completions: CompletionsScene,
     pub terminal: TerminalScene,
     pub settings: SettingsScene,
@@ -477,13 +457,6 @@ pub fn patch_chrome_editor_scroll(
     }
     // Leader (Space) sets no pending_key — gate on visibility itself, and also
     // rebuild when the scene still shows an open popup so it can close.
-    if app.which_key_visible()
-        || chrome.which_key.open
-        || app.pending_key.is_some()
-        || app.pending_ft.is_some()
-    {
-        chrome.which_key = build_which_key(app);
-    }
     if app.completions.active
         || !app.completions.suggestions.is_empty()
         || chrome.completions.open
@@ -606,10 +579,8 @@ pub fn compose(
             pane_focus,
             panes,
             explorer: build_explorer(app),
-            xlc: build_xlc(app),
             palette: build_palette(app),
             search: build_search(app),
-            which_key: build_which_key(app),
             completions: build_completions(app),
             terminal: build_terminal(app),
             settings: build_settings(app),
@@ -1205,7 +1176,7 @@ fn build_git_wb(app: &App) -> GitWbScene {
 
 fn build_scm(app: &App) -> ScmScene {
     // Docked Source Control navigator keeps data without Mode::SourceControl
-    // (same pattern as Project tree + Mode::Normal).
+    // (same pattern as Project tree + Mode::Editor).
     let open = app.scm.open || app.scm.visible();
     if !open {
         return ScmScene {
@@ -1300,24 +1271,14 @@ fn build_scm(app: &App) -> ScmScene {
 }
 
 /// Pack theme Color → 0x00RRGGBB without depending on ratatui in this crate.
-fn color_u32(c: impl std::fmt::Debug) -> u32 {
-    let s = format!("{c:?}");
-    // Typical Debug: `Rgb(15, 17, 26)`
-    if let Some(inner) = s.strip_prefix("Rgb(").and_then(|x| x.strip_suffix(')')) {
-        let parts: Vec<_> = inner.split(',').map(|p| p.trim()).collect();
-        if parts.len() == 3 {
-            if let (Ok(r), Ok(g), Ok(b)) = (
-                parts[0].parse::<u32>(),
-                parts[1].parse::<u32>(),
-                parts[2].parse::<u32>(),
-            ) {
-                return (r << 16) | (g << 8) | b;
-            }
-        }
-    }
-    0xC8C8C8
+/// Pack a theme colour for the face as `0xAARRGGBB`.
+///
+/// This used to `format!("{c:?}")` the colour and parse the Debug string back,
+/// because the theme carried `ratatui::style::Color` — a terminal type the
+/// engine could not read directly. It is a field read now.
+fn color_u32(c: suisei_core::theme::Rgba) -> u32 {
+    c.argb()
 }
-
 fn build_theme(app: &App) -> ThemeScene {
     let t = app.theme;
     ThemeScene {
@@ -1329,9 +1290,6 @@ fn build_theme(app: &App) -> ThemeScene {
         selection: color_u32(t.selection_bg),
         caret: color_u32(t.cursor),
         status_bg: color_u32(t.status_bg),
-        mode_normal: color_u32(t.mode_normal),
-        mode_insert: color_u32(t.mode_insert),
-        mode_visual: color_u32(t.mode_visual),
         keyword: color_u32(t.keyword),
         string: color_u32(t.string),
         comment: color_u32(t.comment),
@@ -1563,30 +1521,6 @@ fn branch_name(app: &App) -> String {
     String::new()
 }
 
-fn build_which_key(app: &App) -> WhichKeyScene {
-    if !app.which_key_visible() {
-        return WhichKeyScene {
-            open: false,
-            title: String::new(),
-            hints: Vec::new(),
-        };
-    }
-    let hints = app
-        .pending_hints
-        .iter()
-        .take(24)
-        .map(|(k, d)| ((*k).to_string(), (*d).to_string()))
-        .collect();
-    WhichKeyScene {
-        open: true,
-        title: if app.which_key.title.is_empty() {
-            "…".into()
-        } else {
-            app.which_key.title.clone()
-        },
-        hints,
-    }
-}
 
 fn build_completions(app: &App) -> CompletionsScene {
     if !app.completions.active || app.completions.suggestions.is_empty() {
@@ -1670,26 +1604,6 @@ fn build_explorer(app: &App) -> ExplorerScene {
     }
 }
 
-fn build_xlc(app: &App) -> XlcScene {
-    let open = app.xlc.open || matches!(app.mode, Mode::XlcInput);
-    let output = if open {
-        // Tail of log for face
-        let n = app.xlc.output.len();
-        let start = n.saturating_sub(40);
-        app.xlc.output[start..].to_vec()
-    } else {
-        Vec::new()
-    };
-    XlcScene {
-        open,
-        input: if open {
-            app.xlc.input.clone()
-        } else {
-            String::new()
-        },
-        output,
-    }
-}
 
 fn build_palette(app: &App) -> PaletteScene {
     let open = app.palette.open || matches!(app.mode, Mode::Palette);
@@ -2449,39 +2363,24 @@ fn visual_col(line: &str, buf_col: usize) -> usize {
     col
 }
 
+/// Which surface owns the keyboard, as a stable name the face switches on.
+///
+/// This used to be the vim status badge (` NORMAL `, ` INSERT `, ` PENDING `…)
+/// and the Swift side made focus decisions by substring-matching it. It is now
+/// simply the focus, so the face can parse it once into a typed value.
 fn mode_label(app: &App) -> &'static str {
     match app.mode {
-        Mode::Normal => {
-            if app.pending_key.is_some() || app.pending_ft.is_some() {
-                " PENDING "
-            } else if app.count.is_some() {
-                " COUNT "
-            } else {
-                " NORMAL "
-            }
-        }
-        Mode::Insert => " INSERT ",
-        Mode::Visual => " VISUAL ",
-        Mode::VisualLine => " V-LINE ",
-        Mode::VisualBlock => " V-BLOCK ",
-        Mode::XlcInput => " CMD ",
-        Mode::Search => " SEARCH ",
-        Mode::Explorer => " FILES ",
-        Mode::Terminal => " TERM ",
-        Mode::Palette => " PALETTE ",
-        Mode::SourceControl => " SCM ",
-        Mode::GitWorkbench => " GIT ",
-        Mode::Settings => " SETTINGS ",
-        Mode::Preview => " PREVIEW ",
-        Mode::WorkspaceSearch => " FIND ",
-        Mode::Screensaver => " XEIFETCH ",
-        Mode::Debug => " DEBUG ",
-        Mode::CallHierarchy => " CALLS ",
-        Mode::Rebase => " REBASE ",
-        Mode::PrReview => " PR ",
-        Mode::Bench => " BENCH ",
-        Mode::PluginStore => " PLUGINS ",
-        Mode::ExtPanel => " EXT ",
-        Mode::Webview => " WEBVIEW ",
+        Mode::Editor => "EDITOR",
+        Mode::Explorer => "EXPLORER",
+        Mode::Terminal => "TERMINAL",
+        Mode::Search => "SEARCH",
+        Mode::Palette => "PALETTE",
+        Mode::SourceControl => "SCM",
+        Mode::GitWorkbench => "GIT",
+        Mode::Settings => "SETTINGS",
+        Mode::Preview => "PREVIEW",
+        Mode::WorkspaceSearch => "FIND",
+        Mode::Debug => "DEBUG",
+        Mode::CallHierarchy => "CALLS",
     }
 }

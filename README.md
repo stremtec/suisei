@@ -39,6 +39,8 @@ Requires: macOS 26+, Xcode toolchain (swiftc), a Rust toolchain.
   menus.
 - `docs/SUISEI-TODO.md` — open bugs and the hard-won design notes (metaball
   chrome, Liquid Glass structure, resize coordinate spaces, build traps).
+- `docs/SUISEI-TUI-RESIDUE.md` — what is still shaped like a terminal editor,
+  measured, with the ordered plan to cut it.
 
 ## Status
 

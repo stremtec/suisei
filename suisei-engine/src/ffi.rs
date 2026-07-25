@@ -279,7 +279,7 @@ pub extern "C" fn suisei_engine_editor_accepts_text(ptr: *const SuiseiEngine) ->
     unsafe {
         u8::from(matches!(
             (*ptr).0.app().mode,
-            suisei_core::app::Mode::Normal | suisei_core::app::Mode::Insert
+            suisei_core::app::Mode::Editor | suisei_core::app::Mode::Editor
         ))
     }
 }
@@ -755,6 +755,20 @@ pub extern "C" fn suisei_engine_redo(ptr: *mut SuiseiEngine) {
     }
 }
 
+/// Tell the engine the system appearance (1 = dark). The face calls this at
+/// launch and whenever `NSApp.effectiveAppearance` changes; when the user has
+/// not pinned a theme, it is what selects light vs dark.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_set_system_appearance(ptr: *mut SuiseiEngine, is_dark: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().set_system_appearance(is_dark != 0);
+        (*ptr).0.recompose_paint_only();
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_select_all(ptr: *mut SuiseiEngine) {
     if ptr.is_null() {
@@ -829,7 +843,7 @@ pub extern "C" fn suisei_engine_gui_ensure_insert(ptr: *mut SuiseiEngine) {
         return;
     }
     unsafe {
-        (*ptr).0.gui_ensure_insert();
+        (*ptr).0.gui_focus_editor();
     }
 }
 
@@ -955,13 +969,6 @@ pub struct SuiseiExplorerSnapshot {
     pub names: [[c_char; SUISEI_EXPLORER_NAME]; SUISEI_MAX_EXPLORER],
 }
 
-#[repr(C)]
-pub struct SuiseiXlcSnapshot {
-    pub open: u8,
-    pub input: [c_char; SUISEI_XLC_INPUT],
-    pub out_count: u32,
-    pub output: [[c_char; SUISEI_XLC_LINE]; SUISEI_MAX_XLC_OUT],
-}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_explorer(
@@ -992,30 +999,6 @@ pub extern "C" fn suisei_engine_explorer(
     for (i, e) in ex.entries.iter().take(n).enumerate() {
         o.is_dir[i] = u8::from(e.is_dir);
         write_cstr(&mut o.names[i], &e.name);
-    }
-    1
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_xlc(ptr: *const SuiseiEngine, out: *mut SuiseiXlcSnapshot) -> u8 {
-    if ptr.is_null() || out.is_null() {
-        return 0;
-    }
-    let eng = unsafe { &*ptr };
-    let Some(chrome) = eng.0.last_diff.chrome.as_ref() else {
-        return 0;
-    };
-    let x = &chrome.xlc;
-    unsafe {
-        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiXlcSnapshot>());
-    }
-    let o = unsafe { &mut *out };
-    o.open = u8::from(x.open);
-    write_cstr(&mut o.input, &x.input);
-    let n = x.output.len().min(SUISEI_MAX_XLC_OUT);
-    o.out_count = n as u32;
-    for (i, line) in x.output.iter().take(n).enumerate() {
-        write_cstr(&mut o.output[i], line);
     }
     1
 }
@@ -1409,14 +1392,6 @@ pub const SUISEI_COMP_LABEL: usize = 64;
 pub const SUISEI_MAX_TERM_LINES: usize = 120;
 pub const SUISEI_TERM_LINE: usize = 256;
 
-#[repr(C)]
-pub struct SuiseiWhichKeySnapshot {
-    pub open: u8,
-    pub count: u32,
-    pub title: [c_char; 32],
-    pub keys: [[c_char; SUISEI_HINT_KEY]; SUISEI_MAX_HINTS],
-    pub descs: [[c_char; SUISEI_HINT_DESC]; SUISEI_MAX_HINTS],
-}
 
 #[repr(C)]
 pub struct SuiseiCompletionsSnapshot {
@@ -1446,34 +1421,6 @@ pub struct SuiseiTerminalSnapshot {
 #[repr(C)]
 pub struct SuiseiStatusExtra {
     pub branch: [c_char; 64],
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_which_key(
-    ptr: *const SuiseiEngine,
-    out: *mut SuiseiWhichKeySnapshot,
-) -> u8 {
-    if ptr.is_null() || out.is_null() {
-        return 0;
-    }
-    let eng = unsafe { &*ptr };
-    let Some(chrome) = eng.0.last_diff.chrome.as_ref() else {
-        return 0;
-    };
-    let w = &chrome.which_key;
-    unsafe {
-        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiWhichKeySnapshot>());
-    }
-    let o = unsafe { &mut *out };
-    o.open = u8::from(w.open);
-    write_cstr(&mut o.title, &w.title);
-    let n = w.hints.len().min(SUISEI_MAX_HINTS);
-    o.count = n as u32;
-    for (i, (k, d)) in w.hints.iter().take(n).enumerate() {
-        write_cstr(&mut o.keys[i], k);
-        write_cstr(&mut o.descs[i], d);
-    }
-    1
 }
 
 #[unsafe(no_mangle)]
@@ -1589,9 +1536,6 @@ pub struct SuiseiThemeSnapshot {
     pub selection: u32,
     pub caret: u32,
     pub status_bg: u32,
-    pub mode_normal: u32,
-    pub mode_insert: u32,
-    pub mode_visual: u32,
     pub keyword: u32,
     pub string_col: u32,
     pub comment: u32,
@@ -1663,9 +1607,6 @@ pub extern "C" fn suisei_engine_theme(
     o.selection = t.selection;
     o.caret = t.caret;
     o.status_bg = t.status_bg;
-    o.mode_normal = t.mode_normal;
-    o.mode_insert = t.mode_insert;
-    o.mode_visual = t.mode_visual;
     o.keyword = t.keyword;
     o.string_col = t.string;
     o.comment = t.comment;

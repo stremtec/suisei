@@ -16,20 +16,13 @@ use crate::preview::PreviewState;
 use crate::scm::ScmPanel;
 use crate::session::{self, Session, SessionFile};
 use crate::settings::SettingsPanel;
-use crate::nav::{FindKind, Jump, JumpList, LastFind, Marks};
-use crate::ops::{
-    self, delete_range, extract_text, range_for_motion, range_for_textobject, LastChange, Motion,
-    Operator, TextObject,
-};
-use crate::macros::MacroBank;
+use crate::nav::{Jump, JumpList};
 use crate::palette::{Palette, PaletteAction};
 use crate::registers::Registers;
-use crate::substitute::{self, SubstituteCmd};
 use crate::syntax::SyntaxEngine;
 use crate::term::Terminal;
 use crate::theme::{self, Theme, OCEAN};
 use crate::undo::UndoStack;
-use crate::xlc::{Xlc, XlcCmd};
 
 /// What kind of GUI edit the last keystroke was, for undo coalescing. A run of
 /// the same kind shares one snapshot; switching kind (or moving the caret)
@@ -41,17 +34,22 @@ pub enum EditRun {
     Delete,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which surface owns the keyboard.
+///
+/// This is **focus, not a modal editing state**. It used to carry vim's
+/// Normal/Insert/Visual on the same axis as the panels, which meant the editor
+/// lived in vim's command mode and any key the GUI failed to intercept was read
+/// as a vim command. There is now one editor state and typing always types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Mode {
-    Normal,
-    Insert,
-    Visual,
-    VisualLine,
-    VisualBlock,
-    XlcInput,
-    Search,
+    /// The text editor. Keys are handled by the Selection-model tables in
+    /// `Engine::dispatch_key`, never by a command interpreter.
+    #[default]
+    Editor,
     Explorer,
     Terminal,
+    /// Incremental find bar (⌘F) — a panel that owns typed characters.
+    Search,
     Palette,
     /// Light Source Control panel (Ctrl+G) — stage / commit / graph
     SourceControl,
@@ -63,24 +61,10 @@ pub enum Mode {
     Preview,
     /// Workspace find / replace (Ctrl+Shift+F)
     WorkspaceSearch,
-    /// `:screensaver` / xeifetch splash
-    Screensaver,
     /// DAP debugger panel (F5 / Ctrl+Shift+D)
     Debug,
     /// LSP call hierarchy panel
     CallHierarchy,
-    /// Interactive git rebase planner
-    Rebase,
-    /// PR multi-file review surface
-    PrReview,
-    /// Live self-benchmark results screen (`:bench`)
-    Bench,
-    /// Plugin store (`:plugins`) — full-screen marketplace browse/install
-    PluginStore,
-    /// Extensions sidebar panel (`SPC x` / `Ctrl+Shift+X`) — loaded plugins + run
-    ExtPanel,
-    /// A rendered extension webview, painted as a terminal image (`:webview`)
-    Webview,
 }
 
 /// Sampled resource usage of the xei process, filled by the frontend for the
@@ -130,27 +114,11 @@ pub struct App {
     pub scroll_frac: f32,
     /// Why `scroll` last changed — consumed and cleared by the face.
     pub scroll_intent: ScrollIntent,
-    pub xlc: Xlc,
     pub undo_stack: UndoStack,
     /// Deprecated alias surface: prefer `registers`. Kept in sync with unnamed.
     pub yank_buffer: Option<String>,
     pub registers: Registers,
-    pub marks: Marks,
     pub jumps: JumpList,
-    pub last_find: Option<LastFind>,
-    /// After `"` waiting for register name
-    pub pending_register: bool,
-    /// After `m` waiting for mark name
-    pub pending_mark_set: bool,
-    /// After `'` or `` ` `` waiting for mark name (`true` = linewise `'`)
-    pub pending_mark_jump: Option<bool>,
-    pub pending_key: Option<char>,
-    pub pending_ft: Option<char>,
-    pub count: Option<usize>,
-    pub pending_hints: Vec<(&'static str, &'static str)>,
-    /// Which-key delay + Space-leader path.
-    pub which_key: crate::which_key::WhichKeyState,
-    pub visual_anchor: Option<Position>,
     /// GUI selection model (P0.2). Exclusive semantics, plural selections; the
     /// primary head mirrors `buffer.cursor`. Independent of the vim
     /// `visual_anchor`/`Mode` pair above, which stays for TUI compatibility —
@@ -188,6 +156,10 @@ pub struct App {
     pub screen_width: u16,
     pub screen_height: u16,
     pub theme: &'static Theme,
+    /// The configured theme name — `"system"` means follow macOS.
+    pub theme_pref: String,
+    /// Current system appearance, pushed down by the face.
+    pub system_is_dark: bool,
     pub xlc_height: u16,
     pub xlc_separator_y: u16,
     pub file_mtime: Option<std::time::SystemTime>,
@@ -218,10 +190,6 @@ pub struct App {
     /// Lazily spawned on first use; `None` until then / when Node is absent.
     #[cfg(feature = "extensions")]
     pub ext: Option<xei_ext_host::ExtHost>,
-    /// Last change for `.` repeat
-    pub last_change: Option<LastChange>,
-    /// Pending operator (`d`/`c`/`y`) while waiting for motion/object
-    pub pending_operator: Option<Operator>,
     /// Pending text-object modifier `i`/`a` after operator
     pub pending_to_mod: Option<char>,
     /// Tab bar hit regions for mouse (filled by UI each frame)
@@ -238,7 +206,6 @@ pub struct App {
     pub hover_text: Option<String>,
     /// Double-click tracking (ms-ish ticks via counter)
     pub last_click: Option<(u16, u16, std::time::Instant)>,
-    pub macros: MacroBank,
     pub tab_width: usize,
     pub clipboard_sync: bool,
     pub relative_number: bool,
@@ -361,8 +328,6 @@ pub struct App {
     pub term_modern: bool,
     /// Terminal speaks Kitty graphics protocol (Ghostty/Kitty/WezTerm).
     pub term_kitty_graphics: bool,
-    /// While replaying a macro — suppress nested recording
-    pub replaying_macro: bool,
     /// Pending rename: new name input via XLC or message
     pub rename_pending: bool,
     /// Last document state pushed to the LSP via didChange (path + text hash).
@@ -479,29 +444,17 @@ impl Default for App {
         let (hook_msg_tx, hook_msg_rx) = std::sync::mpsc::channel();
         Self {
             running: true,
-            mode: Mode::Normal,
+            mode: Mode::Editor,
             buffer: Buffer::new(),
             message: String::from("Welcome to xei! i=insert :=XLC h/j/k/l=move"),
             filename: None,
             scroll: 0,
             scroll_frac: 0.0,
             scroll_intent: ScrollIntent::None,
-            xlc: Xlc::new(),
             undo_stack: UndoStack::new(),
             yank_buffer: None,
             registers: Registers::new(),
-            marks: Marks::new(),
             jumps: JumpList::new(),
-            last_find: None,
-            pending_register: false,
-            pending_mark_set: false,
-            pending_mark_jump: None,
-            pending_key: None,
-            pending_ft: None,
-            count: None,
-            pending_hints: Vec::new(),
-            which_key: crate::which_key::WhichKeyState::default(),
-            visual_anchor: None,
             sel: crate::selection::SelectionSet::new(),
             edit_run: EditRun::None,
             search_pattern: None,
@@ -526,6 +479,8 @@ impl Default for App {
             screen_width: 80,
             screen_height: 24,
             theme: &OCEAN,
+            theme_pref: "system".to_string(),
+            system_is_dark: true,
             xlc_height: 11,
             xlc_separator_y: 0,
             file_mtime: None,
@@ -552,8 +507,6 @@ impl Default for App {
             webview_image: None,
             #[cfg(feature = "extensions")]
             ext: None,
-            last_change: None,
-            pending_operator: None,
             pending_to_mod: None,
             tab_hit_regions: Vec::new(),
             tab_bar_y: 0,
@@ -562,7 +515,6 @@ impl Default for App {
             palette: Palette::new(),
             hover_text: None,
             last_click: None,
-            macros: MacroBank::new(),
             tab_width: 4,
             clipboard_sync: true,
             relative_number: false,
@@ -625,7 +577,6 @@ impl Default for App {
             term_hyperlinks: false,
             term_modern: false,
             term_kitty_graphics: false,
-            replaying_macro: false,
             rename_pending: false,
             lsp_synced_path: None,
             lsp_synced_hash: 0,
@@ -661,9 +612,8 @@ impl App {
         self.key_hints = cfg.key_hints;
         self.lsp
             .apply_config(cfg.lsp_enabled, cfg.lsp_servers.clone());
-        if let Some(t) = theme::find(&cfg.theme) {
-            self.theme = t;
-        }
+        self.theme_pref = cfg.theme.clone();
+        self.theme = theme::resolve(&cfg.theme, self.system_is_dark);
         self.apply_pet_from_config(&cfg);
     }
 
@@ -730,31 +680,29 @@ impl App {
         }
     }
 
+    /// The face reports the system appearance (and every change to it). When
+    /// the user has not pinned a theme, this is what picks light vs dark —
+    /// a native app should not stay light on a dark desktop.
+    pub fn set_system_appearance(&mut self, is_dark: bool) {
+        if self.system_is_dark == is_dark {
+            return;
+        }
+        self.system_is_dark = is_dark;
+        self.theme = crate::theme::resolve(&self.theme_pref, is_dark);
+    }
+
+    /// Status-line note. Replaces the XLC console the vim `:` command line
+    /// used to dump into; the GUI shows one line, not a scrollback panel.
+    pub fn set_message(&mut self, msg: &str) {
+        self.message = msg.to_string();
+    }
+
     /// Frontend hook: store the latest sampled process metrics.
     pub fn set_metrics(&mut self, m: ProcMetrics) {
         self.metrics = m;
     }
 
-    /// `:bench` — run the self-benchmark and switch to the results screen.
-    pub fn run_bench(&mut self) {
-        let report = crate::bench::run(self);
-        self.message = format!("bench: {:.1} ms total · r rerun · Esc exit", report.total_ms);
-        self.bench_report = Some(report);
-        self.mode = Mode::Bench;
-    }
 
-    pub fn exit_bench(&mut self) {
-        if self.mode == Mode::Bench {
-            self.mode = Mode::Normal;
-            self.message.clear();
-        }
-    }
-
-    /// `:exttest` — Spike 0 vertical slice. Lazily spawn the Node ext host, load
-    /// the bundled test extension, and invoke its contributed `xei.hello`
-    /// command. The reply (`window.showInformationMessage`) is drained by the
-    /// frontend loop into the status line — proving a real VSCode-format
-    /// extension can register a command and drive xei UI end-to-end.
     #[cfg(feature = "extensions")]
     pub fn ext_test(&mut self) {
         if self.ext.is_none() {
@@ -792,10 +740,9 @@ impl App {
                 return;
             }
         };
-        self.xlc.open = true;
-        self.xlc.add_output(&format!("=== vscode.* API usage ({} distinct) ===", lines.len()));
+        self.set_message(&format!("=== vscode.* API usage ({} distinct) ===", lines.len()));
         for l in &lines {
-            self.xlc.add_output(l);
+            self.set_message(l);
         }
         self.message = format!("ext: {} distinct vscode.* calls — see XLC panel", lines.len());
     }
@@ -853,34 +800,6 @@ impl App {
 
     /// Open the plugin store (`SPC x` / `Ctrl+Shift+X` / `:plugins`).
     #[cfg(feature = "extensions")]
-    pub fn open_plugin_store(&mut self) {
-        use crate::plugin_store::StoreItem;
-        let installed: Vec<StoreItem> = xei_ext_host::list_installed()
-            .into_iter()
-            .map(|e| StoreItem {
-                id: e.id,
-                name: e.name,
-                version: e.version,
-                description: String::new(),
-                installed: true,
-                fidelity: None,
-                downloads: 0,
-            })
-            .collect();
-        self.plugin_store.open(installed);
-        self.mode = Mode::PluginStore;
-    }
-
-    #[cfg(not(feature = "extensions"))]
-    pub fn open_plugin_store(&mut self) {
-        self.message =
-            "extensions not built — rebuild with `--features extensions`".into();
-    }
-
-    /// Flattened rows for the Extensions sidebar: every *installed* extension as
-    /// a header with a status badge (✓ loaded / ✗ failed / ⋯ pending), loaded
-    /// ones followed by their runnable commands, failed ones by the error.
-    #[cfg(feature = "extensions")]
     pub fn ext_panel_rows(&self) -> Vec<crate::plugin_store::ExtRow> {
         use crate::plugin_store::ExtRow;
         let mut rows = Vec::new();
@@ -935,32 +854,7 @@ impl App {
         Vec::new()
     }
 
-    /// Toggle the Extensions sidebar panel (`SPC x` / `Ctrl+Shift+X`).
-    pub fn toggle_ext_panel(&mut self) {
-        self.ext_panel_open = !self.ext_panel_open;
-        if self.ext_panel_open {
-            self.plugin_store_refresh_installed(); // cache installed for the rows
-            self.ext_panel_sel = 0;
-            self.mode = Mode::ExtPanel;
-            let n = self.ext_panel_rows().iter().filter(|r| !r.is_header).count();
-            self.message = if cfg!(feature = "extensions") {
-                format!("Extensions · {n} command(s) · j/k · Enter run · b browse · Esc")
-            } else {
-                "extensions not built — rebuild with `--features extensions`".into()
-            };
-        } else if self.mode == Mode::ExtPanel {
-            self.mode = Mode::Normal;
-            self.message.clear();
-        }
-    }
 
-    pub fn close_ext_panel(&mut self) {
-        self.ext_panel_open = false;
-        if self.mode == Mode::ExtPanel {
-            self.mode = Mode::Normal;
-            self.message.clear();
-        }
-    }
 
     pub fn ext_panel_move(&mut self, delta: isize) {
         let rows = self.ext_panel_rows();
@@ -986,36 +880,7 @@ impl App {
     /// happens on a frontend thread (it needs cell pixels); core just hands off
     /// the HTML and switches mode.
     #[cfg(feature = "extensions")]
-    pub fn open_webview(&mut self) {
-        let wv = self.ext.as_ref().and_then(|e| e.webviews.last().cloned());
-        let Some(wv) = wv else {
-            self.message = "no webview to show — run a webview command first".into();
-            return;
-        };
-        self.webview_title = if wv.title.is_empty() { "webview".into() } else { wv.title };
-        self.webview_pending_html = Some(wv.html);
-        self.webview_image = None;
-        self.mode = Mode::Webview;
-        self.message = "rendering webview…".into();
-    }
 
-    #[cfg(not(feature = "extensions"))]
-    pub fn open_webview(&mut self) {
-        self.message = "extensions not built — rebuild with `--features extensions`".into();
-    }
-
-    pub fn close_webview(&mut self) {
-        if self.mode == Mode::Webview {
-            self.mode = Mode::Normal;
-            self.message.clear();
-        }
-        self.webview_pending_html = None;
-        // `webview_image` is cleared by the frontend painter (deletes the Kitty
-        // image); leaving it set here is harmless.
-    }
-
-    /// Run the selected extension command.
-    #[cfg(feature = "extensions")]
     pub fn ext_panel_run(&mut self) {
         let rows = self.ext_panel_rows();
         let Some(cmd) = rows.get(self.ext_panel_sel).and_then(|r| r.command.clone()) else {
@@ -1136,21 +1001,6 @@ impl App {
     #[cfg(not(feature = "extensions"))]
     pub fn plugin_store_uninstall_selected(&mut self) {}
 
-    pub fn toggle_screensaver(&mut self) {
-        if self.mode == Mode::Screensaver {
-            self.screensaver.close();
-            self.mode = Mode::Normal;
-            self.message.clear();
-        } else {
-            // Don't stack over terminal/palette awkwardly — close light overlays
-            if self.palette.open {
-                self.palette.close();
-            }
-            self.screensaver.open();
-            self.mode = Mode::Screensaver;
-            self.message = "xeifetch · Esc exit · weather loading…".into();
-        }
-    }
 
     pub fn new() -> Self {
         let mut app = Self::default();
@@ -1368,7 +1218,7 @@ impl App {
     /// `q` in the panel closes it.
     pub fn toggle_debug_panel(&mut self) {
         if self.mode == Mode::Debug {
-            self.mode = Mode::Normal;
+            self.mode = Mode::Editor;
             self.message = "Debug unfocused · Ctrl+Shift+D refocus · q in panel closes".into();
         } else if self.dap.panel_open {
             self.mode = Mode::Debug;
@@ -1385,7 +1235,7 @@ impl App {
     pub fn close_debug_panel(&mut self) {
         self.dap.panel_open = false;
         if self.mode == Mode::Debug {
-            self.mode = Mode::Normal;
+            self.mode = Mode::Editor;
         }
         self.message = "Debug panel closed".into();
     }
@@ -1408,7 +1258,7 @@ impl App {
         self.restore_state_from_tab();
         self.split.clamp_tabs(self.buffers.len());
         self.refresh_git();
-        self.mode = Mode::Normal;
+        self.mode = Mode::Editor;
         self.message = "New tab · i insert · Ctrl+P files · :e <file>".into();
     }
 
@@ -1708,12 +1558,12 @@ impl App {
         let configs = crate::dap::load_launch_configs(hint);
         if configs.is_empty() {
             self.message = "No launch.json configs".into();
-            self.xlc.add_output("No .vscode/launch.json found");
+            self.set_message("No .vscode/launch.json found");
             return;
         }
-        self.xlc.add_output("=== launch.json ===");
+        self.set_message("=== launch.json ===");
         for c in &configs {
-            self.xlc.add_output(&format!(
+            self.set_message(&format!(
                 "  {}  [{}]  {}",
                 c.name, c.request, c.program
             ));
@@ -1808,66 +1658,18 @@ impl App {
         self.message = self.call_hierarchy.message.clone();
     }
 
-    pub fn open_rebase(&mut self, count: usize) {
-        let hint = self.filename.as_deref();
-        let Some(root) = crate::git_ops::find_git_root(hint) else {
-            self.message = "Not a git repository".into();
-            return;
-        };
-        match self.rebase.open_for(&root, count) {
-            Ok(()) => {
-                self.mode = Mode::Rebase;
-                self.message = self.rebase.message.clone();
-            }
-            Err(e) => self.message = e,
-        }
-    }
 
     pub fn run_rebase_plan(&mut self) {
         match self.rebase.run() {
             Ok(msg) => {
-                self.mode = Mode::Normal;
+                self.mode = Mode::Editor;
                 self.message = msg;
             }
             Err(e) => self.message = e,
         }
     }
 
-    pub fn open_pr_review(&mut self, number: u64) {
-        let hint = self.filename.as_deref();
-        let Some(root) = crate::git_ops::find_git_root(hint).or_else(|| {
-            self.git_wb.root.clone()
-        }) else {
-            self.message = "Not a git repository".into();
-            return;
-        };
-        match self.pr_review.open_pr(&root, number) {
-            Ok(()) => {
-                self.mode = Mode::PrReview;
-                self.message = self.pr_review.message.clone();
-            }
-            Err(e) => self.message = e,
-        }
-    }
 
-    pub fn open_pr_review_selected(&mut self) {
-        // From git workbench PR list — pr_sel is visual index into filtered list
-        let idxs: Vec<usize> = if !self.git_wb.pr_filter.is_empty() {
-            self.git_wb.pr_filtered.clone()
-        } else {
-            (0..self.git_wb.prs.len()).collect()
-        };
-        let num = idxs
-            .get(self.git_wb.pr_sel)
-            .and_then(|&i| self.git_wb.prs.get(i))
-            .map(|p| p.number)
-            .or_else(|| self.git_wb.prs.get(self.git_wb.pr_sel).map(|p| p.number));
-        if let Some(n) = num {
-            self.open_pr_review(n);
-        } else {
-            self.message = "No PR selected".into();
-        }
-    }
 
     pub fn toggle_code_lens(&mut self) {
         self.code_lens_enabled = !self.code_lens_enabled;
@@ -2043,7 +1845,7 @@ impl App {
     pub fn close_scm(&mut self) {
         if !self.scm.open {
             if self.mode == Mode::SourceControl {
-                self.mode = Mode::Normal;
+                self.mode = Mode::Editor;
             }
             return;
         }
@@ -2053,7 +1855,7 @@ impl App {
     pub fn close_scm_immediate(&mut self) {
         self.scm.close_immediate();
         if matches!(self.mode, Mode::SourceControl) {
-            self.mode = Mode::Normal;
+            self.mode = Mode::Editor;
         }
     }
 
@@ -2115,7 +1917,7 @@ impl App {
             self.mode = Mode::SourceControl;
             self.message = String::from("Source Control");
         } else {
-            self.mode = Mode::Normal;
+            self.mode = Mode::Editor;
             self.message.clear();
         }
     }
@@ -2158,7 +1960,7 @@ impl App {
             self.save_settings();
         }
         self.settings.close();
-        self.mode = Mode::Normal;
+        self.mode = Mode::Editor;
         self.message.clear();
     }
 
@@ -2178,77 +1980,24 @@ impl App {
         self.key_hints = cfg.key_hints;
         self.lsp
             .apply_config(cfg.lsp_enabled, cfg.lsp_servers.clone());
-        if let Some(t) = theme::find(&cfg.theme) {
-            self.theme = t;
-            set_cursor_esc(t.cursor);
-        }
+        self.theme_pref = cfg.theme.clone();
+        self.theme = theme::resolve(&cfg.theme, self.system_is_dark);
         self.apply_pet_from_config(&cfg);
         // Restart LSP for current file with new server map
         self.lsp_restart_for_current();
     }
 
-    /// Set which-key hints if the feature is enabled.
-    pub fn set_hints(&mut self, hints: Vec<(&'static str, &'static str)>) {
-        if self.key_hints {
-            self.pending_hints = hints;
-        } else {
-            self.pending_hints.clear();
-        }
-    }
 
-    /// Begin a prefix chord with title + delayed popup.
-    pub fn begin_chord(
-        &mut self,
-        title: &str,
-        hints: Vec<(&'static str, &'static str)>,
-    ) {
-        self.which_key.begin_prefix(title);
-        self.set_hints(hints);
-    }
 
-    /// Open Space leader root map.
-    pub fn begin_leader(&mut self) {
-        self.which_key.begin_leader();
-        self.set_hints(crate::which_key::leader_hints(""));
-        self.message = String::from("-- SPC --");
-    }
 
-    /// Enter Space submenu (`f`, `g`, …).
-    pub fn leader_enter_sub(&mut self, key: char, label: &str) {
-        self.which_key.enter_leader_sub(key, label);
-        self.set_hints(crate::which_key::leader_hints(&key.to_string()));
-        self.message = format!("-- SPC {label} --");
-    }
 
-    /// Clear leader / which-key session.
-    pub fn clear_which_key(&mut self) {
-        self.which_key.clear();
-        self.pending_hints.clear();
-    }
 
-    /// Whether the which-key popup should draw this frame.
-    pub fn which_key_visible(&self) -> bool {
-        if !self.key_hints || self.pending_hints.is_empty() {
-            return false;
-        }
-        if !self.which_key.ready() {
-            return false;
-        }
-        self.which_key.is_leader()
-            || self.pending_key.is_some()
-            || self.pending_operator.is_some()
-            || self.pending_register
-            || self.pending_mark_set
-            || self.pending_mark_jump.is_some()
-            || self.split.pending_chord
-            || self.pending_to_mod.is_some()
-    }
 
     pub fn toggle_terminal_side(&mut self) {
         if self.terminal.open && !self.terminal.full_panel {
             self.terminal.open = false;
             self.terminal.shutdown();
-            self.mode = Mode::Normal;
+            self.mode = Mode::Editor;
         } else {
             // Switch from full to side, or open side
             self.terminal.full_panel = false;
@@ -2275,7 +2024,7 @@ impl App {
         if was_side {
             // Keep existing PTY; just rebind as pane window.
             if matches!(self.mode, Mode::Terminal) {
-                self.mode = Mode::Normal;
+                self.mode = Mode::Editor;
             }
         }
         // Open as a window: ensure a split exists so the editor stays visible.
@@ -2311,8 +2060,8 @@ impl App {
         }
         // Critical: stay in Normal — terminal is a pane, not a mode that
         // swallows layout shortcuts / opens the side Debug terminal.
-        if matches!(self.mode, Mode::Terminal | Mode::Insert) {
-            self.mode = Mode::Normal;
+        if matches!(self.mode, Mode::Terminal | Mode::Editor) {
+            self.mode = Mode::Editor;
         }
         self.message = if self.terminal.started {
             "Terminal pane · keys → shell · ⌃⇧T close · ^W w other pane".into()
@@ -2370,7 +2119,7 @@ impl App {
                 self.split.set_focus(bound);
                 self.close_split(); // shuts the PTY down with its pane
                 if matches!(self.mode, Mode::Terminal) {
-                    self.mode = Mode::Normal;
+                    self.mode = Mode::Editor;
                 }
                 self.message = "Terminal window closed".into();
                 return;
@@ -2381,7 +2130,7 @@ impl App {
             self.terminal.pane_bound = None;
             self.terminal.shutdown();
             if matches!(self.mode, Mode::Terminal) {
-                self.mode = Mode::Normal;
+                self.mode = Mode::Editor;
             }
             self.message = "Terminal window closed".into();
         }
@@ -2599,7 +2348,7 @@ impl App {
     /// Begin reverse transform close (mode flips when anim settles).
     pub fn close_preview(&mut self) {
         if !self.preview.open {
-            self.mode = Mode::Normal;
+            self.mode = Mode::Editor;
             return;
         }
         self.clear_media_handles();
@@ -2609,7 +2358,7 @@ impl App {
     pub fn close_preview_immediate(&mut self) {
         self.clear_media_handles();
         self.preview.close_immediate();
-        self.mode = Mode::Normal;
+        self.mode = Mode::Editor;
     }
 
     pub fn refresh_preview_if_open(&mut self) {
@@ -2623,11 +2372,11 @@ impl App {
     /// Settle modes after panel/preview close animations complete.
     pub fn settle_anims(&mut self) {
         if self.scm.take_just_closed() {
-            self.mode = Mode::Normal;
+            self.mode = Mode::Editor;
         }
         if self.preview.take_just_closed() {
             self.clear_media_handles();
-            self.mode = Mode::Normal;
+            self.mode = Mode::Editor;
         }
     }
 
@@ -2693,6 +2442,23 @@ impl App {
     /// position-based requests, so the server always answers against the
     /// post-edit document — including plain insert-mode typing, which never
     /// produced a didChange before.
+    /// Whether the language server's copy of the current document is current —
+    /// i.e. whether [`Self::sync_lsp_document`] would have anything to send.
+    /// False right after an edit, true again once the sync has run.
+    pub fn lsp_document_synced(&self) -> bool {
+        if !self.lsp.server_running {
+            return true;
+        }
+        let Some(path) = self.filename.as_ref() else {
+            return true;
+        };
+        if !crate::lsp::has_server_for(&path.display().to_string()) {
+            return true;
+        }
+        self.lsp_synced_path.as_ref() == Some(path)
+            && self.lsp_synced_version == self.buffer.version()
+    }
+
     pub fn sync_lsp_document(&mut self) {
         if !self.lsp.server_running {
             return;
@@ -2741,168 +2507,17 @@ impl App {
         }
     }
 
-    /// Apply operator to a motion; records last_change for `.`
-    pub fn apply_operator_motion(&mut self, op: Operator, motion: Motion, count: usize) {
-        let count = count.max(1);
-        let range = range_for_motion(&self.buffer, motion, count);
-        self.apply_operator_range(op, range, true);
-        self.last_change = Some(LastChange::Operator { op, motion, count });
-        self.clear_operator_pending();
-    }
 
-    pub fn apply_operator_textobject(&mut self, op: Operator, obj: TextObject, count: usize) {
-        let count = count.max(1);
-        // count>1: apply repeatedly from cursor (vim-ish for words)
-        for i in 0..count {
-            let Some(range) = range_for_textobject(&self.buffer, obj) else {
-                if i == 0 {
-                    self.message = String::from("Text object not found");
-                }
-                break;
-            };
-            let record = i == 0;
-            self.apply_operator_range(op, range, record);
-            if op == Operator::Yank {
-                break;
-            }
-            if op == Operator::Change {
-                break;
-            }
-        }
-        self.last_change = Some(LastChange::TextObject { op, obj, count });
-        self.clear_operator_pending();
-    }
 
-    fn apply_operator_range(
-        &mut self,
-        op: Operator,
-        range: ops::EditRange,
-        push_undo_first: bool,
-    ) {
-        match op {
-            Operator::Yank => {
-                let text = extract_text(&self.buffer, range);
-                let linewise = range.linewise;
-                let stored = if linewise && !text.ends_with('\n') {
-                    format!("{}\n", text)
-                } else {
-                    text
-                };
-                let label = self.registers.active_label();
-                self.store_yank(stored, linewise);
-                self.message = format!("Yanked → {}", label);
-            }
-            Operator::Delete => {
-                if push_undo_first {
-                    self.push_undo();
-                }
-                let text = delete_range(&mut self.buffer, range);
-                let linewise = range.linewise;
-                let stored = if linewise && !text.ends_with('\n') {
-                    format!("{}\n", text)
-                } else {
-                    text
-                };
-                self.store_yank(stored, linewise);
-                self.update_scroll();
-                self.message = String::from("Deleted");
-            }
-            Operator::Change => {
-                if push_undo_first {
-                    self.push_undo();
-                }
-                let text = delete_range(&mut self.buffer, range);
-                self.store_yank(text, range.linewise);
-                self.mode = Mode::Insert;
-                self.message = String::from("-- INSERT --");
-                self.update_scroll();
-            }
-        }
-    }
 
     pub fn store_yank(&mut self, text: String, linewise: bool) {
         self.registers.store(text.clone(), linewise);
         self.yank_buffer = Some(text);
     }
 
-    pub fn apply_substitute_cmd(&mut self, cmd: SubstituteCmd) {
-        self.push_undo();
-        let lines: Vec<String> = self.buffer.lines().to_vec();
-        let row = self.buffer.cursor.row;
-        let (new_lines, n) = substitute::apply_substitute(&lines, &cmd, row);
-        // rebuild buffer preserving cursor row
-        let text = new_lines.join("\n");
-        let col = self.buffer.cursor.col;
-        self.buffer = Buffer::from_string(&text);
-        self.buffer.cursor.row = row.min(self.buffer.line_count().saturating_sub(1));
-        self.buffer.cursor.col = col;
-        self.buffer.clamp_col();
-        self.message = format!("{} substitution(s)", n);
-        self.xlc.add_output(&format!("{} substitution(s) on {}", n, if cmd.global_file { "file" } else { "line" }));
-        self.sync_lsp_document();
-    }
 
-    /// Visual-block range: (min_row, max_row, min_col, max_col) inclusive cols.
-    pub fn block_range(&self) -> Option<(usize, usize, usize, usize)> {
-        let anchor = self.visual_anchor?;
-        let cur = self.buffer.cursor();
-        let (r0, r1) = if anchor.row <= cur.row {
-            (anchor.row, cur.row)
-        } else {
-            (cur.row, anchor.row)
-        };
-        let (c0, c1) = if anchor.col <= cur.col {
-            (anchor.col, cur.col)
-        } else {
-            (cur.col, anchor.col)
-        };
-        Some((r0, r1, c0, c1))
-    }
 
-    pub fn yank_block(&mut self) {
-        let Some((r0, r1, c0, c1)) = self.block_range() else {
-            return;
-        };
-        let mut lines = Vec::new();
-        for row in r0..=r1 {
-            let chars: Vec<char> = self.buffer.line(row).chars().collect();
-            let s = c0.min(chars.len());
-            let e = (c1 + 1).min(chars.len());
-            if s < e {
-                lines.push(chars[s..e].iter().collect::<String>());
-            } else {
-                lines.push(String::new());
-            }
-        }
-        self.store_yank(lines.join("\n"), false);
-        self.enter_normal();
-        self.message = String::from("Yanked block");
-    }
 
-    pub fn delete_block(&mut self) {
-        let Some((r0, r1, c0, c1)) = self.block_range() else {
-            return;
-        };
-        self.push_undo();
-        let mut yanked = Vec::new();
-        for row in r0..=r1 {
-            let chars: Vec<char> = self.buffer.line(row).chars().collect();
-            let s = c0.min(chars.len());
-            let e = (c1 + 1).min(chars.len());
-            if s < e {
-                yanked.push(chars[s..e].iter().collect::<String>());
-                let new_line: String = chars[..s].iter().chain(chars[e..].iter()).collect();
-                self.buffer.set_line(row, new_line);
-            } else {
-                yanked.push(String::new());
-            }
-        }
-        self.store_yank(yanked.join("\n"), false);
-        self.buffer.cursor = Position::new(r0, c0);
-        self.buffer.clamp_col();
-        self.enter_normal();
-        self.message = String::from("Deleted block");
-    }
 
     pub fn request_references(&mut self) {
         self.sync_lsp_document();
@@ -2982,31 +2597,15 @@ impl App {
     /// Paste from system clipboard (Cmd+V / Ctrl+V style) into the buffer.
     pub fn clipboard_paste(&mut self) {
         // Force system clipboard path
-        self.registers.select('+');
-        if self.mode == Mode::Insert {
-            if let Some(val) = self.registers.load_for_put() {
-                self.push_undo();
-                for c in val.text.chars() {
-                    if c == '\n' {
-                        self.buffer.insert_newline_with_indent(false);
-                    } else if c != '\r' {
-                        self.buffer.insert_char(c);
-                    }
-                }
-                self.update_scroll();
-                self.message = String::from("Pasted from clipboard");
-            } else {
-                self.message = String::from("Clipboard empty");
-            }
-        } else {
-            // Normal / Visual: put after (and leave insert if visual was replaced)
-            if matches!(self.mode, Mode::Visual | Mode::VisualLine) {
-                self.delete_selection();
-            }
-            self.registers.select('+');
-            self.paste();
-            self.message = String::from("Pasted from clipboard");
-        }
+        let Some(val) = self.registers.load_for_put() else {
+            self.message = String::from("Clipboard empty");
+            return;
+        };
+        // Paste replaces the selection and lands at the caret — the GUI
+        // contract. There is no vim "put after" branch any more.
+        self.gui_insert_text(&val.text.replace('\r', ""));
+        self.update_scroll();
+        self.message = String::from("Pasted from clipboard");
     }
 
     /// Insert pasted text at the cursor verbatim (no auto-indent — a bracketed
@@ -3024,15 +2623,12 @@ impl App {
         self.message = String::from("Pasted");
     }
 
-    /// Select entire buffer (Ctrl+A / context menu).
+    /// Select entire buffer (⌘A / context menu). Drives the Selection model —
+    /// the old version set vim's `visual_anchor`, which nothing reads now.
     pub fn select_all(&mut self) {
-        let last = self.buffer.line_count().saturating_sub(1);
-        let end_col = self.buffer.line(last).chars().count();
-        self.visual_anchor = Some(Position::new(0, 0));
-        self.buffer.cursor = Position::new(last, end_col);
-        self.mode = Mode::Visual;
+        self.select_all_gui();
         self.completions.deactivate();
-        self.message = String::from("-- VISUAL -- select all");
+        self.message = String::from("Selected all");
     }
 
     /// Open editor right-click context menu at screen coords.
@@ -3076,12 +2672,8 @@ impl App {
         self.editor_ctx = None;
         match item {
             EditorCtxItem::Cut => {
-                if matches!(self.mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock) {
-                    if self.mode == Mode::VisualBlock {
-                        self.delete_block();
-                    } else {
-                        self.delete_selection();
-                    }
+                if self.has_selection() {
+                    self.delete_selection();
                     Ok("Cut".into())
                 } else {
                     self.delete_line();
@@ -3178,109 +2770,12 @@ impl App {
         self.update_scroll();
     }
 
-    pub fn set_mark(&mut self, name: char) {
-        if self.marks.set(name, self.buffer.cursor(), self.filename.clone()) {
-            self.message = format!("Mark '{}' set", name);
-        } else {
-            self.message = String::from("Invalid mark (use a-z)");
-        }
-        self.pending_mark_set = false;
-    }
 
-    pub fn jump_to_mark(&mut self, name: char, linewise: bool) {
-        self.pending_mark_jump = None;
-        let Some(mark) = self.marks.get(name).cloned() else {
-            self.message = format!("Mark '{}' not set", name);
-            return;
-        };
-        self.push_jump();
-        if let Some(ref path) = mark.path {
-            if self.filename.as_ref() != Some(path) {
-                self.open_new_tab(&path.display().to_string());
-            }
-        }
-        self.buffer.cursor = mark.pos;
-        if linewise {
-            self.buffer.move_to_first_non_blank();
-        }
-        self.buffer.clamp_col();
-        self.update_scroll();
-        self.message = format!("Jump to '{}'", name);
-    }
 
-    pub fn record_find(&mut self, kind: FindKind, forward: bool, ch: char) {
-        self.last_find = Some(LastFind { ch, kind, forward });
-    }
 
-    pub fn repeat_find(&mut self, reverse: bool) {
-        let Some(lf) = self.last_find else {
-            self.message = String::from("No previous f/t");
-            return;
-        };
-        let (kind, forward, ch) = lf.repeat(reverse);
-        match (kind, forward) {
-            (FindKind::Find, true) => self.buffer.find_char_forward(ch),
-            (FindKind::Find, false) => self.buffer.find_char_backward(ch),
-            (FindKind::Till, true) => self.buffer.till_char_forward(ch),
-            (FindKind::Till, false) => self.buffer.till_char_backward(ch),
-        }
-        self.update_scroll();
-    }
 
-    pub fn clear_operator_pending(&mut self) {
-        self.pending_operator = None;
-        self.pending_to_mod = None;
-        self.pending_key = None;
-        self.pending_hints.clear();
-        self.which_key.clear();
-    }
 
-    pub fn begin_operator(&mut self, op: Operator) {
-        self.pending_operator = Some(op);
-        self.pending_to_mod = None;
-        self.pending_key = None;
-        let name = match op {
-            Operator::Delete => "d",
-            Operator::Change => "c",
-            Operator::Yank => "y",
-        };
-        let hints = match op {
-            Operator::Delete => crate::which_key::as_hints(crate::which_key::map_operator_delete()),
-            Operator::Change => crate::which_key::as_hints(crate::which_key::map_operator_change()),
-            Operator::Yank => crate::which_key::as_hints(crate::which_key::map_operator_yank()),
-        };
-        self.begin_chord(name, hints);
-        self.message = format!("-- {} --", name);
-    }
 
-    /// Replay last change (`.` command).
-    pub fn repeat_last_change(&mut self) {
-        let Some(change) = self.last_change.clone() else {
-            self.message = String::from("No change to repeat");
-            return;
-        };
-        match change {
-            LastChange::Operator { op, motion, count } => {
-                self.apply_operator_motion(op, motion, count);
-            }
-            LastChange::TextObject { op, obj, count } => {
-                self.apply_operator_textobject(op, obj, count);
-            }
-            LastChange::DeleteChar { count } => {
-                self.push_undo();
-                for _ in 0..count.max(1) {
-                    if self.buffer.cursor.col < self.buffer.current_line_len() {
-                        self.buffer.delete_char_at_cursor();
-                    }
-                }
-            }
-            LastChange::ReplaceChar { ch } => {
-                self.push_undo();
-                self.buffer.replace_char(ch);
-            }
-        }
-        self.message = String::from("Repeated");
-    }
 
     pub fn goto_line(&mut self, line_1based: usize) {
         self.scroll_intent = ScrollIntent::Navigate;
@@ -3331,28 +2826,15 @@ impl App {
         self.running = false;
     }
 
-    pub fn enter_insert(&mut self) {
-        self.push_undo();
-        self.visual_anchor = None;
-        self.mode = Mode::Insert;
-        self.message = String::from("-- INSERT --");
-    }
 
-    pub fn enter_normal(&mut self) {
-        self.mode = Mode::Normal;
-        self.visual_anchor = None;
-        self.pending_key = None;
-        self.pending_ft = None;
-        self.pending_hints.clear();
-        self.count = None;
-        self.pending_register = false;
-        self.pending_mark_set = false;
-        self.pending_mark_jump = None;
-        self.clear_operator_pending();
+    /// Return the keyboard to the editor and drop transient overlays.
+    /// (Was vim's "leave whatever mode you are in"; there is one editor state
+    /// now, so this is just the dismiss.)
+    pub fn focus_editor(&mut self) {
+        self.mode = Mode::Editor;
         self.completions.deactivate();
         self.palette.close();
         self.hover_text = None;
-        // Keep multi-cursors when returning to normal (Esc once clears them)
         self.message = String::new();
     }
 
@@ -3576,7 +3058,7 @@ impl App {
     pub fn execute_palette_selection(&mut self) {
         let action = self.palette.selected_action().cloned();
         self.palette.close();
-        self.mode = Mode::Normal;
+        self.mode = Mode::Editor;
         let Some(action) = action else {
             return;
         };
@@ -3978,7 +3460,6 @@ impl App {
             "preview" => self.toggle_preview(),
             "terminal" => self.toggle_terminal_side(),
             "terminal_full" => self.toggle_terminal_full(),
-            "xlc" => self.enter_xlc(None),
             "tab_next" => self.next_tab(),
             "tab_prev" => self.prev_tab(),
             "tab_close" => self.close_current_tab(),
@@ -3990,11 +3471,6 @@ impl App {
             "split_v" => self.split_vertical(),
             "split_h" => self.split_horizontal(),
             "split_close" => self.close_split(),
-            "help" => {
-                self.enter_xlc(None);
-                self.xlc.input = "help".into();
-                self.execute_xlc();
-            }
             "lsp_def" => {
                 let path = self.filename.as_ref().map(|p| p.display().to_string());
                 if let Some(path) = path {
@@ -4013,7 +3489,6 @@ impl App {
                 if let Some(t) = theme::find(name) {
                     self.theme = t;
                     config::save_theme(t.name);
-                    set_cursor_esc(t.cursor);
                     self.message = format!("Theme: {}", t.name);
                 }
             }
@@ -4200,9 +3675,6 @@ impl App {
         };
     }
 
-    pub fn prompt_rename(&mut self) {
-        self.enter_xlc(Some("Rename "));
-    }
 
     /// Switch to tab index if it exists (0-based).
     pub fn goto_tab(&mut self, idx: usize) {
@@ -4226,45 +3698,23 @@ impl App {
         }
     }
 
-    /// Select word under cursor (double-click / `viw`-ish helper).
+    /// Select the word under the cursor. Delegates to the Selection model.
     pub fn select_word_under_cursor(&mut self) {
-        if let Some(range) = ops::range_for_textobject(&self.buffer, TextObject::InnerWord) {
-            self.visual_anchor = Some(range.start);
-            self.buffer.cursor = Position::new(range.end.row, range.end.col.saturating_sub(1));
-            self.mode = Mode::Visual;
-            self.message = String::from("-- VISUAL --");
-        }
+        let pos = self.buffer.cursor();
+        self.select_word_gui(pos);
     }
 
-    pub fn enter_visual(&mut self) {
-        self.mode = Mode::Visual;
-        self.visual_anchor = Some(self.buffer.cursor());
-        self.message = String::from("-- VISUAL --");
-    }
 
-    pub fn enter_visual_line(&mut self) {
-        self.mode = Mode::VisualLine;
-        self.visual_anchor = Some(self.buffer.cursor());
-        self.message = String::from("-- VISUAL LINE --");
-    }
 
-    pub fn enter_visual_block(&mut self) {
-        self.mode = Mode::VisualBlock;
-        self.visual_anchor = Some(self.buffer.cursor());
-        self.message = String::from("-- VISUAL BLOCK --");
-    }
 
-    pub fn enter_xlc(&mut self, prompt: Option<&str>) {
-        self.mode = Mode::XlcInput;
-        self.xlc.open_panel(prompt);
-    }
 
     pub fn close_xlc(&mut self) {
-        self.xlc.close();
-        self.mode = Mode::Normal;
+        self.mode = Mode::Editor;
     }
 
-    /// Start incremental `/` (forward) or `?` (backward) search.
+    /// Open the incremental find bar (⌘F). This is a GUI panel that owns the
+    /// keyboard while it is up, not a vim mode — `Mode::Search` sits with
+    /// Palette and Settings, and the `/` `?` keys that used to open it are gone.
     pub fn enter_search(&mut self) {
         self.enter_search_dir(true);
     }
@@ -4275,23 +3725,28 @@ impl App {
 
     fn enter_search_dir(&mut self, forward: bool) {
         self.completions.deactivate();
-        self.pending_key = None;
-        self.pending_ft = None;
-        self.pending_hints.clear();
-        self.count = None;
-        self.clear_operator_pending();
         self.search_forward = forward;
         self.search_origin = Some(self.buffer.cursor());
         self.search_scroll_origin = self.scroll;
         self.search_pattern_backup = self.search_pattern.clone();
         self.search_input.clear();
         self.mode = Mode::Search;
-        self.message = if forward {
-            String::from("Search / — Enter accept · Esc cancel · ↑↓ cycle")
-        } else {
-            String::from("Search ? — reverse · Enter accept · Esc cancel")
-        };
+        self.message = String::from("Find — Enter accept · Esc cancel · ↑↓ cycle");
     }
+
+    /// Pattern currently used for highlighting (live input or committed).
+    pub fn active_search_pattern(&self) -> Option<&str> {
+        if self.mode == Mode::Search {
+            if self.search_input.is_empty() {
+                None
+            } else {
+                Some(self.search_input.as_str())
+            }
+        } else {
+            self.search_pattern.as_deref()
+        }
+    }
+
 
     /// Commit live search input as the new pattern and leave Search mode.
     pub fn commit_search(&mut self) {
@@ -4335,7 +3790,7 @@ impl App {
         self.search_input.clear();
         self.search_origin = None;
         self.search_pattern_backup = None;
-        self.mode = Mode::Normal;
+        self.mode = Mode::Editor;
     }
 
     /// Cancel search: restore cursor, restore previous committed pattern.
@@ -4360,7 +3815,7 @@ impl App {
                 self.search_current = idx;
             }
         }
-        self.mode = Mode::Normal;
+        self.mode = Mode::Editor;
         self.message = String::from("Search cancelled");
     }
 
@@ -4390,18 +3845,6 @@ impl App {
         }
     }
 
-    /// Pattern currently used for highlighting (live input or committed).
-    pub fn active_search_pattern(&self) -> Option<&str> {
-        if self.mode == Mode::Search {
-            if self.search_input.is_empty() {
-                None
-            } else {
-                Some(self.search_input.as_str())
-            }
-        } else {
-            self.search_pattern.as_deref()
-        }
-    }
 
     pub fn search_pattern_len_chars(&self) -> usize {
         self.active_search_pattern()
@@ -4430,10 +3873,6 @@ impl App {
     /// Is there a selection to copy/delete — from either source?
     pub fn has_selection(&self) -> bool {
         !self.sel.primary().is_empty()
-            || matches!(
-                self.mode,
-                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-            )
     }
 
     /// Convert the GUI selection's exclusive `[start, end)` span into the
@@ -4459,35 +3898,11 @@ impl App {
     /// Returns `None` for a bare caret with no vim visual mode.
     pub fn selected_range(&self) -> Option<(Position, Position)> {
         let gui = self.sel.primary();
-        if !gui.is_empty() {
-            let (s, e) = gui.range();
-            return Some(self.exclusive_to_inclusive(s, e));
+        if gui.is_empty() {
+            return None;
         }
-        let anchor = self.visual_anchor?;
-        let cursor = self.buffer.cursor();
-        if self.mode == Mode::VisualLine {
-            let (start_row, end_row) = if anchor.row <= cursor.row {
-                (anchor.row, cursor.row)
-            } else {
-                (cursor.row, anchor.row)
-            };
-            Some((
-                Position::new(start_row, 0),
-                Position::new(end_row, self.buffer.line(end_row).chars().count()),
-            ))
-        } else if self.mode == Mode::VisualBlock {
-            // For highlight compatibility, return unordered corners; UI uses block_range
-            if anchor.row < cursor.row || (anchor.row == cursor.row && anchor.col <= cursor.col) {
-                Some((anchor, cursor))
-            } else {
-                Some((cursor, anchor))
-            }
-        } else if anchor.row < cursor.row || (anchor.row == cursor.row && anchor.col <= cursor.col)
-        {
-            Some((anchor, cursor))
-        } else {
-            Some((cursor, anchor))
-        }
+        let (s, e) = gui.range();
+        Some(self.exclusive_to_inclusive(s, e))
     }
 
     /// Heads of every selection in `self.sel` **except the primary** — the
@@ -4512,453 +3927,6 @@ impl App {
             .collect()
     }
 
-    pub fn execute_xlc(&mut self) {
-        let cmd = self.xlc.execute();
-        match cmd {
-            XlcCmd::Save => self.save_file(),
-            XlcCmd::SaveAs(path) => {
-                self.filename = Some(PathBuf::from(&path));
-                self.save_file();
-            }
-            XlcCmd::SaveAndQuit => {
-                self.save_file();
-                if !self.modified {
-                    self.quit();
-                } else {
-                    self.xlc.add_output("Save failed; not quitting.");
-                }
-            }
-            XlcCmd::Quit => {
-                if self.modified {
-                    self.message = String::from("Unsaved changes. Use :w first or :q! to force quit.");
-                    self.xlc.add_output("Unsaved changes. Use w to save first, or q! to force quit.");
-                } else {
-                    self.quit();
-                }
-            }
-            XlcCmd::ForceQuit => self.quit(),
-            XlcCmd::Open(path) => self.open_in_place(&path),
-            XlcCmd::Move(dest) => self.move_file(&dest),
-            XlcCmd::Rename(name) => {
-                if let Some(ref path) = self.filename {
-                    let parent = path.parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| {
-                            env::current_dir().unwrap_or_default()
-                        });
-                    let new_path = parent.join(name);
-                    self.move_file(&new_path.display().to_string());
-                } else {
-                    self.xlc.add_output("No file to rename.");
-                }
-            }
-            XlcCmd::DeleteFile => {
-                if let Some(ref path) = self.filename {
-                    match fs::remove_file(path) {
-                        Ok(_) => self.xlc.add_output(&format!("Deleted: {}", path.display())),
-                        Err(e) => self.xlc.add_output(&format!("Error: {}", e)),
-                    }
-                } else {
-                    self.xlc.add_output("No file to delete.");
-                }
-            }
-            XlcCmd::Pwd => {
-                let cwd = env::current_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "?".to_string());
-                self.xlc.add_output(&cwd);
-            }
-            XlcCmd::Ls => {
-                if let Ok(entries) = std::fs::read_dir(".") {
-                    for entry in entries.flatten() {
-                        let meta = entry.file_type().ok();
-                        let name = entry.file_name();
-                        let prefix = if meta.map(|m| m.is_dir()).unwrap_or(false) { "/" } else { "" };
-                        self.xlc.add_output(&format!("  {}{}", name.to_string_lossy(), prefix));
-                    }
-                } else {
-                    self.xlc.add_output("Could not list directory.");
-                }
-            }
-            XlcCmd::Help => {
-                self.xlc.add_output("=== xei Commands ===");
-                self.xlc.add_output("  w, save         Save current file");
-                self.xlc.add_output("  w <path>        Save to a new path");
-                self.xlc.add_output("  e, open <file>  Open a file");
-                self.xlc.add_output("  mv, move <dest> Move/rename current file");
-                self.xlc.add_output("  rename <name>   Rename in same directory");
-                self.xlc.add_output("  rm              Delete current file");
-                self.xlc.add_output("  pwd             Show working directory");
-                self.xlc.add_output("  ls              List files");
-                self.xlc.add_output("  q               Quit (with unsaved warning)");
-                self.xlc.add_output("  q!              Force quit");
-                self.xlc.add_output("  wq, x           Save and quit");
-                self.xlc.add_output("  find, / <pat>   Search in buffer");
-                self.xlc.add_output("  theme [name]    Switch or list themes");
-                self.xlc.add_output("  bd              Close current tab");
-                self.xlc.add_output("  <number>        Go to line (e.g. :42)");
-                self.xlc.add_output("  s/pat/repl/g    Substitute on line");
-                self.xlc.add_output("  %s/pat/repl/g   Substitute in file");
-                self.xlc.add_output("  problems        Diagnostics list");
-                self.xlc.add_output("  preview         Pretty preview (md/json)");
-                self.xlc.add_output("  git             Full Git workbench");
-                self.xlc.add_output("  screensaver     xeifetch splash (Esc exit)");
-                self.xlc.add_output("  xeifetch / ss   Alias for screensaver");
-                self.xlc.add_output("  bench           Self-benchmark (r rerun · Esc exit)");
-                self.xlc.add_output("  status          Toggle live CPU/MEM/GPU readout");
-                self.xlc.add_output("  pet [path.gif]  Desktop pet (Kitty/Ghostty)");
-                self.xlc.add_output("  settings        Settings panel (Ctrl+,)");
-                self.xlc.add_output("  gh-login / gha  GitHub CLI browser login");
-                self.xlc.add_output("  gh-logout       GitHub CLI logout");
-                self.xlc.add_output("  gh-status       GitHub auth status");
-                self.xlc.add_output("  Rename <name>   LSP rename");
-                self.xlc.add_output("  dap / debug     Toggle debug panel");
-                self.xlc.add_output("  dap start/stop  Start / stop DAP session");
-                self.xlc.add_output("  bp              Toggle breakpoint");
-                self.xlc.add_output("  bp if <expr>    Conditional breakpoint");
-                self.xlc.add_output("  bp log <msg>    Logpoint");
-                self.xlc.add_output("  launch <prog>   DAP launch program");
-                self.xlc.add_output("  DapConfig [n]   launch.json configs");
-                self.xlc.add_output("  eval <expr>     DAP evaluate (stopped)");
-                self.xlc.add_output("  DapAttach …     attach pid <n> | port <n> [lang]");
-                self.xlc.add_output("  calls           Call hierarchy (incoming)");
-                self.xlc.add_output("  rebase [N]      Interactive rebase last N commits");
-                self.xlc.add_output("  rebase-abort    Abort in-progress rebase");
-                self.xlc.add_output("  codelens        Toggle LSP code lenses");
-                self.xlc.add_output("  pr <n>          Open PR review surface");
-                self.xlc.add_output("  hooks           Reload ~/.xei/hooks.toml");
-                self.xlc.add_output("  help, h, ?      Show this help");
-            }
-            XlcCmd::DapPanel => {
-                self.toggle_debug_panel();
-                self.xlc.add_output("Debug panel (F5 start · F9 bp · F10/F11 step)");
-            }
-            XlcCmd::DapStart => {
-                self.dap_start_or_continue();
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::DapStop => {
-                self.dap_stop();
-                self.xlc.add_output("Debug stopped");
-            }
-            XlcCmd::DapLaunch(prog) => {
-                self.dap_launch_program(&prog);
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::DapBreakpoint => {
-                self.dap_toggle_breakpoint();
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::DapCondition(expr) => {
-                self.dap_set_condition(&expr);
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::DapLogpoint(msg) => {
-                self.dap_set_logpoint(&msg);
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::DapConfig(name) => {
-                if name.is_none() {
-                    self.dap_list_configs();
-                } else {
-                    self.dap_launch_config(name.as_deref());
-                    self.xlc.add_output(&self.message.clone());
-                }
-            }
-            XlcCmd::DapEval(expr) => {
-                self.dap_evaluate(&expr);
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::DapAttach(spec) => {
-                self.dap_attach(&spec);
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::Rebase(n) => {
-                self.open_rebase(n);
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::RebaseAbort => {
-                let hint = self.filename.as_deref();
-                if let Some(root) = crate::git_ops::find_git_root(hint) {
-                    match crate::rebase::rebase_abort(&root) {
-                        Ok(m) => {
-                            self.message = m.clone();
-                            self.xlc.add_output(&m);
-                        }
-                        Err(e) => {
-                            self.message = e.clone();
-                            self.xlc.add_output(&e);
-                        }
-                    }
-                } else {
-                    self.xlc.add_output("Not a git repository");
-                }
-            }
-            XlcCmd::RebaseContinue => {
-                let hint = self.filename.as_deref();
-                if let Some(root) = crate::git_ops::find_git_root(hint) {
-                    match crate::rebase::rebase_continue(&root) {
-                        Ok(m) => {
-                            self.message = m.clone();
-                            self.xlc.add_output(&m);
-                        }
-                        Err(e) => {
-                            self.message = e.clone();
-                            self.xlc.add_output(&e);
-                        }
-                    }
-                } else {
-                    self.xlc.add_output("Not a git repository");
-                }
-            }
-            XlcCmd::CallHierarchy => {
-                self.open_call_hierarchy(false);
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::CodeLens => {
-                self.toggle_code_lens();
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::PrReview(n) => {
-                if n == 0 {
-                    self.xlc.add_output("Usage: pr <number>");
-                } else {
-                    self.open_pr_review(n);
-                    self.xlc.add_output(&self.message.clone());
-                }
-            }
-            XlcCmd::Update => {
-                // No check result yet (throttled/first run)? Force one now and
-                // install automatically when it lands.
-                self.message = if self.update.latest.is_none() && !self.update.installing {
-                    self.update
-                        .check_now_and_install(env!("CARGO_PKG_VERSION"))
-                } else {
-                    self.update.start_install()
-                };
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::BlankTab => {
-                self.open_blank_tab();
-            }
-            XlcCmd::Bench => {
-                self.run_bench();
-            }
-            XlcCmd::StatusMetrics => {
-                self.toggle_status_metrics();
-            }
-            XlcCmd::ExtTest => {
-                self.ext_test();
-            }
-            XlcCmd::ExtApi => {
-                self.ext_api_report();
-            }
-            XlcCmd::Plugins(arg) => {
-                self.ext_plugins(&arg);
-            }
-            XlcCmd::Webview => {
-                self.open_webview();
-            }
-            XlcCmd::HooksReload => {
-                self.reload_hooks();
-                self.xlc.add_output(&self.message.clone());
-            }
-            XlcCmd::Preview => {
-                self.toggle_preview();
-                self.xlc.add_output("Preview toggled (Ctrl+Shift+V / Esc)");
-            }
-            XlcCmd::GhLogin => {
-                self.xlc.add_output("Starting browser login (non-blocking)…");
-                self.open_git_workbench();
-                self.git_wb.tab = crate::git_workbench::GitTab::Auth;
-                match self.git_wb.start_browser_login() {
-                    Ok(()) => {
-                        self.message = "Auth · complete sign-in in browser".into();
-                        self.xlc.add_output("Opened Auth tab — finish login in browser");
-                    }
-                    Err(e) => {
-                        self.message = e.clone();
-                        self.xlc.add_output(&e);
-                    }
-                }
-            }
-            XlcCmd::GhLogout => match crate::gh::auth_logout() {
-                Ok(m) => {
-                    self.message = m.clone();
-                    self.xlc.add_output(&m);
-                    self.git_wb.refresh_auth();
-                }
-                Err(e) => {
-                    self.message = e.clone();
-                    self.xlc.add_output(&e);
-                }
-            },
-            XlcCmd::GhStatus => {
-                let info = crate::gh::auth_status();
-                self.git_wb.auth = info.clone();
-                self.xlc.add_output(&info.detail);
-                self.message = info.detail;
-            }
-            XlcCmd::GitWorkbench => {
-                self.open_git_workbench();
-                self.xlc.add_output("Git workbench (Ctrl+Shift+G)");
-            }
-            XlcCmd::Settings => {
-                self.open_settings();
-                self.xlc.add_output("Settings (Ctrl+,)");
-            }
-            XlcCmd::Screensaver => {
-                self.toggle_screensaver();
-                self.xlc.add_output("xeifetch screensaver (Esc to leave)");
-            }
-            XlcCmd::Pet(path) => {
-                if path.is_empty() {
-                    let st = if self.pet.enabled { "on" } else { "off" };
-                    let frames = self.pet.frame_count();
-                    let gfx = if self.pet_graphics_ok() {
-                        "gpu+kitty ok"
-                    } else {
-                        "needs gpu_acc + Kitty/Ghostty"
-                    };
-                    let err = self.pet.load_error.as_deref().unwrap_or("");
-                    self.xlc.add_output(&format!(
-                        "pet {st} · path={} · frames={frames} · pos={},{} · w={} · speed={}  [{gfx}] {err}",
-                        self.pet.path,
-                        self.pet.x,
-                        self.pet.y,
-                        self.pet.width_cells,
-                        crate::pet::PetState::speed_label(self.pet.speed),
-                    ));
-                    self.message =
-                        "Use :pet ~/pic.gif · :pet on|off · Settings → Pet (needs GPU)".into();
-                } else if matches!(path.as_str(), "off" | "disable" | "0" | "false") {
-                    self.pet.enabled = false;
-                    let mut cfg = config::load();
-                    cfg.pet_enabled = false;
-                    config::save(&cfg);
-                    self.xlc.add_output("pet off");
-                    self.message = "Pet off".into();
-                } else if matches!(path.as_str(), "on" | "enable" | "1" | "true") {
-                    if !self.pet_graphics_ok() {
-                        self.pet.enabled = false;
-                        self.xlc.add_output(
-                            "pet requires gpu_acc + Kitty/Ghostty graphics (Settings → Setting)",
-                        );
-                        self.message = "Pet needs GPU + Kitty graphics".into();
-                    } else if !self.pet.has_frames() {
-                        self.pet.enabled = false;
-                        self.xlc.add_output("pet: no frames — :pet ~/path.gif first");
-                        self.message = "Load a GIF first: :pet ~/path.gif".into();
-                    } else {
-                        self.pet.enabled = true;
-                        let mut cfg = config::load();
-                        cfg.pet_enabled = true;
-                        config::save(&cfg);
-                        self.xlc.add_output("pet on");
-                        self.message = "Pet on".into();
-                    }
-                } else {
-                    if !self.pet_graphics_ok() {
-                        self.xlc.add_output(
-                            "pet requires gpu_acc + Kitty/Ghostty — enable gpu_acc in Settings",
-                        );
-                        self.message = "Pet needs GPU + Kitty graphics".into();
-                        // Still load path so it's ready once GPU is on
-                    }
-                    let p = crate::pet::expand_path(&path);
-                    let ps = p.display().to_string();
-                    self.pet.load_path(&ps);
-                    self.pet.enabled = self.pet.has_frames() && self.pet_graphics_ok();
-                    let mut cfg = config::load();
-                    cfg.pet_path = path.clone(); // keep user form (~/…)
-                    cfg.pet_enabled = self.pet.enabled;
-                    cfg.pet_x = self.pet.x;
-                    cfg.pet_y = self.pet.y;
-                    cfg.pet_width_cells = self.pet.width_cells;
-                    cfg.pet_speed = self.pet.speed;
-                    config::save(&cfg);
-                    if let Some(ref e) = self.pet.load_error {
-                        self.xlc.add_output(&format!("pet load error: {e}"));
-                        self.message = e.clone();
-                    } else if !self.pet_graphics_ok() {
-                        self.xlc.add_output(&format!(
-                            "pet loaded {} ({} frames) but not shown — GPU/Kitty required",
-                            ps,
-                            self.pet.frame_count()
-                        ));
-                    } else {
-                        self.xlc.add_output(&format!(
-                            "pet loaded {} ({} frames)",
-                            ps,
-                            self.pet.frame_count()
-                        ));
-                        self.message = format!("Pet · {} frames", self.pet.frame_count());
-                    }
-                }
-            }
-            XlcCmd::Search(pattern) => {
-                self.search_pattern = Some(pattern.clone());
-                self.recompute_search(&pattern, true);
-                let n = self.search_matches.len();
-                self.message = if n == 0 {
-                    format!("Pattern not found: {}", pattern)
-                } else {
-                    format!("/{}/  1/{}", pattern, n)
-                };
-                self.xlc.add_output(&format!("Search /{}/ → {} match(es)", pattern, n));
-            }
-            XlcCmd::Theme(name) => {
-                if name.is_empty() {
-                    self.xlc.add_output("Available themes:");
-                    for t in theme::all_themes() {
-                        let marker = if self.theme.name == t.name { " *" } else { "  " };
-                        self.xlc.add_output(&format!("{}{}", marker, t.name));
-                    }
-                } else if let Some(t) = theme::find(&name) {
-                    self.theme = t;
-                    config::save_theme(t.name);
-                    set_cursor_esc(t.cursor);
-                    self.message = format!("Theme: {}", t.name);
-                    self.xlc.add_output(&format!("Switched to theme: {}", t.name));
-                } else {
-                    self.xlc.add_output(&format!("Unknown theme: {}. Use :theme to list.", name));
-                }
-            }
-            XlcCmd::BufDelete => {
-                self.close_current_tab();
-                self.xlc.add_output("Buffer closed");
-            }
-            XlcCmd::LspStart(cmd) => {
-                if let Some(ref path) = self.filename {
-                    let root = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-                    self.lsp.start(&cmd, &root, &path.display().to_string());
-                    self.xlc.add_output(&format!("LSP started: {}", cmd));
-                }
-            }
-            XlcCmd::GotoLine(n) => {
-                self.goto_line(n);
-                self.xlc.add_output(&format!("Jumped to line {}", n));
-            }
-            XlcCmd::Problems => {
-                self.open_problems_palette();
-            }
-            XlcCmd::Substitute(raw) => {
-                if let Some(cmd) = substitute::parse_substitute(&raw) {
-                    self.apply_substitute_cmd(cmd);
-                } else {
-                    self.xlc.add_output("Invalid :s syntax. Use :s/pat/repl/g or :%s/pat/repl/g");
-                    self.message = String::from("Invalid substitute");
-                }
-            }
-            XlcCmd::LspRename(name) => {
-                self.request_rename(&name);
-            }
-            XlcCmd::None => {
-                self.message = String::from("Unknown command. Try :help");
-                self.xlc.add_output("Try :help for available commands.");
-            }
-        }
-    }
 
     fn open_in_place(&mut self, path: &str) {
         self.open_new_tab(path);
@@ -4971,14 +3939,14 @@ impl App {
                 Ok(_) => {
                     self.filename = Some(dest_path);
                     self.message = format!("Moved to: {}", dest);
-                    self.xlc.add_output(&format!("Moved to: {}", dest));
+                    self.set_message(&format!("Moved to: {}", dest));
                 }
                 Err(e) => {
-                    self.xlc.add_output(&format!("Error moving: {}", e));
+                    self.set_message(&format!("Error moving: {}", e));
                 }
             }
         } else {
-            self.xlc.add_output("No file to move.");
+            self.set_message("No file to move.");
         }
     }
 
@@ -5199,17 +4167,17 @@ impl App {
                     self.refresh_git();
                     self.save_session();
                     self.message = format!("✓ Saved: {}", path.display());
-                    self.xlc.add_output(&format!("✓ Saved: {}", path.display()));
+                    self.set_message(&format!("✓ Saved: {}", path.display()));
                     self.fire_hook(crate::hooks::HookEvent::Save);
                 }
                 Err(e) => {
                     self.message = format!("✗ Error: {}", e);
-                    self.xlc.add_output(&format!("✗ Error: {}", e));
+                    self.set_message(&format!("✗ Error: {}", e));
                 }
             }
         } else {
             self.message = String::from("No filename. Use :w <filename>");
-            self.xlc.add_output("No filename. Use: w <path>");
+            self.set_message("No filename. Use: w <path>");
         }
     }
 
@@ -5476,18 +4444,11 @@ impl App {
                 };
                 lines.push(s);
             }
-            let linewise = self.mode == Mode::VisualLine;
             let text = lines.join("\n");
             let label = self.registers.active_label();
-            self.store_yank(
-                if linewise {
-                    format!("{}\n", text)
-                } else {
-                    text
-                },
-                linewise,
-            );
-            self.enter_normal();
+            // Copy leaves the selection standing — collapsing it here would
+            // make ⌘C deselect, which no GUI editor does.
+            self.store_yank(text, false);
             self.message = format!("Yanked → {}", label);
         }
     }
@@ -5496,20 +4457,6 @@ impl App {
         if let Some((start, end)) = self.selected_range() {
             self.push_undo();
             let mut deleted_text = String::new();
-
-            if self.mode == Mode::VisualLine {
-                self.buffer.cursor.row = start.row;
-                let count = end.row - start.row + 1;
-                for _ in 0..count {
-                    let line = self.buffer.delete_line();
-                    if !deleted_text.is_empty() { deleted_text.push('\n'); }
-                    deleted_text.push_str(&line);
-                }
-                self.store_yank(format!("{}\n", deleted_text), true);
-                self.enter_normal();
-                self.message = String::from("Deleted");
-                return;
-            }
 
             if start.row == end.row {
                 let line = self.buffer.line(start.row);
@@ -5546,7 +4493,7 @@ impl App {
             self.store_yank(deleted_text, false);
             self.buffer.cursor = Position::new(start.row, start.col);
             self.buffer.clamp_col();
-            self.enter_normal();
+            self.focus_editor();
             self.message = String::from("Deleted");
         }
     }
@@ -5569,7 +4516,7 @@ impl App {
                 .iter()
                 .map(|d| d.row.to_string())
                 .collect();
-            self.xlc.add_output(&format!("diag rows: {}", rows.join(",")));
+            self.set_message(&format!("diag rows: {}", rows.join(",")));
         }
     }
 
@@ -5975,14 +4922,6 @@ impl App {
     }
 }
 
-pub fn set_cursor_esc(color: ratatui::style::Color) {
-    use ratatui::style::Color;
-    if let Color::Rgb(r, g, b) = color {
-        print!("\x1b]12;rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\", r, r, g, g, b, b);
-        let _ = std::io::stdout().flush();
-    }
-}
-
 pub use crate::fs_atomic::atomic_write_file;
 
 #[cfg(test)]
@@ -6033,89 +4972,6 @@ mod tests {
         let (refs, ready) = app.references_result();
         assert!(!ready, "must read as pending until the server answers");
         assert!(refs.is_empty());
-    }
-
-    #[test]
-    fn shift_arrow_extends_selection_plain_arrow_collapses() {
-        use crate::key::{KeyCode, KeyEvent, KeyModifiers};
-        let mut app = app_with("abcdef");
-        app.mode = Mode::Insert;
-        app.buffer.cursor = Position::new(0, 1); // after 'a'
-        // Shift+Right twice → Visual spanning two chars.
-        app.dispatch(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
-        app.dispatch(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
-        assert!(
-            matches!(app.mode, Mode::Visual),
-            "Shift+arrow must enter Visual, got {:?}",
-            app.mode
-        );
-        let range = app.selected_range().expect("selection range");
-        assert_eq!(range.0.row, 0);
-        assert_eq!(range.1.row, 0);
-        assert!(
-            range.1.col > range.0.col || range.0.col != range.1.col,
-            "expected non-empty selection, got {range:?}"
-        );
-        // Plain Right collapses Visual.
-        app.dispatch(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        assert!(
-            !matches!(app.mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock),
-            "plain arrow must collapse selection, mode={:?}",
-            app.mode
-        );
-        assert!(app.selected_range().is_none());
-    }
-
-    #[test]
-    fn typing_replaces_shift_selection() {
-        use crate::key::{KeyCode, KeyEvent, KeyModifiers};
-        // Real GUI contract (EngineBridge.ensureInsertMode(replacingSelection)):
-        // Shift-extend → dispatch `c` (change) → typed char arrives in Insert.
-        let mut app = app_with("abcdef");
-        app.mode = Mode::Insert;
-        app.buffer.cursor = Position::new(0, 0);
-        app.dispatch(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
-        app.dispatch(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
-        app.dispatch(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
-        assert!(matches!(app.mode, Mode::Visual), "expected Visual after Shift+Right");
-        // Inclusive visual range: anchor 0 + 3×Right → cursor col 3 → "abcd".
-        let before = app.buffer.line(0).to_string();
-        assert_eq!(before, "abcdef");
-        // Face path: bare `c` while selection is active (not a synthetic enter_insert).
-        app.dispatch(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert!(
-            matches!(app.mode, Mode::Insert),
-            "visual `c` must enter Insert, got {:?}",
-            app.mode
-        );
-        assert!(
-            app.selected_range().is_none(),
-            "selection must be gone after change"
-        );
-        assert_eq!(
-            app.buffer.line(0),
-            "ef",
-            "change must delete the selected inclusive range"
-        );
-        // Next keystroke is the user's typed character (still on the real dispatch path).
-        app.dispatch(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
-        assert_eq!(app.buffer.line(0), "Xef");
-    }
-
-    #[test]
-    fn backspace_on_shift_selection_deletes_range() {
-        use crate::key::{KeyCode, KeyEvent, KeyModifiers};
-        // Face maps Backspace-on-selection to visual `d`.
-        let mut app = app_with("hello");
-        app.mode = Mode::Insert;
-        app.buffer.cursor = Position::new(0, 0);
-        app.dispatch(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
-        app.dispatch(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
-        // Inclusive: cols 0..=2 after two Rights from 0? enter_visual@0 + Right→1 + Right→2 → "hel"
-        assert!(matches!(app.mode, Mode::Visual));
-        app.dispatch(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-        assert_eq!(app.buffer.line(0), "lo");
-        assert!(!matches!(app.mode, Mode::Visual | Mode::VisualLine));
     }
 
     #[test]
@@ -6248,7 +5104,7 @@ mod tests {
     #[test]
     fn undo_restores_simple_insert() {
         let mut app = app_with("ab");
-        app.mode = Mode::Insert;
+        app.mode = Mode::Editor;
         app.buffer.cursor = Position::new(0, 2);
         app.push_undo();
         app.buffer.insert_char('X');
@@ -6356,7 +5212,7 @@ mod tests {
         app.update_search_input();
         assert_eq!(app.buffer.cursor.row, 2);
         app.cancel_search();
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.mode, Mode::Editor);
         assert_eq!(app.buffer.cursor, Position::new(1, 1));
         assert!(app.search_input.is_empty());
     }
@@ -6368,7 +5224,7 @@ mod tests {
         app.search_input = "foo".into();
         app.update_search_input();
         app.commit_search();
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.mode, Mode::Editor);
         assert_eq!(app.search_pattern.as_deref(), Some("foo"));
         assert_eq!(app.search_matches.len(), 2);
         let first = app.buffer.cursor;
@@ -6388,31 +5244,6 @@ mod tests {
     }
 
     #[test]
-    fn paste_before_charwise_cursor_on_last_char() {
-        let mut app = app_with("abc");
-        app.buffer.cursor = Position::new(0, 1); // on 'b'
-        app.registers.select('z');
-        app.registers.store("XY".into(), false);
-        app.registers.select('z');
-        app.paste_before();
-        assert_eq!(app.buffer.line(0), "aXYbc");
-        // vim: cursor ends on the last pasted char ('Y')
-        assert_eq!(app.buffer.cursor, Position::new(0, 2));
-    }
-
-    #[test]
-    fn paste_after_charwise_cursor_on_last_char() {
-        let mut app = app_with("ab");
-        app.buffer.cursor = Position::new(0, 0); // on 'a'
-        app.registers.select('z');
-        app.registers.store("XY".into(), false);
-        app.registers.select('z');
-        app.paste();
-        assert_eq!(app.buffer.line(0), "aXYb");
-        assert_eq!(app.buffer.cursor, Position::new(0, 2));
-    }
-
-    #[test]
     fn close_tab_keeps_remaining_tab_state() {
         let dir = std::env::temp_dir();
         let f1 = dir.join("xei_test_close_a.rs");
@@ -6428,20 +5259,6 @@ mod tests {
         assert_eq!(app.buffer.line(0), "fn a() {}");
         let _ = std::fs::remove_file(&f1);
         let _ = std::fs::remove_file(&f2);
-    }
-
-    #[test]
-    fn xlc_wq_is_save_and_quit() {
-        let dir = std::env::temp_dir().join("xei_test_wq.txt");
-        let _ = std::fs::write(&dir, "data");
-        let mut app = App::open_file(dir.to_str().unwrap());
-        app.buffer.insert_char('!');
-        app.modified = true;
-        app.xlc.input = "wq".into();
-        app.execute_xlc();
-        assert!(!app.running);
-        assert!(!app.modified);
-        let _ = std::fs::remove_file(&dir);
     }
 }
 

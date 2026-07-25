@@ -3,11 +3,7 @@
 //! Extracted from `xei/src/event.rs` so both faces call `App::dispatch`.
 
 use crate::app::{App, Mode};
-use crate::buffer::Position;
 use crate::key::{KeyCode, KeyEvent, KeyModifiers};
-use crate::macros::MacroKey;
-use crate::nav::FindKind;
-use crate::ops::{motion_from_char, parse_textobject, Motion, Operator};
 
 impl App {
     /// Single key-entry for all shells. Behavior must match the TUI path.
@@ -31,21 +27,12 @@ fn paste_clipboard_to_terminal(app: &mut App) {
 }
 
 fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
-    // Record macro keys (after filtering pure recording control)
-    let recording = app.macros.is_recording() && !app.replaying_macro;
-
     // ── Pane terminal (Ctrl+Shift+T): strict PTY policy ─────────────────
     // When the terminal *window* is focused, almost every key goes to the
     // child shell (Ctrl+C, arrows, …). Only a tiny allowlist is editor chrome.
     // Must run before clipboard / Ctrl+S / Cmd+C handlers.
-    if app.terminal_window_focused() && matches!(app.mode, Mode::Normal | Mode::Insert) {
+    if app.terminal_window_focused() && matches!(app.mode, Mode::Editor) {
         if handle_pane_terminal_window(app, code, modifiers) {
-            let was_recording = app.macros.is_recording() && !app.replaying_macro;
-            if was_recording {
-                if let Some(mk) = key_to_macro(code, modifiers) {
-                    app.macros.push(mk);
-                }
-            }
             return;
         }
         // false → allowlisted editor action already handled (e.g. split chord
@@ -62,7 +49,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             // ("shortcuts feel vim-tuned" complaint).
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
             | KeyCode::Backspace
-                if matches!(app.mode, Mode::Normal | Mode::Insert) =>
+                if matches!(app.mode, Mode::Editor) =>
             {
                 match code {
                     KeyCode::Left => app.buffer.move_to_line_start(),
@@ -89,11 +76,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // cmd_like+C → copy. Shift handled upstream as paste-preview; C is plain copy.
                 if !matches!(
                     app.mode,
-                    Mode::Terminal
-                        | Mode::XlcInput
-                        | Mode::Search
-                        | Mode::Palette
-                        | Mode::SourceControl
+                    Mode::Terminal | Mode::Palette | Mode::SourceControl
                 ) {
                     app.clipboard_copy();
                 }
@@ -112,7 +95,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 if modifiers.contains(KeyModifiers::SHIFT) {
                     if matches!(
                         app.mode,
-                        Mode::Normal | Mode::Insert | Mode::Preview | Mode::Explorer
+                        Mode::Editor | Mode::Preview | Mode::Explorer
                     ) {
                         app.toggle_preview();
                     }
@@ -121,32 +104,17 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // plain cmd_like+V → paste
                 if !matches!(
                     app.mode,
-                    Mode::Terminal
-                        | Mode::XlcInput
-                        | Mode::Search
-                        | Mode::Palette
-                        | Mode::SourceControl
-                        | Mode::Preview
+                    Mode::Terminal | Mode::Palette | Mode::SourceControl | Mode::Preview
                 ) {
                     app.clipboard_paste();
                 }
                 return;
             }
             KeyCode::Char('x') | KeyCode::Char('X') => {
-                // Ctrl/Cmd+Shift+X — Extensions sidebar (VS Code muscle memory)
-                if modifiers.contains(KeyModifiers::SHIFT)
-                    && matches!(app.mode, Mode::Normal | Mode::Insert | Mode::ExtPanel)
-                {
-                    app.toggle_ext_panel();
-                    return;
-                }
-                // Cmd/Ctrl+X in a visual selection → cut
-                if matches!(app.mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock) {
-                    if app.mode == Mode::VisualBlock {
-                        app.delete_block();
-                    } else {
-                        app.delete_selection();
-                    }
+                // Cmd/Ctrl+X — cut the selection.
+                if matches!(app.mode, Mode::Editor) && app.has_selection() {
+                    app.clipboard_copy();
+                    app.delete_selection();
                     app.message = String::from("Cut to clipboard");
                 }
                 return;
@@ -168,7 +136,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 if modifiers.contains(KeyModifiers::SHIFT)
                     && matches!(
                         app.mode,
-                        Mode::Normal | Mode::Insert | Mode::WorkspaceSearch | Mode::Explorer
+                        Mode::Editor | Mode::WorkspaceSearch | Mode::Explorer
                     )
                 {
                     app.open_workspace_search();
@@ -180,11 +148,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 if modifiers.contains(KeyModifiers::SHIFT)
                     && matches!(
                         app.mode,
-                        Mode::Normal
-                            | Mode::Insert
-                            | Mode::Terminal
-                            | Mode::Explorer
-                            | Mode::GitWorkbench
+                        Mode::Editor | Mode::Terminal | Mode::Explorer | Mode::GitWorkbench
                     )
                 {
                     app.toggle_terminal_full();
@@ -194,7 +158,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             KeyCode::Char('o') | KeyCode::Char('O') => {
                 // Ctrl+Shift+O — document symbols
                 if modifiers.contains(KeyModifiers::SHIFT)
-                    && matches!(app.mode, Mode::Normal | Mode::Insert | Mode::Explorer)
+                    && matches!(app.mode, Mode::Editor | Mode::Explorer)
                 {
                     app.open_document_symbols();
                     return;
@@ -203,7 +167,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             KeyCode::Char('i') | KeyCode::Char('I') => {
                 // Ctrl+Shift+I — format document (VS Code-ish)
                 if modifiers.contains(KeyModifiers::SHIFT)
-                    && matches!(app.mode, Mode::Normal | Mode::Insert)
+                    && matches!(app.mode, Mode::Editor)
                 {
                     app.format_document();
                     return;
@@ -215,14 +179,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // Ctrl+G — light Source Control
                 let git_modes = matches!(
                     app.mode,
-                    Mode::Normal
-                        | Mode::Insert
-                        | Mode::Visual
-                        | Mode::VisualLine
-                        | Mode::VisualBlock
-                        | Mode::SourceControl
-                        | Mode::GitWorkbench
-                        | Mode::Explorer
+                    Mode::Editor | Mode::SourceControl | Mode::GitWorkbench | Mode::Explorer
                 );
                 if !git_modes {
                     return;
@@ -238,7 +195,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // Ctrl/Cmd+, — Settings (VS Code convention)
                 if matches!(
                     app.mode,
-                    Mode::Normal | Mode::Insert | Mode::Settings | Mode::Explorer
+                    Mode::Editor | Mode::Settings | Mode::Explorer
                 ) {
                     app.open_settings();
                 }
@@ -248,11 +205,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // Cmd+S (macOS) — save (Ctrl+S is handled in the CONTROL block below)
                 if matches!(
                     app.mode,
-                    Mode::Normal
-                        | Mode::Insert
-                        | Mode::Visual
-                        | Mode::VisualLine
-                        | Mode::VisualBlock
+                    Mode::Editor
                 ) {
                     app.save_file();
                 }
@@ -313,14 +266,13 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         }
     }
 
-    // Ctrl+W split chords (vim-style). Works even when a terminal *window*
+    // Ctrl+W split chords. Work even when a terminal *window*
     // is focused — pane terminal is not Mode::Terminal.
     if app.split.pending_chord
-        && matches!(app.mode, Mode::Normal)
+        && matches!(app.mode, Mode::Editor)
         && !modifiers.contains(KeyModifiers::CONTROL)
     {
         app.split.pending_chord = false;
-        app.pending_hints.clear();
         match code {
             KeyCode::Char('v') => app.split_vertical(),
             KeyCode::Char('s') => app.split_horizontal(),
@@ -351,7 +303,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     if modifiers.contains(KeyModifiers::ALT)
         && !cmd_like
         && !modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(app.mode, Mode::Normal | Mode::Insert)
+        && matches!(app.mode, Mode::Editor)
     {
         match code {
             KeyCode::Left => {
@@ -387,48 +339,35 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         }
     }
 
-    // Normal: Ctrl+V → visual block (vim). Insert: Ctrl+V → paste.
+    // Ctrl+V → paste.
     if modifiers.contains(KeyModifiers::CONTROL)
         && !modifiers.contains(KeyModifiers::SHIFT)
         && !modifiers.contains(KeyModifiers::SUPER)
     {
-        if matches!(code, KeyCode::Char('w') | KeyCode::Char('W')) && app.mode == Mode::Normal {
+        if matches!(code, KeyCode::Char('w') | KeyCode::Char('W')) && app.mode == Mode::Editor {
             app.split.pending_chord = true;
-            app.begin_chord(
-                "Ctrl+W",
-                crate::which_key::as_hints(crate::which_key::map_ctrl_w()),
-            );
-            app.message = String::from("Ctrl+W —");
+            app.message = String::from("Ctrl+W — s split · v vsplit · w focus · q close");
             return;
         }
         if matches!(code, KeyCode::Char('.'))
-            && matches!(app.mode, Mode::Normal | Mode::Insert)
+            && matches!(app.mode, Mode::Editor)
         {
             // Ctrl+. — code actions / quick fix
             app.request_code_actions();
             return;
         }
-        if matches!(code, KeyCode::Char('v') | KeyCode::Char('V')) {
-            if app.mode == Mode::Insert {
-                app.clipboard_paste();
-                return;
-            }
-            if app.mode == Mode::Normal {
-                app.enter_visual_block();
-                return;
-            }
+        if matches!(code, KeyCode::Char('v') | KeyCode::Char('V'))
+            && app.mode == Mode::Editor
+        {
+            app.clipboard_paste();
+            return;
         }
     }
-
-    // Macro stop: second `q` in normal (not recording into push of stop key)
-    // Handled in handle_normal — here we push recorded keys after handling
-
-    let _ = recording; // used after dispatch
 
     // ── DAP debug function keys (any editor mode) ───────────────────
     if matches!(
         app.mode,
-        Mode::Normal | Mode::Insert | Mode::Debug | Mode::Visual | Mode::VisualLine
+        Mode::Editor | Mode::Debug
     ) {
         match code {
             KeyCode::F(5) => {
@@ -467,7 +406,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         if app.terminal.open {
             app.terminal.open = false;
             app.terminal.shutdown();
-            app.mode = Mode::Normal;
+            app.mode = Mode::Editor;
         } else {
             app.terminal.open = true;
             app.terminal.start(app.filename.as_ref());
@@ -486,7 +425,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             if app.terminal.open {
                 app.terminal.open = false;
                 app.terminal.shutdown();
-                app.mode = Mode::Normal;
+                app.mode = Mode::Editor;
             }
             return;
         }
@@ -499,24 +438,17 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             }
         }
 
-        if app.mode == Mode::Search {
-            // Don't steal search input for panel shortcuts (except Esc via mode handler).
-            // Ctrl+G style cancels.
-            if matches!(code, KeyCode::Char('c') | KeyCode::Char('g')) {
-                app.cancel_search();
-                return;
-            }
-        } else if app.mode != Mode::Terminal {
+        if app.mode != Mode::Terminal {
             // Multi-cursor: Ctrl+D add next match · Ctrl+Alt+j/k column carets
             if matches!(code, KeyCode::Char('d') | KeyCode::Char('D'))
                 && !modifiers.contains(KeyModifiers::SHIFT)
-                && matches!(app.mode, Mode::Normal | Mode::Insert)
+                && matches!(app.mode, Mode::Editor)
             {
                 app.multi_cursor_add_next();
                 return;
             }
             if modifiers.contains(KeyModifiers::ALT)
-                && matches!(app.mode, Mode::Normal | Mode::Insert)
+                && matches!(app.mode, Mode::Editor)
             {
                 match code {
                     KeyCode::Down | KeyCode::Char('j') => {
@@ -531,52 +463,43 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 }
             }
             match code {
-            KeyCode::Char('e') => {
-                if app.mode == Mode::XlcInput {
-                    app.close_xlc();
-                    app.enter_normal();
-                } else {
-                    app.enter_xlc(None);
-                }
-                return;
-            }
             KeyCode::Char('s') => {
                 // Ctrl+S save
-                if matches!(app.mode, Mode::Normal | Mode::Insert) {
+                if matches!(app.mode, Mode::Editor) {
                     app.save_file();
                 }
                 return;
             }
             KeyCode::Char('r') => {
                 // Ctrl+R redo
-                if app.mode == Mode::Normal {
+                if app.mode == Mode::Editor {
                     app.redo();
                 }
                 return;
             }
             KeyCode::Char('o') => {
                 // Ctrl+O jump back
-                if app.mode == Mode::Normal {
+                if app.mode == Mode::Editor {
                     app.jump_back();
                 }
                 return;
             }
             KeyCode::Char('i') => {
                 // Ctrl+I jump forward
-                if app.mode == Mode::Normal {
+                if app.mode == Mode::Editor {
                     app.jump_forward();
                 }
                 return;
             }
             KeyCode::Char('p') => {
                 // Ctrl+P — quick open files (VS Code)
-                if app.mode == Mode::Normal || app.mode == Mode::Insert {
+                if app.mode == Mode::Editor || app.mode == Mode::Editor {
                     app.open_file_palette();
                 }
                 return;
             }
             KeyCode::Char('a') => {
-                if app.mode == Mode::Insert {
+                if app.mode == Mode::Editor {
                     trigger_completion(app);
                 }
                 return;
@@ -585,11 +508,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // Ctrl+G — light SCM (from workbench: step back to SCM)
                 if matches!(
                     app.mode,
-                    Mode::Normal
-                        | Mode::Insert
-                        | Mode::SourceControl
-                        | Mode::GitWorkbench
-                        | Mode::Explorer
+                    Mode::Editor | Mode::SourceControl | Mode::GitWorkbench | Mode::Explorer
                 ) {
                     app.toggle_scm();
                 }
@@ -601,7 +520,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // Ctrl+Shift+D — debug panel (VS Code-ish)
                 if matches!(
                     app.mode,
-                    Mode::Normal | Mode::Insert | Mode::Debug | Mode::Explorer
+                    Mode::Editor | Mode::Debug | Mode::Explorer
                 ) {
                     app.toggle_debug_panel();
                 }
@@ -611,45 +530,27 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 // Ctrl+, without requiring Shift (some terminals only send CONTROL)
                 if matches!(
                     app.mode,
-                    Mode::Normal | Mode::Insert | Mode::Settings | Mode::Explorer
+                    Mode::Editor | Mode::Settings | Mode::Explorer
                 ) {
                     app.open_settings();
                 }
                 return;
             }
-            KeyCode::Char('u') => {
-                if app.mode == Mode::XlcInput {
-                    app.xlc.scroll_up(3);
-                    return;
-                }
-            }
-            KeyCode::Char('d') => {
-                if app.mode == Mode::XlcInput {
-                    app.xlc.scroll_down(3);
-                    return;
-                }
-            }
             KeyCode::Char('b') | KeyCode::Char('B') => {
-                if app.mode == Mode::XlcInput {
-                    app.xlc.scroll_up(8);
-                    return;
-                }
                 // Ctrl+B — git blame side panel (slide-in, flame colors)
                 if matches!(
                     app.mode,
-                    Mode::Normal | Mode::Insert | Mode::Visual | Mode::VisualLine | Mode::Explorer
+                    Mode::Editor | Mode::Explorer
                 ) {
                     app.toggle_blame();
                     return;
                 }
             }
             KeyCode::Char('f') => {
-                if app.mode == Mode::XlcInput {
-                    app.xlc.scroll_down(8);
-                } else if matches!(app.mode, Mode::Normal | Mode::Insert | Mode::Explorer) {
+                if matches!(app.mode, Mode::Editor | Mode::Explorer) {
                     if app.explorer.open {
                         app.explorer.close();
-                        app.mode = Mode::Normal;
+                        app.mode = Mode::Editor;
                     } else {
                         app.explorer.toggle_at(app.filename.as_ref());
                         app.mode = Mode::Explorer;
@@ -670,167 +571,34 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         }
     }
 
-    // Snapshot whether we were recording before this key
-    let was_recording = app.macros.is_recording() && !app.replaying_macro;
-    let reg_before = app.macros.recording;
-
-    // ── Shift+arrows: extend selection (Mac / GUI text-field contract) ──
-    // Shift+←/→/↑/↓ creates Visual (if needed) and moves the head.
-    // Plain arrows while Visual collapse then move (fall through).
-    // Must not steal Alt/Ctrl chords (word motion / multi-cursor).
-    if matches!(
-        app.mode,
-        Mode::Normal | Mode::Insert | Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-    ) && matches!(
-        code,
-        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
-    ) && !cmd_like
-        && !modifiers.contains(KeyModifiers::CONTROL)
-        && !modifiers.contains(KeyModifiers::ALT)
-        && !modifiers.contains(KeyModifiers::SUPER)
-    {
-        let shift = modifiers.contains(KeyModifiers::SHIFT);
-        if shift {
-            if !matches!(
-                app.mode,
-                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-            ) {
-                app.enter_visual();
-            }
-            match code {
-                KeyCode::Left => app.move_left(),
-                KeyCode::Right => app.move_right(),
-                KeyCode::Up => app.move_up(),
-                KeyCode::Down => app.move_down(),
-                _ => {}
-            }
-            if was_recording {
-                if let Some(mk) = key_to_macro(code, modifiers) {
-                    app.macros.push(mk);
-                }
-            }
-            return;
-        } else if matches!(
-            app.mode,
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-        ) {
-            // Collapse selection; caret stays at the head, then fall through
-            // so Normal/Insert handlers perform the motion.
-            app.enter_normal();
-        }
-    }
-
+    // Route to whichever surface owns the keyboard. The editor is absent on
+    // purpose: `Mode::Editor` keys are handled by the engine's Selection-model
+    // tables and never arrive here (see `Engine::dispatch_key`). Anything that
+    // does reach this arm is an application chord the sections above declined.
     match app.mode {
-        Mode::Normal => handle_normal(app, code),
-        Mode::Insert => handle_insert(app, code),
-        Mode::Visual | Mode::VisualLine | Mode::VisualBlock => handle_visual(app, code),
-        Mode::XlcInput => handle_xlc(app, code),
-        Mode::Search => handle_search_input(app, code),
+        Mode::Editor => {}
         Mode::Explorer => handle_explorer(app, code),
         Mode::Terminal => handle_terminal(app, code),
+        Mode::Search => handle_search_input(app, code),
         Mode::Palette => handle_palette(app, code),
         Mode::SourceControl => handle_scm(app, code),
         Mode::GitWorkbench => handle_git_workbench(app, code),
         Mode::Settings => handle_settings(app, code),
         Mode::Preview => handle_preview(app, code),
         Mode::WorkspaceSearch => handle_workspace_search(app, code),
-        Mode::Screensaver => handle_screensaver(app, code),
         Mode::Debug => handle_debug(app, code),
         Mode::CallHierarchy => handle_call_hierarchy(app, code),
-        Mode::Rebase => handle_rebase(app, code),
-        Mode::PrReview => handle_pr_review(app, code),
-        Mode::Bench => handle_bench(app, code),
-        Mode::PluginStore => handle_plugin_store(app, code),
-        Mode::ExtPanel => handle_ext_panel(app, code),
-        Mode::Webview => handle_webview(app, code),
-    }
-
-    // Append to macro buffer (skip the `q` that starts/stops recording)
-    if was_recording && app.macros.is_recording() {
-        if let Some(mk) = key_to_macro(code, modifiers) {
-            // Don't record nested @ playback
-            app.macros.push(mk);
-        }
-    } else if was_recording && !app.macros.is_recording() {
-        // stopped — buffer already stored without the stopping q if we stop before push
-        let _ = reg_before;
     }
 }
 
-fn key_to_macro(code: KeyCode, modifiers: KeyModifiers) -> Option<MacroKey> {
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        if let KeyCode::Char(c) = code {
-            return Some(MacroKey::Ctrl(c.to_ascii_lowercase()));
-        }
-    }
-    if modifiers.contains(KeyModifiers::SUPER) {
-        if let KeyCode::Char(c) = code {
-            return Some(MacroKey::Super(c.to_ascii_lowercase()));
-        }
-    }
-    Some(match code {
-        KeyCode::Char(c) => MacroKey::Char(c),
-        KeyCode::Esc => MacroKey::Esc,
-        KeyCode::Enter => MacroKey::Enter,
-        KeyCode::Backspace => MacroKey::Backspace,
-        KeyCode::Tab => MacroKey::Tab,
-        KeyCode::Up => MacroKey::Up,
-        KeyCode::Down => MacroKey::Down,
-        KeyCode::Left => MacroKey::Left,
-        KeyCode::Right => MacroKey::Right,
-        KeyCode::Home => MacroKey::Home,
-        KeyCode::End => MacroKey::End,
-        KeyCode::PageUp => MacroKey::PageUp,
-        KeyCode::PageDown => MacroKey::PageDown,
-        KeyCode::Delete => MacroKey::Delete,
-        _ => return None,
-    })
-}
 
-fn play_macro(app: &mut App, name: char) {
-    let keys: Vec<MacroKey> = match app.macros.get(name) {
-        Some(k) => k.to_vec(),
-        None => {
-            app.message = format!("Macro '{}' empty", name);
-            return;
-        }
-    };
-    app.macros.set_last_played(name);
-    app.replaying_macro = true;
-    for k in keys {
-        let (code, mods) = macro_to_key(&k);
-        dispatch_key(app, code, mods);
-    }
-    app.replaying_macro = false;
-    app.message = format!("Played @{}", name);
-}
 
-fn macro_to_key(k: &MacroKey) -> (KeyCode, KeyModifiers) {
-    match k {
-        MacroKey::Char(c) => (KeyCode::Char(*c), KeyModifiers::NONE),
-        MacroKey::Esc => (KeyCode::Esc, KeyModifiers::NONE),
-        MacroKey::Enter => (KeyCode::Enter, KeyModifiers::NONE),
-        MacroKey::Backspace => (KeyCode::Backspace, KeyModifiers::NONE),
-        MacroKey::Tab => (KeyCode::Tab, KeyModifiers::NONE),
-        MacroKey::Up => (KeyCode::Up, KeyModifiers::NONE),
-        MacroKey::Down => (KeyCode::Down, KeyModifiers::NONE),
-        MacroKey::Left => (KeyCode::Left, KeyModifiers::NONE),
-        MacroKey::Right => (KeyCode::Right, KeyModifiers::NONE),
-        MacroKey::Home => (KeyCode::Home, KeyModifiers::NONE),
-        MacroKey::End => (KeyCode::End, KeyModifiers::NONE),
-        MacroKey::PageUp => (KeyCode::PageUp, KeyModifiers::NONE),
-        MacroKey::PageDown => (KeyCode::PageDown, KeyModifiers::NONE),
-        MacroKey::Delete => (KeyCode::Delete, KeyModifiers::NONE),
-        MacroKey::Ctrl(c) => (KeyCode::Char(*c), KeyModifiers::CONTROL),
-        MacroKey::Super(c) => (KeyCode::Char(*c), KeyModifiers::SUPER),
-    }
-}
 
 fn handle_palette(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc => {
             app.palette.close();
-            app.mode = Mode::Normal;
+            app.mode = Mode::Editor;
             app.message = String::new();
         }
         KeyCode::Enter => app.execute_palette_selection(),
@@ -854,7 +622,7 @@ fn handle_workspace_search(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc => {
             app.workspace_search.close();
-            app.mode = Mode::Normal;
+            app.mode = Mode::Editor;
             app.message = String::new();
         }
         KeyCode::Tab => {
@@ -879,7 +647,7 @@ fn handle_workspace_search(app: &mut App, code: KeyCode) {
             }
             if let Some(hit) = app.workspace_search.selected_hit().cloned() {
                 app.workspace_search.close();
-                app.mode = Mode::Normal;
+                app.mode = Mode::Editor;
                 app.goto_file_location(
                     &hit.path.display().to_string(),
                     hit.row,
@@ -1043,10 +811,6 @@ fn handle_settings(app: &mut App, code: KeyCode) {
                 app.close_settings();
                 app.toggle_scm();
             }
-            SettingsAction::OpenPluginStore => {
-                app.close_settings();
-                app.open_plugin_store();
-            }
             SettingsAction::None => {}
         },
         KeyCode::Char('s') | KeyCode::Char('S') => {
@@ -1075,207 +839,17 @@ fn handle_settings(app: &mut App, code: KeyCode) {
     }
 }
 
-fn handle_ext_panel(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => app.close_ext_panel(),
-        KeyCode::Char('j') | KeyCode::Down => app.ext_panel_move(1),
-        KeyCode::Char('k') | KeyCode::Up => app.ext_panel_move(-1),
-        KeyCode::Enter => app.ext_panel_run(),
-        // Browse the marketplace (full-screen store).
-        KeyCode::Char('b') | KeyCode::Char('/') => app.open_plugin_store(),
-        // Show the latest webview an extension opened (rendered as an image).
-        KeyCode::Char('w') => app.open_webview(),
-        _ => {}
-    }
-}
 
-fn handle_webview(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => app.close_webview(),
-        _ => {}
-    }
-}
 
-fn handle_plugin_store(app: &mut App, code: KeyCode) {
-    // Live-search input mode: results update as you type (debounced in the run
-    // loop). Enter/Esc just leave the field to navigate the results.
-    if app.plugin_store.input {
-        match code {
-            KeyCode::Esc | KeyCode::Enter => app.plugin_store.cancel_input(),
-            KeyCode::Backspace => app.plugin_store.input_backspace(),
-            KeyCode::Char(c) if !c.is_control() => app.plugin_store.input_char(c),
-            _ => {}
-        }
-        return;
-    }
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.plugin_store.close();
-            app.mode = Mode::Normal;
-            app.message.clear();
-        }
-        KeyCode::Char('j') | KeyCode::Down => app.plugin_store.move_sel(1),
-        KeyCode::Char('k') | KeyCode::Up => app.plugin_store.move_sel(-1),
-        KeyCode::Tab => app.plugin_store.switch_tab(),
-        KeyCode::Char('/') => app.plugin_store.begin_input(),
-        KeyCode::Enter | KeyCode::Char('i') => {
-            app.plugin_store_install_selected();
-        }
-        KeyCode::Char('x') => app.plugin_store_uninstall_selected(),
-        KeyCode::Char('r') => {
-            app.plugin_store_refresh_installed();
-            app.plugin_store.message = "installed list refreshed".into();
-        }
-        _ => {}
-    }
-}
 
-fn handle_bench(app: &mut App, code: KeyCode) {
-    match code {
-        // `r` re-runs the benchmark; anything else leaves the screen.
-        KeyCode::Char('r') | KeyCode::Char('R') => app.run_bench(),
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => app.exit_bench(),
-        _ => app.exit_bench(),
-    }
-}
 
-fn handle_screensaver(app: &mut App, code: KeyCode) {
-    // Cryptex password entry (`/` easter egg)
-    if app.screensaver.cryptex_input {
-        match code {
-            KeyCode::Esc => {
-                app.screensaver.cancel_cryptex_input();
-                app.message = "cryptex locked".into();
-            }
-            KeyCode::Enter => {
-                if app.screensaver.submit_cryptex() {
-                    app.message = "god.".into();
-                } else {
-                    app.message = "…incorrect combination".into();
-                }
-            }
-            KeyCode::Backspace => {
-                app.screensaver.cryptex_backspace();
-            }
-            KeyCode::Char(c) if !c.is_control() => {
-                app.screensaver.cryptex_push(c);
-            }
-            _ => {}
-        }
-        return;
-    }
 
-    match code {
-        // `/` → type into the cryptex (Da Vinci Code easter egg)
-        KeyCode::Char('/') => {
-            app.screensaver.begin_cryptex_input();
-            app.message = "cryptex · enter the combination  (Esc cancel)".into();
-        }
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.toggle_screensaver();
-        }
-        // Other keys still dismiss (classic screensaver UX)
-        _ => {
-            app.toggle_screensaver();
-        }
-    }
-}
-
-fn handle_pr_review(app: &mut App, code: KeyCode) {
-    use crate::pr_review::PrReviewFocus;
-    // Root captured at open time; fall back for sessions opened another way.
-    let root = app.pr_review.root.clone().or_else(|| {
-        app.filename
-            .as_ref()
-            .and_then(|p| crate::git_ops::find_git_root(Some(p)))
-    });
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.pr_review.close();
-            // return to git workbench if it was open
-            if app.git_wb.open {
-                app.mode = Mode::GitWorkbench;
-            } else {
-                app.mode = Mode::Normal;
-            }
-            app.message = String::new();
-        }
-        KeyCode::Tab => {
-            app.pr_review.focus = app.pr_review.focus.next();
-            app.message = match app.pr_review.focus {
-                PrReviewFocus::Files => "PR · files".into(),
-                PrReviewFocus::Comments => "PR · comments".into(),
-                PrReviewFocus::Body => "PR · description".into(),
-            };
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.pr_review.move_sel(1);
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.pr_review.move_sel(-1);
-        }
-        KeyCode::PageDown | KeyCode::Char('d') if app.pr_review.focus == PrReviewFocus::Files => {
-            app.pr_review.diff_scroll = app.pr_review.diff_scroll.saturating_add(8);
-        }
-        KeyCode::PageUp | KeyCode::Char('u') if app.pr_review.focus == PrReviewFocus::Files => {
-            app.pr_review.diff_scroll = app.pr_review.diff_scroll.saturating_sub(8);
-        }
-        KeyCode::Char('J') => {
-            app.pr_review.diff_scroll = app.pr_review.diff_scroll.saturating_add(3);
-        }
-        KeyCode::Char('K') => {
-            app.pr_review.diff_scroll = app.pr_review.diff_scroll.saturating_sub(3);
-        }
-        KeyCode::Enter | KeyCode::Char('o') => {
-            if let Some(path) = app.pr_review.selected_file_path().map(|s| s.to_string()) {
-                // Try open file from worktree
-                if let Some(ref r) = root {
-                    let full = r.join(&path);
-                    if full.is_file() {
-                        app.open_new_tab(&full.display().to_string());
-                        app.pr_review.close();
-                        app.mode = Mode::Normal;
-                        app.message = format!("Opened {path}");
-                    } else {
-                        app.message = format!("Not in worktree: {path}");
-                    }
-                }
-            }
-        }
-        KeyCode::Char('c') => {
-            // checkout this PR
-            if app.pr_review.number > 0 {
-                if let Some(ref r) = root {
-                    match crate::gh::pr_checkout(r, app.pr_review.number) {
-                        Ok(m) => {
-                            app.message = m;
-                            app.refresh_git();
-                        }
-                        Err(e) => app.message = e,
-                    }
-                }
-            }
-        }
-        KeyCode::Char('b') => {
-            if !app.pr_review.url.is_empty() {
-                app.message = match crate::gh::open_in_browser(&app.pr_review.url) {
-                    Ok(m) => m,
-                    Err(e) => e,
-                };
-            }
-        }
-        KeyCode::Char('1') => app.pr_review.focus = PrReviewFocus::Files,
-        KeyCode::Char('2') => app.pr_review.focus = PrReviewFocus::Comments,
-        KeyCode::Char('3') => app.pr_review.focus = PrReviewFocus::Body,
-        _ => {}
-    }
-}
 
 fn handle_call_hierarchy(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.call_hierarchy.close();
-            app.mode = Mode::Normal;
+            app.mode = Mode::Editor;
             app.message = String::new();
         }
         KeyCode::Down | KeyCode::Char('j') => app.call_hierarchy.move_sel(1),
@@ -1294,7 +868,7 @@ fn handle_call_hierarchy(app: &mut App, code: KeyCode) {
                     app.buffer.clamp_col();
                     app.update_scroll();
                     app.call_hierarchy.close();
-                    app.mode = Mode::Normal;
+                    app.mode = Mode::Editor;
                     app.message = format!("→ {} · {}:{}", item.name, item.path, item.row + 1);
                 }
             }
@@ -1312,34 +886,6 @@ fn handle_call_hierarchy(app: &mut App, code: KeyCode) {
     }
 }
 
-fn handle_rebase(app: &mut App, code: KeyCode) {
-    use crate::rebase::RebaseAction;
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.rebase.close();
-            app.mode = Mode::Normal;
-            app.message = "Rebase cancelled".into();
-        }
-        KeyCode::Down | KeyCode::Char('j') => app.rebase.move_sel(1),
-        KeyCode::Up | KeyCode::Char('k') => app.rebase.move_sel(-1),
-        KeyCode::Tab | KeyCode::Char(' ') => app.rebase.cycle_action(),
-        KeyCode::Char('K') => app.rebase.move_entry(-1),
-        KeyCode::Char('J') => app.rebase.move_entry(1),
-        KeyCode::Char(c) if RebaseAction::from_char(c).is_some() => {
-            if let Some(a) = RebaseAction::from_char(c) {
-                app.rebase.set_action(a);
-            }
-        }
-        KeyCode::Enter => {
-            app.run_rebase_plan();
-        }
-        KeyCode::Char('!') => {
-            // force run
-            app.run_rebase_plan();
-        }
-        _ => {}
-    }
-}
 
 /// DAP debugger panel (Ctrl+Shift+D / F5).
 /// Esc unfocuses (panel stays); `q` closes the panel.
@@ -1349,7 +895,7 @@ fn handle_debug(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc => {
             // Keep panel visible — just return focus to the editor.
-            app.mode = Mode::Normal;
+            app.mode = Mode::Editor;
             app.message = "Debug unfocused · Ctrl+Shift+D refocus · q closes".into();
         }
         KeyCode::Char('q') => {
@@ -1831,9 +1377,6 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
                 if app.git_wb.pr_filter_mode {
                     app.git_wb.pr_filter_mode = false;
                     app.message = format!("Filter: {} result(s)", app.git_wb.pr_filtered.len());
-                } else {
-                    // Enter → PR review surface (files + comments + diff)
-                    app.open_pr_review_selected();
                 }
             }
             GitTab::Issues => {
@@ -1890,12 +1433,8 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
         KeyCode::Char('p') if app.git_wb.tab == GitTab::Stash => {
             match app.git_wb.stash_show_selected() {
                 Ok(text) => {
-                    app.xlc.open = true;
-                    app.xlc.add_output("=== stash show ===");
-                    for line in text.lines().take(80) {
-                        app.xlc.add_output(line);
-                    }
-                    app.message = "Stash preview → XLC".into();
+                    // The XLC console is gone; summarise on the status line.
+                    app.message = format!("Stash: {} line(s)", text.lines().count());
                 }
                 Err(e) => app.message = e,
             }
@@ -1912,9 +1451,6 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
                 }
                 Err(e) => app.message = e,
             }
-        }
-        KeyCode::Char('v') if app.git_wb.tab == GitTab::PullRequests => {
-            app.open_pr_review_selected();
         }
         KeyCode::Char('M') if app.git_wb.tab == GitTab::PullRequests => {
             match app.git_wb.merge_selected_pr("squash") {
@@ -2374,1182 +1910,75 @@ fn handle_scm(app: &mut App, code: KeyCode) {
     }
 }
 
-fn handle_normal(app: &mut App, code: KeyCode) {
-    // Esc with multi-cursors: clear them first
-    if matches!(code, KeyCode::Esc) && app.multi.is_active() {
-        app.clear_multi_cursors();
-        return;
-    }
 
-    // ── Space leader (which-key) ─────────────────────────
-    if app.which_key.is_leader() {
-        handle_leader(app, code);
-        return;
-    }
 
-    // ── Register / mark pending ─────────────────────────
-    if app.pending_register {
-        if let KeyCode::Char(c) = code {
-            if app.registers.select(c) {
-                app.message = format!("Register {}", app.registers.active_label());
-                app.begin_chord(
-                    &format!("\"{}", app.registers.active_label()),
-                    vec![
-                        ("y", "yank into reg"),
-                        ("d", "delete into reg"),
-                        ("p", "put from reg"),
-                    ],
-                );
-            } else {
-                app.message = String::from("Invalid register");
-                app.clear_which_key();
-            }
-        }
-        app.pending_register = false;
-        return;
-    }
-    if app.pending_mark_set {
-        if let KeyCode::Char(c) = code {
-            app.set_mark(c);
-            app.clear_which_key();
-        } else {
-            app.pending_mark_set = false;
-            app.clear_which_key();
-            app.message = String::from("Mark cancelled");
-        }
-        return;
-    }
-    if let Some(linewise) = app.pending_mark_jump.take() {
-        if let KeyCode::Char(c) = code {
-            app.jump_to_mark(c, linewise);
-            app.clear_which_key();
-        } else {
-            app.clear_which_key();
-            app.message = String::from("Mark jump cancelled");
-        }
-        return;
-    }
 
-    // ── Operator-pending resolution ─────────────────────
-    if let Some(op) = app.pending_operator {
-        handle_operator_pending(app, op, code);
-        return;
-    }
 
-    if let Some(pending) = app.pending_key.take() {
-        handle_pending(app, pending, code);
-        return;
-    }
 
-    if let KeyCode::Char(c) = code {
-        // f/F/t/T/r: pending char target
-        if let Some(ft) = app.pending_ft.take() {
-            match ft {
-                'f' => {
-                    app.buffer.find_char_forward(c);
-                    app.record_find(FindKind::Find, true, c);
-                }
-                'F' => {
-                    app.buffer.find_char_backward(c);
-                    app.record_find(FindKind::Find, false, c);
-                }
-                't' => {
-                    app.buffer.till_char_forward(c);
-                    app.record_find(FindKind::Till, true, c);
-                }
-                'T' => {
-                    app.buffer.till_char_backward(c);
-                    app.record_find(FindKind::Till, false, c);
-                }
-                'r' => {
-                    app.push_undo();
-                    app.buffer.replace_char(c);
-                    app.last_change = Some(crate::LastChange::ReplaceChar { ch: c });
-                }
-                _ => {}
-            }
-            app.update_scroll();
-            return;
-        }
-        // Count accumulation
-        if c.is_ascii_digit() {
-            if c == '0' && app.count.is_none() {
-                // bare 0
-            } else {
-                let d = c.to_digit(10).unwrap() as usize;
-                app.count = Some(app.count.unwrap_or(0) * 10 + d);
-                return;
-            }
-        }
-        let has_count = app.count.is_some();
-        let n = app.count.take().unwrap_or(1);
-        match c {
-            'f' | 'F' | 'T' | 'r' => {
-                app.pending_ft = Some(c);
-                return;
-            }
-            't' => {
-                app.pending_ft = Some('t');
-                return;
-            }
-            'd' => {
-                app.begin_operator(Operator::Delete);
-                return;
-            }
-            'c' => {
-                app.begin_operator(Operator::Change);
-                return;
-            }
-            'y' => {
-                app.begin_operator(Operator::Yank);
-                return;
-            }
-            'C' => {
-                app.apply_operator_motion(Operator::Change, Motion::LineEnd, 1);
-                return;
-            }
-            'D' => {
-                app.apply_operator_motion(Operator::Delete, Motion::LineEnd, 1);
-                return;
-            }
-            '.' => {
-                app.repeat_last_change();
-                return;
-            }
-            'h' | 'j' | 'k' | 'l' | 'w' | 'b' | 'e' => {
-                for _ in 0..n {
-                    match c {
-                        'h' => app.buffer.move_left(),
-                        'j' => app.buffer.move_down(),
-                        'k' => app.buffer.move_up(),
-                        'l' => app.buffer.move_right(),
-                        'w' => app.buffer.move_word_forward(),
-                        'b' => app.buffer.move_word_back(),
-                        'e' => {
-                            // reuse motion helper via range end
-                            let r = crate::ops::range_for_motion(
-                                &app.buffer,
-                                Motion::WordEnd,
-                                1,
-                            );
-                            app.buffer.cursor = Position::new(
-                                r.end.row,
-                                r.end.col.saturating_sub(1),
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-                app.update_scroll();
-                return;
-            }
-            'x' => {
-                app.push_undo();
-                for _ in 0..n {
-                    if app.buffer.cursor.col < app.buffer.current_line_len() {
-                        app.buffer.delete_char_at_cursor();
-                    }
-                }
-                app.last_change = Some(crate::LastChange::DeleteChar { count: n });
-                return;
-            }
-            'G' => {
-                if has_count {
-                    app.goto_line(n);
-                } else {
-                    app.push_jump();
-                    app.buffer.cursor.row = app.buffer.line_count().saturating_sub(1);
-                    app.buffer.move_to_line_start();
-                    app.update_scroll();
-                }
-                return;
-            }
-            'g' => {
-                app.pending_key = Some('g');
-                app.begin_chord(
-                    "g",
-                    crate::which_key::as_hints(crate::which_key::map_g()),
-                );
-                app.message = String::from("-- g --");
-                return;
-            }
-            'z' => {
-                app.pending_key = Some('z');
-                app.begin_chord(
-                    "z",
-                    crate::which_key::as_hints(crate::which_key::map_z()),
-                );
-                app.message = String::from("-- z --");
-                return;
-            }
-            ']' => {
-                app.pending_key = Some(']');
-                app.begin_chord(
-                    "]",
-                    crate::which_key::as_hints(crate::which_key::map_bracket_close()),
-                );
-                app.message = String::from("-- ] --");
-                return;
-            }
-            '[' => {
-                app.pending_key = Some('[');
-                app.begin_chord(
-                    "[",
-                    crate::which_key::as_hints(crate::which_key::map_bracket_open()),
-                );
-                app.message = String::from("-- [ --");
-                return;
-            }
-            ' ' => {
-                // Space — leader key (which-key full map)
-                app.begin_leader();
-                return;
-            }
-            'K' => {
-                app.request_hover();
-                return;
-            }
-            'q' => {
-                if app.macros.is_recording() {
-                    app.macros.stop();
-                    app.message = String::from("Macro recorded");
-                } else {
-                    app.pending_key = Some('q');
-                    app.begin_chord(
-                        "q",
-                        crate::which_key::as_hints(crate::which_key::map_macro_record()),
-                    );
-                    app.message = String::from("-- record macro --");
-                }
-                return;
-            }
-            '@' => {
-                app.pending_key = Some('@');
-                app.begin_chord(
-                    "@",
-                    crate::which_key::as_hints(crate::which_key::map_macro_play()),
-                );
-                app.message = String::from("-- play macro --");
-                return;
-            }
-            'm' => {
-                app.pending_mark_set = true;
-                app.begin_chord(
-                    "m",
-                    crate::which_key::as_hints(crate::which_key::map_mark_set()),
-                );
-                app.message = String::from("-- mark --");
-                return;
-            }
-            '"' => {
-                app.pending_register = true;
-                app.begin_chord(
-                    "\"",
-                    crate::which_key::as_hints(crate::which_key::map_register()),
-                );
-                app.message = String::from("-- register --");
-                return;
-            }
-            ';' => {
-                app.repeat_find(false);
-                return;
-            }
-            ',' => {
-                app.repeat_find(true);
-                return;
-            }
-            '\'' => {
-                app.pending_mark_jump = Some(true);
-                app.begin_chord(
-                    "'",
-                    crate::which_key::as_hints(crate::which_key::map_mark_jump_line()),
-                );
-                app.message = String::from("-- jump ' --");
-                return;
-            }
-            '`' => {
-                app.pending_mark_jump = Some(false);
-                app.begin_chord(
-                    "`",
-                    crate::which_key::as_hints(crate::which_key::map_mark_jump_exact()),
-                );
-                app.message = String::from("-- jump ` --");
-                return;
-            }
-            _ => {}
-        }
-    }
 
-    match code {
-        KeyCode::Char(':') => app.enter_xlc(None),
-        KeyCode::Char('/') => app.enter_search(),
-        KeyCode::Char('?') => app.enter_search_backward(),
-        KeyCode::Char('i') => app.enter_insert(),
-        KeyCode::Char('a') => {
-            app.buffer.move_right();
-            app.enter_insert();
-        }
-        KeyCode::Char('A') => {
-            app.buffer.move_to_line_end();
-            app.enter_insert();
-        }
-        KeyCode::Char('I') => {
-            app.buffer.move_to_first_non_blank();
-            app.enter_insert();
-        }
-        KeyCode::Char('v') => app.enter_visual(),
-        KeyCode::Char('V') => app.enter_visual_line(),
-        KeyCode::Char('h') | KeyCode::Left => app.move_left(),
-        KeyCode::Char('l') | KeyCode::Right => app.move_right(),
-        KeyCode::Char('k') | KeyCode::Up => app.move_up(),
-        KeyCode::Char('j') | KeyCode::Down => app.move_down(),
-        KeyCode::Char('0') => app.buffer.move_to_line_start(),
-        KeyCode::Char('$') => app.buffer.move_to_line_end(),
-        KeyCode::Char('^') => app.buffer.move_to_first_non_blank(),
-        KeyCode::Char('J') => {
-            app.push_undo();
-            app.buffer.join_lines();
-        }
-        KeyCode::Char('>') => {
-            app.push_undo();
-            app.buffer.indent_line();
-            app.buffer.move_to_first_non_blank();
-        }
-        KeyCode::Char('<') => {
-            app.push_undo();
-            app.buffer.dedent_line();
-            app.buffer.move_to_first_non_blank();
-        }
-        KeyCode::Char('P') => app.paste_before(),
-        KeyCode::Char('w') => app.buffer.move_word_forward(),
-        KeyCode::Char('b') => app.buffer.move_word_back(),
-        KeyCode::Char('o') => {
-            app.push_undo();
-            app.buffer.move_to_line_end();
-            app.buffer.insert_newline_with_indent(false);
-            app.mode = Mode::Insert;
-            app.visual_anchor = None;
-            app.message = String::from("-- INSERT --");
-        }
-        KeyCode::Char('O') => {
-            app.push_undo();
-            let row = app.buffer.cursor.row;
-            let indent = app.buffer.leading_indent(row);
-            let indent_cols = indent.chars().count();
-            app.buffer.insert_line_at(row, indent);
-            app.buffer.cursor.col = indent_cols;
-            app.mode = Mode::Insert;
-            app.visual_anchor = None;
-            app.message = String::from("-- INSERT --");
-        }
-        KeyCode::Char('p') => app.paste(),
-        KeyCode::Char('u') => app.undo(),
-        KeyCode::Char('n') => app.search_next(),
-        KeyCode::Char('N') => app.search_prev(),
-        KeyCode::Char('*') => app.search_word_under_cursor(),
-        KeyCode::Char('#') => app.search_word_under_cursor_backward(),
-        KeyCode::Char('G') => {
-            app.push_jump();
-            app.buffer.cursor.row = app.buffer.line_count().saturating_sub(1);
-            app.buffer.move_to_line_start();
-            app.update_scroll();
-        }
-        KeyCode::PageDown => {
-            let step = (app.viewport.height as usize).saturating_sub(1).max(1);
-            let max = app.buffer.line_count().saturating_sub(1);
-            app.buffer.cursor.row = (app.buffer.cursor.row + step).min(max);
-            app.buffer.clamp_col();
-            app.update_scroll();
-        }
-        KeyCode::PageUp => {
-            let step = (app.viewport.height as usize).saturating_sub(1).max(1);
-            app.buffer.cursor.row = app.buffer.cursor.row.saturating_sub(step);
-            app.buffer.clamp_col();
-            app.update_scroll();
-        }
-        KeyCode::Home => app.buffer.move_to_line_start(),
-        KeyCode::End => app.buffer.move_to_line_end(),
-        KeyCode::Tab => {
-            // Tab without ctrl = jump forward (vim Ctrl+I often equals Tab)
-            app.jump_forward();
-        }
-        KeyCode::Esc => {
-            app.pending_key = None;
-            app.pending_ft = None;
-            app.count = None;
-            app.pending_register = false;
-            app.pending_mark_set = false;
-            app.pending_mark_jump = None;
-            app.registers.clear_active();
-            app.clear_operator_pending();
-            app.clear_which_key();
-            app.hover_text = None;
-            app.message = String::new();
-        }
-        _ => {}
-    }
-}
-
-/// Space-leader dispatch (which-key nested maps).
-fn handle_leader(app: &mut App, code: KeyCode) {
-    let path = app.which_key.leader.clone().unwrap_or_default();
+/// Find-bar key handling. This is a GUI panel that owns the keyboard while
+/// it is open — the same shape as `handle_palette`, not a vim mode.
+fn handle_search_input(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc => {
-            app.clear_which_key();
-            app.message = String::new();
-            return;
-        }
-        KeyCode::Backspace if !path.is_empty() => {
-            // Back to root
-            app.begin_leader();
-            return;
-        }
-        KeyCode::Char(c) => {
-            if path.is_empty() {
-                // Root menu
-                match c {
-                    'f' => {
-                        app.leader_enter_sub('f', "f");
-                        return;
-                    }
-                    'b' => {
-                        app.leader_enter_sub('b', "b");
-                        return;
-                    }
-                    'g' => {
-                        app.leader_enter_sub('g', "g");
-                        return;
-                    }
-                    'l' => {
-                        app.leader_enter_sub('l', "l");
-                        return;
-                    }
-                    'w' => {
-                        app.leader_enter_sub('w', "w");
-                        return;
-                    }
-                    's' => {
-                        app.leader_enter_sub('s', "s");
-                        return;
-                    }
-                    'c' => {
-                        app.leader_enter_sub('c', "c");
-                        return;
-                    }
-                    'd' => {
-                        app.leader_enter_sub('d', "d");
-                        return;
-                    }
-                    't' => {
-                        app.leader_enter_sub('t', "t");
-                        return;
-                    }
-                    'h' => {
-                        app.leader_enter_sub('h', "h");
-                        return;
-                    }
-                    'p' => {
-                        app.clear_which_key();
-                        app.open_command_palette();
-                        return;
-                    }
-                    '/' => {
-                        app.clear_which_key();
-                        app.open_workspace_search();
-                        return;
-                    }
-                    ',' => {
-                        app.clear_which_key();
-                        app.open_settings();
-                        return;
-                    }
-                    'x' => {
-                        app.clear_which_key();
-                        app.toggle_ext_panel();
-                        return;
-                    }
-                    'e' => {
-                        app.clear_which_key();
-                        if app.explorer.open {
-                            app.explorer.close();
-                            app.mode = Mode::Normal;
-                        } else {
-                            app.explorer.toggle_at(app.filename.as_ref());
-                            app.mode = Mode::Explorer;
-                        }
-                        return;
-                    }
-                    ';' => {
-                        app.clear_which_key();
-                        app.enter_xlc(None);
-                        return;
-                    }
-                    _ => {
-                        app.clear_which_key();
-                        app.message = format!("SPC {c} — unknown");
-                        return;
-                    }
-                }
-            }
-            // Submenus
-            app.clear_which_key();
-            match (path.as_str(), c) {
-                // files
-                ("f", 'f') => app.open_file_palette(),
-                ("f", 'e') => {
-                    if app.explorer.open {
-                        app.explorer.close();
-                        app.mode = Mode::Normal;
-                    } else {
-                        app.explorer.toggle_at(app.filename.as_ref());
-                        app.mode = Mode::Explorer;
-                    }
-                }
-                ("f", 's') => app.save_file(),
-                ("f", 'S') => app.enter_xlc(Some("w ")),
-                ("f", 'p') => app.toggle_preview(),
-                ("f", 'r') => app.reload_from_disk(),
-                // buffers
-                ("b", 'n') => app.next_tab(),
-                ("b", 'p') => app.prev_tab(),
-                ("b", 'd') => app.close_current_tab(),
-                ("b", 'b') => app.open_file_palette(),
-                ("b", d) if d.is_ascii_digit() => {
-                    let n = d.to_digit(10).unwrap_or(0) as usize;
-                    if n >= 1 {
-                        app.goto_tab(n - 1);
-                    }
-                }
-                // git
-                ("g", 'g') => app.open_git_workbench(),
-                ("g", 's') => app.toggle_scm(),
-                ("g", 'b') => app.toggle_blame(),
-                ("g", 'f') => app.git_remote("fetch"),
-                ("g", 'p') => app.git_remote("pull"),
-                ("g", 'P') => app.git_remote("push"),
-                ("g", 'r') => app.open_rebase(8),
-                ("g", 'v') => app.open_pr_review_selected(),
-                // lsp
-                ("l", 'd') => {
-                    if let Some(path) = app.filename.as_ref().map(|p| p.display().to_string()) {
-                        app.push_jump();
-                        app.sync_lsp_document();
-                        let cursor = app.buffer.cursor();
-                        app.lsp.request_definition(&path, cursor.row, cursor.col);
-                        app.message = String::from("Requested go-to-definition");
-                    }
-                }
-                ("l", 'r') => app.request_references(),
-                ("l", 'h') => app.request_hover(),
-                ("l", 'a') => app.request_code_actions(),
-                ("l", 'f') => app.format_document(),
-                ("l", 'o') => app.open_document_symbols(),
-                ("l", 'R') => app.prompt_rename(),
-                ("l", 'n') => app.diag_next(),
-                ("l", 'p') => app.diag_prev(),
-                ("l", 'c') => app.open_call_hierarchy(false),
-                // window
-                ("w", 'v') => app.split_vertical(),
-                ("w", 's') => app.split_horizontal(),
-                ("w", 'w') => app.focus_other_pane(),
-                ("w", 'q') => app.close_split(),
-                ("w", '=') => {
-                    app.split.equalize();
-                    app.message = String::from("Split equalized");
-                }
-                ("w", 't') => app.toggle_terminal_full(),
-                // search
-                ("s", 's') => app.enter_search(),
-                ("s", 'S') => app.enter_search_backward(),
-                ("s", 'f') => app.open_workspace_search(),
-                ("s", 'o') => app.open_document_symbols(),
-                ("s", 'w') => app.open_workspace_symbols(),
-                // code
-                ("c", 'a') => app.request_code_actions(),
-                ("c", 'f') => app.format_document(),
-                ("c", 'r') => app.prompt_rename(),
-                ("c", 'd') => {
-                    if let Some(path) = app.filename.as_ref().map(|p| p.display().to_string()) {
-                        app.push_jump();
-                        app.sync_lsp_document();
-                        let cursor = app.buffer.cursor();
-                        app.lsp.request_definition(&path, cursor.row, cursor.col);
-                    }
-                }
-                ("c", 'R') => app.request_references(),
-                // debug
-                ("d", 'd') => app.toggle_debug_panel(),
-                ("d", 's') => app.dap_start_or_continue(),
-                ("d", 'b') => app.dap_toggle_breakpoint(),
-                ("d", 'n') => app.dap_step_over(),
-                ("d", 'i') => app.dap_step_into(),
-                ("d", 'o') => app.dap_step_out(),
-                ("d", 'p') => app.dap_pause(),
-                ("d", 'x') => app.dap_stop(),
-                ("d", 'c') => app.dap_list_configs(),
-                ("d", 'a') => {
-                    app.message =
-                        "Attach: :DapAttach pid <n> | :DapAttach port <n> [python|node]".into();
-                }
-                ("d", 'r') => {
-                    if let Err(e) = app.dap.restart() {
-                        app.message = e;
-                    } else {
-                        app.message = "▶ restart".into();
-                    }
-                }
-                // toggle
-                ("t", 'b') => app.toggle_blame(),
-                ("t", 'e') => {
-                    if app.explorer.open {
-                        app.explorer.close();
-                        app.mode = Mode::Normal;
-                    } else {
-                        app.explorer.toggle_at(app.filename.as_ref());
-                        app.mode = Mode::Explorer;
-                    }
-                }
-                ("t", 't') => app.toggle_terminal_side(),
-                ("t", 'T') => app.toggle_terminal_full(),
-                ("t", 'i') => app.toggle_inlay_hints(),
-                ("t", 'l') => app.toggle_code_lens(),
-                ("t", 'r') => app.toggle_relative_number(),
-                ("t", 'p') => app.toggle_preview(),
-                // help
-                ("h", 'h') | ("h", ',') => app.open_settings(),
-                ("h", 'k') => {
-                    app.key_hints = !app.key_hints;
-                    app.message = if app.key_hints {
-                        "key_hints on".into()
-                    } else {
-                        "key_hints off".into()
-                    };
-                }
-                ("h", 's') => app.toggle_screensaver(),
-                _ => {
-                    app.message = format!("SPC {path}{c} — unknown");
-                }
-            }
-        }
-        _ => {
-            app.clear_which_key();
-        }
-    }
-}
-
-fn handle_operator_pending(app: &mut App, op: Operator, code: KeyCode) {
-    // Allow count after operator: d2w, c3iw, ...
-    if let KeyCode::Char(c) = code {
-        if c.is_ascii_digit() {
-            if c == '0' && app.count.is_none() {
-                // d0 = delete to line start
-            } else {
-                let d = c.to_digit(10).unwrap() as usize;
-                app.count = Some(app.count.unwrap_or(0) * 10 + d);
-                return;
-            }
-        }
-    }
-    let n = app.count.take().unwrap_or(1);
-
-    // df{x} / dt{x} etc.
-    if let Some(ft) = app.pending_ft.take() {
-        if let KeyCode::Char(ch) = code {
-            let motion = match ft {
-                'f' => Motion::FindForward(ch),
-                'F' => Motion::FindBackward(ch),
-                't' => Motion::TillForward(ch),
-                'T' => Motion::TillBackward(ch),
-                _ => {
-                    app.clear_operator_pending();
-                    return;
-                }
-            };
-            app.apply_operator_motion(op, motion, n);
-        } else {
-            app.clear_operator_pending();
-        }
-        return;
-    }
-
-    // Text-object modifier pending (i / a)
-    if let Some(mod_c) = app.pending_to_mod.take() {
-        if let KeyCode::Char(obj_c) = code {
-            if let Some(obj) = parse_textobject(mod_c, obj_c) {
-                app.apply_operator_textobject(op, obj, n);
-                return;
-            }
-        }
-        app.clear_operator_pending();
-        app.message = String::from("Unknown text object");
-        return;
-    }
-
-    match code {
-        KeyCode::Esc => {
-            app.clear_operator_pending();
-            app.message = String::new();
-        }
-        KeyCode::Char('i') | KeyCode::Char('a') => {
-            if let KeyCode::Char(m) = code {
-                app.pending_to_mod = Some(m);
-                let prefix = match op {
-                    Operator::Delete => 'd',
-                    Operator::Change => 'c',
-                    Operator::Yank => 'y',
-                };
-                app.begin_chord(
-                    &format!("{prefix}{m}"),
-                    crate::which_key::as_hints(crate::which_key::map_textobject()),
-                );
-                app.message = format!("-- {}{} --", prefix, m);
-            }
-        }
-        KeyCode::Char('d') if op == Operator::Delete => {
-            app.apply_operator_motion(op, Motion::WholeLine, n);
-        }
-        KeyCode::Char('c') if op == Operator::Change => {
-            app.apply_operator_motion(op, Motion::WholeLine, n);
-        }
-        KeyCode::Char('y') if op == Operator::Yank => {
-            app.apply_operator_motion(op, Motion::WholeLine, n);
-        }
-        KeyCode::Char('g') => {
-            app.pending_key = Some('@');
-            app.pending_hints = vec![("g", "to buffer start")];
-            app.message = String::from("-- press g for buffer start --");
-        }
-        KeyCode::Char('G') => {
-            app.apply_operator_motion(op, Motion::BufferEnd, 1);
-        }
-        KeyCode::Char(c) => {
-            if let Some(motion) = motion_from_char(c) {
-                app.apply_operator_motion(op, motion, n);
-            } else if matches!(c, 'f' | 'F' | 't' | 'T') {
-                app.pending_ft = Some(c);
-                let prefix = match op {
-                    Operator::Delete => 'd',
-                    Operator::Change => 'c',
-                    Operator::Yank => 'y',
-                };
-                app.message = format!("-- {}{}{{char}} --", prefix, c);
-            } else {
-                app.clear_operator_pending();
-                app.message = String::from("Unknown motion");
-            }
-        }
-        _ => {
-            app.clear_operator_pending();
-        }
-    }
-}
-
-fn handle_pending(app: &mut App, pending: char, code: KeyCode) {
-    app.pending_hints.clear();
-    app.which_key.clear();
-    // Operator + g + g
-    if pending == '@' {
-        if let Some(op) = app.pending_operator {
-            if matches!(code, KeyCode::Char('g')) {
-                app.apply_operator_motion(op, Motion::BufferStart, 1);
-                return;
-            }
-        }
-        app.clear_operator_pending();
-        return;
-    }
-    // f/t after operator
-    if let Some(op) = app.pending_operator {
-        if let Some(ft) = app.pending_ft.take() {
-            if let KeyCode::Char(ch) = code {
-                let motion = match ft {
-                    'f' => Motion::FindForward(ch),
-                    'F' => Motion::FindBackward(ch),
-                    't' => Motion::TillForward(ch),
-                    'T' => Motion::TillBackward(ch),
-                    _ => {
-                        app.clear_operator_pending();
-                        return;
-                    }
-                };
-                app.apply_operator_motion(op, motion, 1);
-                return;
-            }
-        }
-    }
-
-    match (pending, code) {
-        ('g', KeyCode::Char('g')) => {
-            app.push_jump();
-            app.buffer.cursor.row = 0;
-            app.buffer.cursor.col = 0;
-            app.scroll = 0;
-            app.message = String::new();
-        }
-        ('g', KeyCode::Char('d')) => {
-            let path = app.filename.as_ref().map(|p| p.display().to_string());
-            if let Some(path) = path {
-                app.push_jump();
-                app.sync_lsp_document();
-                let cursor = app.buffer.cursor();
-                app.lsp.request_definition(&path, cursor.row, cursor.col);
-                app.message = String::from("Requested go-to-definition");
-            }
-        }
-        ('g', KeyCode::Char('p')) => {
-            app.request_peek_definition();
-        }
-        ('g', KeyCode::Char('O')) => {
-            app.open_document_symbols();
-        }
-        ('g', KeyCode::Char('t')) => app.next_tab(),
-        ('g', KeyCode::Char('T')) => app.prev_tab(),
-        ('g', KeyCode::Char('r')) => {
-            app.request_references();
-        }
-        ('g', KeyCode::Char('b')) => {
-            app.toggle_blame();
-        }
-        ('g', KeyCode::Char('C')) => {
-            app.open_call_hierarchy(false);
-        }
-        ('g', KeyCode::Char('I')) => {
-            // incoming calls
-            app.open_call_hierarchy(false);
-        }
-        ('g', KeyCode::Char('H')) => {
-            // outgoing helpers (call hierarchy outgoing)
-            app.open_call_hierarchy(true);
-        }
-        ('g', _) => {
-            app.message = String::from("g: gg gd gp gO gr gb gC gI gH gt gT");
-        }
-        ('z', KeyCode::Char('a')) => app.fold_toggle(),
-        ('z', KeyCode::Char('c')) => app.fold_close(),
-        ('z', KeyCode::Char('o')) => app.fold_open(),
-        ('z', KeyCode::Char('M')) => app.fold_close_all(),
-        ('z', KeyCode::Char('R')) => app.fold_open_all(),
-        ('z', KeyCode::Char('h')) if !app.wrap_lines => {
-            app.hscroll = app.hscroll.saturating_sub(6);
-        }
-        ('z', KeyCode::Char('l')) if !app.wrap_lines => {
-            app.hscroll = app.hscroll.saturating_add(6);
-        }
-        ('z', KeyCode::Char('H')) if !app.wrap_lines => {
-            let half = (app.viewport.width as usize / 2).max(1);
-            app.hscroll = app.hscroll.saturating_sub(half);
-        }
-        ('z', KeyCode::Char('L')) if !app.wrap_lines => {
-            let half = (app.viewport.width as usize / 2).max(1);
-            app.hscroll = app.hscroll.saturating_add(half);
-        }
-        ('z', _) => {
-            app.message = if app.wrap_lines {
-                String::from("z: za zc zo zM zR")
-            } else {
-                String::from("z: za zc zo zM zR · zh/zl/zH/zL pan")
-            };
-        }
-        (']', KeyCode::Char('d')) => app.diag_next(),
-        (']', KeyCode::Char('c')) => app.git_change_next(),
-        (']', _) => {
-            app.message = String::from("]d diag · ]c git change");
-        }
-        ('[', KeyCode::Char('d')) => app.diag_prev(),
-        ('[', KeyCode::Char('c')) => app.git_change_prev(),
-        ('[', _) => {
-            app.message = String::from("[d diag · [c git change");
-        }
-        ('q', KeyCode::Char(c)) if c.is_ascii_lowercase() => {
-            if app.macros.start(c) {
-                app.message = format!("Recording @{0}… (q to stop)", c);
-            }
-        }
-        ('q', _) => {
-            app.message = String::from("q{a-z} to record");
-        }
-        ('@', KeyCode::Char('@')) => {
-            if let Some(name) = app.macros.last_played {
-                play_macro(app, name);
-            } else {
-                app.message = String::from("No previous macro");
-            }
-        }
-        ('@', KeyCode::Char(c)) if c.is_ascii_lowercase() => {
-            play_macro(app, c);
-        }
-        ('@', _) => {
-            app.message = String::from("@{a-z} to play");
-        }
-        _ => {}
-    }
-}
-
-fn handle_insert(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc => {
-            app.completions.deactivate();
-            if app.multi.is_active() {
-                // First Esc clears multi-cursors; second leaves insert
-                app.clear_multi_cursors();
-                return;
-            }
-            // Vim-like: leave insert on the last typed char
-            if app.buffer.cursor.col > 0 {
-                app.buffer.move_left();
-            }
-            app.enter_normal();
-            app.message = String::new();
+            app.cancel_search();
         }
         KeyCode::Enter => {
-            if app.completions.active {
-                apply_completion(app);
+            app.commit_search();
+        }
+        KeyCode::Backspace => {
+            if app.search_input.is_empty() {
+                app.cancel_search();
             } else {
-                app.multi_newline();
-                app.update_scroll();
+                app.search_input.pop();
+                app.update_search_input();
             }
         }
-        KeyCode::Tab => {
-            if app.completions.active && !app.completions.suggestions.is_empty() {
-                apply_completion(app);
-            } else if app.multi.is_active() {
-                for _ in 0..4 {
-                    app.multi_insert_char(' ');
-                }
-                app.update_scroll();
-            } else {
-                // Snippet expand (fn, for, if, …) then fall back to indent spaces
-                let ext = app.file_extension();
-                if let Some(msg) = crate::snippets::try_expand(&mut app.buffer, ext.as_deref()) {
-                    app.modified = true;
-                    app.rebuild_folds();
-                    app.update_scroll();
-                    app.message = msg;
-                } else {
-                    for _ in 0..4 {
-                        app.buffer.insert_char(' ');
-                    }
-                }
-            }
-        }
-        KeyCode::BackTab => {
-            if app.completions.active {
-                app.completions.prev();
-            }
-        }
-        KeyCode::Left => {
-            app.completions.deactivate();
-            app.multi_move_each(|b| {
-                b.move_left();
-            });
-            app.update_scroll();
-        }
-        KeyCode::Right => {
-            app.completions.deactivate();
-            app.multi_move_each(|b| {
-                b.move_right();
-            });
-            app.update_scroll();
-        }
-        KeyCode::Up => {
-            if app.completions.active {
-                app.completions.prev();
-            } else {
-                app.multi_move_each(|b| {
-                    b.move_up();
-                });
-                app.update_scroll();
+        KeyCode::Delete => {
+            // same as backspace for single-line search
+            if !app.search_input.is_empty() {
+                app.search_input.pop();
+                app.update_search_input();
             }
         }
         KeyCode::Down => {
-            if app.completions.active {
-                app.completions.next();
-            } else {
-                app.multi_move_each(|b| {
-                    b.move_down();
-                });
+            // Jump to next live match while still typing
+            if !app.search_matches.is_empty() {
+                app.search_current = (app.search_current + 1) % app.search_matches.len();
+                let pos = app.search_matches[app.search_current];
+                app.buffer.cursor = pos;
                 app.update_scroll();
+                app.message = format!(
+                    "/{}/  {}/{}",
+                    app.search_input,
+                    app.search_current + 1,
+                    app.search_matches.len()
+                );
             }
         }
-        KeyCode::Backspace => {
-            if app.multi.is_active() {
-                app.multi_backspace();
-            } else if is_pair_close_char(app.buffer.char_before_cursor())
-                && is_pair_open_char(app.buffer.char_after_cursor())
-            {
-                if !app.buffer.delete_pair(
-                    app.buffer.char_before_cursor().unwrap(),
-                    pair_close_for(app.buffer.char_before_cursor().unwrap()),
-                ) {
-                    app.buffer.backspace();
-                }
-            } else {
-                app.buffer.backspace();
-            }
-            app.completions.deactivate();
-        }
-        KeyCode::Char(')') => {
-            if app.multi.is_active() {
-                app.multi_insert_char(')');
-            } else if !app.buffer.skip_char_if_match(')') {
-                app.buffer.insert_char(')');
-            }
-            app.completions.deactivate();
-        }
-        KeyCode::Char(']') => {
-            if app.multi.is_active() {
-                app.multi_insert_char(']');
-            } else if !app.buffer.skip_char_if_match(']') {
-                app.buffer.insert_char(']');
-            }
-            app.completions.deactivate();
-        }
-        KeyCode::Char('}') => {
-            if app.multi.is_active() {
-                app.multi_insert_char('}');
-            } else if !app.buffer.skip_char_if_match('}') {
-                app.buffer.insert_char('}');
-            }
-            app.completions.deactivate();
-        }
-        KeyCode::Char('\'') => {
-            app.completions.deactivate();
-            if app.multi.is_active() {
-                app.multi_insert_char('\'');
-            } else if app.buffer.skip_char_if_match('\'') {
-            } else if should_auto_close_single_quote(app) {
-                app.buffer.insert_char_pair('\'', '\'');
-            } else {
-                app.buffer.insert_char('\'');
-            }
-        }
-        KeyCode::Char('"') => {
-            app.completions.deactivate();
-            if app.multi.is_active() {
-                app.multi_insert_char('"');
-            } else if app.buffer.skip_char_if_match('"') {
-            } else if should_auto_close_double_quote(app) {
-                app.buffer.insert_char_pair('"', '"');
-            } else {
-                app.buffer.insert_char('"');
-            }
-        }
-        KeyCode::Char('(') => {
-            if app.multi.is_active() {
-                app.multi_insert_char('(');
-            } else {
-                app.buffer.insert_char_pair('(', ')');
-            }
-            app.completions.deactivate();
-        }
-        KeyCode::Char('[') => {
-            if app.multi.is_active() {
-                app.multi_insert_char('[');
-            } else {
-                app.buffer.insert_char_pair('[', ']');
-            }
-            app.completions.deactivate();
-        }
-        KeyCode::Char('{') => {
-            if app.multi.is_active() {
-                app.multi_insert_char('{');
-            } else {
-                app.buffer.insert_char_pair('{', '}');
-            }
-            app.completions.deactivate();
-        }
-        KeyCode::Char('<') => {
-            if app.multi.is_active() {
-                app.multi_insert_char('<');
-            } else {
-                app.buffer.insert_char_pair('<', '>');
-            }
-            app.completions.deactivate();
-        }
-        KeyCode::Char('`') => {
-            app.completions.deactivate();
-            if app.multi.is_active() {
-                app.multi_insert_char('`');
-            } else if app.buffer.skip_char_if_match('`') {
-            } else {
-                app.buffer.insert_char_pair('`', '`');
+        KeyCode::Up => {
+            if !app.search_matches.is_empty() {
+                app.search_current = if app.search_current == 0 {
+                    app.search_matches.len() - 1
+                } else {
+                    app.search_current - 1
+                };
+                let pos = app.search_matches[app.search_current];
+                app.buffer.cursor = pos;
+                app.update_scroll();
+                app.message = format!(
+                    "/{}/  {}/{}",
+                    app.search_input,
+                    app.search_current + 1,
+                    app.search_matches.len()
+                );
             }
         }
         KeyCode::Char(c) => {
-            app.multi_insert_char(c);
-            app.update_scroll();
-            if !app.multi.is_active() {
-                auto_trigger_completion(app, c);
+            if !c.is_control() {
+                app.search_input.push(c);
+                app.update_search_input();
             }
-        }
-        _ => {
-            app.completions.deactivate();
-        }
-    }
-}
-
-fn handle_visual(app: &mut App, code: KeyCode) {
-    if app.pending_register {
-        if let KeyCode::Char(c) = code {
-            if app.registers.select(c) {
-                app.message = format!("Register {} (visual)", app.registers.active_label());
-            }
-        }
-        app.pending_register = false;
-        return;
-    }
-    let is_block = app.mode == Mode::VisualBlock;
-    match code {
-        KeyCode::Esc => app.enter_normal(),
-        KeyCode::Char('"') => {
-            app.pending_register = true;
-            app.message = String::from("-- register (visual) --");
-        }
-        KeyCode::Char('d') | KeyCode::Char('x') => {
-            if is_block {
-                app.delete_block();
-            } else {
-                app.delete_selection();
-            }
-        }
-        // Vim `c` / GUI ensureInsertMode(replacingSelection): delete range, land in Insert.
-        // EngineBridge dispatches bare `c` before the typed character when Visual is active.
-        KeyCode::Char('c') | KeyCode::Char('C') => {
-            if is_block {
-                app.delete_block();
-            } else {
-                app.delete_selection();
-            }
-            app.enter_insert();
-        }
-        KeyCode::Char('y') => {
-            if is_block {
-                app.yank_block();
-            } else {
-                app.yank_selection();
-            }
-        }
-        KeyCode::Char('p') | KeyCode::Char('P') => {
-            if is_block {
-                app.delete_block();
-            } else {
-                app.delete_selection();
-            }
-            app.paste_before();
-        }
-        KeyCode::Char('h') | KeyCode::Left => app.move_left(),
-        KeyCode::Char('l') | KeyCode::Right => app.move_right(),
-        KeyCode::Char('k') | KeyCode::Up => app.move_up(),
-        KeyCode::Char('j') | KeyCode::Down => app.move_down(),
-        KeyCode::Char('w') => app.buffer.move_word_forward(),
-        KeyCode::Char('b') => app.buffer.move_word_back(),
-        KeyCode::Char('0') => app.buffer.move_to_line_start(),
-        KeyCode::Char('$') => app.buffer.move_to_line_end(),
-        KeyCode::Char('G') => {
-            let last_row = app.buffer.line_count().saturating_sub(1);
-            app.buffer.cursor.row = last_row;
-            app.buffer.move_to_line_start();
-            app.update_scroll();
         }
         _ => {}
     }
@@ -3559,7 +1988,7 @@ fn handle_explorer(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.explorer.close();
-            app.mode = Mode::Normal;
+            app.mode = Mode::Editor;
         }
         KeyCode::Char('j') | KeyCode::Down => app.explorer.move_down(),
         KeyCode::Char('k') | KeyCode::Up => app.explorer.move_up(),
@@ -3586,7 +2015,7 @@ fn open_file(app: &mut App, path: &std::path::PathBuf) {
             Ok(()) => {}
             Err(e) => {
                 app.message = e;
-                app.mode = Mode::Normal;
+                app.mode = Mode::Editor;
             }
         }
         return;
@@ -3594,7 +2023,7 @@ fn open_file(app: &mut App, path: &std::path::PathBuf) {
     let path_str = path.display().to_string();
     app.open_new_tab(&path_str);
     app.explorer.close();
-    app.mode = Mode::Normal;
+    app.mode = Mode::Editor;
 }
 
 /// Handle keys for the Ctrl+Shift+T terminal *window* (not side Ctrl+T mode).
@@ -3661,10 +2090,6 @@ fn handle_pane_terminal_window(
         && matches!(code, KeyCode::Char('w') | KeyCode::Char('W'))
     {
         app.split.pending_chord = true;
-        app.begin_chord(
-            "Ctrl+W",
-            crate::which_key::as_hints(crate::which_key::map_ctrl_w()),
-        );
         app.message = String::from("Ctrl+W — (terminal) focus other pane with w");
         return true;
     }
@@ -3774,134 +2199,18 @@ fn handle_terminal(app: &mut App, code: KeyCode) {
             }
             app.terminal.open = false;
             app.terminal.shutdown();
-            app.mode = Mode::Normal;
+            app.mode = Mode::Editor;
         }
         other => write_terminal_key(app, other),
     }
 }
 
-fn handle_xlc(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc => app.close_xlc(),
-        KeyCode::Enter => {
-            // All commands (including :wq / :x) go through App::execute_xlc
-            app.execute_xlc();
-        }
-        KeyCode::Backspace => {
-            if app.xlc.input.is_empty() {
-                app.close_xlc();
-            } else {
-                app.xlc.pop_char();
-            }
-        }
-        KeyCode::Up => app.xlc.history_up(),
-        KeyCode::Down => app.xlc.history_down(),
-        KeyCode::PageUp => app.xlc.scroll_up(5),
-        KeyCode::PageDown => app.xlc.scroll_down(5),
-        KeyCode::Home => app.xlc.scroll_to_top(),
-        KeyCode::End => app.xlc.scroll_to_bottom(),
-        KeyCode::Char(c) => app.xlc.push_char(c),
-        _ => {}
-    }
-}
 
-fn handle_search_input(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Esc => {
-            app.cancel_search();
-        }
-        KeyCode::Enter => {
-            app.commit_search();
-        }
-        KeyCode::Backspace => {
-            if app.search_input.is_empty() {
-                app.cancel_search();
-            } else {
-                app.search_input.pop();
-                app.update_search_input();
-            }
-        }
-        KeyCode::Delete => {
-            // same as backspace for single-line search
-            if !app.search_input.is_empty() {
-                app.search_input.pop();
-                app.update_search_input();
-            }
-        }
-        KeyCode::Down => {
-            // Jump to next live match while still typing
-            if !app.search_matches.is_empty() {
-                app.search_current = (app.search_current + 1) % app.search_matches.len();
-                let pos = app.search_matches[app.search_current];
-                app.buffer.cursor = pos;
-                app.update_scroll();
-                app.message = format!(
-                    "/{}/  {}/{}",
-                    app.search_input,
-                    app.search_current + 1,
-                    app.search_matches.len()
-                );
-            }
-        }
-        KeyCode::Up => {
-            if !app.search_matches.is_empty() {
-                app.search_current = if app.search_current == 0 {
-                    app.search_matches.len() - 1
-                } else {
-                    app.search_current - 1
-                };
-                let pos = app.search_matches[app.search_current];
-                app.buffer.cursor = pos;
-                app.update_scroll();
-                app.message = format!(
-                    "/{}/  {}/{}",
-                    app.search_input,
-                    app.search_current + 1,
-                    app.search_matches.len()
-                );
-            }
-        }
-        KeyCode::Char(c) => {
-            if !c.is_control() {
-                app.search_input.push(c);
-                app.update_search_input();
-            }
-        }
-        _ => {}
-    }
-}
 
-fn should_auto_close_single_quote(app: &App) -> bool {
-    let before = app.buffer.char_before_cursor();
-    let after = app.buffer.char_after_cursor();
-    matches!(before, None | Some(' ') | Some('(') | Some('[') | Some('{') | Some(','))
-        && matches!(after, None | Some(' ') | Some(')') | Some(']') | Some('}') | Some(',') | Some(';'))
-}
 
-fn should_auto_close_double_quote(app: &App) -> bool {
-    should_auto_close_single_quote(app)
-}
 
-fn is_pair_open_char(c: Option<char>) -> bool {
-    matches!(c, Some('(') | Some('[') | Some('{') | Some('"') | Some('\'') | Some('`') | Some('<'))
-}
 
-fn is_pair_close_char(c: Option<char>) -> bool {
-    matches!(c, Some(')') | Some(']') | Some('}') | Some('"') | Some('\'') | Some('`') | Some('>'))
-}
 
-fn pair_close_for(open: char) -> char {
-    match open {
-        '(' => ')',
-        '[' => ']',
-        '{' => '}',
-        '"' => '"',
-        '\'' => '\'',
-        '`' => '`',
-        '<' => '>',
-        _ => open,
-    }
-}
 
 fn trigger_completion(app: &mut App) {
     let prefix = word_before_cursor(app);
@@ -3918,60 +2227,7 @@ fn trigger_completion(app: &mut App) {
     }
 }
 
-fn auto_trigger_completion(app: &mut App, c: char) {
-    if c.is_alphabetic() || c == '_' {
-        let prefix = word_before_cursor(app);
-        if prefix.len() >= 1 {
-            let ext = app.file_extension();
-            if app.completions.active {
-                app.completions.refine(&prefix);
-            } else {
-                app.completions.activate(&prefix, ext.as_deref());
-            }
-        } else {
-            app.completions.deactivate();
-        }
-    } else {
-        app.completions.deactivate();
-    }
-}
 
-fn apply_completion(app: &mut App) {
-    if let Some(suggestion) = app.completions.selected_suggestion().cloned() {
-        let prefix = app.completions.prefix.clone();
-        if !prefix.is_empty() {
-            for _ in 0..prefix.chars().count() {
-                app.buffer.backspace();
-            }
-        }
-
-        let text = &suggestion.insert_text;
-        let last = text.chars().last();
-
-        match last {
-            Some('(') | Some('[') | Some('{') | Some('<') => {
-                for ch in text.chars().take(text.chars().count().saturating_sub(1)) {
-                    app.buffer.insert_char(ch);
-                }
-                let close = match last.unwrap() {
-                    '(' => ')',
-                    '[' => ']',
-                    '{' => '}',
-                    '<' => '>',
-                    _ => unreachable!(),
-                };
-                app.buffer.insert_char_pair(last.unwrap(), close);
-            }
-            _ => {
-                for ch in text.chars() {
-                    app.buffer.insert_char(ch);
-                }
-            }
-        }
-
-        app.completions.deactivate();
-    }
-}
 
 fn word_before_cursor(app: &App) -> String {
     let cursor = app.buffer.cursor();
@@ -3990,3 +2246,4 @@ fn word_before_cursor(app: &App) -> String {
 
     chars[start..cursor.col].iter().collect()
 }
+

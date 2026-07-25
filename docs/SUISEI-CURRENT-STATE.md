@@ -28,8 +28,9 @@ target:    Suisei.app (native client) ←IPC→ suisei-daemon (durable App state
 ### P0 — correctness and release gates
 
 1. **Make the current build and tests release-reliable.**
-   - Fix `package-suisei-app.sh` dependency detection: it watches `xei-core`
-     but omits `suisei-core`, so a core-only edit can package a stale dylib.
+   - DONE `package-suisei-app.sh` dependency detection now scans
+     `suisei-engine` **and** `suisei-core`, so a core-only edit can no longer
+     package a stale dylib.
    - Fix `ProjectIndex` Swift-concurrency warnings before Swift 6 promotes them
      to errors: do filesystem enumeration off actor without actor-isolated
      static reads, and replace the async `FileManager.DirectoryEnumerator`
@@ -70,6 +71,31 @@ target:    Suisei.app (native client) ←IPC→ suisei-daemon (durable App state
    - REMAINING (small): secondary-selection *fills* (a distinct span kind + a
      pre-text draw pass) — dead until ⌘-D/add-next-occurrence creates non-empty
      secondary selections, so folded into that feature.
+   - DONE 2026-07-25 — **the vim spine is out of the key path.** `Mode` was
+     conflating vim editing states with GUI panel focus; it is now pure focus
+     (`Mode::Editor` + the panels). Deleted: every vim key handler
+     (`handle_normal`/`leader`/`operator_pending`/`pending`/`insert`/`visual`),
+     macro record/playback, the `:` ex-command interpreter (`execute_xlc`) and
+     the TUI-only surfaces (screensaver/bench/plugin-store/webview/ext-panel/
+     rebase/PR-review). `dispatch.rs` 3,993 → 2,268 lines; `app.rs` 6,489 →
+     ~5,700. The engine now *seals* the editor: a key the Selection-model
+     tables decline is dropped, never handed to a command interpreter.
+     The face stopped switching on a vim status badge — the engine sends the
+     focus and Swift parses it once into a typed `Focus`.
+     The second pass finished the job: the vim state fields
+     (`visual_anchor`, `pending_*`, `count`, `marks`, `last_find`, `macros`,
+     `which_key`) are gone from `App`, and `which_key.rs` / `macros.rs` /
+     `substitute.rs` / `xlc.rs` / `ops.rs` are deleted. `nav.rs` kept only the
+     jumplist (Back/Forward); `registers.rs` shrank to a clipboard-backed yank
+     store; the one text-object the GUI needs is a local `word_range_at` in
+     `gui_edit.rs`. The which-key and XLC FFI structs, their C decls and the
+     Swift snapshots went with them, as did the `mode_normal/insert/visual`
+     theme colours. Total: −5,600 lines.
+   - FIXED 2026-07-25: the modeless edit path was gated on `explorer.open`,
+     which in the GUI means "the docked navigator has entries", not "the
+     explorer owns the keys". Opening any project therefore sent every
+     keystroke to the vim command machine — typing did nothing and bare keys
+     ran vim commands. Key routing now keys off `Mode` alone.
    - Gate: Shift+arrow, typing-over-selection, IME composition, drag, and
      ⌘-click multi-cursor caret paint ✅ without a mode-specific Swift workaround.
 
@@ -115,8 +141,18 @@ target:    Suisei.app (native client) ←IPC→ suisei-daemon (durable App state
      tabs, with no cursor jump or duplicate row identity.
 
 6. **Turn existing Core capability into complete IDE workflows.**
+   - DONE (2026-07-25) the GUI now *pumps* the language services at all. The
+     engine tick never called `LspClient::poll`, and that drain is what parses
+     the `initialize` reply and then sends `initialized` + `didOpen` — so every
+     spawned rust-analyzer stayed un-handshaked and idle, `server_running` was
+     permanently false, and every LSP-backed surface (references, hover,
+     definition, rename, format, diagnostics) resolved empty. The xei TUI drove
+     this from its main loop; the GUI never had an equivalent.
+     `App::poll_language_services` (`pump.rs`) is that equivalent, plus the
+     throttled post-edit `didChange` the GUI edit path never sent.
    - Finish Go to Definition, hover, code actions, rename, format, diagnostics
-     navigation, workspace search/replace, and semantic-token presentation.
+     navigation, workspace search/replace, and semantic-token presentation —
+     now against a language server that actually answers.
    - Ship an intentional DAP surface: launch/attach, breakpoint lifecycle,
      stack/scopes/variables, debug console and stop/continue. A snapshot alone
      is not a debugger workflow.

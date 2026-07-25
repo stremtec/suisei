@@ -5,8 +5,6 @@
 //! autolinks, images, setext headings, fenced/indented code, entities, escapes.
 
 use std::path::Path;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewKind {
@@ -2211,106 +2209,6 @@ fn render_plain(text: &str) -> Vec<PreviewLine> {
 fn pl(spans: Vec<(String, PreviewStyle)>) -> PreviewLine {
     PreviewLine { spans, image: None }
 }
-
-// ── Style → ratatui ─────────────────────────────────────
-
-/// Blend two RGB colors (falls back to `a` for named colors).
-fn mix(a: Color, b: Color, t: f32) -> Color {
-    match (a, b) {
-        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => Color::Rgb(
-            (ar as f32 + (br as f32 - ar as f32) * t) as u8,
-            (ag as f32 + (bg as f32 - ag as f32) * t) as u8,
-            (ab as f32 + (bb as f32 - ab as f32) * t) as u8,
-        ),
-        _ => a,
-    }
-}
-
-/// Theme-derived styling: headings grade from accent toward fg, semantic
-/// colors come from the active theme so light themes stay readable.
-pub fn to_ratatui_style(s: PreviewStyle, theme: &crate::theme::Theme) -> Style {
-    let heading = |level: u8| {
-        let t = (level.saturating_sub(1)) as f32 * 0.13;
-        Style::default()
-            .fg(mix(theme.accent, theme.fg, t))
-            .add_modifier(Modifier::BOLD)
-    };
-    match s {
-        PreviewStyle::Normal => Style::default().fg(theme.fg),
-        PreviewStyle::H1 => heading(1),
-        PreviewStyle::H2 => heading(2),
-        PreviewStyle::H3 => heading(3),
-        PreviewStyle::H4 => heading(4),
-        PreviewStyle::H5 => heading(5),
-        PreviewStyle::H6 => heading(6),
-        PreviewStyle::Bold => Style::default()
-            .fg(theme.fg)
-            .add_modifier(Modifier::BOLD),
-        PreviewStyle::Italic => Style::default()
-            .fg(theme.fg)
-            .add_modifier(Modifier::ITALIC),
-        PreviewStyle::BoldItalic => Style::default()
-            .fg(theme.fg)
-            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
-        PreviewStyle::Strike => Style::default()
-            .fg(theme.muted)
-            .add_modifier(Modifier::CROSSED_OUT),
-        PreviewStyle::Code => Style::default().fg(theme.number).bg(theme.panel_bg),
-        PreviewStyle::CodeBlock => Style::default().fg(theme.string).bg(theme.panel_bg),
-        PreviewStyle::CodeLang => Style::default()
-            .fg(theme.namespace)
-            .add_modifier(Modifier::BOLD),
-        PreviewStyle::Link => Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::UNDERLINED),
-        PreviewStyle::Image => Style::default()
-            .fg(theme.macro_name)
-            .add_modifier(Modifier::ITALIC),
-        PreviewStyle::Quote => Style::default().fg(theme.comment),
-        PreviewStyle::AlertNote => Style::default().fg(theme.accent),
-        PreviewStyle::AlertTip => Style::default().fg(theme.success),
-        PreviewStyle::AlertImportant => Style::default()
-            .fg(theme.macro_name)
-            .add_modifier(Modifier::BOLD),
-        PreviewStyle::AlertWarning => Style::default()
-            .fg(theme.warning)
-            .add_modifier(Modifier::BOLD),
-        PreviewStyle::AlertCaution => Style::default()
-            .fg(theme.error)
-            .add_modifier(Modifier::BOLD),
-        PreviewStyle::ListBullet => Style::default().fg(theme.string),
-        PreviewStyle::TaskDone => Style::default().fg(theme.success),
-        PreviewStyle::TaskTodo => Style::default().fg(theme.muted),
-        PreviewStyle::Hr => Style::default().fg(theme.border),
-        PreviewStyle::Dim => Style::default().fg(theme.muted),
-        PreviewStyle::Footnote => Style::default()
-            .fg(theme.namespace)
-            .add_modifier(Modifier::ITALIC),
-        PreviewStyle::Kbd => Style::default()
-            .fg(theme.fg)
-            .bg(theme.selection_bg)
-            .add_modifier(Modifier::BOLD),
-        PreviewStyle::Html => Style::default().fg(theme.comment),
-        PreviewStyle::JsonKey => Style::default().fg(theme.type_name),
-        PreviewStyle::JsonString => Style::default().fg(theme.string),
-        PreviewStyle::JsonNumber => Style::default().fg(theme.number),
-        PreviewStyle::JsonLit => Style::default().fg(theme.macro_name),
-    }
-}
-
-pub fn preview_line_to_ratatui(line: &PreviewLine, theme: &crate::theme::Theme) -> Line<'static> {
-    if line.spans.is_empty() {
-        return Line::from(Span::raw(""));
-    }
-    let spans: Vec<Span<'static>> = line
-        .spans
-        .iter()
-        .map(|(t, st)| Span::styled(t.clone(), to_ratatui_style(*st, theme)))
-        .collect();
-    Line::from(spans)
-}
-
-// ── Tests ───────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

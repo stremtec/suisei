@@ -913,7 +913,9 @@ impl SettingsPanel {
     pub fn activate(&mut self) -> SettingsAction {
         match self.page {
             SettingsPage::About | SettingsPage::Help => SettingsAction::None,
-            SettingsPage::Extensions => SettingsAction::OpenPluginStore,
+            // The plugin store was a TUI full-screen surface; the GUI has no
+            // equivalent yet, so this page is informational.
+            SettingsPage::Extensions => SettingsAction::None,
             SettingsPage::Pet => {
                 let rows = pet_rows();
                 let Some(row) = rows.get(self.selected).copied() else {
@@ -1148,7 +1150,6 @@ pub enum SettingsAction {
     ApplyPet,
     OpenWorkbench,
     OpenScm,
-    OpenPluginStore,
 }
 
 fn next_pet_speed(cur: u16) -> u16 {

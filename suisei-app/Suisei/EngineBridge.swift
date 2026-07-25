@@ -169,11 +169,46 @@ struct PreviewSnap: Equatable {
     }
 }
 
-struct XlcSnap: Equatable {
-    var open: Bool
-    var input: String
-    var output: [String]
-    static let empty = XlcSnap(open: false, input: "", output: [])
+
+/// Which surface owns the keyboard, mirroring `suisei_core::app::Mode`.
+///
+/// The face used to decide this by substring-matching a vim status badge
+/// (` NORMAL `, ` INSERT `, ` VISUAL `…) that the compositor emitted for the
+/// status line. The engine now sends the focus itself; parse it once, here.
+enum Focus: String {
+    case editor = "EDITOR"
+    case explorer = "EXPLORER"
+    case terminal = "TERMINAL"
+    case search = "SEARCH"
+    case palette = "PALETTE"
+    case scm = "SCM"
+    case git = "GIT"
+    case settings = "SETTINGS"
+    case preview = "PREVIEW"
+    case workspaceFind = "FIND"
+    case debug = "DEBUG"
+    case calls = "CALLS"
+    case unknown = ""
+
+    init(label: String) {
+        self = Focus(rawValue: label.trimmingCharacters(in: .whitespaces).uppercased()) ?? .unknown
+    }
+
+    /// A panel that owns typed characters — neither the editor nor the PTY.
+    var ownsTyping: Bool {
+        switch self {
+        case .editor, .terminal, .unknown: return false
+        default: return true
+        }
+    }
+
+    /// Key handling here mutates shell surfaces the light pull set never fetches.
+    var wantsFullChrome: Bool {
+        switch self {
+        case .explorer, .scm, .git, .settings, .workspaceFind, .debug, .calls: return true
+        default: return false
+        }
+    }
 }
 
 struct PaletteItem: Equatable, Identifiable {
@@ -208,13 +243,6 @@ struct HintRow: Equatable {
 struct CompRow: Equatable {
     var label: String
     var detail: String
-}
-
-struct WhichKeySnap: Equatable {
-    var open: Bool
-    var title: String
-    var hints: [HintRow]
-    static let empty = WhichKeySnap(open: false, title: "", hints: [])
 }
 
 struct CompletionsSnap: Equatable {
@@ -329,9 +357,6 @@ struct ThemeSnap: Equatable {
     var selection: UInt32
     var caret: UInt32
     var statusBg: UInt32
-    var modeNormal: UInt32
-    var modeInsert: UInt32
-    var modeVisual: UInt32
     var keyword: UInt32
     var string: UInt32
     var comment: UInt32
@@ -343,16 +368,19 @@ struct ThemeSnap: Equatable {
         name: "ocean",
         editorBg: 0x0F111A, fg: 0xC8D2DC, dim: 0x525C72, accent: 0x6BB8C4,
         selection: 0x2A3A55, caret: 0xC8E08C, statusBg: 0x0A0C14,
-        modeNormal: 0x6BBC8C, modeInsert: 0x6B94EB, modeVisual: 0xE085B8,
         keyword: 0x00DCFF, string: 0x96E6B4, comment: 0x606C7A,
         number: 0xFFB482, typeName: 0x64C8FF, function: 0xFFDC78
     )
 
+    /// Theme colours arrive packed as `0xAARRGGBB`. Alpha is real: chrome
+    /// tokens use it so separators composite over whatever is behind them,
+    /// the way `NSColor.separatorColor` does, instead of baking an opaque grey.
     func color(_ packed: UInt32) -> Color {
+        let a = Double((packed >> 24) & 0xFF) / 255.0
         let r = Double((packed >> 16) & 0xFF) / 255.0
         let g = Double((packed >> 8) & 0xFF) / 255.0
         let b = Double(packed & 0xFF) / 255.0
-        return Color(red: r, green: g, blue: b)
+        return Color(red: r, green: g, blue: b).opacity(a)
     }
 }
 
@@ -380,10 +408,8 @@ struct ChromeSnapshot: Equatable {
     var lines: [EditorLine]
     var split: SplitSnap
     var explorer: ExplorerSnap
-    var xlc: XlcSnap
     var palette: PaletteSnap
     var search: SearchSnap
-    var whichKey: WhichKeySnap
     var completions: CompletionsSnap
     var terminal: TerminalSnap
     var settings: SettingsSnap
@@ -398,8 +424,8 @@ struct ChromeSnapshot: Equatable {
         cursorRow: 1, cursorCol: 1, caretVCol: 0, lineCount: 1, scroll: 0,
         pct: 0, bufferVersion: 0, branch: "", tabs: [], lines: [],
         split: .empty,
-        explorer: .empty, xlc: .empty, palette: .empty, search: .empty,
-        whichKey: .empty, completions: .empty, terminal: .empty,
+        explorer: .empty, palette: .empty, search: .empty,
+        completions: .empty, terminal: .empty,
         settings: .empty, theme: .empty, scm: .empty, gitWb: .empty,
         outline: []
     )
@@ -576,7 +602,6 @@ final class EngineBridge: ObservableObject {
     var editorWindowFrame: CGRect = .null
     /// Floating panel frames in window coords — scroll/hit pass-through.
     var explorerWindowFrame: CGRect = .null
-    var xlcWindowFrame: CGRect = .null
     var terminalWindowFrame: CGRect = .null
 
     /// True while a modal/float owns chrome — editor must not place the caret.
@@ -616,17 +641,38 @@ final class EngineBridge: ObservableObject {
         pointerSession = false
     }
 
+    private var appearanceObserver: NSKeyValueObservation?
+
     init() {
         engine = suisei_engine_new()
+        pushSystemAppearance()
+        observeSystemAppearance()
         refreshChrome()
         checkRecovery()
     }
 
     deinit {
         tickTimer?.invalidate()
+        appearanceObserver?.invalidate()
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
         if let engine { suisei_engine_free(engine) }
+    }
+
+    /// Follow macOS light/dark. Unless the user has pinned a theme, the engine
+    /// picks the palette from this — the app used to read a fixed theme name
+    /// out of a config file and stay light on a dark desktop.
+    private func pushSystemAppearance() {
+        guard let engine else { return }
+        let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+        suisei_engine_set_system_appearance(engine, match == .darkAqua ? 1 : 0)
+        refreshChrome()
+    }
+
+    private func observeSystemAppearance() {
+        appearanceObserver = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.pushSystemAppearance() }
+        }
     }
 
     func activateInput() {
@@ -641,7 +687,7 @@ final class EngineBridge: ObservableObject {
         refreshChrome()
         // Never force Insert on the welcome sheet — that can muddy cold-start state.
         if !chrome.welcome {
-            ensureInsertMode()
+            ensureEditorFocus()
         }
     }
 
@@ -748,7 +794,7 @@ final class EngineBridge: ObservableObject {
     var terminalOwnsKeys: Bool {
         let t = chrome.terminal
         guard t.open else { return false }
-        if chrome.modeLabel.uppercased().contains("TERM") { return true }
+        if focus == .terminal { return true }
         if t.fullPanel {
             if let bound = t.paneBound {
                 return !editorSplit.isSplit || editorSplit.focus == bound
@@ -830,7 +876,7 @@ final class EngineBridge: ObservableObject {
         guard let engine else { return }
         // Chrome-owned modes keep shell surfaces (SCM list, git workbench, explorer
         // selection) live per keystroke — the light path never pulls those FFIs.
-        let wasChromeMode = Self.modeWantsFullChrome(chrome.modeLabel)
+        let wasChromeMode = focus.wantsFullChrome
         _ = suisei_engine_dispatch_key(engine, code.rawValue, ch, fNum, mods.rawValue)
         // Terminal output is polled on tick — always refresh chrome while open.
         if chrome.terminal.open || wasChromeMode
@@ -840,18 +886,14 @@ final class EngineBridge: ObservableObject {
         } else {
             refreshEditorPaintOnly()
         }
-        if !wasChromeMode, Self.modeWantsFullChrome(chrome.modeLabel) {
+        if !wasChromeMode, focus.wantsFullChrome {
             // Key just entered a chrome mode the light path can't service.
             refreshChrome()
         }
     }
 
-    /// Modes whose key handling mutates shell surfaces outside the light pull set.
-    private static func modeWantsFullChrome(_ label: String) -> Bool {
-        let t = label.trimmingCharacters(in: .whitespaces).uppercased()
-        return ["FILES", "SCM", "GIT", "SETTINGS", "FIND", "PLUGINS",
-                "DEBUG", "CALLS", "REBASE", "PR", "EXT"].contains(t)
-    }
+    /// Which surface owns the keyboard right now.
+    var focus: Focus { Focus(label: chrome.modeLabel) }
 
     func insertChar(_ c: Character) {
         guard let scalar = c.unicodeScalars.first else { return }
@@ -868,25 +910,19 @@ final class EngineBridge: ObservableObject {
     /// True while an overlay / panel surface owns typed characters (find bar,
     /// palette filter, git panes, settings, read-only preview…) — never force
     /// Insert then.
-    private var panelOwnsTyping: Bool {
-        let t = chrome.modeLabel.trimmingCharacters(in: .whitespaces).uppercased()
-        return ["SEARCH", "CMD", "PALETTE", "FILES", "SCM", "GIT", "SETTINGS", "PREVIEW",
-                "FIND", "PLUGINS", "DEBUG", "CALLS", "REBASE", "PR", "EXT"].contains(t)
-    }
+    private var panelOwnsTyping: Bool { focus.ownsTyping }
 
-    /// Land in Insert so typing works (GUI contract — the editor is never "Normal").
+    /// Give the editor the keyboard back.
     ///
-    /// Delegates to the engine's semantic command which handles all mode
-    /// transitions internally (Visual → Esc → Insert, Normal → `i`, etc.).
-    /// Special case: Terminal focus is released via `focus_terminal(false)`
-    /// because core's Mode::Terminal Esc handler SHUTS the terminal DOWN
-    /// (TUI contract) — we just want to unfocus it.
-    func ensureInsertMode(replacingSelection: Bool = false) {
+    /// There is no Insert mode to land in any more — the editor is one state
+    /// and typing always types. All this does is release whichever panel or
+    /// terminal currently owns keys. Terminal focus is released via
+    /// `focus_terminal(false)` rather than Esc, because core's terminal Esc
+    /// handler SHUTS the terminal down (TUI contract); we only want to unfocus.
+    func ensureEditorFocus(replacingSelection: Bool = false) {
         guard let engine else { return }
-        let m = chrome.modeLabel.uppercased()
-        if m.contains("INSERT") { return }
-        // Terminal focus: release without Esc (Esc would close the panel).
-        if m.contains("TERM") {
+        if focus == .editor { return }
+        if focus == .terminal {
             focusTerminal(false)
         }
         suisei_engine_gui_ensure_insert(engine)
@@ -912,7 +948,7 @@ final class EngineBridge: ObservableObject {
                mods.contains(.control), !mods.contains(.superKey),
                ch == UInt32(UnicodeScalar("v").value) || ch == UInt32(UnicodeScalar("V").value)
             {
-                ensureInsertMode(replacingSelection: true)
+                ensureEditorFocus(replacingSelection: true)
             }
             return false
         }
@@ -1094,7 +1130,7 @@ final class EngineBridge: ObservableObject {
         guard let engine, deltaCols != 0 else { return }
         suisei_engine_scroll_h(engine, deltaCols)
         _ = pullEditorPaintSnap(publish: true)
-        if chrome.modeLabel.uppercased().contains("PREVIEW") || preview.open {
+        if focus == .preview || preview.open {
             refreshPreview()
         }
     }
@@ -1356,7 +1392,7 @@ final class EngineBridge: ObservableObject {
         refreshChrome()
         resolveProjectRoot()
         // Hybrid: open file → ready to type (Mac contract).
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     /// Workspace root for hierarchical Project navigator (folder open / git root).
@@ -1521,7 +1557,7 @@ final class EngineBridge: ObservableObject {
         suisei_engine_click(engine, row, col, 0)
         pointerSession = true
         refreshChrome()
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     /// Absolute buffer row/col from native document coordinates (NSScrollView canvas).
@@ -1543,7 +1579,7 @@ final class EngineBridge: ObservableObject {
         suisei_engine_click_utf16(engine, row, utf16, 0)
         pointerSession = true
         refreshChrome()
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     func pointerDragUTF16(row: UInt32, utf16: UInt32) {
@@ -1563,16 +1599,13 @@ final class EngineBridge: ObservableObject {
         suisei_engine_click(engine, row, col, 0)
         pointerSession = true
         refreshChrome()
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     /// Clicking the editor takes key focus back from terminal / find / palette.
     private func exitPanelFocusForEditorClick() {
-        let m = chrome.modeLabel.uppercased()
-        if m.contains("TERM") || m.contains("CMD") || m.contains("SEARCH")
-            || m.contains("PALETTE")
-        {
-            ensureInsertMode()
+        if focus != .editor {
+            ensureEditorFocus()
         }
     }
 
@@ -1759,7 +1792,7 @@ final class EngineBridge: ObservableObject {
         cancelPointerSession()
         suisei_engine_undo(engine)
         refreshChrome()
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     func redo() {
@@ -1767,7 +1800,7 @@ final class EngineBridge: ObservableObject {
         cancelPointerSession()
         suisei_engine_redo(engine)
         refreshChrome()
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     func selectAll() {
@@ -1797,7 +1830,7 @@ final class EngineBridge: ObservableObject {
         guard chrome.search.open else { return }
         dispatchRaw(code: .enter)
         refreshChrome()
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     /// Insert arbitrary text at the caret (drag-drop, programmatic paste).
@@ -1982,7 +2015,7 @@ final class EngineBridge: ObservableObject {
         cancelPointerSession()
         suisei_engine_close_tab(engine, UInt32(index))
         refreshChrome()
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     /// Xcode “+ → New Untitled Tab” — always stays in editor shell (never Welcome).
@@ -1996,7 +2029,7 @@ final class EngineBridge: ObservableObject {
             // Force a full refresh after compositor welcome fix.
             refreshChrome()
         }
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     /// Xcode “+ → Editor Pane On Right”
@@ -2295,7 +2328,7 @@ final class EngineBridge: ObservableObject {
         cancelPointerSession()
         suisei_engine_goto_definition(engine)
         refreshChrome()
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     func renameSymbol(_ newName: String) {
@@ -2344,7 +2377,7 @@ final class EngineBridge: ObservableObject {
         cancelPointerSession()
         item.path.withCString { suisei_engine_goto_breakpoint(engine, $0, item.line) }
         refreshChrome()
-        ensureInsertMode()
+        ensureEditorFocus()
     }
 
     func removeBreakpoint(_ item: BreakpointItem) {
@@ -2706,14 +2739,10 @@ final class EngineBridge: ObservableObject {
         next.lines = lines
         next.split = split
         // Cheap open-flag probes only (empty payload when closed).
-        let xlc = loadXlc(engine)
-        next.xlc = xlc.open ? xlc : .empty
         let palette = loadPalette(engine)
         next.palette = palette.open ? palette : .empty
         let search = loadSearch(engine)
         next.search = search.open ? search : .empty
-        let whichKey = loadWhichKey(engine)
-        next.whichKey = whichKey.open ? whichKey : .empty
         let completions = loadCompletions(engine)
         next.completions = completions.open ? completions : .empty
         let terminal = loadTerminal(engine)
@@ -2874,14 +2903,10 @@ final class EngineBridge: ObservableObject {
         // Always load explorer entries: docked Project navigator stays visible in Normal mode.
         // (TUI-style open flag only affects keyboard focus, not tree paint.)
         let explorer = loadExplorer(engine)
-        let xlc = loadXlc(engine)
-        let xlcOut = xlc.open ? xlc : XlcSnap.empty
         let palette = loadPalette(engine)
         let paletteOut = palette.open ? palette : PaletteSnap.empty
         let search = loadSearch(engine)
         let searchOut = search.open ? search : SearchSnap.empty
-        let whichKey = loadWhichKey(engine)
-        let whichOut = whichKey.open ? whichKey : WhichKeySnap.empty
         let completions = loadCompletions(engine)
         let compOut = completions.open ? completions : CompletionsSnap.empty
         let terminal = loadTerminal(engine)
@@ -2924,10 +2949,8 @@ final class EngineBridge: ObservableObject {
             lines: lines,
             split: split,
             explorer: explorer,
-            xlc: xlcOut,
             palette: paletteOut,
             search: searchOut,
-            whichKey: whichOut,
             completions: compOut,
             terminal: termOut,
             settings: settingsOut,
@@ -3119,9 +3142,6 @@ final class EngineBridge: ObservableObject {
             selection: snap.selection,
             caret: snap.caret,
             statusBg: snap.status_bg,
-            modeNormal: snap.mode_normal,
-            modeInsert: snap.mode_insert,
-            modeVisual: snap.mode_visual,
             keyword: snap.keyword,
             string: snap.string_col,
             comment: snap.comment,
@@ -3292,25 +3312,6 @@ final class EngineBridge: ObservableObject {
         )
     }
 
-    private func loadXlc(_ engine: OpaquePointer) -> XlcSnap {
-        var snap = SuiseiXlcSnapshot()
-        guard suisei_engine_xlc(engine, &snap) != 0 else { return .empty }
-        var output: [String] = []
-        let n = Int(snap.out_count)
-        withUnsafeBytes(of: snap.output) { raw in
-            let lineCap = Int(SUISEI_XLC_LINE)
-            for i in 0..<min(n, Int(SUISEI_MAX_XLC_OUT)) {
-                let base = raw.baseAddress!.advanced(by: i * lineCap)
-                output.append(String(cString: base.assumingMemoryBound(to: CChar.self)))
-            }
-        }
-        return XlcSnap(
-            open: snap.open != 0,
-            input: cStringField(snap.input),
-            output: output
-        )
-    }
-
     private func loadPalette(_ engine: OpaquePointer) -> PaletteSnap {
         var snap = SuiseiPaletteSnapshot()
         guard suisei_engine_palette(engine, &snap) != 0 else { return .empty }
@@ -3350,28 +3351,6 @@ final class EngineBridge: ObservableObject {
             matchCount: snap.match_count,
             matchIndex: snap.match_index
         )
-    }
-
-    private func loadWhichKey(_ engine: OpaquePointer) -> WhichKeySnap {
-        var snap = SuiseiWhichKeySnapshot()
-        guard suisei_engine_which_key(engine, &snap) != 0 else { return .empty }
-        var hints: [HintRow] = []
-        let n = Int(snap.count)
-        withUnsafeBytes(of: snap.keys) { kRaw in
-            withUnsafeBytes(of: snap.descs) { dRaw in
-                let kCap = Int(SUISEI_HINT_KEY)
-                let dCap = Int(SUISEI_HINT_DESC)
-                for i in 0..<min(n, Int(SUISEI_MAX_HINTS)) {
-                    let kb = kRaw.baseAddress!.advanced(by: i * kCap)
-                    let db = dRaw.baseAddress!.advanced(by: i * dCap)
-                    hints.append(HintRow(
-                        key: String(cString: kb.assumingMemoryBound(to: CChar.self)),
-                        desc: String(cString: db.assumingMemoryBound(to: CChar.self))
-                    ))
-                }
-            }
-        }
-        return WhichKeySnap(open: snap.open != 0, title: cStringField(snap.title), hints: hints)
     }
 
     private func loadCompletions(_ engine: OpaquePointer) -> CompletionsSnap {

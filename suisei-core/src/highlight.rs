@@ -1,6 +1,5 @@
 //! Token kinds, theme styling, and line-based fallback tokenizer.
 
-use ratatui::style::{Modifier, Style};
 
 use crate::theme::Theme;
 
@@ -28,37 +27,6 @@ pub enum TokenKind {
     Lifetime,
 }
 
-pub fn style_for(theme: &Theme, kind: TokenKind) -> Style {
-    let (fg, bold) = match kind {
-        TokenKind::Keyword | TokenKind::KeywordControl | TokenKind::KeywordImport => {
-            (theme.keyword, true)
-        }
-        TokenKind::String => (theme.string, false),
-        TokenKind::Comment => (theme.comment, false),
-        TokenKind::Number => (theme.number, false),
-        TokenKind::TypeName => (theme.type_name, false),
-        TokenKind::Function => (theme.function, false),
-        TokenKind::Method => (theme.function, false),
-        TokenKind::Macro => (theme.macro_name, false),
-        TokenKind::Namespace => (theme.namespace, false),
-        TokenKind::Parameter => (theme.parameter, false),
-        TokenKind::Property => (theme.property, false),
-        TokenKind::Constant => (theme.constant, false),
-        TokenKind::Variable => (theme.fg, false),
-        TokenKind::Operator => (theme.operator, false),
-        TokenKind::Punctuation => (theme.punctuation, false),
-        TokenKind::Attribute => (theme.macro_name, false),
-        TokenKind::Lifetime => (theme.parameter, false),
-    };
-    let mut s = Style::default().fg(fg);
-    if bold {
-        s = s.add_modifier(Modifier::BOLD);
-    }
-    if matches!(kind, TokenKind::Comment) {
-        s = s.add_modifier(Modifier::ITALIC);
-    }
-    s
-}
 
 /// Map LSP semantic token type name → TokenKind
 pub fn from_semantic_type(name: &str) -> TokenKind {

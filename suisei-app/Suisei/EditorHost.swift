@@ -1135,7 +1135,7 @@ final class EditorCanvasView: NSView {
         // A plain click places the caret and resumes typing; a drag leaves its
         // selection alone (typing over it replaces it).
         if !dragMoved, event.clickCount == 1 {
-            engine.ensureInsertMode()
+            engine.ensureEditorFocus()
         }
         dragMoved = false
     }
@@ -1166,7 +1166,9 @@ final class EditorCanvasView: NSView {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let engine else { return nil }
-        let selectionActive = engine.chrome.modeLabel.uppercased().contains("VISUAL")
+        // Was a vim-Visual probe, which the GUI never entered — Cut/Copy were
+        // therefore always disabled. The painted band knows the truth.
+        let selectionActive = bandRows.contains { $0.hasSelection }
         // Click outside a selection moves the caret there first (Xcode behavior).
         if !selectionActive {
             let p = convert(event.locationInWindow, from: nil)

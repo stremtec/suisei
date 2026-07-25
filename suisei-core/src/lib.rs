@@ -21,11 +21,10 @@ pub mod git_ops;
 pub mod git_workbench;
 pub mod highlight;
 pub mod lsp;
-pub mod macros;
 pub mod gui_edit;
 pub mod multi_cursor;
 pub mod nav;
-pub mod ops;
+pub mod pump;
 pub mod selection;
 pub mod palette;
 pub mod media;
@@ -41,15 +40,12 @@ pub mod settings;
 pub mod screensaver;
 pub mod pet;
 pub mod split;
-pub mod substitute;
 pub mod syntax;
 pub mod term;
 pub mod undo;
 pub mod update;
 pub mod theme;
-pub mod which_key;
 pub mod workspace_search;
-pub mod xlc;
 pub mod fs_atomic;
 
 pub mod app;
@@ -58,13 +54,11 @@ pub mod key;
 pub use fs_atomic::atomic_write_file;
 pub use app::{
     App, BufferTab, EditorContextMenu, EditorCtxItem, EditorViewport, Mode, MouseState,
-    ProcMetrics, ResizeTarget, SplitSepHit, set_cursor_esc,
+    ProcMetrics, ResizeTarget, SplitSepHit,
 };
 pub use key::{KeyCode, KeyEvent, KeyModifiers};
-pub use macros::{MacroBank, MacroKey};
 pub use multi_cursor::MultiCursor;
-pub use nav::{FindKind, Jump, JumpList, LastFind, Marks};
-pub use ops::{LastChange, Motion, Operator, TextObject};
+pub use nav::{Jump, JumpList};
 pub use palette::{Palette, PaletteAction, PaletteKind};
 pub use peek::PeekState;
 pub use plugin_store::{ExtRow, PluginStore, StoreItem, StoreMsg, StoreTab};
@@ -85,8 +79,6 @@ pub use settings::{
 pub use screensaver::{Screensaver, WeatherInfo};
 pub use pet::PetState;
 pub use split::{Pane, SplitKind, SplitState};
-pub use substitute::SubstituteCmd;
-pub use which_key::{ChordHint, WhichKeyState};
 pub use workspace_search::{SearchHit, WorkspaceSearch};
 pub use call_hierarchy::{CallDirection, CallHierarchyState, CallItem};
 pub use dap::{

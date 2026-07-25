@@ -6,6 +6,15 @@ use suisei_core::key::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::compositor::{compose, FrameDiff, ShellState};
 
+/// Ticks between post-edit `textDocument/didChange` syncs. The tick is 50 ms,
+/// so this coalesces a typing run into one full-text notification every 150 ms
+/// — `App::sync_lsp_document` is version-gated, so an idle frame costs nothing
+/// and only a changed buffer pays the O(file) join.
+const LSP_SYNC_TICKS: u32 = 3;
+
+/// One indent level, inserted by Tab and by auto-indent on Enter.
+const INDENT: &str = "    ";
+
 /// One row in the Breakpoints navigator (face FFI).
 #[derive(Debug, Clone)]
 pub struct BreakpointRow {
@@ -172,7 +181,7 @@ impl Engine {
                 // Last shell closed → close the panel.
                 self.app.terminal.open = false;
                 if matches!(self.app.mode, Mode::Terminal) {
-                    self.app.mode = Mode::Normal;
+                    self.app.mode = Mode::Editor;
                 }
                 self.active_terminal = 0;
             }
@@ -192,23 +201,13 @@ impl Engine {
 
     // ─── GUI semantic editing commands ────────────────────────────────────────
     //
-    // The face calls these INSTEAD of synthesizing vim keystrokes (`i`, `Esc`,
+    // Semantic edit commands the face calls directly (there is no key
     // `c`, `d`). Core stays modal internally (shared with the xei TUI) but the
     // GUI never surfaces modes — these commands handle transitions invisibly.
 
-    /// True when the engine is in a text-editing mode (Insert/Normal/Visual*).
+    /// True when the editor (rather than a panel or the terminal) has focus.
     fn is_editing_mode(&self) -> bool {
-        matches!(
-            self.app.mode,
-            Mode::Normal | Mode::Insert | Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-        )
-    }
-
-    fn is_visual_mode(&self) -> bool {
-        matches!(
-            self.app.mode,
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-        )
+        matches!(self.app.mode, Mode::Editor)
     }
 
     /// Type a printable character at the caret(s) — GUI fast path.
@@ -248,8 +247,8 @@ impl Engine {
     /// Esc: collapse the selection and dismiss editor overlays. No mode dance,
     /// no synthetic `i` — editing continues immediately.
     pub fn gui_escape(&mut self) {
-        // Let the legacy Esc close overlays / clear any stray vim state; it is
-        // not intercepted, so it reaches the dispatch and does the housekeeping.
+        // Esc reaches the dispatch so an open panel can close itself; the
+        // caret collapse below is the editor's own half of the contract.
         self.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         if self.is_editing_mode() {
             self.app.caret_collapse();
@@ -257,15 +256,25 @@ impl Engine {
         self.recompose_scroll();
     }
 
-    /// Historically forced Insert mode for click-to-type. Typing is now
-    /// mode-independent, so there is nothing to ensure — this only clears a
-    /// stray vim visual selection (which the GUI should never enter) and never
-    /// inserts.
-    pub fn gui_ensure_insert(&mut self) {
-        if self.is_visual_mode() {
-            self.app.enter_normal();
-            self.app.sync_sel_to_cursor();
+    /// Give the editor the keyboard back — the face calls this when the user
+    /// clicks into the text.
+    ///
+    /// This used to force vim Insert mode, then (once typing went modeless)
+    /// shrank to "clear a stray visual selection". Neither applies now: the
+    /// only thing that can hold the keyboard is a panel, so releasing it is
+    /// the whole job. A panel that owns typed characters is dismissed the same
+    /// way its own Esc would.
+    pub fn gui_focus_editor(&mut self) {
+        if matches!(self.app.mode, Mode::Editor) {
+            return;
         }
+        match self.app.mode {
+            Mode::Search => self.app.cancel_search(),
+            Mode::Palette => self.app.palette.close(),
+            _ => {}
+        }
+        self.app.mode = Mode::Editor;
+        self.recompose();
     }
 
     /// Route a caret-navigation key straight to the Selection model, bypassing
@@ -277,10 +286,7 @@ impl Engine {
     /// bare arrow moves the caret and collapses any selection.
     fn try_gui_navigation(&mut self, ev: KeyEvent) -> bool {
         use suisei_core::gui_edit::Motion;
-        if !matches!(self.app.mode, Mode::Insert | Mode::Normal) {
-            return false;
-        }
-        if self.app.terminal_window_focused() || self.app.explorer.open {
+        if !self.editor_owns_keys() {
             return false;
         }
         let m = ev.modifiers;
@@ -299,6 +305,8 @@ impl Engine {
             KeyCode::Down => Motion::Down,
             KeyCode::Home => Motion::LineStart,
             KeyCode::End => Motion::LineEnd,
+            KeyCode::PageUp => Motion::PageUp,
+            KeyCode::PageDown => Motion::PageDown,
             _ => return false,
         };
         // A prior legacy path may have moved the cursor; make the selection's
@@ -323,10 +331,7 @@ impl Engine {
     /// Control/Super combos are shortcuts (copy, save, …) and fall through to
     /// the legacy dispatch; so do chrome panels and the terminal.
     fn try_gui_edit(&mut self, ev: KeyEvent) -> bool {
-        if !matches!(self.app.mode, Mode::Insert | Mode::Normal) {
-            return false;
-        }
-        if self.app.terminal_window_focused() || self.app.explorer.open {
+        if !self.editor_owns_keys() {
             return false;
         }
         let m = ev.modifiers;
@@ -335,12 +340,42 @@ impl Engine {
         }
         match ev.code {
             KeyCode::Char(c) => self.app.gui_insert_text(&c.to_string()),
-            KeyCode::Enter => self.app.gui_insert_newline("    "),
+            KeyCode::Enter => self.app.gui_insert_newline(INDENT),
             KeyCode::Backspace => self.app.gui_delete_backward(),
             KeyCode::Delete => self.app.gui_delete_forward(),
+            // Tab indents. It used to reach vim's `handle_normal`, where Tab is
+            // the jumplist-forward command (`Ctrl+I`) — pressing Tab in the
+            // editor jumped somewhere else in the file instead of inserting.
+            KeyCode::Tab => self.app.gui_insert_text(INDENT),
+            // Esc collapses a multi-caret / selection back to one caret. In the
+            // editor there is no overlay left for it to close — an overlay owns
+            // the keyboard while it is up.
+            KeyCode::Esc => self.app.caret_collapse(),
             _ => return false,
         }
         true
+    }
+
+    /// Does the editor itself own the keyboard right now?
+    ///
+    /// Ownership is a *mode* question. It is deliberately NOT asked of panel
+    /// visibility flags like `explorer.open`, which in the GUI only mean "the
+    /// docked navigator has entries" — `suisei_engine_open_path` sets that on
+    /// every project/file open, without taking focus. Gating on it once sent
+    /// every keystroke to the vim command machine for a whole session.
+    fn editor_owns_keys(&self) -> bool {
+        matches!(self.app.mode, Mode::Editor)
+            && !self.app.terminal_window_focused()
+    }
+
+    /// Keys that still belong to `App::dispatch` while the editor has focus:
+    /// modifier chords are application shortcuts (Ctrl+F explorer, Ctrl+, …)
+    /// and function keys drive the debugger. Everything else unmodified is the
+    /// editor's own business.
+    fn is_app_shortcut(ev: KeyEvent) -> bool {
+        ev.modifiers.contains(KeyModifiers::CONTROL)
+            || ev.modifiers.contains(KeyModifiers::SUPER)
+            || matches!(ev.code, KeyCode::F(_))
     }
 
     pub fn dispatch_key(&mut self, ev: KeyEvent) {
@@ -357,6 +392,15 @@ impl Engine {
                 self.app.update_scroll();
             }
             self.recompose_scroll();
+            return;
+        }
+        // SEALED: while the editor owns the keyboard, the two tables above are
+        // the whole contract. A key they did not take is dropped here rather
+        // than falling through to `App::dispatch`, whose Normal-mode handler is
+        // the vim command interpreter — that fallthrough is what turned `z`
+        // into a fold prefix and Tab into a jumplist jump. Only real
+        // application shortcuts still pass.
+        if self.editor_owns_keys() && !Self::is_app_shortcut(ev) {
             return;
         }
         // Hard rule: chrome-only keys (explorer / XLC / settings / SCM / git wb)
@@ -392,7 +436,7 @@ impl Engine {
             // through the legacy path. Collapse the GUI selection to a caret
             // there so the next Shift+Arrow starts from the right place — and
             // so a stale highlight never lingers after typing.
-            if matches!(self.app.mode, Mode::Insert | Mode::Normal)
+            if matches!(self.app.mode, Mode::Editor)
                 && self.app.sel.primary().head != self.app.buffer.cursor()
             {
                 self.app.sync_sel_to_cursor();
@@ -409,13 +453,7 @@ impl Engine {
         let chrome_mode = |m: Mode| {
             !matches!(
                 m,
-                Mode::Normal
-                    | Mode::Insert
-                    | Mode::Visual
-                    | Mode::VisualLine
-                    | Mode::VisualBlock
-                    | Mode::Terminal
-                    | Mode::Preview
+                Mode::Editor | Mode::Terminal | Mode::Preview
             )
         };
         let shell_surface_changed = mode_before != self.app.mode
@@ -474,9 +512,22 @@ impl Engine {
             self.shell.dirty = true;
             need_full = true;
         }
-        // which_key / completions / palette need live paint while open
+        // Language services. Nothing about the LSP works without this: the
+        // drain inside is what parses the `initialize` reply and sends
+        // `initialized` + `didOpen`, so skipping it leaves the server spawned
+        // and permanently idle. Post-edit didChange goes first (throttled, so a
+        // typing run coalesces into one full-text notification), then the drain,
+        // so a request issued this frame answers against the current document.
+        if self.tick_count % LSP_SYNC_TICKS == 0 {
+            self.app.sync_lsp_document();
+        }
+        let lang = self.app.poll_language_services();
+        if lang.any() {
+            self.shell.dirty = true;
+            need_full |= lang.chrome;
+        }
+        // completions / palette need live paint while open
         if self.shell.dirty
-            || self.app.which_key_visible()
             || self.app.completions.active
             || self.app.palette.open
         {
@@ -804,19 +855,8 @@ impl Engine {
 
         if matches!(self.app.mode, Mode::Palette | Mode::Explorer) {
             self.app.palette.close();
-            self.app.mode = Mode::Normal;
+            self.app.mode = Mode::Editor;
         }
-        // A click leaves any keyboard-vim visual selection — the GUI model
-        // (`app.sel`) is authoritative from here, and a lingering
-        // `visual_anchor` would otherwise show through `selected_range`.
-        if matches!(
-            self.app.mode,
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-        ) {
-            self.app.enter_normal();
-            self.app.message.clear();
-        }
-
         if select_word {
             // Double-click: select the word into the GUI model.
             self.app.select_word_gui(pos);
@@ -946,7 +986,7 @@ impl Engine {
         }
         if matches!(
             self.app.mode,
-            Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            Mode::Editor
         ) {
             self.app.delete_selection();
         }
@@ -963,7 +1003,7 @@ impl Engine {
                 self.app.mode = Mode::Terminal;
             }
         } else if matches!(self.app.mode, Mode::Terminal) {
-            self.app.mode = Mode::Normal;
+            self.app.mode = Mode::Editor;
         }
         self.recompose();
     }
@@ -1000,9 +1040,9 @@ impl Engine {
         if let Some(path) = self.app.explorer.select_current() {
             let path_str = path.display().to_string();
             self.app.open_new_tab(&path_str);
-            // Keep tree data for docked navigator; leave Mode::Normal for editing.
+            // Keep tree data for docked navigator; leave Mode::Editor for editing.
             self.app.explorer.open = true;
-            self.app.mode = Mode::Normal;
+            self.app.mode = Mode::Editor;
             self.app.message = format!("Opened {}", path_str);
         }
         // dir navigation refreshes entries in place
@@ -1036,7 +1076,7 @@ impl Engine {
             self.app.scm.ensure_graph();
         }
         if matches!(self.app.mode, Mode::SourceControl) {
-            self.app.mode = Mode::Normal;
+            self.app.mode = Mode::Editor;
         }
         self.recompose();
     }
@@ -1335,7 +1375,7 @@ impl Engine {
                 self.app.close_settings();
                 self.app.toggle_scm();
             }
-            SettingsAction::OpenPluginStore | SettingsAction::None => {}
+            SettingsAction::None => {}
         }
         // GUI face has no "s to save" muscle memory — persist draft after every change.
         if self.app.settings.dirty {
@@ -1526,9 +1566,9 @@ mod tests {
         let mut eng = eng_with_text("hello");
         eng.click_at(0, 2, false);
         assert_eq!(eng.app.buffer.cursor.col, 2);
-        assert!(matches!(eng.app.mode, Mode::Normal));
+        assert!(matches!(eng.app.mode, Mode::Editor));
         eng.mouse_up();
-        assert!(matches!(eng.app.mode, Mode::Normal));
+        assert!(matches!(eng.app.mode, Mode::Editor));
         assert!(eng.app.selected_range().is_none());
     }
 
@@ -1603,7 +1643,7 @@ mod tests {
         assert!(eng.app.sel.primary().is_empty());
         eng.drag_to(0, 4); // exclusive head at col 4 → covers chars 1,2,3
         assert!(!eng.app.sel.primary().is_empty());
-        assert!(!matches!(eng.app.mode, Mode::Visual)); // no vim mode
+        assert!(matches!(eng.app.mode, Mode::Editor)); // selection never changes focus
 
         let (s, e) = eng.app.selected_range().expect("selection");
         assert_eq!((s.row, s.col), (0, 1), "anchor at first click");
@@ -1676,7 +1716,7 @@ mod tests {
         eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
         eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
         assert!(!eng.app.sel.primary().is_empty());
-        assert!(!matches!(eng.app.mode, Mode::Visual), "no vim mode");
+        assert!(matches!(eng.app.mode, Mode::Editor), "selection never changes focus");
         let (s, e) = eng.app.selected_range().unwrap();
         assert_eq!((s.row, s.col), (0, 0));
         assert_eq!((e.row, e.col), (0, 1)); // exclusive head at 2 → inclusive 1 ("he")
@@ -1734,11 +1774,11 @@ mod tests {
         let mut eng = eng_with_text("hello world");
         eng.click_at(0, 3, false);
         eng.mouse_up();
-        assert!(matches!(eng.app.mode, Mode::Normal));
+        assert!(matches!(eng.app.mode, Mode::Editor));
         // second click elsewhere
         eng.click_at(0, 7, false);
         eng.mouse_up();
-        assert!(matches!(eng.app.mode, Mode::Normal));
+        assert!(matches!(eng.app.mode, Mode::Editor));
         assert!(eng.app.selected_range().is_none());
     }
 
@@ -2034,7 +2074,7 @@ mod tests {
             .position(|e| e.name == "sample.txt")
             .expect("sample.txt in explorer");
         eng.explorer_activate(idx as u32);
-        assert!(matches!(eng.app.mode, Mode::Normal));
+        assert!(matches!(eng.app.mode, Mode::Editor));
         // Docked navigator keeps tree open after file activate.
         assert!(eng.app.explorer.open);
         assert!(
@@ -2080,9 +2120,9 @@ mod tests {
         eng.app = App::open_file(path.to_str().unwrap());
         eng.app.explorer.entries.clear();
         eng.app.explorer.open = false;
-        eng.app.mode = Mode::Normal;
+        eng.app.mode = Mode::Editor;
         eng.ensure_project_tree();
-        assert!(matches!(eng.app.mode, Mode::Normal));
+        assert!(matches!(eng.app.mode, Mode::Editor));
         assert!(eng.app.explorer.open);
         assert!(
             !eng.app.explorer.entries.is_empty(),
@@ -2125,6 +2165,147 @@ mod tests {
         assert!(!theme_name.is_empty());
         assert_eq!(eng.app.theme.name, theme_name);
         assert!(eng.last_diff.chrome.as_ref().unwrap().settings.open);
+    }
+
+    /// The property the editor must hold: with it focused, **no** key can put
+    /// the core into a vim state. Fires every printable ASCII plus the
+    /// non-character keys and asserts the mode never leaves Normal/Insert, no
+    /// vim pending state accumulates, and the leader/which-key never opens.
+    ///
+    /// This is what catches the regression class — reintroducing the
+    /// `explorer.open` gate makes it fail on `/` (`Mode::Search`). The `return`
+    /// seal in `dispatch_key` is the belt to this test's braces: today the two
+    /// GUI tables happen to cover every bare key, so the seal changes no
+    /// behaviour; it exists so that adding a key to `handle_normal`, or
+    /// dropping one from the tables, cannot silently reopen the path.
+    #[test]
+    fn no_bare_key_can_reach_the_vim_machine() {
+        let mut eng = eng_with_text("alpha beta\ngamma\n");
+        eng.app.explorer.open = true; // the state that used to open the hole
+        let mut keys: Vec<KeyEvent> = (0x20u8..0x7f).map(|b| KeyEvent::char(b as char)).collect();
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Insert,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            keys.push(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        for ev in keys {
+            eng.dispatch_key(ev);
+            assert!(
+                matches!(eng.app.mode, Mode::Editor),
+                "{:?} left the editor in {:?}",
+                ev.code,
+                eng.app.mode
+            );
+        }
+    }
+
+    /// Tab used to land in `handle_normal`, where it is the jumplist-forward
+    /// command — it moved the caret somewhere else instead of indenting.
+    #[test]
+    fn tab_indents_instead_of_jumping() {
+        let mut eng = eng_with_text("fn main() {}");
+        eng.dispatch_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(eng.app.buffer.line(0), "fn main() {}    ");
+    }
+
+    #[test]
+    fn page_keys_move_a_screenful_through_the_selection_model() {
+        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let mut eng = Engine::new();
+        eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
+        eng.app.buffer = suisei_core::buffer::Buffer::from_string(&text);
+        eng.app.sync_sel_to_cursor();
+        eng.dispatch_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let down = eng.app.buffer.cursor().row;
+        assert!(down > 1, "PageDown must travel a screenful, got row {down}");
+        assert_eq!(
+            eng.app.sel.primary().head.row,
+            down,
+            "the Selection model must be the one that moved"
+        );
+        eng.dispatch_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert_eq!(eng.app.buffer.cursor().row, 0, "PageUp returns to the top");
+    }
+
+    /// `explorer.open` means the docked Project navigator has entries — every
+    /// project/file open sets it (`suisei_engine_open_path`), explicitly
+    /// *without* taking keyboard focus. Gating the edit path on it therefore
+    /// broke typing for the whole session the moment a project was opened:
+    /// every key fell through to the vim command machine instead.
+    #[test]
+    fn typing_works_with_the_project_navigator_docked() {
+        let mut eng = eng_with_text("fn main() {}");
+        eng.app.explorer.open = true; // docked, not keyboard-focused
+        eng.dispatch_key(KeyEvent::char('z'));
+        assert!(
+            eng.app.buffer.line(0).ends_with('z'),
+            "a bare key must type, not run a vim command: {:?}",
+            eng.app.buffer.line(0)
+        );
+    }
+
+    /// Same gate, navigation side. A bare arrow is a poor probe — the vim
+    /// machine moves the caret too — so use Alt+Left, which is word-left only
+    /// on the GUI path.
+    #[test]
+    fn word_motion_works_with_the_project_navigator_docked() {
+        let mut eng = eng_with_text("alpha beta");
+        eng.app.explorer.open = true;
+        eng.dispatch_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(
+            eng.app.buffer.cursor().col,
+            6,
+            "Alt+Left must jump to the start of `beta` via the Selection model"
+        );
+    }
+
+    /// The tick is the GUI's only pump for the language services — without
+    /// this call the LSP never finishes its handshake and no result is ever
+    /// applied. A queued hover answer standing in for "a reply arrived".
+    #[test]
+    fn tick_pumps_the_language_services() {
+        let mut eng = eng_with_text("hello");
+        eng.app.lsp.pending_hover = Some("fn main()".to_string());
+        assert!(eng.app.hover_text.is_none());
+        eng.tick(50);
+        assert_eq!(
+            eng.app.hover_text.as_deref(),
+            Some("fn main()"),
+            "tick must drain the LSP and apply its results"
+        );
+    }
+
+    /// The GUI edit path never notified the server itself, so without this the
+    /// document the LSP answers against is whatever it saw at didOpen.
+    #[test]
+    fn tick_syncs_the_document_to_the_language_server() {
+        let mut eng = eng_with_text("fn main() {}");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_tick_sync.rs"));
+        eng.app.lsp.server_running = true; // stands in for a live server
+        eng.dispatch_key(KeyEvent::char('x'));
+        assert!(
+            !eng.app.lsp_document_synced(),
+            "an edit must leave the server's copy stale"
+        );
+        // The tick also runs the shadow WAL, which writes to the developer's
+        // real `~/.suisei/journal` and would then surface in the app's recovery
+        // sheet. The sync is version-gated, not `modified`-gated, so clearing
+        // the dirty flag keeps this test out of that directory.
+        eng.app.modified = false;
+        for _ in 0..LSP_SYNC_TICKS {
+            eng.tick(50);
+        }
+        assert!(
+            eng.app.lsp_document_synced(),
+            "the tick must send the post-edit didChange"
+        );
     }
 
     #[test]
@@ -2379,24 +2560,6 @@ mod tests {
     }
 
     #[test]
-    fn leader_which_key_paints_via_light_path() {
-        let mut eng = Engine::new();
-        eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.app.key_hints = true;
-        eng.dispatch_key(KeyEvent::char(' '));
-        eng.app.which_key.force_ready();
-        // Simulate the tick-driven light repaint (no full recompose).
-        eng.recompose_scroll();
-        if eng.app.which_key_visible() {
-            let c = eng.last_diff.chrome.as_ref().unwrap();
-            assert!(
-                c.which_key.open,
-                "leader which-key must appear via the scroll patch path"
-            );
-        }
-    }
-
-    #[test]
     fn scroll_sync_tracks_position_without_recompose() {
         let mut eng = eng_with_text(&"row\n".repeat(300));
         eng.resize(800.0, 400.0, 18.0, 9.0, 2.0);
@@ -2449,7 +2612,7 @@ mod tests {
         assert!(eng.app.preview.open, "first toggle opens the preview");
         // GUI reality: focus clicks can drop the app back into Insert while
         // the panel is still showing — the close must not depend on the mode.
-        eng.app.mode = Mode::Insert;
+        eng.app.mode = Mode::Editor;
         eng.dispatch_key(toggle);
         assert!(
             !eng.app.preview.open,

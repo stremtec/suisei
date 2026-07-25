@@ -22,6 +22,8 @@ pub enum Motion {
     Right,
     Up,
     Down,
+    PageUp,
+    PageDown,
     WordLeft,
     WordRight,
     LineStart,
@@ -34,7 +36,10 @@ impl Motion {
     /// Horizontal/word/line/doc motions define a fresh goal column; only
     /// vertical motion consults and preserves one.
     fn is_vertical(self) -> bool {
-        matches!(self, Motion::Up | Motion::Down)
+        matches!(
+            self,
+            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
+        )
     }
 }
 
@@ -63,7 +68,7 @@ impl App {
                 self.buffer.cursor = Position::new(last, col);
             }
             // Vertical never reaches here (see `apply_motion`).
-            Motion::Up | Motion::Down => {}
+            Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {}
         }
         let target = self.buffer.cursor;
         self.buffer.cursor = saved;
@@ -71,16 +76,31 @@ impl App {
     }
 
     /// Vertical motion that preserves the goal column across short lines.
-    /// Returns the new head and the goal column to carry forward.
-    fn vertical_target(&self, from: Position, goal_x: Option<usize>, up: bool) -> (Position, usize) {
+    /// `rows` is signed: negative moves up. Returns the new head and the goal
+    /// column to carry forward.
+    fn vertical_target(
+        &self,
+        from: Position,
+        goal_x: Option<usize>,
+        rows: isize,
+    ) -> (Position, usize) {
         let goal = goal_x.unwrap_or(from.col);
-        let row = if up {
-            from.row.saturating_sub(1)
+        let last = self.buffer.line_count().saturating_sub(1);
+        let row = if rows < 0 {
+            from.row.saturating_sub(rows.unsigned_abs())
         } else {
-            (from.row + 1).min(self.buffer.line_count().saturating_sub(1))
+            from.row.saturating_add(rows as usize).min(last)
         };
         let len = self.buffer.line(row).chars().count();
         (Position::new(row, goal.min(len)), goal)
+    }
+
+    /// Rows a Page motion travels: one screenful less an overlap line, so the
+    /// line you were reading stays on screen. Falls back to a sane page when
+    /// the viewport has not been sized yet (headless tests).
+    fn page_rows(&self) -> usize {
+        let h = self.viewport.height as usize;
+        if h > 1 { h - 1 } else { 20 }
     }
 
     /// Resolve a motion against the primary head, returning the new head and
@@ -88,8 +108,13 @@ impl App {
     fn apply_motion(&mut self, motion: Motion) -> (Position, Option<usize>) {
         let head = self.sel.primary().head;
         if motion.is_vertical() {
-            let (pos, goal) =
-                self.vertical_target(head, self.sel.primary().goal_x, motion == Motion::Up);
+            let rows = match motion {
+                Motion::Up => -1,
+                Motion::Down => 1,
+                Motion::PageUp => -(self.page_rows() as isize),
+                _ => self.page_rows() as isize,
+            };
+            let (pos, goal) = self.vertical_target(head, self.sel.primary().goal_x, rows);
             (pos, Some(goal))
         } else {
             (self.motion_target(head, motion), None)
@@ -164,13 +189,13 @@ impl App {
         let clamped = self.clamp_to_document(pos);
         let saved = self.buffer.cursor;
         self.buffer.cursor = clamped;
-        let range = crate::ops::range_for_textobject(&self.buffer, crate::ops::TextObject::InnerWord);
+        let range = word_range_at(&self.buffer, clamped);
         self.buffer.cursor = saved;
-        if let Some(r) = range {
-            // `range_for_textobject` end is exclusive already — exactly the GUI
-            // head. anchor = word start, head = one past the word.
-            self.sel = crate::selection::SelectionSet::single(Selection::new(r.start, r.end));
-            self.buffer.cursor = r.end;
+        if let Some((start, end)) = range {
+            // `end` is exclusive — exactly the GUI head.
+            // anchor = word start, head = one past the word.
+            self.sel = crate::selection::SelectionSet::single(Selection::new(start, end));
+            self.buffer.cursor = end;
         } else {
             self.caret_place(clamped);
         }
@@ -342,6 +367,33 @@ impl App {
     }
 }
 
+/// The word under `pos`, as an exclusive `[start, end)` span — the one piece of
+/// the old vim text-object machinery the GUI needs (double-click, ⌘D).
+/// Word class follows the editor convention: alphanumeric+`_` is one word, a
+/// run of punctuation is another, whitespace is never selected.
+fn word_range_at(buf: &crate::buffer::Buffer, pos: Position) -> Option<(Position, Position)> {
+    let chars: Vec<char> = buf.line(pos.row).chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let col = pos.col.min(chars.len().saturating_sub(1));
+    if chars[col].is_whitespace() {
+        return None;
+    }
+    let word_char = |c: char| c.is_alphanumeric() || c == '_';
+    let same_class = |a: char, b: char| word_char(a) == word_char(b) && !b.is_whitespace();
+    let here = chars[col];
+    let mut start = col;
+    while start > 0 && same_class(here, chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = col + 1;
+    while end < chars.len() && same_class(here, chars[end]) {
+        end += 1;
+    }
+    Some((Position::new(pos.row, start), Position::new(pos.row, end)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,7 +528,6 @@ mod tests {
             app.caret_extend(Motion::Right); // select "hello"
         }
         assert!(app.has_selection());
-        assert!(!matches!(app.mode, crate::app::Mode::Visual));
         app.clipboard_copy();
         assert_eq!(app.yank_buffer.as_deref(), Some("hello"));
         // selected_range is the inclusive bridge: [0,0]..[0,4] for "hello".

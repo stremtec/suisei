@@ -108,29 +108,3 @@ impl KeyEvent {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::{App, Mode};
-
-    #[test]
-    fn dispatch_i_enters_insert() {
-        let mut app = App::new();
-        assert!(matches!(app.mode, Mode::Normal));
-        app.dispatch(KeyEvent::char('i'));
-        assert!(matches!(app.mode, Mode::Insert));
-        app.dispatch(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(app.mode, Mode::Normal));
-    }
-
-    #[test]
-    fn dispatch_insert_char_mutates_buffer() {
-        let mut app = App::new();
-        app.dispatch(KeyEvent::char('i'));
-        app.dispatch(KeyEvent::char('a'));
-        app.dispatch(KeyEvent::char('b'));
-        let line = app.buffer.line(0);
-        assert!(line.contains('a') && line.contains('b'), "line={line:?}");
-    }
-}

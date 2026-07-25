@@ -34,7 +34,7 @@ struct ContentView: View {
     // Persist only when a resize gesture ends (see `persistPanelSizes`).
     @State private var navW: Double = 280
     @State private var termW: Double = 400
-    @State private var xlcH: Double = 200
+    @State private var debugAreaH: Double = 200
     @State private var inspectorW: Double = 240
     /// Xcode-like navigator mode (icon rail).
     @State private var navMode: NavMode = .project
@@ -186,10 +186,6 @@ struct ContentView: View {
         theme.color(theme.selection).opacity(isLightTheme ? 0.45 : 0.55)
     }
     private var caretColor: Color { theme.color(theme.caret) }
-    private var modeNormal: Color { theme.color(theme.modeNormal) }
-    private var modeInsert: Color { theme.color(theme.modeInsert) }
-    private var modeVisual: Color { theme.color(theme.modeVisual) }
-    private var modeOther: Color { accent }
 
     var body: some View {
         // Welcome is its own Window scene (SuiseiApp) with system chrome.
@@ -377,7 +373,7 @@ struct ContentView: View {
             engine.ensureProjectTree()
             engine.uiDebugVisible = false
             if !engine.chrome.welcome {
-                engine.ensureInsertMode()
+                engine.ensureEditorFocus()
             }
         }
         // Deferred to .default run-loop mode: the theme flips while the
@@ -551,8 +547,9 @@ struct ContentView: View {
         }
         let t = d.double(forKey: "suisei.panel.termW")
         if t >= 200 { termW = t }
+        // Key keeps its old name so a saved height survives the XLC removal.
         let x = d.double(forKey: "suisei.panel.xlcH")
-        if x >= 100 { xlcH = x }
+        if x >= 100 { debugAreaH = x }
         let i = d.double(forKey: "suisei.panel.inspectorW")
         if i >= 140 { inspectorW = i }
     }
@@ -561,7 +558,7 @@ struct ContentView: View {
         let d = UserDefaults.standard
         d.set(navW, forKey: "suisei.panel.navW")
         d.set(termW, forKey: "suisei.panel.termW")
-        d.set(xlcH, forKey: "suisei.panel.xlcH")
+        d.set(debugAreaH, forKey: "suisei.panel.xlcH")
         d.set(inspectorW, forKey: "suisei.panel.inspectorW")
     }
 
@@ -667,7 +664,7 @@ struct ContentView: View {
                                     .frame(height: 1)
                                     .offset(y: 28)
                             }
-                            .frame(height: CGFloat(xlcH))
+                            .frame(height: CGFloat(debugAreaH))
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
@@ -1991,7 +1988,7 @@ struct ContentView: View {
     }
 
     private var terminalFocused: Bool {
-        engine.chrome.modeLabel.uppercased().contains("TERM")
+        engine.focus == .terminal
     }
 
     private func terminalSessionChip(_ i: Int) -> some View {
@@ -3427,7 +3424,7 @@ struct ContentView: View {
             if engine.uiDebugVisible {
                 VStack(spacing: 0) {
                     PanelResizeGrip(
-                        size: $xlcH, minS: 120, maxS: 480,
+                        size: $debugAreaH, minS: 120, maxS: 480,
                         axis: .vertical, invert: true,
                         fg: fg,
                         onBegan: beginPanelLiveResize,
@@ -3441,7 +3438,7 @@ struct ContentView: View {
                     // full island (under the navigator included). Content
                     // here is inset with the rest of the stage.
                     debugArea
-                        .frame(height: CGFloat(xlcH))
+                        .frame(height: CGFloat(debugAreaH))
                 }
                 // No extra backing — the terminal card floats on the ROOT
                 // shellBase like every other panel (a tinted wrapper drew a
