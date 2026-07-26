@@ -305,20 +305,38 @@ highlighted for a frame). Caught in a mid-flight capture on the first attempt.
 One consumer (`isSource: false`) against many anchors (`isSource: true`) is the
 construction that cannot do that.
 
-### J4 · Tabs cannot be reordered · FIXED (2026-07-26)
-Drag a chip across its neighbours and the strip rearranges live, on
-`dropEntered` rather than on drop, so the landing place is visible while
-dragging.
+### J4 · Tabs cannot be reordered · **HALF DONE** — the move works, the grab does not
 
-`App::move_tab` carries **every** index that points into `buffers` with the
-move: the active tab and every split pane's `tab_index`. Panes address their
-document by position (`SUISEI-SPLIT-PLAN.md` §1.1), so a reorder that moved
-only the vector would leave each pane showing whatever slid into its slot —
-the same class of bug closing a tab already has. Two regression tests cover
-both directions and the no-ops.
+**Done and tested:** `App::move_tab(from, to)` carries every index that points
+into `buffers` with the move — the active tab and every split pane's
+`tab_index`. Panes address their document by position
+(`SUISEI-SPLIT-PLAN.md` §1.1), so a reorder that moved only the vector would
+leave each pane showing whatever slid into its slot. Two regression tests cover
+both directions, the pane remap and the no-ops. Exposed as
+`suisei_engine_move_tab` / `EngineBridge.moveTab`.
 
-*Not verified by automation:* synthetic mouse events do not open a SwiftUI drag
-session, so the drag itself was reasoned and compiled, not driven.
+**Not done:** getting a mouse drag on a tab chip to *reach* anything. Four
+approaches, each one built and driven against the running app, each one
+measured rather than assumed:
+
+| approach | result |
+|---|---|
+| `.onDrag` / `.onDrop` (system drag session) | never starts — the chip's own `simultaneousGesture(DragGesture(minimumDistance: 0))` pre-empts the press |
+| per-chip `DragGesture` + `simultaneousGesture` | chip is a `Button`; its recogniser claims the movement |
+| row-level `highPriorityGesture` | `onChanged` **never fires** (probe-confirmed). Dragging moved the **window** — the top bar has a full-bleed `WindowDragGesture` layer under the strip |
+| AppKit `NSView` overlay, `hitTest` + `acceptsFirstMouse` | `mouseDown` **never fires** (probe-confirmed) |
+
+The third row is the strongest evidence: the press is being claimed by the top
+bar's `WindowDragGesture`, which is a full-bleed `Color.clear` layer behind the
+tabs in the top bar's `ZStack`.
+
+Next things to try, in order:
+1. **Stop that layer being full-bleed.** Give the window drag only the regions
+   that should drag the window, so the strip's area is not over it at all.
+   This addresses the measured cause directly.
+2. Check whether the strip's `.mask(...)` is breaking hit-testing for anything
+   other than the Buttons — a `.contentShape(Rectangle())` after the mask would
+   rule it in or out.
 
 ### J5 · Editor split is unstable · PLANNED — **priority 2**
 ### J6 · "Turn this pane into a terminal" is unstable · PLANNED

@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 
 /// Corner-radius scale. Radii were scattered across {0,4,6,8,10,12,18}, which
 /// leaves no basis for the concentric rule — an inner element's radius has to
@@ -58,8 +57,6 @@ struct ContentView: View {
     @State private var selectionProgress: CGFloat = 1
     /// Shared geometry for the tab bar's active capsule.
     @Namespace private var tabPillSpace
-    /// Index of the tab being dragged in the strip, nil otherwise.
-    @State private var draggingTab: Int? = nil
 
     /// While the pill is in flight (click travel or drag) it turns to Liquid
     /// Glass and swells slightly; on arrival it sets back into solid accent.
@@ -1102,32 +1099,9 @@ struct ContentView: View {
                                 }
                             )
                             .id(tab.id)
-                            // Drag to reorder. The payload is the tab's index;
-                            // core carries the active index and every split
-                            // pane with the move, so this is safe with a file
-                            // open in more than one pane.
-                            .onDrag {
-                                draggingTab = tab.id
-                                return NSItemProvider(object: "\(tab.id)" as NSString)
-                            }
-                            .onDrop(
-                                of: [UTType.text],
-                                delegate: TabDropTarget(
-                                    over: tab.id,
-                                    dragging: $draggingTab,
-                                    move: { from, to in engine.moveTab(from: from, to: to) }
-                                )
-                            )
-                            // Closing a tab used to just blink out. Collapse it
-                            // instead: the chip shrinks toward its leading edge
-                            // and the strip closes the gap, so the eye follows
-                            // where the tab went.
-                            .transition(
-                                .asymmetric(
-                                    insertion: .opacity.combined(with: .scale(scale: 0.96, anchor: .leading)),
-                                    removal: .opacity.combined(with: .scale(scale: 0.88, anchor: .leading))
-                                )
-                            )
+                            // Report this chip's slot so the drag below knows
+                            // which one the cursor is over. Chip widths differ
+                            // with the title, so slots cannot be computed.
                             .contextMenu {
                                 Button("Close Tab") { engine.closeTab(tab.id) }
                                 Button("Close Other Tabs") {
@@ -4705,34 +4679,6 @@ private struct SplitCapsule: Shape {
         )
     }
 }
-/// Live reorder while a tab chip is dragged over its neighbours.
-///
-/// The move happens on `dropEntered`, not on drop, so the strip rearranges
-/// under the cursor and the user can see where the tab will land — the same
-/// behaviour as every other tab bar. `dropExited` does nothing: leaving a chip
-/// means entering another one, and undoing the move there would fight it.
-private struct TabDropTarget: DropDelegate {
-    let over: Int
-    @Binding var dragging: Int?
-    let move: (Int, Int) -> Void
-
-    func dropEntered(info: DropInfo) {
-        guard let from = dragging, from != over else { return }
-        move(from, over)
-        // The dragged tab now lives where it was dropped; keep following it.
-        dragging = over
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        dragging = nil
-        return true
-    }
-}
-
 private struct TravellingPill: Shape {
     /// 0 = fully at `from`, 1 = fully at `to`.
     var progress: CGFloat
