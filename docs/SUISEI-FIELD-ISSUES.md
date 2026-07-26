@@ -271,6 +271,41 @@ was continuous. It is now created once per size through
 
 ---
 
+## J. Second usability pass (2026-07-26, evening)
+
+### J1 · The inspector toggle's rounded background is off-centre · OPEN
+Top-right corner. The grey/accent rounded rect behind the icon sits slightly
+right of the glyph. Likely the same class of problem as the tab bar's `+`:
+a symbol's ink centre is not its frame centre. Measure both boxes, do not guess.
+
+### J2 · The command palette is off-centre · OPEN
+The "Files" overlay sits slightly right of the window's centre. Suspect the
+centring container accounts for the navigator but not the inspector, or vice
+versa.
+
+### J3 · No motion when switching tabs · OPEN
+The tab bar has no travelling indicator between the outgoing and incoming tab —
+the same treatment the navigator rail's pill already has.
+
+### J4 · Tabs cannot be reordered · OPEN
+No drag-to-rearrange in the tab strip.
+
+### J5 · Editor split is unstable · OPEN — **priority 2**
+Named by the user as the second thing to fix. Needs its own reproduction pass:
+what specifically breaks (focus, ratio, pane identity, close behaviour).
+
+### J6 · "Turn this pane into a terminal" is unstable · OPEN
+The shortcut that replaces the focused editor pane with a terminal and sends the
+file that was there back to the tab bar. Unreliable in split layouts.
+
+### J7 · No editor layout save / restore · OPEN
+VS Code-like tab behaviour is missing. The intended shape is specific: a fast
+scroll up or down near the tab bar reveals a **separate layout tab bar**, so
+layouts are switchable the way documents are. Design first, then build — this
+is a feature, not a defect.
+
+---
+
 ## H. Known-deferred, still open
 
 ### H1 · Esc does not close the find bar · OPEN
