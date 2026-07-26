@@ -98,7 +98,11 @@ struct SuiseiApp: App {
 
             Button(engine.uiDebugVisible ? "Hide Debug Area" : "Show Debug Area") {
                 let next = !engine.uiDebugVisible
-                engine.animatingPanels { engine.setDebugArea(next) }
+                engine.animatingPanels {
+                    withAnimation(.spring(duration: 0.3, bounce: 0.12)) {
+                        engine.setDebugArea(next)
+                    }
+                }
             }
             .keyboardShortcut("y", modifiers: [.command, .shift])
 
@@ -108,27 +112,30 @@ struct SuiseiApp: App {
         // View — chrome panels (roles, not ad-hoc chords only).
         CommandMenu("View") {
             Button("File Explorer") {
-                engine.animatingPanels { engine.uiNavVisible = true }
                 NotificationCenter.default.post(name: .suiseiNavProject, object: nil)
+                engine.animatingPanels { engine.uiNavVisible = true }
             }
             .keyboardShortcut("f", modifiers: .control)
 
             Button("Source Control") {
-                engine.animatingPanels { engine.uiNavVisible = true }
+                // Load before the slide, never during it: these are engine
+                // recomposes and chrome pulls, and on the animation's first
+                // frame they are exactly what makes the panel hitch on open.
                 engine.ensureScm()
                 NotificationCenter.default.post(name: .suiseiNavScm, object: nil)
+                engine.animatingPanels { engine.uiNavVisible = true }
             }
             .keyboardShortcut("g", modifiers: .control)
 
             Button("Find Navigator") {
-                engine.animatingPanels { engine.uiNavVisible = true }
                 NotificationCenter.default.post(name: .suiseiNavFind, object: nil)
+                engine.animatingPanels { engine.uiNavVisible = true }
             }
 
             Button("Breakpoints") {
-                engine.animatingPanels { engine.uiNavVisible = true }
                 engine.refreshBreakpoints()
                 NotificationCenter.default.post(name: .suiseiNavBreakpoints, object: nil)
+                engine.animatingPanels { engine.uiNavVisible = true }
             }
 
             Divider()
@@ -319,8 +326,8 @@ struct SuiseiApp: App {
             Button("Find Previous") { engine.findStep(forward: false) }
                 .keyboardShortcut("g", modifiers: [.command, .shift])
             Button("Find in Project…") {
-                engine.animatingPanels { engine.uiNavVisible = true }
                 NotificationCenter.default.post(name: .suiseiNavFind, object: nil)
+                engine.animatingPanels { engine.uiNavVisible = true }
             }
             .keyboardShortcut("f", modifiers: [.command, .shift])
         }

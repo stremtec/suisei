@@ -655,11 +655,13 @@ final class EngineBridge: ObservableObject {
     func animatingPanels(_ body: () -> Void) {
         PerfProbe.record("panel toggle started", 0)
         windowLiveResizing = true
-        // `.smooth`, not `.snappy`: snappy carries bounce, and a full-height
-        // panel that wobbles as it leaves reads as flippant. Panels glide.
-        withAnimation(.smooth(duration: 0.3)) {
-            body()
-        }
+        // NO `withAnimation` here. The motion is an implicit
+        // `.animation(_:value:)` on the container that holds both the panel and
+        // the content that steps aside for it — the way the inspector has
+        // always done it. Driving the same change from an explicit transaction
+        // as well gave the navigator two animators for one value, and it
+        // stuttered; the inspector, with only the implicit one, never did.
+        body()
         // CANCELLABLE, and that is the whole point. Toggling again inside the
         // settle window used to let the PREVIOUS toggle's timer fire in the
         // middle of the new animation: it cleared `windowLiveResizing`, which

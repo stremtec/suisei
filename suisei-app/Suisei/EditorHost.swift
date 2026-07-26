@@ -168,6 +168,51 @@ final class EditorScrollView: NSScrollView {
     override var isFlipped: Bool { true }
     override class var isCompatibleWithResponsiveScrolling: Bool { true }
 
+    /// Document width in columns as of the last `apply`.
+    private var lastContentCols: Int = 0
+
+    /// Re-fit the canvas whenever OUR frame changes.
+    ///
+    /// The canvas used to be sized only inside `apply`, which runs when SwiftUI
+    /// re-renders the representable — and a panel slide changes this view's
+    /// frame through AppKit layout, not through the representable's inputs. So
+    /// the canvas kept its old width for the whole animation, and everything
+    /// drawn to `bounds.width` (the cursor-line highlight above all) stopped
+    /// short of the new edge until some later event happened to re-apply.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        fitCanvasToBounds()
+    }
+
+    /// Size the document view to the greater of the visible area and the
+    /// content. Face-only — no engine round trip, so it can run per frame.
+    private func fitCanvasToBounds() {
+        let lineH = EditorMetrics.lineHeight
+        let cell = EditorMetrics.cellWidth
+        let count = max(1, Int(lastDocLineCount))
+        let docH = max(bounds.height, CGFloat(count) * lineH + 8)
+        var docW = max(bounds.width, 1)
+        if !lastWrap {
+            // The engine owns the extent. The old budget was
+            // `max(400, hScroll + 160)` — a width that GREW WITH THE SCROLL
+            // POSITION, so every pan to the right made the document wider and
+            // the pan could never reach an end.
+            docW = max(docW, CGFloat(lastContentCols) * cell + EditorMetrics.gutter + 32)
+        }
+        let newSize = NSSize(width: docW, height: docH)
+        guard abs(canvas.frame.width - newSize.width) > 0.5
+            || abs(canvas.frame.height - newSize.height) > 0.5
+        else { return }
+        // Resizing the canvas clamps the clip origin, which fires
+        // `clipBoundsChanged` and pushes that clamped position back into Core —
+        // wiping the scroll it had just restored for this tab. The push has to
+        // stay muted across the resize.
+        suppressPush = true
+        canvas.setFrameSize(newSize)
+        suppressPush = false
+        canvas.needsDisplay = true
+    }
+
 
     @objc private func liveScrollWillStart(_ note: Notification) {
         if !isUserScrolling { engine?.beginLiveScroll() }
@@ -209,34 +254,11 @@ final class EditorScrollView: NSScrollView {
         hasHorizontalScroller = !wrapLines
         horizontalScrollElasticity = wrapLines ? .none : .allowed
 
-        let docH = max(bounds.height, CGFloat(count) * lineH + 8)
-        var docW = max(bounds.width, 1)
-        if !wrapLines {
-            // The engine owns the extent now. The old budget was
-            // `max(400, hScroll + 160)` — a width that GREW WITH THE SCROLL
-            // POSITION, so every pan to the right made the document wider and
-            // the pan could never reach an end. That was the "infinite
-            // horizontal scroll".
-            let cols = Int(engine?.contentCols() ?? 0)
-            docW = max(docW, CGFloat(cols) * cell + EditorMetrics.gutter + 32)
-        }
-        let newSize = NSSize(width: docW, height: docH)
-        if abs(canvas.frame.width - newSize.width) > 0.5
-            || abs(canvas.frame.height - newSize.height) > 0.5
-        {
-            // Resizing the canvas clamps the clip origin, which fires
-            // `clipBoundsChanged` and pushes that clamped position back into
-            // Core — wiping the scroll it had just restored for this tab. The
-            // push has to stay muted across the resize; the clip is positioned
-            // deliberately below.
-            suppressPush = true
-            canvas.setFrameSize(newSize)
-            suppressPush = false
-        }
-
         let docChanged = docLineCount != lastDocLineCount || wrapLines != lastWrap
         lastDocLineCount = docLineCount
         lastWrap = wrapLines
+        lastContentCols = Int(engine?.contentCols() ?? 0)
+        fitCanvasToBounds()
 
         canvas.setChrome(
             showFocusRing: showFocusRing,

@@ -257,54 +257,95 @@ struct ContentView: View {
             // its own shadow. This is also why the terminal↔sidebar metaball
             // bridge is gone: there is no shell channel left to bridge — the
             // ground between the two IS the island now.
-            if engine.uiNavVisible {
-                sidebarColumn
-                    .frame(width: CGFloat(navW))
-                    .frame(maxHeight: .infinity)
-                    .background(editorBg)
-                    .clipShape(RoundedRectangle(
+            // ALWAYS PRESENT, moved by `offset`. Not `if` + `.transition`.
+            //
+            // The conditional-with-transition form would not animate its
+            // REMOVAL, and five measured attempts failed to make it: explicit
+            // `withAnimation` vs implicit `.animation(_:value:)`, the animation
+            // on the outer container vs on the panel's own, adding `.zIndex`,
+            // applying the transition before the full-width stretch instead of
+            // after, and dropping the `windowLiveResizing` publish that lands
+            // in the same update. Every one of them measured open ≈ 5–8 frames
+            // of motion against close = 1 frame, i.e. the panel snapped shut.
+            //
+            // An offset is a plain animatable property, so both directions are
+            // the same interpolation running in opposite senses and cannot
+            // diverge. Keeping the panel mounted also means opening it no
+            // longer re-runs `ProjectTreeView`'s `onAppear` rebuild.
+            sidebarColumn
+                .frame(width: CGFloat(navW))
+                .frame(maxHeight: .infinity)
+                .background(editorBg)
+                .clipShape(RoundedRectangle(
+                    cornerRadius: ContentView.panelCornerRadius, style: .continuous
+                ))
+                .overlay(
+                    RoundedRectangle(
                         cornerRadius: ContentView.panelCornerRadius, style: .continuous
-                    ))
-                    .overlay(
-                        RoundedRectangle(
-                            cornerRadius: ContentView.panelCornerRadius, style: .continuous
-                        )
-                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
                     )
-                    // The resize grip rides the widget's own trailing edge now
-                    // that the sidebar owns no slot in the layout.
-                    // (240 floor: five modes plus the detached toggle need the
-                    // room — see `navStripIcon`.)
-                    .overlay(alignment: .trailing) {
-                        PanelResizeGrip(
-                            size: $navW, minS: 240, maxS: 460,
-                            axis: .horizontal, invert: false,
-                            fg: fg,
-                            onBegan: beginPanelLiveResize,
-                            onEnded: endPanelLiveResize
-                        )
-                    }
-                    .shadow(
-                        color: .black.opacity(isLightTheme ? 0.07 : 0.30),
-                        radius: 9, y: 2
+                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+                // The resize grip rides the widget's own trailing edge now
+                // that the sidebar owns no slot in the layout.
+                // (240 floor: five modes plus the detached toggle need the
+                // room — see `navStripIcon`.)
+                .overlay(alignment: .trailing) {
+                    PanelResizeGrip(
+                        size: $navW, minS: 240, maxS: 460,
+                        axis: .horizontal, invert: false,
+                        fg: fg,
+                        onBegan: beginPanelLiveResize,
+                        onEnded: endPanelLiveResize
                     )
-                    .padding(.leading, ContentView.panelGap)
-                    .padding(.vertical, ContentView.panelGap)
-                    .frame(
-                        maxWidth: .infinity, maxHeight: .infinity,
-                        alignment: .leading
-                    )
-                    // Slide only. Fading WHILE sliding is the other half of
-                    // what read as 경박 — a solid panel leaves by the edge, it
-                    // does not evaporate on the way out.
-                    .transition(.move(edge: .leading))
-            }
+                }
+                .shadow(
+                    color: .black.opacity(isLightTheme ? 0.07 : 0.30),
+                    radius: 9, y: 2
+                )
+                .padding(.leading, ContentView.panelGap)
+                .padding(.vertical, ContentView.panelGap)
+                // Far enough left to clear its own shadow as well as the card.
+                .offset(x: engine.uiNavVisible ? 0 : -(CGFloat(navW) + 40))
+                .opacity(engine.uiNavVisible ? 1 : 0)
+                // Hidden means untouchable — an off-screen panel must not eat
+                // clicks meant for the editor beneath it.
+                .allowsHitTesting(engine.uiNavVisible)
+                .frame(
+                    maxWidth: .infinity, maxHeight: .infinity,
+                    alignment: .leading
+                )
+                // Below `topBar` (2) so the sidebar toggle is never covered by
+                // the panel it toggles.
+                .zIndex(1)
 
             // Custom titlebar row: full window width → tabs stay WINDOW-centered
             // regardless of the sidebar, and everything here is SwiftUI content
             // (blurable, coverable — impossible with NSToolbar).
             topBar
+                // Above the navigator (1) so the sidebar toggle is never
+                // covered by the panel it toggles.
+                .zIndex(2)
         }
+        // THE INSPECTOR'S ANIMATION, verbatim — `.snappy(duration: 0.25)`
+        // keyed on the visibility value, plus `nil` for the width so dragging a
+        // resize grip never animates. The navigator was driven by an explicit
+        // `withAnimation` transaction instead, which is what differed and what
+        // stuttered.
+        //
+        // It sits HERE, on the container above both, rather than on the panel:
+        // the navigator is a floating overlay, so the editor does not resize
+        // around it — its content steps aside via `editorCard`'s leading
+        // padding, in a different subtree. Only a modifier above both moves
+        // them as one.
+        //
+        // The inspector's `.zIndex(2)` is deliberately NOT copied: it is
+        // positional, not part of the animation, and in this ZStack it raised
+        // the navigator above `topBar` and hid the sidebar toggle behind it.
+        // `.snappy` is a spring WITH bounce (≈0.15). On the inspector's narrow
+        // column that wobble is invisible; on a full-height panel it is not.
+        // Explicit `bounce: 0` rather than `.smooth`, so the intent is in the
+        // code and not in a preset that might change.
+        .animation(.spring(duration: 0.25, bounce: 0), value: engine.uiNavVisible)
         // Everything starts at the true window top (no reserved titlebar strip):
         // the navigator card swallows the traffic lights + toggle, the top bar
         // row shares that height over the detail side.
@@ -639,10 +680,17 @@ struct ContentView: View {
         let shape = RoundedRectangle(
             cornerRadius: ContentView.panelCornerRadius, style: .continuous
         )
-        // The island starts at the WINDOW edge and passes beneath the
-        // floating navigator; only the CONTENT steps aside. 7pt keeps the same
-        // breathing room the content had when the sidebar was still a column.
-        let contentInset = engine.uiNavVisible ? CGFloat(navW) + 7 : 0
+        // The island starts at the WINDOW edge and passes beneath the floating
+        // navigator; only the CONTENT steps aside.
+        //
+        // No extra breathing room beyond the panel's own width. The `+ 7` that
+        // used to be here was SwiftUI PADDING, i.e. outside the editor canvas —
+        // so the canvas could not paint it, and the cursor-line highlight
+        // stopped 7pt short of the sidebar with bare card background showing
+        // through (measured: sidebar border ends at x=316, highlight starts at
+        // x=324). The navigator is a floating card with its own shadow; that
+        // shadow is the separation, and it falls on content that now reaches.
+        let contentInset = engine.uiNavVisible ? CGFloat(navW) : 0
         return editorIsolatedStage
             .padding(.leading, contentInset)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -687,11 +735,22 @@ struct ContentView: View {
         DockedPanelShape(fillet: ContentView.panelCornerRadius)
     }
 
-    /// Barely there. The console needs to read as a different room without
-    /// becoming a different object — a strong fill would undo the fusing.
-    private var terminalDockFill: Color {
-        mixColor(editorBg, isLightTheme ? .black : .white, 0.035)
+    /// The terminal grid's own background — behind the glyphs AND behind the
+    /// whole panel, so no sliver of another fill can show at its edges.
+    private var terminalGridBg: Color {
+        mixColor(editorBg, .black, isLightTheme ? 0.035 : 0.18)
     }
+
+    /// The docked terminal region is filled with the GRID's own colour.
+    ///
+    /// It used to be its own barely-there tint, one shade off the grid. The
+    /// grid view does not cover the dock shape exactly — measured 4pt short at
+    /// the bottom in one layout and 27pt in another — and every point of that
+    /// difference showed as a strip of a slightly different colour along the
+    /// terminal's edge. One colour across the whole region makes the seam
+    /// impossible instead of leaving it to arithmetic that has already been
+    /// wrong twice.
+    private var terminalDockFill: Color { terminalGridBg }
 
     private var floatingPanelBackground: some View {
         ZStack {
@@ -1159,8 +1218,13 @@ struct ContentView: View {
                     iconSize: 15.5,
                     opticalNudgeX: 0.7
                 ) {
+                    // Content FIRST, animation second. `applyNavMode` runs a
+                    // full engine recompose and a full chrome pull — measured
+                    // at 13 ms — and running it after the toggle put all of
+                    // that on the opening animation's first frame, which is
+                    // where the panel visibly hitched on the way out.
+                    if !engine.uiNavVisible { applyNavMode(navMode) }
                     animatePanels { engine.uiNavVisible.toggle() }
-                    if engine.uiNavVisible { applyNavMode(navMode) }
                     focused = true
                 }
                 Spacer()
@@ -1324,7 +1388,13 @@ struct ContentView: View {
     /// animation, which a menu item has no business carrying.
     private func toggleDebugArea() {
         let next = !engine.uiDebugVisible
-        animatePanels { engine.setDebugArea(next) }
+        // The debug panel is an `if` + `.transition`, so it needs an explicit
+        // transaction. The navigator does not — it is an animated `offset`.
+        // This must NOT be an ancestor `.animation(value: uiDebugVisible)`:
+        // that overrides `navigatorModeStrip`'s own
+        // `.animation(NavStrip.settle, value: separated)` and the strip's
+        // split-apart stopped animating entirely.
+        animatePanels { withAnimation(NavStrip.settle) { engine.setDebugArea(next) } }
         // Only reclaim editor focus when CLOSING. On open the shell owns the
         // keyboard (setDebugArea), and `focused = true` here was part of the
         // long-standing focus bug — the root `.focused` container isn't itself
@@ -2131,11 +2201,18 @@ struct ContentView: View {
                 cursorRow: engine.chrome.terminal.cursorRow,
                 cursorCol: engine.chrome.terminal.cursorCol,
                 fontSize: 12,
-                bg: NSColor(mixColor(editorBg, .black, isLightTheme ? 0.035 : 0.18)),
+                bg: NSColor(terminalGridBg),
                 fg: NSColor(fg),
                 onScrollback: { engine.terminalScroll($0) }
             )
             .frame(width: geo.size.width, height: geo.size.height)
+            // The SAME fill behind the whole panel. The grid's canvas can land
+            // a few points shy of the panel — measured 4pt at the bottom — and
+            // the panel's own dock fill is a different tint, so that residue
+            // read as a strip the terminal "did not reach". Painting one colour
+            // behind both makes the seam impossible rather than arithmetically
+            // avoided.
+            .background(terminalGridBg)
             .contentShape(Rectangle())
             .onTapGesture {
                 engine.focusTerminal(true)
@@ -2280,11 +2357,43 @@ struct ContentView: View {
         // (WindowDragGesture + double-click zoom cover the titlebar behaviors).
         if let container = buttons[0].superview?.superview {
             let lightsZone: CGFloat = leading + gap * 2 + buttons[2].frame.width + 14
-            let h = container.frame.height
+            // Height clamped to the BUTTON ROW, not the grown titlebar. At the
+            // accessory's full 48pt the container's own edge showed as a pale
+            // step beside the lights, ending exactly at `lightsZone` — the grey
+            // slab between the traffic lights and the sidebar toggle. Sized to
+            // the buttons, whatever it paints is behind them.
             let winH = window.frame.height
-            let target = NSRect(x: 0, y: winH - h, width: lightsZone, height: h)
+            let top = buttons.map { $0.frame.maxY }.max() ?? container.frame.height
+            let bottom = buttons.map { $0.frame.minY }.min() ?? 0
+            let h = max(1, top - bottom) + 2
+            let y = winH - container.frame.height + bottom - 1
+            let target = NSRect(x: 0, y: y, width: lightsZone, height: h)
             if container.frame != target {
                 container.frame = target
+            }
+            // …and it must not PAINT. The titlebar the accessory grows draws
+            // its own material, and clamped to the lights zone that material
+            // reads as a pale ~85pt slab sitting between the traffic lights and
+            // the sidebar toggle — a step with a visible edge at exactly
+            // `lightsZone`. The navigator card behind it is the surface; the
+            // titlebar has nothing to contribute but the buttons.
+            // …and it must not PAINT. The container sits ABOVE our SwiftUI
+            // hosting view in `NSThemeFrame`, and it carries a
+            // `_NSTitlebarDecorationView` exactly its own size. Clamped to the
+            // lights zone that decoration is a pale slab ~91pt wide sitting
+            // between the traffic lights and the sidebar toggle, with a hard
+            // edge where it stops. (`NSTitlebarBackgroundView` beside it is
+            // already hidden — that one is not the culprit, and clearing the
+            // container's own layer changes nothing because neither paints it.)
+            //
+            // Matched by name: the class is private, and a name that stops
+            // matching means AppKit reorganised the titlebar, in which case the
+            // slab is back and visible rather than silently mis-hidden.
+            container.wantsLayer = true
+            container.layer?.backgroundColor = NSColor.clear.cgColor
+            for v in container.subviews
+            where String(describing: type(of: v)).contains("TitlebarDecoration") {
+                v.isHidden = true
             }
         }
     }
@@ -5014,6 +5123,33 @@ private final class TermScroll: NSScrollView {
 
     override var isFlipped: Bool { true }
 
+    /// Row count and metrics as of the last `apply`, so a frame change can
+    /// re-fit without one.
+    private var lastRowCount: Int = 1
+    private var lastFontSize: CGFloat = 12
+
+    /// Re-fit the grid whenever OUR frame changes.
+    ///
+    /// The canvas was sized only inside `apply`, which runs when SwiftUI hands
+    /// down new lines — but a panel resize changes this view's frame through
+    /// AppKit layout instead. The grid kept its old width, so the terminal's
+    /// dark background stopped short of the new edge until the next output
+    /// arrived.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        fitCanvasToBounds()
+    }
+
+    private func fitCanvasToBounds() {
+        let lineH = lastFontSize + 5
+        let h = max(bounds.height, CGFloat(lastRowCount) * lineH + 12)
+        let w = max(bounds.width, 200)
+        guard abs(canvas.frame.height - h) > 0.5 || abs(canvas.frame.width - w) > 0.5
+        else { return }
+        canvas.setFrameSize(NSSize(width: w, height: h))
+        canvas.needsDisplay = true
+    }
+
     func apply(lines: [String], fontSize: CGFloat, bg: NSColor, fg: NSColor) {
         // Core hands the WHOLE grid (empty rows as " "): untrimmed, a fresh
         // 44-row shell overflowed the panel and bottom-stick scrolled the
@@ -5025,10 +5161,9 @@ private final class TermScroll: NSScrollView {
         let lineH = fontSize + 5
         let wasAtBottom = documentVisibleRect.maxY >= canvas.frame.height - lineH * 2
         let changed = canvas.set(lines: lines, fontSize: fontSize, bg: bg, fg: fg)
-        let h = max(bounds.height, CGFloat(lines.count) * lineH + 12)
-        if abs(canvas.frame.height - h) > 0.5 || abs(canvas.frame.width - bounds.width) > 0.5 {
-            canvas.setFrameSize(NSSize(width: max(bounds.width, 200), height: h))
-        }
+        lastRowCount = lines.count
+        lastFontSize = fontSize
+        fitCanvasToBounds()
         if changed, wasAtBottom {
             let y = max(0, canvas.frame.height - contentView.bounds.height)
             contentView.setBoundsOrigin(NSPoint(x: 0, y: y))
