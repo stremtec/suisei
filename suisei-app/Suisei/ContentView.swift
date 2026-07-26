@@ -354,6 +354,15 @@ struct ContentView: View {
             // Settings is a separate Window — not an in-app overlay.
             if engine.chrome.palette.open {
                 paletteOverlay
+                    // Centre on the EDITOR, not the window. The overlay hangs
+                    // off the root, so it centred on the window — and the two
+                    // panels flanking the editor are not the same width, so
+                    // window-centred is never editor-centred. Measured with
+                    // both open: navigator edge at x=318, editor edge at
+                    // x=1696, editor centre 1007 against a window centre of
+                    // 1023.5 — the palette sat 16.5px right, which is exactly
+                    // what it looked like.
+                    .offset(x: (navReserved - inspectorReserved) / 2)
                     .zIndex(100)
                     // Removal is IMMEDIATE (.identity): the animated removal
                     // could wedge mid-transition, leaving an invisible view
@@ -534,6 +543,18 @@ struct ContentView: View {
             focused = true
             engine.activateInput()
         }
+    }
+
+    /// Width the navigator takes out of the window, 0 when hidden. Overlays
+    /// that want to sit in the middle of the EDITOR offset by the difference
+    /// between this and `inspectorReserved`.
+    private var navReserved: CGFloat {
+        engine.uiNavVisible ? CGFloat(navW) + ContentView.panelGap : 0
+    }
+
+    /// The inspector's equivalent.
+    private var inspectorReserved: CGFloat {
+        outlineVisible ? CGFloat(inspectorW) + ContentView.panelGap : 0
     }
 
     /// Outline shows unless the git workbench owns the editor slot.

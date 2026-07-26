@@ -273,15 +273,25 @@ was continuous. It is now created once per size through
 
 ## J. Second usability pass (2026-07-26, evening)
 
-### J1 · The inspector toggle's rounded background is off-centre · OPEN
-Top-right corner. The grey/accent rounded rect behind the icon sits slightly
-right of the glyph. Likely the same class of problem as the tab bar's `+`:
-a symbol's ink centre is not its frame centre. Measure both boxes, do not guess.
+### J1 · The inspector toggle's rounded background is off-centre · FIXED (2026-07-26)
+`ToolbarPlainIcon` applied `opticalNudgeX` to the **glyph** and drew the hover
+capsule on the **frame**, so the two disagreed by exactly the nudge. The
+inspector toggle carries `-0.6`, and 0.6pt of disagreement is what reads as the
+capsule being shoved right. The nudge now sits after the capsule, so glyph and
+capsule move together and the pair is optically centred in its slot; the row
+rhythm shifts by the same sub-point, which nothing can see.
 
-### J2 · The command palette is off-centre · OPEN
-The "Files" overlay sits slightly right of the window's centre. Suspect the
-centring container accounts for the navigator but not the inspector, or vice
-versa.
+### J2 · The command palette is off-centre · FIXED (2026-07-26)
+The overlay hangs off the root view, so it centred on the **window** — and the
+two panels flanking the editor are not the same width, so window-centred is
+never editor-centred. Measured with both open: navigator edge at x=318,
+inspector edge at x=1757, editor centre 1037.5 against a window centre of
+1023.5. It now offsets by `(navReserved - inspectorReserved) / 2`; re-measured
+after, the panel centres on 1036.
+
+Note for the next overlay: the editor's right bound is the **inspector's** edge
+(1757), not the minimap's (1696). Measuring against the minimap gives an editor
+centre of 1007 and sends you the wrong way by 30px.
 
 ### J3 · No motion when switching tabs · OPEN
 The tab bar has no travelling indicator between the outgoing and incoming tab —
