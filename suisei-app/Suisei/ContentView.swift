@@ -1214,28 +1214,34 @@ struct ContentView: View {
         .frame(height: 26)
         .contentShape(Rectangle())
         .coordinateSpace(name: Self.tabStripSpace)
-        // GRAB AND MOVE — the navigator rail's construction
-        // (`simultaneousGesture`, small minimum distance, on the row that holds
-        // the Buttons), attached OUTSIDE the `ScrollView`.
+        // GRAB AND MOVE, in AppKit — SwiftUI cannot win this one.
         //
-        // Inside it, no gesture shape received a single event: a macOS
-        // `ScrollView` is an `NSScrollView`, and a horizontal drag in a
-        // horizontally scrolling one is consumed by its own event handling
-        // before SwiftUI arbitration is reached. The rail has no ScrollView,
-        // which is why the same gesture has always worked there.
+        // This strip sits in the window's TITLEBAR REGION (the window is
+        // `.fullSizeContentView` with a hidden titlebar). AppKit drags the
+        // window from any view there whose `mouseDownCanMoveWindow` is true,
+        // and it consumes the mouseDown BEFORE SwiftUI gesture arbitration
+        // runs. Five SwiftUI gesture shapes were tried and none received a
+        // single event; a synthetic drag on the strip dragged the window off
+        // the screen instead. `.simultaneousGesture(DragGesture)` on a Button
+        // is separately reported not to fire on macOS at all
+        // (developer.apple.com/forums/thread/718959).
         //
-        // The rail computes its slot arithmetically because every mode is the
-        // same width; tabs are as wide as their titles, so slots are measured.
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 3, coordinateSpace: .named(Self.tabStripSpace))
-                .onChanged { v in
-                    let held = draggingTab ?? tabSlot(at: v.startLocation.x)
-                    guard let held else { return }
-                    if draggingTab == nil { draggingTab = held }
-                    guard let to = tabSlot(at: v.location.x), to != held else { return }
+        // An overlay that overrides `mouseDownCanMoveWindow` to false opts the
+        // region out of titlebar dragging, and only then do mouse events
+        // arrive. It therefore owns clicks too, so it routes them back.
+        .overlay(
+            TabStripMouse(
+                slotAt: { x in tabSlot(at: x) },
+                onDrag: { held, to in
                     if engine.moveTab(from: held, to: to) { draggingTab = to }
-                }
-                .onEnded { _ in draggingTab = nil }
+                },
+                onPick: { held in draggingTab = held },
+                onClick: { slot in
+                    focused = true
+                    engine.gotoTab(slot)
+                },
+                onEnd: { draggingTab = nil }
+            )
         )
         .zIndex(1)
         .onHover { tabStripHover = $0 }
@@ -4732,6 +4738,111 @@ private struct SplitCapsule: Shape {
         )
     }
 }
+/// Mouse handling for the tab strip, in AppKit.
+///
+/// Exists for one reason: `mouseDownCanMoveWindow`. The strip lives in the
+/// titlebar region of a `.fullSizeContentView` window, and AppKit drags the
+/// window from any view there that allows it — consuming the press before
+/// SwiftUI ever arbitrates. Overriding it to `false` is what lets mouse events
+/// reach anything at all here.
+///
+/// Because this overlay is then the hit view, it owns clicks as well as drags
+/// and hands both back through closures.
+private struct TabStripMouse: NSViewRepresentable {
+    /// Which tab sits at an x in the strip's own coordinates.
+    var slotAt: (CGFloat) -> Int?
+    var onDrag: (Int, Int) -> Void
+    var onPick: (Int) -> Void
+    var onClick: (Int) -> Void
+    var onEnd: () -> Void
+
+    final class Catcher: NSView {
+        var slotAt: ((CGFloat) -> Int?)?
+        var onDrag: ((Int, Int) -> Void)?
+        var onPick: ((Int) -> Void)?
+        var onClick: ((Int) -> Void)?
+        var onEnd: (() -> Void)?
+
+        private var held: Int?
+        private var startX: CGFloat = 0
+        private var moved = false
+
+        /// THE fix. Without it AppKit takes the press to drag the window and
+        /// none of the handlers below ever run.
+        override var mouseDownCanMoveWindow: Bool { false }
+        /// Reorder a tab without having to focus the window first.
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override var isFlipped: Bool { true }
+
+        private func x(of event: NSEvent) -> CGFloat {
+            convert(event.locationInWindow, from: nil).x
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            startX = x(of: event)
+            moved = false
+            held = slotAt?(startX) ?? nil
+        }
+
+        override func mouseDragged(with event: NSEvent) { advance(to: x(of: event)) }
+
+        /// Also treated as a drag while a press is live. Some event sources —
+        /// synthetic input among them — post `mouseMoved` with the button held
+        /// rather than `leftMouseDragged`, and a reorder that only listens for
+        /// the latter silently does nothing for them.
+        override func mouseMoved(with event: NSEvent) {
+            guard held != nil else { return }
+            advance(to: x(of: event))
+        }
+
+        private func advance(to cur: CGFloat) {
+            if !moved, abs(cur - startX) > 3 {
+                moved = true
+                if let held { onPick?(held) }
+            }
+            guard moved, let from = held, let to = slotAt?(cur), to != from else { return }
+            onDrag?(from, to)
+            held = to
+        }
+
+        // `mouseMoved` needs a tracking area to be delivered at all.
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(
+                rect: bounds,
+                options: [.activeInKeyWindow, .mouseMoved, .inVisibleRect],
+                owner: self
+            ))
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            if !moved, let slot = slotAt?(x(of: event)) {
+                onClick?(slot)
+            }
+            held = nil
+            moved = false
+            onEnd?()
+        }
+    }
+
+    func makeNSView(context: Context) -> Catcher {
+        let v = Catcher()
+        apply(to: v)
+        return v
+    }
+
+    func updateNSView(_ v: Catcher, context: Context) { apply(to: v) }
+
+    private func apply(to v: Catcher) {
+        v.slotAt = slotAt
+        v.onDrag = onDrag
+        v.onPick = onPick
+        v.onClick = onClick
+        v.onEnd = onEnd
+    }
+}
+
 private struct TravellingPill: Shape {
     /// 0 = fully at `from`, 1 = fully at `to`.
     var progress: CGFloat
