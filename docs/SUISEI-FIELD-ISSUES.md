@@ -300,13 +300,18 @@ the same treatment the navigator rail's pill already has.
 ### J4 · Tabs cannot be reordered · OPEN
 No drag-to-rearrange in the tab strip.
 
-### J5 · Editor split is unstable · OPEN — **priority 2**
-Named by the user as the second thing to fix. Needs its own reproduction pass:
-what specifically breaks (focus, ratio, pane identity, close behaviour).
-
-### J6 · "Turn this pane into a terminal" is unstable · OPEN
-The shortcut that replaces the focused editor pane with a terminal and sends the
-file that was there back to the tab bar. Unreliable in split layouts.
+### J5 · Editor split is unstable · PLANNED — **priority 2**
+### J6 · "Turn this pane into a terminal" is unstable · PLANNED
+Both need rebuilding rather than repair. Causes and an ordered plan are in
+[`SUISEI-SPLIT-PLAN.md`](SUISEI-SPLIT-PLAN.md). The short version: panes address
+content by **index** (`Pane.tab_index`, `terminal.pane_bound`) so closing or
+reordering anything silently repoints them; the focused pane's scroll/cursor
+exists in two places kept in step by hand; one `kind` and one `ratio` serve the
+whole layout, so mixed splits are refused outright and three panes cannot be
+resized; and the terminal's location is spread across four fields that can
+disagree. J6 as specified — convert the focused pane, displace its document to
+the tab bar — is not implemented at all; the current code opens a *new split*
+instead.
 
 ### J7 · No editor layout save / restore · OPEN
 VS Code-like tab behaviour is missing. The intended shape is specific: a fast
