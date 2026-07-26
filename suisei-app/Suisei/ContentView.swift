@@ -57,6 +57,16 @@ struct ContentView: View {
     @State private var selectionProgress: CGFloat = 1
     /// Shared geometry for the tab bar's active capsule.
     @Namespace private var tabPillSpace
+    /// Tab currently held by a drag, nil otherwise.
+    @State private var draggingTab: Int? = nil
+    /// Chip rects in the strip's space — chips are as wide as their titles, so
+    /// slots cannot be computed the way the rail's equal-width modes can.
+    @State private var tabFrames: [Int: CGRect] = [:]
+    static let tabStripSpace = "suisei.tabstrip"
+
+    private func tabSlot(at x: CGFloat) -> Int? {
+        tabFrames.first { $0.value.minX <= x && x <= $0.value.maxX }?.key
+    }
 
     /// While the pill is in flight (click travel or drag) it turns to Liquid
     /// Glass and swells slightly; on arrival it sets back into solid accent.
@@ -1102,6 +1112,12 @@ struct ContentView: View {
                             // Report this chip's slot so the drag below knows
                             // which one the cursor is over. Chip widths differ
                             // with the title, so slots cannot be computed.
+                            .onGeometryChange(for: CGRect.self) { proxy in
+                                proxy.frame(in: .named(Self.tabStripSpace))
+                            } action: { rect in
+                                tabFrames[tab.id] = rect
+                            }
+                            .opacity(draggingTab == tab.id ? 0.85 : 1)
                             .contextMenu {
                                 Button("Close Tab") { engine.closeTab(tab.id) }
                                 Button("Close Other Tabs") {
@@ -1197,6 +1213,31 @@ struct ContentView: View {
         // Fixed strip height keeps chips and "+" on one exact center line.
         .frame(height: 26)
         .contentShape(Rectangle())
+        .coordinateSpace(name: Self.tabStripSpace)
+        // GRAB AND MOVE — the navigator rail's construction
+        // (`simultaneousGesture`, small minimum distance, on the row that holds
+        // the Buttons), attached OUTSIDE the `ScrollView`.
+        //
+        // Inside it, no gesture shape received a single event: a macOS
+        // `ScrollView` is an `NSScrollView`, and a horizontal drag in a
+        // horizontally scrolling one is consumed by its own event handling
+        // before SwiftUI arbitration is reached. The rail has no ScrollView,
+        // which is why the same gesture has always worked there.
+        //
+        // The rail computes its slot arithmetically because every mode is the
+        // same width; tabs are as wide as their titles, so slots are measured.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 3, coordinateSpace: .named(Self.tabStripSpace))
+                .onChanged { v in
+                    let held = draggingTab ?? tabSlot(at: v.startLocation.x)
+                    guard let held else { return }
+                    if draggingTab == nil { draggingTab = held }
+                    guard let to = tabSlot(at: v.location.x), to != held else { return }
+                    if engine.moveTab(from: held, to: to) { draggingTab = to }
+                }
+                .onEnded { _ in draggingTab = nil }
+        )
+        .zIndex(1)
         .onHover { tabStripHover = $0 }
     }
 
@@ -1222,6 +1263,18 @@ struct ContentView: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .gesture(WindowDragGesture())
+                    // INERT while the cursor is over the tab strip.
+                    //
+                    // `WindowDragGesture` drags the window at the AppKit level,
+                    // and it won every press that began on a chip no matter
+                    // what was tried above it — five gesture shapes and a
+                    // zIndex, each one probe-confirmed to receive nothing.
+                    // Ordering cannot help when the claimant is not competing
+                    // in SwiftUI's arbitration; the layer has to stop taking
+                    // hits where the tabs are. `tabStripHover` already tracks
+                    // exactly that region.
+                    .allowsHitTesting(!tabStripHover)
+                    .zIndex(0)
                     .simultaneousGesture(
                         TapGesture(count: 2).onEnded {
                             NSApp.keyWindow?.performZoom(nil)
