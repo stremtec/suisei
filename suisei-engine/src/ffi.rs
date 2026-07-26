@@ -282,6 +282,24 @@ pub extern "C" fn suisei_engine_editor_accepts_text(ptr: *const SuiseiEngine) ->
     unsafe { u8::from(matches!((*ptr).0.app().mode, suisei_core::app::Mode::Editor)) }
 }
 
+/// Reorder the tab bar: move the tab at `from` so it sits at `to`.
+///
+/// Returns 1 when the order changed. Core carries every index that points into
+/// the buffer list — the active tab and every split pane — because panes
+/// address their document by position.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_move_tab(ptr: *mut SuiseiEngine, from: u32, to: u32) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let engine = unsafe { &mut *ptr };
+    let moved = engine.0.app_mut().move_tab(from as usize, to as usize);
+    if moved {
+        engine.0.recompose();
+    }
+    u8::from(moved)
+}
+
 /// Width of the document in display columns (tabs expanded, wide glyphs
 /// counted double). The face sizes its horizontal scroll canvas from this.
 ///

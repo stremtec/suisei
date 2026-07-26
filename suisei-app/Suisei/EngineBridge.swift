@@ -2199,6 +2199,16 @@ final class EngineBridge: ObservableObject {
         return data
     }
 
+    /// Reorder the tab bar. Core moves the active index and every split pane
+    /// with it, so this is safe while a document is open in more than one pane.
+    @discardableResult
+    func moveTab(from: Int, to: Int) -> Bool {
+        guard let engine, from != to, from >= 0, to >= 0 else { return false }
+        let moved = suisei_engine_move_tab(engine, UInt32(from), UInt32(to)) != 0
+        if moved { refreshChrome() }
+        return moved
+    }
+
     /// Width of the document in display columns — the horizontal scroll extent.
     /// A high-water mark on the engine side (see `App::content_width`), so it
     /// never shrinks under a scroll in progress.

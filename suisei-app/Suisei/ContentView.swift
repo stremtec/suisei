@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// Corner-radius scale. Radii were scattered across {0,4,6,8,10,12,18}, which
 /// leaves no basis for the concentric rule — an inner element's radius has to
@@ -55,6 +56,11 @@ struct ContentView: View {
     @State private var selectionFrom: Int = 0
     @State private var selectionTo: Int = 0
     @State private var selectionProgress: CGFloat = 1
+    /// Shared geometry for the tab bar's active capsule.
+    @Namespace private var tabPillSpace
+    /// Index of the tab being dragged in the strip, nil otherwise.
+    @State private var draggingTab: Int? = nil
+
     /// While the pill is in flight (click travel or drag) it turns to Liquid
     /// Glass and swells slightly; on arrival it sets back into solid accent.
     @State private var pillLiquid: Bool = false
@@ -1084,6 +1090,8 @@ struct ContentView: View {
                                 fg: Color.primary,
                                 dim: Color.secondary,
                                 isLight: isLightTheme,
+                                tabId: tab.id,
+                                pillSpace: tabPillSpace,
                                 action: {
                                     focused = true
                                     engine.gotoTab(tab.id)
@@ -1094,6 +1102,22 @@ struct ContentView: View {
                                 }
                             )
                             .id(tab.id)
+                            // Drag to reorder. The payload is the tab's index;
+                            // core carries the active index and every split
+                            // pane with the move, so this is safe with a file
+                            // open in more than one pane.
+                            .onDrag {
+                                draggingTab = tab.id
+                                return NSItemProvider(object: "\(tab.id)" as NSString)
+                            }
+                            .onDrop(
+                                of: [UTType.text],
+                                delegate: TabDropTarget(
+                                    over: tab.id,
+                                    dragging: $draggingTab,
+                                    move: { from, to in engine.moveTab(from: from, to: to) }
+                                )
+                            )
                             // Closing a tab used to just blink out. Collapse it
                             // instead: the chip shrinks toward its leading edge
                             // and the strip closes the gap, so the eye follows
@@ -1114,8 +1138,28 @@ struct ContentView: View {
                             }
                         }
                     }
+                    // ONE capsule for the whole strip, following the active
+                    // chip's anchor. This is the only view holding both the
+                    // chip it leaves and the chip it arrives at, which is why
+                    // the travel is drawn — and animated — here.
+                    .background {
+                        if let activeId = engine.chrome.tabs.first(where: \.active)?.id {
+                            Capsule(style: .continuous)
+                                .fill(Color.primary.opacity(isLightTheme ? 0.10 : 0.14))
+                                .matchedGeometryEffect(
+                                    id: activeId, in: tabPillSpace, isSource: false
+                                )
+                        }
+                    }
                     .padding(.horizontal, 2)
                     .animation(.smooth(duration: 0.32), value: engine.chrome.tabs.map(\.id))
+                    // The strip is the only view holding BOTH the chip the
+                    // active capsule leaves and the one it arrives at, so the
+                    // travel has to be animated here.
+                    .animation(
+                        .snappy(duration: 0.22),
+                        value: engine.chrome.tabs.first(where: \.active)?.id
+                    )
                     // Take the chips' TRUE width, never the scroll frame's:
                     // without this the measurement can latch to the frame that
                     // it itself feeds, collapsing the strip to its floor and
@@ -4661,6 +4705,34 @@ private struct SplitCapsule: Shape {
         )
     }
 }
+/// Live reorder while a tab chip is dragged over its neighbours.
+///
+/// The move happens on `dropEntered`, not on drop, so the strip rearranges
+/// under the cursor and the user can see where the tab will land — the same
+/// behaviour as every other tab bar. `dropExited` does nothing: leaving a chip
+/// means entering another one, and undoing the move there would fight it.
+private struct TabDropTarget: DropDelegate {
+    let over: Int
+    @Binding var dragging: Int?
+    let move: (Int, Int) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let from = dragging, from != over else { return }
+        move(from, over)
+        // The dragged tab now lives where it was dropped; keep following it.
+        dragging = over
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragging = nil
+        return true
+    }
+}
+
 private struct TravellingPill: Shape {
     /// 0 = fully at `from`, 1 = fully at `to`.
     var progress: CGFloat

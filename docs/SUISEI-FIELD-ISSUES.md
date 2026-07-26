@@ -293,12 +293,32 @@ Note for the next overlay: the editor's right bound is the **inspector's** edge
 (1757), not the minimap's (1696). Measuring against the minimap gives an editor
 centre of 1007 and sends you the wrong way by 30px.
 
-### J3 · No motion when switching tabs · OPEN
-The tab bar has no travelling indicator between the outgoing and incoming tab —
-the same treatment the navigator rail's pill already has.
+### J3 · No motion when switching tabs · FIXED (2026-07-26)
+Each chip drew its own capsule, so a switch cross-faded two of them in place.
+There is now **one** capsule for the whole strip, matched to per-chip anchors
+via `matchedGeometryEffect`, animated on the strip — the only view holding both
+the chip it leaves and the chip it arrives at.
 
-### J4 · Tabs cannot be reordered · OPEN
-No drag-to-rearrange in the tab strip.
+Worth knowing for the next one of these: a capsule *per chip* each claiming the
+same id as a source renders **twice** mid-transition (both chips look
+highlighted for a frame). Caught in a mid-flight capture on the first attempt.
+One consumer (`isSource: false`) against many anchors (`isSource: true`) is the
+construction that cannot do that.
+
+### J4 · Tabs cannot be reordered · FIXED (2026-07-26)
+Drag a chip across its neighbours and the strip rearranges live, on
+`dropEntered` rather than on drop, so the landing place is visible while
+dragging.
+
+`App::move_tab` carries **every** index that points into `buffers` with the
+move: the active tab and every split pane's `tab_index`. Panes address their
+document by position (`SUISEI-SPLIT-PLAN.md` §1.1), so a reorder that moved
+only the vector would leave each pane showing whatever slid into its slot —
+the same class of bug closing a tab already has. Two regression tests cover
+both directions and the no-ops.
+
+*Not verified by automation:* synthetic mouse events do not open a SwiftUI drag
+session, so the drag itself was reasoned and compiled, not driven.
 
 ### J5 · Editor split is unstable · PLANNED — **priority 2**
 ### J6 · "Turn this pane into a terminal" is unstable · PLANNED

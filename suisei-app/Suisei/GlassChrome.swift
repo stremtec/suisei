@@ -86,6 +86,11 @@ struct ToolbarTabChip: View {
     var fg: Color
     var dim: Color
     var isLight: Bool
+    /// Identity of this chip inside `pillSpace`.
+    var tabId: Int
+    /// Shared namespace for the active capsule, so it TRAVELS between chips
+    /// instead of one fading out while another fades in.
+    var pillSpace: Namespace.ID
     var action: () -> Void
     var onClose: (() -> Void)? = nil
 
@@ -119,21 +124,34 @@ struct ToolbarTabChip: View {
             // the icons beside it in the same row — small enough to look like a
             // mistake rather than a choice.
             .frame(height: 24)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(
-                        active
-                            ? Color.primary.opacity(isLight ? 0.10 : 0.14)
-                            : (hovering ? Color.primary.opacity(isLight ? 0.06 : 0.10) : Color.clear)
-                    )
-            )
+            .background {
+                // The hover fill belongs to THIS chip. The ACTIVE fill does
+                // not live here at all — the strip draws a single capsule that
+                // follows whichever chip is active. A capsule per chip, each
+                // claiming the same `matchedGeometryEffect` id as a source,
+                // renders twice mid-transition: both the outgoing and incoming
+                // chip appear highlighted for a frame.
+                ZStack {
+                    if hovering, !active {
+                        Capsule(style: .continuous)
+                            .fill(Color.primary.opacity(isLight ? 0.06 : 0.10))
+                    }
+                    // Invisible anchor the strip's capsule matches against.
+                    Color.clear
+                        .matchedGeometryEffect(id: tabId, in: pillSpace, isSource: true)
+                }
+            }
             .scaleEffect(pressed ? 0.96 : 1)
             .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.snappy(duration: 0.16), value: hovering)
-        .animation(.snappy(duration: 0.20), value: active)
+        // NOT `value: active` — the travelling capsule is animated by the
+        // strip, which is the only view that contains both the chip it leaves
+        // and the chip it arrives at. Animating it here as well gave the shared
+        // geometry two drivers.
+
         .animation(.snappy(duration: 0.12), value: pressed)
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)

@@ -3745,6 +3745,46 @@ impl App {
         }
     }
 
+    /// Move the tab at `from` to sit at `to`, as a tab-bar drag does.
+    ///
+    /// Every index that points into `buffers` has to move with it: the active
+    /// tab, and every split pane's `tab_index`. Panes address their document by
+    /// POSITION (see `SUISEI-SPLIT-PLAN.md` §1.1), so a reorder that forgot
+    /// them would silently repoint each pane at whatever slid into its slot —
+    /// the same class of bug that closing a tab already has.
+    ///
+    /// Returns false when the move is a no-op or out of range.
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        let n = self.buffers.len();
+        if from >= n || to >= n || from == to {
+            return false;
+        }
+        // The active tab's state lives in `App` until it is parked, so park it
+        // before the vector moves underneath it.
+        self.save_state_to_tab();
+        let tab = self.buffers.remove(from);
+        self.buffers.insert(to, tab);
+
+        // A move shifts exactly the slots between `from` and `to`.
+        let remap = |i: usize| -> usize {
+            if i == from {
+                to
+            } else if from < to && i > from && i <= to {
+                i - 1
+            } else if to < from && i >= to && i < from {
+                i + 1
+            } else {
+                i
+            }
+        };
+        self.current_buffer = remap(self.current_buffer);
+        for pane in &mut self.split.panes {
+            pane.tab_index = remap(pane.tab_index);
+        }
+        self.restore_state_from_tab();
+        true
+    }
+
     pub fn request_hover(&mut self) {
         self.sync_lsp_document();
         if let Some(ref path) = self.filename {
@@ -5201,6 +5241,79 @@ mod tests {
             "code actions: {}",
             app.message
         );
+    }
+
+    /// A tab-bar drag must carry every index that points into `buffers` with
+    /// it. Panes address their document by POSITION, so a reorder that moved
+    /// only the vector would leave each pane showing whatever slid into its
+    /// slot.
+    #[test]
+    fn moving_a_tab_carries_the_active_index_and_every_pane() {
+        let mut app = app_with("a");
+        for name in ["b", "c", "d"] {
+            app.buffers.push(BufferTab {
+                buffer: crate::buffer::Buffer::from_string(name),
+                filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
+                scroll: 0,
+                modified: false,
+                saved_hash: EMPTY_TEXT_HASH,
+                undo_stack: UndoStack::new(),
+                file_mtime: None,
+            });
+        }
+        app.save_state_to_tab(); // tab 0 mirrors the active buffer
+        let names = |app: &App| -> Vec<String> {
+            app.buffers
+                .iter()
+                .map(|t| t.buffer.line(0).to_string())
+                .collect()
+        };
+        assert_eq!(names(&app), ["a", "b", "c", "d"]);
+
+        // Three panes, one on each of the first three tabs.
+        app.split.panes = vec![
+            crate::split::Pane { tab_index: 0, ..Default::default() },
+            crate::split::Pane { tab_index: 1, ..Default::default() },
+            crate::split::Pane { tab_index: 2, ..Default::default() },
+        ];
+        app.goto_tab(1); // park + restore properly; a bare assignment leaves
+                         // `App.buffer` showing a different tab's text
+        assert!(app.move_tab(0, 2));
+        assert_eq!(names(&app), ["b", "c", "a", "d"]);
+        assert_eq!(app.current_buffer, 0, "the active tab followed its document");
+        let panes: Vec<usize> = app.split.panes.iter().map(|p| p.tab_index).collect();
+        assert_eq!(panes, [2, 0, 1], "every pane still shows the file it showed");
+    }
+
+    /// The other direction, and the no-ops.
+    #[test]
+    fn moving_a_tab_backwards_shifts_the_slots_it_passes() {
+        let mut app = app_with("a");
+        for name in ["b", "c"] {
+            app.buffers.push(BufferTab {
+                buffer: crate::buffer::Buffer::from_string(name),
+                filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
+                scroll: 0,
+                modified: false,
+                saved_hash: EMPTY_TEXT_HASH,
+                undo_stack: UndoStack::new(),
+                file_mtime: None,
+            });
+        }
+        app.save_state_to_tab();
+        app.split.panes = vec![crate::split::Pane { tab_index: 2, ..Default::default() }];
+        app.goto_tab(2);
+
+        // c moves to the front: a b c → c a b
+        assert!(app.move_tab(2, 0));
+        let names: Vec<String> = app.buffers.iter().map(|t| t.buffer.line(0).to_string()).collect();
+        assert_eq!(names, ["c", "a", "b"]);
+        assert_eq!(app.current_buffer, 0);
+        assert_eq!(app.split.panes[0].tab_index, 0);
+
+        assert!(!app.move_tab(1, 1), "a move onto itself is a no-op");
+        assert!(!app.move_tab(0, 9), "out of range is refused");
+        assert!(!app.move_tab(9, 0));
     }
 
     /// `modified` was a one-way latch: set by every edit, cleared only by a
