@@ -653,18 +653,32 @@ final class EngineBridge: ObservableObject {
     /// an `NSViewRepresentable`: without it, each of the ~18 animation frames
     /// pushes a resize into the engine and recomposes.
     func animatingPanels(_ body: () -> Void) {
+        PerfProbe.record("panel toggle started", 0)
         windowLiveResizing = true
         // `.smooth`, not `.snappy`: snappy carries bounce, and a full-height
         // panel that wobbles as it leaves reads as flippant. Panels glide.
         withAnimation(.smooth(duration: 0.3)) {
             body()
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) { [weak self] in
+        // CANCELLABLE, and that is the whole point. Toggling again inside the
+        // settle window used to let the PREVIOUS toggle's timer fire in the
+        // middle of the new animation: it cleared `windowLiveResizing`, which
+        // re-enabled the per-frame engine resize this flag exists to suppress,
+        // and then pushed a full resize on top of it. Toggling repeatedly piled
+        // the timers up — one stomp each, mid-flight. That was the stutter.
+        panelSettleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            PerfProbe.record("panel settle RAN", 0)
             self.windowLiveResizing = false
             self.settleEditorResize()
         }
+        panelSettleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36, execute: work)
     }
+
+    /// Pending tail of the last panel animation; only the newest may run.
+    private var panelSettleWork: DispatchWorkItem?
 
     func settleEditorResize() {
         resizePendingFull = false

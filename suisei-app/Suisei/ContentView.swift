@@ -758,22 +758,6 @@ struct ContentView: View {
                     // reference screenshot's drama is its PHOTO backdrop —
                     // over flat light chrome, Apple's own glass is exactly
                     // this quiet.)
-                    if engine.uiNavVisible && pillLiquid {
-                        GlassEffectContainer {
-                            Color.clear.modifier(LiquidGlassPill(
-                                progress: selectionProgress,
-                                from: pillDragX ?? pillFromXOverride
-                                    ?? CGFloat(selectionFrom) * (modesW / modes),
-                                to: pillDragX ?? CGFloat(selectionTo) * (modesW / modes),
-                                width: modesW / modes,
-                                height: NavStrip.iconH,
-                                tint: .accentColor
-                            ))
-                        }
-                        .shadow(color: .black.opacity(0.16), radius: 6, y: 2)
-                        .allowsHitTesting(false)
-                        .transition(.opacity)
-                    }
 
                     HStack(spacing: 0) {
                     ForEach(NavMode.allCases, id: \.self) { mode in
@@ -790,7 +774,10 @@ struct ContentView: View {
                             }
                             focused = true
                         } label: {
-                            navStripIcon(mode.systemImage, lit: navSlotLit(mode))
+                            navStripIcon(
+                                mode.systemImage,
+                                lit: navSlotLit(mode, slotWidth: modesW / modes)
+                            )
                         }
                         .buttonStyle(.plain)
                         .help(mode.title)
@@ -802,14 +789,25 @@ struct ContentView: View {
                     .background {
                         let slot = modesW / modes
                         if engine.uiNavVisible {
+                            // Hands over to the glass across the TRAVEL, not at
+                            // its ends: solid at both endpoints, gone at
+                            // mid-flight. Same geometry as the glass pill, so
+                            // the two track each other exactly and there is
+                            // never a size step to hide.
+                            // `pillDragX` first, for BOTH ends: while the user
+                            // is carrying the pill there is no travel, it just
+                            // sits where the cursor put it. The glass overlay
+                            // used to be the only thing honouring the drag, so
+                            // removing the glass took the pill with it and a
+                            // drag moved nothing at all.
                             TravellingPill(
                                 progress: selectionProgress,
-                                from: pillFromXOverride ?? CGFloat(selectionFrom) * slot,
-                                to: CGFloat(selectionTo) * slot,
+                                from: pillDragX ?? pillFromXOverride
+                                    ?? CGFloat(selectionFrom) * slot,
+                                to: pillDragX ?? CGFloat(selectionTo) * slot,
                                 width: slot
                             )
                             .fill(Color.accentColor)
-                            .opacity(pillLiquid ? 0 : 1)
                         }
                     }
 
@@ -946,11 +944,20 @@ struct ContentView: View {
     /// white, dimmed for the whole journey, then snapped back. Now the origin
     /// hands its ink over as the pill leaves and the destination takes it as
     /// the pill arrives — which is only legible because the travelling pill
-    /// carries the accent tint now (see `LiquidGlassPill.tint`).
-    private func navSlotLit(_ mode: NavMode) -> Double {
+    private func navSlotLit(_ mode: NavMode, slotWidth: CGFloat) -> Double {
         guard engine.uiNavVisible,
               let slot = NavMode.allCases.firstIndex(of: mode) else { return 0 }
-        guard pillLiquid, selectionTo != selectionFrom else {
+        // Dragging: light whatever the pill is ACTUALLY sitting over. Keyed off
+        // the selection instead, the icon the pill was carried AWAY from kept
+        // its white ink — white on the bare rail, so it simply vanished. The
+        // pill covers `[dragX, dragX + slotWidth]`; overlap with this slot is
+        // how lit it is, which also crossfades correctly mid-slot.
+        if let dragX = pillDragX, slotWidth > 0 {
+            let lo = max(dragX, CGFloat(slot) * slotWidth)
+            let hi = min(dragX + slotWidth, CGFloat(slot + 1) * slotWidth)
+            return Double(max(0, hi - lo) / slotWidth)
+        }
+        guard selectionTo != selectionFrom else {
             return navMode == mode ? 1 : 0
         }
         // Light whatever the pill is passing over, not only its endpoints: on a
@@ -3185,7 +3192,7 @@ struct ContentView: View {
                         Image(systemName: mode.systemImage)
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(
-                                inspectorMode == mode && !inspectorLiquid
+                                inspectorMode == mode
                                     ? Color.white : Color.secondary
                             )
                             .frame(width: slot, height: 22)
@@ -3222,7 +3229,6 @@ struct ContentView: View {
                     width: slot
                 )
                 .fill(Color.accentColor)
-                .opacity(inspectorLiquid ? 0 : 1)
             }
             .background {
                 // Behind the glyph row like the navigator's — but as a plain
@@ -3230,21 +3236,6 @@ struct ContentView: View {
                 // the CONTAINER is acceptable: the anti-pattern is bare
                 // glassEffect shapes in backgrounds, and the container is what
                 // restores correct sampling.
-                if inspectorLiquid {
-                    GlassEffectContainer {
-                        Color.clear.modifier(LiquidGlassPill(
-                            progress: inspectorProgress,
-                            from: CGFloat(inspectorFrom) * slot,
-                            to: CGFloat(inspectorTo) * slot,
-                            width: slot,
-                            height: 22,
-                            tint: .accentColor
-                        ))
-                    }
-                    .shadow(color: .black.opacity(0.16), radius: 6, y: 2)
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-                }
             }
             .animation(.easeOut(duration: 0.15), value: inspectorLiquid)
         }
@@ -4540,72 +4531,6 @@ private struct SplitCapsule: Shape {
         )
     }
 }
-
-/// The selection pill, mid-flight between two slots.
-///
-/// ONE capsule whose length breathes: the centre travels on an ease while the
-/// length bumps up and back down, so it elongates out of the old slot and
-/// settles into the new one.
-///
-/// This started as a two-blob metaball — two copies of the pill on different
-/// easings, fusing through a neck — and that is retired, because the geometry
-/// cannot deliver what the effect is for. Two circles of radius `r` whose
-/// centres are `d` apart always show a waist of `2√(r² − (d/2)²)`, so
-/// stretching a two-blob shape ALWAYS pinches it: stretch and it turns into a
-/// dumbbell, refuse to pinch and it cannot stretch. Worse, capping the lag to
-/// stop a long jump tearing the blobs apart froze the separation at its
-/// maximum, which turned the whole travel into a rigid dumbbell sliding
-/// sideways — read on screen as three or four separate pills rather than one
-/// stretching.
-///
-/// `Metaball` still earns its keep on `SplitCapsule`, where the two halves
-/// genuinely ARE separate things and a neck is the honest picture.
-/// The travelling pill in its LIQUID state — real Liquid Glass, structured
-/// the way Apple's guidance demands: glass applied to a SIZED VIEW inside a
-/// `GlassEffectContainer`, moved by animatable geometry. Both earlier attempts
-/// violated that and paid: a shape handed to `glassEffect(in:)` never
-/// interpolates (the lens teleported), and glass inside `.background` is the
-/// documented anti-pattern (the lens composited above the icons as a white
-/// blob). Shares `TravellingPill.geometry` so the lens rides exactly the solid
-/// pill's path.
-private struct LiquidGlassPill: ViewModifier, Animatable {
-    var progress: CGFloat
-    var from: CGFloat
-    var to: CGFloat
-    var width: CGFloat
-    var height: CGFloat
-    /// Carried through the flight so the indicator keeps its identity.
-    /// Untinted, this glass is clear — over the rail's light chrome the
-    /// travelling pill turned **white** for most of its journey (frame capture,
-    /// 2026-07-26: accent → pale → pure white → pale → accent), which reads as
-    /// the selection vanishing and a smear crossing the strip.
-    var tint: Color
-    /// How far the liquid outgrows the resting pill.
-    private static let swell: CGFloat = 8
-
-    var animatableData: CGFloat {
-        get { progress }
-        set { progress = newValue }
-    }
-
-    func body(content: Content) -> some View {
-        let g = TravellingPill.geometry(
-            progress: progress, from: from, to: to, width: width
-        )
-        content
-            .frame(width: g.length + Self.swell, height: height + Self.swell)
-            // `.regular`, and the LAYERING is what earns the transparency:
-            // above the icons the glass has glyphs to refract, which is where
-            // the native look lives. `.clear` was tried and its stronger
-            // lensing smears glyphs at this 30pt scale — and regular is the
-            // variant that carries Apple's full rim highlight + lighting
-            // treatment, which `.clear` largely forgoes.
-            .glassEffect(.regular.tint(tint).interactive(), in: Capsule())
-            .glassEffectTransition(.materialize)
-            .position(x: g.centre, y: height / 2)
-    }
-}
-
 private struct TravellingPill: Shape {
     /// 0 = fully at `from`, 1 = fully at `to`.
     var progress: CGFloat
@@ -4616,6 +4541,17 @@ private struct TravellingPill: Shape {
     /// Ceiling on the elongation, so a jump across the rail stretches into a
     /// lozenge rather than a bar spanning the whole strip.
     private static let maxStretch: CGFloat = 30
+
+    /// Extra size at mid-flight, on top of the directional stretch: the pill
+    /// swells as it leaves and settles back as it arrives.
+    ///
+    /// This lives on the SOLID pill now. It used to be a constant `+8` on the
+    /// liquid-glass overlay, which meant the glass was permanently bigger than
+    /// the pill it handed back to, and the hand-off was a crossfade — so the
+    /// size never actually travelled, it stepped. `sin(πt)` is zero at both
+    /// ends, and `TravellingPill` interpolates `progress` per frame, so the
+    /// growth and the return are one continuous motion.
+    private static let maxSwell: CGFloat = 6
 
     /// ALL FOUR values animate, not just `progress`. The slots resize whenever
     /// the Debug Area toggles, so `from`, `to` and `width` change too — and a
@@ -4635,7 +4571,7 @@ private struct TravellingPill: Shape {
 
     /// Centre eases across; length swells and returns. `sin(πt)` is zero at
     /// BOTH ends by construction, so the endpoints are exactly a resting pill.
-    /// Static so the LIQUID pill (`LiquidGlassPill`) rides the identical path —
+    /// Static so any overlay riding the pill uses the identical path —
     /// two copies of this math WILL drift.
     static func geometry(
         progress: CGFloat, from: CGFloat, to: CGFloat, width: CGFloat
@@ -4650,12 +4586,15 @@ private struct TravellingPill: Shape {
     func path(in rect: CGRect) -> Path {
         guard rect.height > 0, width > 0 else { return Path() }
         let g = Self.geometry(progress: progress, from: from, to: to, width: width)
+        let swell = Self.maxSwell * sin(.pi * min(max(progress, 0), 1))
+        let h = rect.height + swell
+        let w = g.length + swell
         return Path(
             roundedRect: CGRect(
-                x: g.centre - g.length / 2, y: rect.minY,
-                width: g.length, height: rect.height
+                x: g.centre - w / 2, y: rect.minY - swell / 2,
+                width: w, height: h
             ),
-            cornerRadius: rect.height / 2, style: .circular
+            cornerRadius: h / 2, style: .circular
         )
     }
 }
