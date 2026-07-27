@@ -114,6 +114,8 @@ typedef struct SuiseiChromeSnapshot {
   uint32_t tab_active;
   uint8_t tab_dirty[SUISEI_MAX_TABS];
   char tab_titles[SUISEI_MAX_TABS][SUISEI_TITLE_CAP];
+  /* Stable per-tab id — survives reorder, unlike the slot index. */
+  uint64_t tab_ids[SUISEI_MAX_TABS];
   /* Split: 0 none, 1 vertical (side-by-side), 2 horizontal (stacked). */
   uint8_t split_kind;
   uint8_t pane_count;

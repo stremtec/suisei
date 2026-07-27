@@ -1088,7 +1088,11 @@ struct ContentView: View {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
-                        ForEach(engine.chrome.tabs) { tab in
+                        // Keyed by the DOCUMENT, not the slot. With the slot
+                        // index as identity a reorder leaves the identity list
+                        // unchanged and only the titles swap in place, so there
+                        // is nothing for SwiftUI to move.
+                        ForEach(engine.chrome.tabs, id: \.stableId) { tab in
                             ToolbarTabChip(
                                 title: tab.title,
                                 dirty: tab.dirty,
@@ -1097,7 +1101,7 @@ struct ContentView: View {
                                 fg: Color.primary,
                                 dim: Color.secondary,
                                 isLight: isLightTheme,
-                                tabId: tab.id,
+                                tabId: Int(truncatingIfNeeded: tab.stableId),
                                 pillSpace: tabPillSpace,
                                 action: {
                                     focused = true
@@ -1108,7 +1112,7 @@ struct ContentView: View {
                                     engine.closeTab(tab.id)
                                 }
                             )
-                            .id(tab.id)
+                            .id(tab.stableId)
                             // Report this chip's slot so the drag below knows
                             // which one the cursor is over. Chip widths differ
                             // with the title, so slots cannot be computed.
@@ -1117,7 +1121,18 @@ struct ContentView: View {
                             } action: { rect in
                                 tabFrames[tab.id] = rect
                             }
-                            .opacity(draggingTab == tab.id ? 0.85 : 1)
+                            // Picked up: lifted, not merely dimmer. Without
+                            // this a grabbed tab looked identical to a resting
+                            // one and the reorder read as a teleport.
+                            .scaleEffect(draggingTab == tab.id ? 1.06 : 1)
+                            .opacity(draggingTab == tab.id ? 0.9 : 1)
+                            .shadow(
+                                color: .black.opacity(draggingTab == tab.id ? 0.28 : 0),
+                                radius: draggingTab == tab.id ? 7 : 0,
+                                y: draggingTab == tab.id ? 2 : 0
+                            )
+                            .zIndex(draggingTab == tab.id ? 1 : 0)
+                            .animation(.snappy(duration: 0.16), value: draggingTab)
                             .contextMenu {
                                 Button("Close Tab") { engine.closeTab(tab.id) }
                                 Button("Close Other Tabs") {
@@ -1133,7 +1148,9 @@ struct ContentView: View {
                     // chip it leaves and the chip it arrives at, which is why
                     // the travel is drawn — and animated — here.
                     .background {
-                        if let activeId = engine.chrome.tabs.first(where: \.active)?.id {
+                        if let activeId = engine.chrome.tabs
+                            .first(where: \.active)
+                            .map({ Int(truncatingIfNeeded: $0.stableId) }) {
                             Capsule(style: .continuous)
                                 .fill(Color.primary.opacity(isLightTheme ? 0.10 : 0.14))
                                 .matchedGeometryEffect(
@@ -1142,7 +1159,12 @@ struct ContentView: View {
                         }
                     }
                     .padding(.horizontal, 2)
-                    .animation(.smooth(duration: 0.32), value: engine.chrome.tabs.map(\.id))
+                    // Insert/remove AND reorder — the value is the ORDER of
+                    // stable ids, which only now actually changes on a drag.
+                    .animation(
+                        .smooth(duration: 0.28),
+                        value: engine.chrome.tabs.map(\.stableId)
+                    )
                     // The strip is the only view holding BOTH the chip the
                     // active capsule leaves and the one it arrives at, so the
                     // travel has to be animated here.

@@ -338,6 +338,16 @@ Next things to try, in order:
    other than the Buttons — a `.contentShape(Rectangle())` after the mask would
    rule it in or out.
 
+### S1 (partial) · Stable tab ids · DONE (2026-07-27)
+`BufferTab.id`, monotonic and never reused, carried to the face as `tab_ids` in
+the chrome snapshot. Brought forward from the split plan because the tab strip
+cannot animate a reorder without it — `ForEach` keyed on the slot index leaves
+the identity list unchanged when tabs swap.
+
+**Remaining for S1:** `Pane.tab_index` still addresses documents by position,
+and `App::move_tab` / `close_tab` repair those indices by hand. That hand-repair
+is exactly what the step exists to delete.
+
 ### J5 · Editor split is unstable · PLANNED — **priority 2**
 ### J6 · "Turn this pane into a terminal" is unstable · PLANNED
 Both need rebuilding rather than repair. Causes and an ordered plan are in

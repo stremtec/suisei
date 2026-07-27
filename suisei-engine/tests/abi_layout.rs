@@ -133,10 +133,14 @@ fn chrome_snapshot_key_offsets() {
     assert_eq!(offset_of!(SuiseiChromeSnapshot, dirty_buffer) % 4, 0,
         "flags block should be u32-aligned after path fields");
 
-    // Split metadata comes after tab_titles
+    // Per-tab ids sit right after the titles, and the split metadata after
+    // them. `tab_ids` is what the face uses as list identity — an index cannot
+    // serve, because a reorder leaves the index list unchanged.
     let tab_titles_end = offset_of!(SuiseiChromeSnapshot, tab_titles)
         + SUISEI_MAX_TABS * SUISEI_TITLE_CAP;
-    assert_eq!(offset_of!(SuiseiChromeSnapshot, split_kind), tab_titles_end);
+    assert_eq!(offset_of!(SuiseiChromeSnapshot, tab_ids), tab_titles_end);
+    let tab_ids_end = tab_titles_end + SUISEI_MAX_TABS * size_of::<u64>();
+    assert_eq!(offset_of!(SuiseiChromeSnapshot, split_kind), tab_ids_end);
 
     // Panes array follows split metadata
     let split_ratio_off = offset_of!(SuiseiChromeSnapshot, split_ratio);

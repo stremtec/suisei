@@ -101,6 +101,9 @@ pub struct SuiseiChromeSnapshot {
     pub tab_active: u32,
     pub tab_dirty: [u8; SUISEI_MAX_TABS],
     pub tab_titles: [[c_char; SUISEI_TITLE_CAP]; SUISEI_MAX_TABS],
+    /// `BufferTab::id` per tab — stable across reorders, so the face can use it
+    /// as list identity and actually animate a move.
+    pub tab_ids: [u64; SUISEI_MAX_TABS],
     /// 0 none, 1 vertical, 2 horizontal
     pub split_kind: u8,
     pub pane_count: u8,
@@ -402,6 +405,7 @@ pub extern "C" fn suisei_engine_chrome(
     o.tab_active = chrome.tabs.iter().position(|t| t.active).unwrap_or(0) as u32;
     for (i, tab) in chrome.tabs.iter().take(tab_n).enumerate() {
         o.tab_dirty[i] = u8::from(tab.dirty);
+        o.tab_ids[i] = tab.id;
         write_cstr(&mut o.tab_titles[i], &tab.title);
     }
 

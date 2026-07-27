@@ -44,6 +44,8 @@ impl Default for ShellState {
 
 #[derive(Debug, Clone)]
 pub struct TabScene {
+    /// `BufferTab::id` — stable across reorders, unlike the slot index.
+    pub id: u64,
     pub title: String,
     pub dirty: bool,
     pub active: bool,
@@ -1706,6 +1708,7 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
             tab.modified
         };
         out.push(TabScene {
+            id: tab.id,
             title,
             dirty,
             active: is_current,
@@ -1713,6 +1716,7 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
     }
     if out.is_empty() {
         out.push(TabScene {
+            id: 0,
             title: "[No Name]".into(),
             dirty: app.modified,
             active: true,

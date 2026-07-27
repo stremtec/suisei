@@ -80,7 +80,13 @@ struct SplitSnap: Equatable {
 }
 
 struct TabItem: Equatable, Identifiable {
+    /// Slot index — what every engine call takes.
     var id: Int
+    /// `BufferTab::id`. Stable across a reorder, so it is what the tab strip
+    /// uses as list identity: with the slot index there, dragging a tab left
+    /// the identity list unchanged and only the titles swapped in place, and
+    /// SwiftUI had nothing to animate.
+    var stableId: UInt64
     var title: String
     var dirty: Bool
     var active: Bool
@@ -1332,12 +1338,14 @@ final class EngineBridge: ObservableObject {
         let tabCount = Int(snap.tab_count)
         withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
             withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
+                let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
                 let titleCap = Int(SUISEI_TITLE_CAP)
                 for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
                     let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
                     let title = String(cString: base.assumingMemoryBound(to: CChar.self))
                     tabs.append(TabItem(
                         id: i,
+                        stableId: ids[i],
                         title: title.isEmpty ? "[No Name]" : title,
                         dirty: dirtyRaw[i] != 0,
                         active: i == Int(snap.tab_active)
@@ -2971,12 +2979,14 @@ final class EngineBridge: ObservableObject {
         let tabCount = Int(snap.tab_count)
         withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
             withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
+                let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
                 let titleCap = Int(SUISEI_TITLE_CAP)
                 for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
                     let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
                     let title = String(cString: base.assumingMemoryBound(to: CChar.self))
                     tabs.append(TabItem(
                         id: i,
+                        stableId: ids[i],
                         title: title.isEmpty ? "[No Name]" : title,
                         dirty: dirtyRaw[i] != 0,
                         active: i == Int(snap.tab_active)
@@ -3180,12 +3190,14 @@ final class EngineBridge: ObservableObject {
         let tabCount = Int(snap.tab_count)
         withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
             withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
+                let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
                 let titleCap = Int(SUISEI_TITLE_CAP)
                 for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
                     let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
                     let title = String(cString: base.assumingMemoryBound(to: CChar.self))
                     tabs.append(TabItem(
                         id: i,
+                        stableId: ids[i],
                         title: title.isEmpty ? "[No Name]" : title,
                         dirty: dirtyRaw[i] != 0,
                         active: i == Int(snap.tab_active)

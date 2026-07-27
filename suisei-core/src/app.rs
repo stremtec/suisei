@@ -320,6 +320,8 @@ pub struct App {
     /// once per change instead of the old pre-edit push_undo notification.
     lsp_synced_path: Option<PathBuf>,
     lsp_synced_hash: u64,
+    /// Source of `BufferTab::id`. Monotonic; ids are never reused.
+    next_tab_id: u64,
     /// Buffer version at the last dirty-flag re-check, so an idle document is
     /// never re-hashed. See [`App::recheck_modified`].
     dirty_checked_version: u64,
@@ -341,6 +343,15 @@ pub struct App {
 
 #[derive(Clone)]
 pub struct BufferTab {
+    /// Stable for this tab's lifetime and never reused.
+    ///
+    /// Everything else addresses a tab by its POSITION in `buffers`, which
+    /// moves whenever one is closed or reordered. The face needs an identity
+    /// that does not: with an index as its list identity, dragging a tab left
+    /// the identity list unchanged and only the titles swapped in place, so
+    /// there was nothing for it to animate. See `SUISEI-SPLIT-PLAN.md` §S1 —
+    /// panes should key off this too, which is the remainder of that step.
+    pub id: u64,
     pub buffer: Buffer,
     pub filename: Option<PathBuf>,
     pub scroll: usize,
@@ -490,6 +501,7 @@ impl Default for App {
             xlc_separator_y: 0,
             file_mtime: None,
             buffers: vec![BufferTab {
+                id: 0,
                 buffer: Buffer::new(),
                 filename: None,
                 scroll: 0,
@@ -577,6 +589,7 @@ impl Default for App {
             rename_pending: false,
             lsp_synced_path: None,
             lsp_synced_hash: 0,
+            next_tab_id: 1,
             saved_hash: EMPTY_TEXT_HASH,
             dirty_checked_version: 0,
             content_width: 0,
@@ -1000,6 +1013,7 @@ impl App {
             undo_stack: undo.clone(),
             file_mtime: mtime,
             buffers: vec![BufferTab {
+                id: 0,
                 buffer,
                 filename: Some(abs_path.clone()),
                 scroll: 0,
@@ -1257,7 +1271,9 @@ impl App {
         let buffer = Buffer::new();
         let mut undo = UndoStack::new();
         undo.push(buffer.snapshot());
+        let tab_id = self.take_tab_id();
         self.buffers.push(crate::BufferTab {
+            id: tab_id,
             buffer,
             filename: None,
             scroll: 0,
@@ -3745,6 +3761,14 @@ impl App {
         }
     }
 
+    /// Next unused tab id. Monotonic — a closed tab's id never comes back, so
+    /// a stale reference can be detected rather than silently resolving.
+    fn take_tab_id(&mut self) -> u64 {
+        let id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.wrapping_add(1);
+        id
+    }
+
     /// Move the tab at `from` to sit at `to`, as a tab-bar drag does.
     ///
     /// Every index that points into `buffers` has to move with it: the active
@@ -4733,7 +4757,9 @@ impl App {
         undo.push(buffer.snapshot());
         undo.attach_file(&abs_path, self.undo_caching, &content);
 
+        let tab_id = self.take_tab_id();
         self.buffers.push(BufferTab {
+            id: tab_id,
             buffer,
             filename: Some(abs_path.clone()),
             scroll: 0,
@@ -5000,7 +5026,9 @@ impl App {
             self.undo_stack = UndoStack::new();
             self.undo_stack.push(self.buffer.snapshot());
             self.file_mtime = None;
+            let fresh_id = self.take_tab_id();
             self.buffers[0] = BufferTab {
+                id: fresh_id,
                 buffer: self.buffer.clone(),
                 filename: None,
                 scroll: 0,
@@ -5251,7 +5279,9 @@ mod tests {
     fn moving_a_tab_carries_the_active_index_and_every_pane() {
         let mut app = app_with("a");
         for name in ["b", "c", "d"] {
+            let tab_id = app.take_tab_id();
             app.buffers.push(BufferTab {
+                id: tab_id,
                 buffer: crate::buffer::Buffer::from_string(name),
                 filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
                 scroll: 0,
@@ -5290,7 +5320,9 @@ mod tests {
     fn moving_a_tab_backwards_shifts_the_slots_it_passes() {
         let mut app = app_with("a");
         for name in ["b", "c"] {
+            let tab_id = app.take_tab_id();
             app.buffers.push(BufferTab {
+                id: tab_id,
                 buffer: crate::buffer::Buffer::from_string(name),
                 filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
                 scroll: 0,
