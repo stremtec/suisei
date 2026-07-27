@@ -974,6 +974,17 @@ pub extern "C" fn suisei_engine_terminal_resize(ptr: *mut SuiseiEngine, cols: u3
 }
 
 /// Route keys to the PTY (`on != 0`) or back to the editor buffer.
+/// Toggle the docked terminal (⌃T) without going through the key path.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_toggle_terminal_dock(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.toggle_terminal_dock();
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_focus_terminal(ptr: *mut SuiseiEngine, on: u8) {
     if ptr.is_null() {

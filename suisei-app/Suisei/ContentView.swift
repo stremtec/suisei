@@ -838,7 +838,13 @@ struct ContentView: View {
     /// terminal's edge. One colour across the whole region makes the seam
     /// impossible instead of leaving it to arithmetic that has already been
     /// wrong twice.
-    private var terminalDockFill: Color { terminalGridBg }
+    private var terminalDockFill: Color {
+        // Only wear the grid's colour when a grid is actually there. An empty
+        // dock painted terminal-dark left its "Open Terminal · ⌃T" prompt as
+        // `.tertiary` ink on near-black — legible in the light theme it was
+        // designed against, invisible once the grid went dark.
+        engine.chrome.terminal.open ? terminalGridBg : editorBg
+    }
 
     private var floatingPanelBackground: some View {
         ZStack {
@@ -2199,25 +2205,40 @@ struct ContentView: View {
         }
     }
 
+    /// Ink for the dock's header row.
+    ///
+    /// The dock paints ONE colour across its whole region — deliberately, so a
+    /// grid that falls a few points short can never show a seam — and that
+    /// colour is now the terminal's dark one while a shell is running. The
+    /// header sits on top of it, so its ink has to follow the fill instead of
+    /// the editor theme, or it is dark-on-dark.
+    private var dockHeaderFg: Color {
+        engine.chrome.terminal.open ? terminalGridFg : fg
+    }
+
+    private var dockHeaderDim: Color {
+        engine.chrome.terminal.open ? terminalGridFg.opacity(0.55) : dim
+    }
+
     /// Debug area — Xcode-style bottom console hosting the shell (no modes, no XLC).
     private var debugArea: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "terminal.fill")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(terminalFocused ? accent : dim)
+                    .foregroundStyle(terminalFocused ? accent : dockHeaderDim)
                 Text("Terminal")
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(terminalFocused ? fg : dim)
+                    .foregroundStyle(terminalFocused ? dockHeaderFg : dockHeaderDim)
                 if terminalFocused {
                     Text("keys → shell · Esc or click editor to leave")
                         .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(dockHeaderDim)
                         .transition(.opacity)
                 } else if engine.chrome.terminal.open {
                     Text("click to type")
                         .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(dockHeaderDim)
                         .transition(.opacity)
                 }
                 Spacer()
@@ -2258,7 +2279,7 @@ struct ContentView: View {
 
                         HoverIconButton(
                             systemImage: "plus", help: "New Shell",
-                            fg: Color.primary, dim: Color.secondary
+                            fg: dockHeaderFg, dim: dockHeaderDim
                         ) {
                             engine.terminalNewSession()
                         }
@@ -2270,19 +2291,15 @@ struct ContentView: View {
                 // the two never lined up.
                 HoverIconButton(
                     systemImage: "xmark", help: "Hide Debug Area",
-                    fg: Color.primary, dim: Color.secondary
+                    fg: dockHeaderFg, dim: dockHeaderDim
                 ) {
                     withAnimation(.snappy(duration: 0.28)) {
                         engine.uiDebugVisible = false
                     }
-                    // Only toggle side terminal — never Ctrl+T while full-panel is open
-                    // (that would demote the editor-pane terminal into the debug strip).
-                    if engine.chrome.terminal.open && !engine.chrome.terminal.fullPanel {
-                        engine.dispatch(
-                            code: .char_,
-                            ch: UInt32(UnicodeScalar("t").value),
-                            mods: .control
-                        )
+                    // Closes the DOCK only. Pane terminals are separate
+                    // processes and are not affected.
+                    if engine.chrome.terminal.open {
+                        engine.toggleTerminalDock()
                     }
                     focused = true
                 }
@@ -2362,7 +2379,7 @@ struct ContentView: View {
     private func openDebugTerminal() {
         engine.uiDebugVisible = true
         if !engine.chrome.terminal.open {
-            engine.dispatch(code: .char_, ch: UInt32(UnicodeScalar("t").value), mods: .control)
+            engine.toggleTerminalDock()
         }
         focused = true
     }

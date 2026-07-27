@@ -224,6 +224,28 @@ it only because its canvas takes the `NSTextInputClient` path. Core then had to
 learn to re-apply the SHIFT modifier when writing a letter to a PTY, since its
 key model carries case as a modifier rather than in the character.
 
+### 3.4 The docked terminal (⌃T)
+
+Three faults, two of them mine from §3.3's fix.
+
+**The button was a keystroke.** "Open Terminal · ⌃T" and the dock's ✕ did not
+call anything — they synthesised a ⌃T key event. That worked only while nothing
+else claimed the key, and a focused terminal pane claims it correctly (⌃T is a
+readline binding), so the control silently stopped working and the panel sat on
+an empty state you could not dismiss. `suisei_engine_toggle_terminal_dock` now
+exists and the controls call it. A button should call the thing it names.
+
+**Empty dock unreadable** *(regression from the dark grid)*. `terminalDockFill`
+is the grid's own colour, deliberately — the grid does not cover the dock shape
+exactly, and every point of difference used to show as a seam. Once the grid
+went genuinely dark, the empty state's `.tertiary` prompt was near-black on
+near-black. The fill now only wears the grid's colour when a grid is there.
+
+**Header unreadable while running** *(same cause, other half)*. The header sits
+on that one-colour fill, so with a shell running its theme-derived ink was
+dark-on-dark. It now follows the fill rather than the editor theme, which keeps
+the seam guarantee intact instead of trading it away.
+
 ### Still open
 `terminal.pane_bound` is a pane **index** into a list whose order the tree can
 change — the last positional handle in this area, and S4's job. J6 (pane →

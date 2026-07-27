@@ -2290,6 +2290,18 @@ final class EngineBridge: ObservableObject {
     /// the dock instead of the pane the user clicked. A pane terminal stays in
     /// `Mode::Editor` — core sees the focused pane is a terminal and hands it
     /// the keys.
+    /// Open or close the docked terminal (⌃T).
+    ///
+    /// Calls the engine directly. The dock's button and its ✕ used to
+    /// synthesise a ⌃T keystroke, which a focused terminal pane now eats as a
+    /// control byte — so the button did nothing and the panel sat on an empty
+    /// state you could not dismiss.
+    func toggleTerminalDock() {
+        guard let engine else { return }
+        suisei_engine_toggle_terminal_dock(engine)
+        refreshChrome()
+    }
+
     func focusTerminalPane(_ index: Int) {
         reclaimKeyboardFromTextFields()
         focusPane(index)

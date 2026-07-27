@@ -1149,6 +1149,22 @@ impl Engine {
 
     /// GUI focus contract: clicking the terminal panel routes keys to the PTY,
     /// clicking the editor routes them back to the buffer.
+    /// Toggle the **docked** terminal (⌃T), directly.
+    ///
+    /// The face had no way to ask for this: its button synthesised a ⌃T
+    /// keystroke instead. That works only for as long as nothing else claims
+    /// the key — and a focused terminal pane does, quite correctly, since ⌃T
+    /// is a readline binding. So the button silently stopped working. A
+    /// control has to call the thing it names.
+    pub fn toggle_terminal_dock(&mut self) {
+        self.app.toggle_terminal_side();
+        if self.app.terminal.open {
+            self.ensure_terminal_started();
+        }
+        self.shell.dirty = true;
+        self.recompose();
+    }
+
     pub fn focus_terminal(&mut self, on: bool) {
         if on {
             if self.app.terminal.open {

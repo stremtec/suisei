@@ -246,6 +246,7 @@ void suisei_engine_find_open(SuiseiEngine *ptr);
 void suisei_engine_find_step(SuiseiEngine *ptr, uint8_t forward);
 void suisei_engine_paste_text(SuiseiEngine *ptr, const char *text);
 void suisei_engine_terminal_resize(SuiseiEngine *ptr, uint32_t cols, uint32_t rows);
+void suisei_engine_toggle_terminal_dock(SuiseiEngine *e);
 void suisei_engine_focus_terminal(SuiseiEngine *ptr, uint8_t on);
 /* Multi-session shells (active session lives in Core; parked ones keep running). */
 uint32_t suisei_engine_terminal_sessions(const SuiseiEngine *ptr);
