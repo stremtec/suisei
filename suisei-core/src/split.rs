@@ -591,6 +591,46 @@ impl SplitState {
         Some((id, restore))
     }
 
+    // ---- folding ---------------------------------------------------------
+
+    /// The whole arrangement, ready to be parked in a layout tab.
+    ///
+    /// The tree names a `PaneId` per leaf and the panes carry their document,
+    /// scroll and cursor, so this pair is a complete description of what is on
+    /// screen — which is why a layout tab needs no state of its own.
+    pub fn snapshot(&self) -> (Layout, Vec<Pane>) {
+        (self.root.clone(), self.panes.clone())
+    }
+
+    /// Put a parked arrangement back on screen.
+    pub fn restore(&mut self, root: Layout, panes: Vec<Pane>) {
+        if panes.is_empty() {
+            return;
+        }
+        // Ids in the restored tree may collide with ones handed out since, so
+        // keep the counter ahead of everything now present.
+        let highest = panes.iter().map(|p| p.id.0).max().unwrap_or(0);
+        self.next_id = self.next_id.max(highest + 1);
+        self.root = root;
+        self.panes = panes;
+        self.resync_order();
+        if let Some(first) = self.panes.first() {
+            self.focus = first.id;
+        }
+    }
+
+    /// Collapse to a single pane showing `doc` — what happens when the user
+    /// switches away from a folded layout and the desk is cleared.
+    pub fn collapse_to(&mut self, doc: BufferId) {
+        let id = PaneId(self.next_id);
+        self.next_id = self.next_id.wrapping_add(1);
+        let mut pane = Pane::new(id);
+        pane.content = PaneContent::Document(doc);
+        self.root = Layout::Leaf(id);
+        self.panes = vec![pane];
+        self.focus = id;
+    }
+
     // ---- internals -------------------------------------------------------
 
     fn take_id(&mut self) -> PaneId {

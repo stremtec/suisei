@@ -149,6 +149,11 @@ pub struct App {
     /// The **docked** terminal (⌃T). Pane terminals are separate processes,
     /// one per pane, in `pane_terminals`.
     pub terminal: Terminal,
+    /// Folded layouts, in strip order. See `layout_tab`.
+    pub layouts: Vec<crate::layout_tab::LayoutTab>,
+    /// The layout the editor is currently showing, if any. Switching to a
+    /// document tab clears it — that is the whole point of folding.
+    pub active_layout: Option<u64>,
     /// A shell per terminal pane, keyed by the id its pane carries.
     ///
     /// There used to be exactly one `Terminal` for everything, so a second
@@ -515,6 +520,8 @@ impl Default for App {
             viewport: EditorViewport::default(),
             explorer: Explorer::new(),
             terminal: Terminal::new(),
+            layouts: Vec::new(),
+            active_layout: None,
             pane_terminals: std::collections::HashMap::new(),
             explorer_width: 22,
             terminal_width: 30,
@@ -3816,13 +3823,134 @@ impl App {
     /// Switch to tab index if it exists (0-based).
     pub fn goto_tab(&mut self, idx: usize) {
         if idx < self.buffers.len() {
+            // Park the arrangement BEFORE the active document moves. Parking
+            // afterwards records the document being switched *to*, because
+            // `App` is the focused pane — the pane would come back showing the
+            // wrong file.
+            let leaving = self.active_layout.take();
+            if let Some(id) = leaving {
+                self.park_layout(id);
+            }
             self.save_state_to_tab();
             self.current_buffer = idx;
             self.restore_state_from_tab();
+            // Leaving a folded layout clears the desk: the editor comes down
+            // to this one document and the arrangement waits in its tab. This
+            // is the visible half of folding — the fold itself is silent.
+            if leaving.is_some() {
+                let doc = self.current_buffer_id();
+                self.split.collapse_to(doc);
+            }
             self.message = format!("Tab {}", idx + 1);
         } else {
             self.message = format!("No tab {}", idx + 1);
         }
+    }
+
+    /// Write the on-screen arrangement back into its layout tab, so switching
+    /// away and back is lossless.
+    fn park_layout(&mut self, id: u64) {
+        self.park_focused_pane();
+        let (tree, panes) = self.split.snapshot();
+        if let Some(l) = self.layouts.iter_mut().find(|l| l.id == id) {
+            l.tree = tree;
+            l.panes = panes;
+        }
+    }
+
+    // ---- layout tabs (J7) -----------------------------------------------
+
+    /// Fold the current arrangement into a layout tab.
+    ///
+    /// Deliberately quiet: the new layout tab becomes active, so **nothing on
+    /// screen changes**. The visible effect is the next tab switch, which
+    /// clears the editor down to that one document while the arrangement waits
+    /// in its tab. That is the point of the feature — clearing the desk in one
+    /// gesture without closing anything.
+    ///
+    /// Refuses when there is nothing to fold: a single pane is not an
+    /// arrangement, and folding it would just hide a file behind a name.
+    pub fn fold_layout(&mut self) -> bool {
+        if self.active_layout.is_some() || !self.split.is_split() {
+            return false;
+        }
+        self.park_focused_pane();
+        let (tree, panes) = self.split.snapshot();
+        let mut docs: Vec<BufferId> = Vec::new();
+        for p in &panes {
+            let b = p.buffer();
+            if b != BufferId::default() && !docs.contains(&b) {
+                docs.push(b);
+            }
+        }
+        if docs.is_empty() {
+            return false;
+        }
+        let id = self.take_tab_id().0;
+        let name = crate::layout_tab::next_name(&self.layouts);
+        self.layouts.push(crate::layout_tab::LayoutTab {
+            id,
+            name,
+            tree,
+            panes,
+            docs,
+            style: crate::layout_tab::LayoutStyle::Grouped,
+        });
+        self.active_layout = Some(id);
+        self.message = "Folded into a layout tab · scroll down here to unfold".into();
+        true
+    }
+
+    /// Unfold the **active** layout: its documents return to the strip as
+    /// individual tabs and the arrangement stays exactly as it is on screen.
+    ///
+    /// Bound to the active layout rather than the one under the pointer. A
+    /// layout that detonates because the pointer was passing over it on the
+    /// way to another tab is worse than no unfold at all.
+    pub fn unfold_layout(&mut self) -> bool {
+        let Some(id) = self.active_layout else {
+            return false;
+        };
+        let Some(i) = self.layouts.iter().position(|l| l.id == id) else {
+            self.active_layout = None;
+            return false;
+        };
+        self.layouts.remove(i);
+        self.active_layout = None;
+        self.message = "Layout unfolded".into();
+        true
+    }
+
+    /// Show a layout: install its tree, exactly as it was parked.
+    pub fn activate_layout(&mut self, id: u64) -> bool {
+        let Some(l) = self.layouts.iter().find(|l| l.id == id) else {
+            return false;
+        };
+        let (tree, panes) = (l.tree.clone(), l.panes.clone());
+        self.park_focused_pane();
+        self.save_state_to_tab();
+        // Panes carry their own document and viewport, so restoring the tree
+        // and its panes restores the whole arrangement — including where each
+        // pane was scrolled to.
+        self.split.restore(tree, panes);
+        self.active_layout = Some(id);
+        self.load_focused_pane();
+        true
+    }
+
+    /// Switch a layout between its two strip shapes.
+    pub fn toggle_layout_style(&mut self, id: u64) -> bool {
+        if let Some(l) = self.layouts.iter_mut().find(|l| l.id == id) {
+            l.style = l.style.toggled();
+            return true;
+        }
+        false
+    }
+
+    /// Whether `doc` is folded into some layout — folded documents do not get
+    /// their own chip unless their layout is drawn grouped.
+    pub fn layout_holding(&self, doc: BufferId) -> Option<&crate::layout_tab::LayoutTab> {
+        self.layouts.iter().find(|l| l.holds(doc))
     }
 
     /// Next unused tab id. Monotonic — a closed tab's id never comes back, so
@@ -5478,6 +5606,96 @@ mod tests {
         app.close_tab_at(1);
         assert_eq!(app.buffers.len(), 1);
         assert_eq!(app.buffer.line(0), "b");
+    }
+
+    /// J7's four transitions: fold, switch away, switch back, unfold.
+    #[test]
+    fn folding_parks_the_arrangement_and_leaving_clears_the_desk() {
+        let mut app = app_with("a");
+        for name in ["b", "c"] {
+            let tab_id = app.take_tab_id();
+            app.buffers.push(BufferTab {
+                id: tab_id,
+                buffer: crate::buffer::Buffer::from_string(name),
+                filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
+                scroll: 0,
+                modified: false,
+                saved_hash: EMPTY_TEXT_HASH,
+                undo_stack: UndoStack::new(),
+                file_mtime: None,
+            });
+        }
+        app.save_state_to_tab();
+        let (a_id, b_id) = (app.buffers[0].id, app.buffers[1].id);
+        panes_on(&mut app, &[a_id, b_id]);
+        app.goto_tab(0);
+        assert_eq!(app.split.pane_count(), 2);
+
+        // 1 · Fold. Deliberately quiet — the arrangement stays on screen.
+        assert!(app.fold_layout(), "two panes are an arrangement");
+        assert_eq!(app.layouts.len(), 1);
+        assert_eq!(app.split.pane_count(), 2, "the fold changes nothing on screen");
+        let layout_id = app.layouts[0].id;
+        assert_eq!(app.active_layout, Some(layout_id));
+        assert_eq!(app.layouts[0].docs, vec![a_id, b_id]);
+
+        // 2 · Switch away — the desk clears.
+        app.goto_tab(2); // c
+        assert_eq!(app.active_layout, None);
+        assert_eq!(app.split.pane_count(), 1, "editor comes down to one document");
+        assert!(!app.split.is_split());
+        assert_eq!(app.layouts.len(), 1, "the arrangement is not lost, it is parked");
+
+        // 3 · Switch back — the arrangement returns.
+        assert!(app.activate_layout(layout_id));
+        assert_eq!(app.split.pane_count(), 2);
+        let shown: Vec<usize> = app.split.panes.iter().map(|p| app.pane_tab(p)).collect();
+        assert_eq!(shown, vec![0, 1], "both panes on the documents they had");
+
+        // 4 · Unfold — the layout is gone, the arrangement stays put.
+        assert!(app.unfold_layout());
+        assert!(app.layouts.is_empty());
+        assert_eq!(app.active_layout, None);
+        assert_eq!(app.split.pane_count(), 2, "unfolding is as quiet as folding");
+    }
+
+    /// A single pane is not an arrangement — folding it would just hide a file
+    /// behind a name.
+    #[test]
+    fn folding_refuses_when_there_is_nothing_to_fold() {
+        let mut app = app_with("a");
+        app.save_state_to_tab();
+        assert!(!app.split.is_split());
+        assert!(!app.fold_layout());
+        assert!(app.layouts.is_empty());
+    }
+
+    #[test]
+    fn a_layout_switches_between_its_two_strip_shapes() {
+        let mut app = app_with("a");
+        let tab_id = app.take_tab_id();
+        app.buffers.push(BufferTab {
+            id: tab_id,
+            buffer: crate::buffer::Buffer::from_string("b"),
+            filename: Some(PathBuf::from("/tmp/b.txt")),
+            scroll: 0,
+            modified: false,
+            saved_hash: EMPTY_TEXT_HASH,
+            undo_stack: UndoStack::new(),
+            file_mtime: None,
+        });
+        app.save_state_to_tab();
+        let (a_id, b_id) = (app.buffers[0].id, app.buffers[1].id);
+        panes_on(&mut app, &[a_id, b_id]);
+        app.goto_tab(0);
+        assert!(app.fold_layout());
+
+        let id = app.layouts[0].id;
+        assert_eq!(app.layouts[0].style, crate::layout_tab::LayoutStyle::Grouped);
+        assert!(app.toggle_layout_style(id));
+        assert_eq!(app.layouts[0].style, crate::layout_tab::LayoutStyle::Unified);
+        assert!(app.toggle_layout_style(id));
+        assert_eq!(app.layouts[0].style, crate::layout_tab::LayoutStyle::Grouped);
     }
 
     /// The other direction, and the no-ops.

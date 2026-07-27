@@ -19,6 +19,7 @@ pub mod git_graph;
 pub mod git_ops;
 pub mod git_workbench;
 pub mod highlight;
+pub mod layout_tab;
 pub mod lsp;
 pub mod gui_edit;
 pub mod multi_cursor;
@@ -72,6 +73,7 @@ pub use settings::{
 };
 pub use pet::PetState;
 pub use split::{Axis, Layout, Pane, PaneId, SplitState};
+pub use layout_tab::{LayoutStyle, LayoutTab};
 pub use workspace_search::{SearchHit, WorkspaceSearch};
 pub use call_hierarchy::{CallDirection, CallHierarchyState, CallItem};
 pub use dap::{

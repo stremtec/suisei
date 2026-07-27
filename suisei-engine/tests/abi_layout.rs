@@ -145,7 +145,10 @@ fn chrome_snapshot_key_offsets() {
         + SUISEI_MAX_TABS * SUISEI_TITLE_CAP;
     assert_eq!(offset_of!(SuiseiChromeSnapshot, tab_ids), tab_titles_end);
     let tab_ids_end = tab_titles_end + SUISEI_MAX_TABS * size_of::<u64>();
-    assert_eq!(offset_of!(SuiseiChromeSnapshot, split_kind), tab_ids_end);
+    // Layout-tab metadata sits between the ids and the split block.
+    assert_eq!(offset_of!(SuiseiChromeSnapshot, tab_groups), tab_ids_end);
+    let tab_groups_end = tab_ids_end + SUISEI_MAX_TABS * size_of::<u64>();
+    assert_eq!(offset_of!(SuiseiChromeSnapshot, tab_is_layout), tab_groups_end);
 
     // Panes array follows split metadata
     let split_ratio_off = offset_of!(SuiseiChromeSnapshot, split_ratio);

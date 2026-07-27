@@ -112,6 +112,11 @@ pub struct SuiseiChromeSnapshot {
     /// `BufferTab::id` per tab — stable across reorders, so the face can use it
     /// as list identity and actually animate a move.
     pub tab_ids: [u64; SUISEI_MAX_TABS],
+    /// Layout this chip belongs to (0 = none). Consecutive chips sharing a
+    /// non-zero value are one folded layout, drawn inside a single container.
+    pub tab_groups: [u64; SUISEI_MAX_TABS],
+    /// 1 when the chip IS a layout (unified style) rather than a document.
+    pub tab_is_layout: [u8; SUISEI_MAX_TABS],
     /// 0 none, 1 vertical, 2 horizontal
     pub split_kind: u8,
     pub pane_count: u8,
@@ -414,6 +419,8 @@ pub extern "C" fn suisei_engine_chrome(
     for (i, tab) in chrome.tabs.iter().take(tab_n).enumerate() {
         o.tab_dirty[i] = u8::from(tab.dirty);
         o.tab_ids[i] = tab.id;
+        o.tab_groups[i] = tab.group;
+        o.tab_is_layout[i] = u8::from(tab.is_layout);
         write_cstr(&mut o.tab_titles[i], &tab.title);
     }
 
@@ -974,6 +981,42 @@ pub extern "C" fn suisei_engine_terminal_resize(ptr: *mut SuiseiEngine, cols: u3
 }
 
 /// Route keys to the PTY (`on != 0`) or back to the editor buffer.
+/// Fold the editor's arrangement into a layout tab (J7). Returns 1 on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_fold_layout(ptr: *mut SuiseiEngine) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { u8::from((*ptr).0.fold_layout()) }
+}
+
+/// Unfold the ACTIVE layout — bound to the tab you are in, never the one under
+/// the pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_unfold_layout(ptr: *mut SuiseiEngine) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { u8::from((*ptr).0.unfold_layout()) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_activate_layout(ptr: *mut SuiseiEngine, id: u64) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { u8::from((*ptr).0.activate_layout(id)) }
+}
+
+/// Switch a layout between grouped and unified strip shapes.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_toggle_layout_style(ptr: *mut SuiseiEngine, id: u64) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { u8::from((*ptr).0.toggle_layout_style(id)) }
+}
+
 /// Toggle the docked terminal (⌃T) without going through the key path.
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_toggle_terminal_dock(ptr: *mut SuiseiEngine) {

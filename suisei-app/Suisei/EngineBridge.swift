@@ -103,6 +103,14 @@ struct TabItem: Equatable, Identifiable {
     var title: String
     var dirty: Bool
     var active: Bool
+    /// The folded layout this chip belongs to, or 0.
+    ///
+    /// Consecutive chips sharing a non-zero value are one layout drawn in the
+    /// **grouped** shape — the documents keep their chips and the strip draws
+    /// one rounded container around the run. A **unified** layout is instead a
+    /// single chip with `isLayout` set.
+    var group: UInt64 = 0
+    var isLayout: Bool = false
 }
 
 struct ExplorerEntry: Equatable, Identifiable {
@@ -1379,6 +1387,8 @@ final class EngineBridge: ObservableObject {
         withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
             withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
                 let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
+                let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
+                let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
                 let titleCap = Int(SUISEI_TITLE_CAP)
                 for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
                     let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
@@ -1388,7 +1398,9 @@ final class EngineBridge: ObservableObject {
                         stableId: ids[i],
                         title: title.isEmpty ? "[No Name]" : title,
                         dirty: dirtyRaw[i] != 0,
-                        active: i == Int(snap.tab_active)
+                        active: i == Int(snap.tab_active),
+                        group: groups[i],
+                        isLayout: isLayout[i] != 0
                     ))
                 }
             }
@@ -2290,6 +2302,45 @@ final class EngineBridge: ObservableObject {
     /// the dock instead of the pane the user clicked. A pane terminal stays in
     /// `Mode::Editor` — core sees the focused pane is a terminal and hands it
     /// the keys.
+    // MARK: - Layout tabs (J7)
+
+    /// Fold the editor's arrangement into a layout tab. Returns false when
+    /// there is nothing to fold (a single pane is not an arrangement).
+    @discardableResult
+    func foldLayout() -> Bool {
+        guard let engine else { return false }
+        let ok = suisei_engine_fold_layout(engine) != 0
+        if ok { refreshChrome() }
+        return ok
+    }
+
+    /// Unfold the ACTIVE layout — the tab you are in, never the one under the
+    /// pointer. A layout that detonates because the pointer was passing over
+    /// it on the way somewhere else is worse than no unfold at all.
+    @discardableResult
+    func unfoldLayout() -> Bool {
+        guard let engine else { return false }
+        let ok = suisei_engine_unfold_layout(engine) != 0
+        if ok { refreshChrome() }
+        return ok
+    }
+
+    func activateLayout(_ id: UInt64) {
+        guard let engine else { return }
+        if suisei_engine_activate_layout(engine, id) != 0 { refreshChrome() }
+    }
+
+    /// Switch a layout between the grouped and unified strip shapes.
+    func toggleLayoutStyle(_ id: UInt64) {
+        guard let engine else { return }
+        if suisei_engine_toggle_layout_style(engine, id) != 0 { refreshChrome() }
+    }
+
+    /// Whether a folded layout is currently on screen.
+    var hasActiveLayout: Bool {
+        chrome.tabs.contains { $0.group != 0 && $0.active }
+    }
+
     /// Open or close the docked terminal (⌃T).
     ///
     /// Calls the engine directly. The dock's button and its ✕ used to
@@ -3066,6 +3117,8 @@ final class EngineBridge: ObservableObject {
         withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
             withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
                 let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
+                let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
+                let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
                 let titleCap = Int(SUISEI_TITLE_CAP)
                 for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
                     let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
@@ -3075,7 +3128,9 @@ final class EngineBridge: ObservableObject {
                         stableId: ids[i],
                         title: title.isEmpty ? "[No Name]" : title,
                         dirty: dirtyRaw[i] != 0,
-                        active: i == Int(snap.tab_active)
+                        active: i == Int(snap.tab_active),
+                        group: groups[i],
+                        isLayout: isLayout[i] != 0
                     ))
                 }
             }
@@ -3304,6 +3359,8 @@ final class EngineBridge: ObservableObject {
         withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
             withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
                 let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
+                let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
+                let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
                 let titleCap = Int(SUISEI_TITLE_CAP)
                 for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
                     let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
@@ -3313,7 +3370,9 @@ final class EngineBridge: ObservableObject {
                         stableId: ids[i],
                         title: title.isEmpty ? "[No Name]" : title,
                         dirty: dirtyRaw[i] != 0,
-                        active: i == Int(snap.tab_active)
+                        active: i == Int(snap.tab_active),
+                        group: groups[i],
+                        isLayout: isLayout[i] != 0
                     ))
                 }
             }

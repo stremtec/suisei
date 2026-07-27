@@ -1149,6 +1149,43 @@ impl Engine {
 
     /// GUI focus contract: clicking the terminal panel routes keys to the PTY,
     /// clicking the editor routes them back to the buffer.
+    // ---- layout tabs (J7) -------------------------------------------------
+
+    /// Fold the current arrangement into a layout tab.
+    pub fn fold_layout(&mut self) -> bool {
+        let ok = self.app.fold_layout();
+        if ok {
+            self.recompose();
+        }
+        ok
+    }
+
+    /// Unfold the active layout.
+    pub fn unfold_layout(&mut self) -> bool {
+        let ok = self.app.unfold_layout();
+        if ok {
+            self.recompose();
+        }
+        ok
+    }
+
+    pub fn activate_layout(&mut self, id: u64) -> bool {
+        let ok = self.app.activate_layout(id);
+        if ok {
+            self.app.update_scroll();
+            self.recompose();
+        }
+        ok
+    }
+
+    pub fn toggle_layout_style(&mut self, id: u64) -> bool {
+        let ok = self.app.toggle_layout_style(id);
+        if ok {
+            self.recompose();
+        }
+        ok
+    }
+
     /// Toggle the **docked** terminal (⌃T), directly.
     ///
     /// The face had no way to ask for this: its button synthesised a ⌃T

@@ -49,6 +49,17 @@ pub struct TabScene {
     pub title: String,
     pub dirty: bool,
     pub active: bool,
+    /// The layout this chip belongs to, or 0.
+    ///
+    /// A folded layout wears one of two shapes (`LayoutStyle`): **grouped**,
+    /// where its documents keep their own chips and the face draws one rounded
+    /// container around the run, or **unified**, where it is a single chip
+    /// carrying the layout's name. Both are expressed here — grouped emits a
+    /// chip per document sharing this id, unified emits one chip whose own id
+    /// is the layout's.
+    pub group: u64,
+    /// This chip *is* a layout (unified style), not a document.
+    pub is_layout: bool,
 }
 
 /// Highlight span in visual-column space (tab-expanded coordinates).
@@ -1714,12 +1725,37 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
         } else {
             tab.modified
         };
+        // A document folded into a layout is drawn by that layout — either as
+        // part of its group, or not at all when the layout is unified.
+        let group = app
+            .layout_holding(tab.id)
+            .map(|l| (l.id, l.style))
+            .unwrap_or((0, crate::LayoutStyleAlias::Grouped));
+        if group.0 != 0 && group.1 == crate::LayoutStyleAlias::Unified {
+            continue;
+        }
         out.push(TabScene {
             id: tab.id.0,
             title,
             dirty,
             active: is_current,
+            group: group.0,
+            is_layout: false,
         });
+    }
+    // Unified layouts get one chip of their own, appended after the loose
+    // documents. Grouped layouts need no chip — their documents are the chips.
+    for l in &app.layouts {
+        if l.style == crate::LayoutStyleAlias::Unified {
+            out.push(TabScene {
+                id: l.id,
+                title: l.name.clone(),
+                dirty: false,
+                active: app.active_layout == Some(l.id),
+                group: l.id,
+                is_layout: true,
+            });
+        }
     }
     if out.is_empty() {
         out.push(TabScene {
@@ -1727,6 +1763,8 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
             title: "[No Name]".into(),
             dirty: app.modified,
             active: true,
+            group: 0,
+            is_layout: false,
         });
     }
     out

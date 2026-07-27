@@ -62,6 +62,13 @@ struct ContentView: View {
     /// Chip rects in the strip's space — chips are as wide as their titles, so
     /// slots cannot be computed the way the rail's equal-width modes can.
     @State private var tabFrames: [Int: CGRect] = [:]
+    /// Where the chip row sits inside the strip's coordinate space.
+    ///
+    /// `tabFrames` are measured in `tabStripSpace` because that is what the
+    /// drag needs, but the grouped-layout container is drawn as a background
+    /// ON the chip row — a different origin. Without this the container was
+    /// laid out relative to the wrong space and landed off-screen.
+    @State private var chipRowOrigin: CGPoint = .zero
     static let tabStripSpace = "suisei.tabstrip"
 
     /// Which chip sits under `x`. Used for CLICKS, where "contains" is right.
@@ -1089,6 +1096,34 @@ struct ContentView: View {
     /// icons spread, the blue pill has to spread with them or it reads as a
     /// button that forgot to grow (Xcode's does grow). `iconW` survives only as
     /// the floor the toggle shrinks to once the pill splits.
+    /// Contiguous runs of chips belonging to one folded layout, with the
+    /// measured x-span of each run.
+    ///
+    /// Derived from the chip frames the drag already measures, so the grouped
+    /// container is exact rather than arithmetic that has to agree with the
+    /// layout — the same reasoning that fixed the three-pane clipping.
+    struct LayoutRun: Identifiable {
+        var group: UInt64
+        var minX: CGFloat
+        var maxX: CGFloat
+        var id: UInt64 { group }
+    }
+
+    private func layoutGroupRuns(_ tabs: [TabItem]) -> [LayoutRun] {
+        var runs: [UInt64: LayoutRun] = [:]
+        for tab in tabs where tab.group != 0 && !tab.isLayout {
+            guard let f = tabFrames[tab.id] else { continue }
+            if var existing = runs[tab.group] {
+                existing.minX = min(existing.minX, f.minX)
+                existing.maxX = max(existing.maxX, f.maxX)
+                runs[tab.group] = existing
+            } else {
+                runs[tab.group] = LayoutRun(group: tab.group, minX: f.minX, maxX: f.maxX)
+            }
+        }
+        return runs.values.sorted { $0.minX < $1.minX }
+    }
+
     /// How lit a slot's icon is, 0 (unselected grey) … 1 (white on the pill).
     ///
     /// Tied to the pill's own travel, not to the click. Keying it off `navMode`
@@ -1165,7 +1200,19 @@ struct ContentView: View {
                                 pillSpace: tabPillSpace,
                                 action: {
                                     focused = true
-                                    engine.gotoTab(tab.id)
+                                    if tab.isLayout {
+                                        engine.activateLayout(tab.group)
+                                    } else if tab.group != 0, !tab.active {
+                                        // A chip inside a grouped layout is a
+                                        // way back INTO that layout — the group
+                                        // is the layout, so clicking any of its
+                                        // documents restores the arrangement
+                                        // rather than opening that one file
+                                        // alone.
+                                        engine.activateLayout(tab.group)
+                                    } else {
+                                        engine.gotoTab(tab.id)
+                                    }
                                 },
                                 onClose: {
                                     focused = true
@@ -1194,6 +1241,17 @@ struct ContentView: View {
                             .zIndex(draggingTab == tab.id ? 1 : 0)
                             .animation(.snappy(duration: 0.16), value: draggingTab)
                             .contextMenu {
+                                if tab.group != 0 {
+                                    Button(
+                                        tab.isLayout
+                                            ? "Show Layout as Group"
+                                            : "Merge Layout into One Tab"
+                                    ) {
+                                        engine.toggleLayoutStyle(tab.group)
+                                    }
+                                    Button("Unfold Layout") { engine.unfoldLayout() }
+                                    Divider()
+                                }
                                 Button("Close Tab") { engine.closeTab(tab.id) }
                                 Button("Close Other Tabs") {
                                     for other in engine.chrome.tabs.reversed() where other.id != tab.id {
@@ -1201,6 +1259,31 @@ struct ContentView: View {
                                     }
                                 }
                             }
+                        }
+                    }
+                    // Grouped layouts: one rounded grey container behind the
+                    // run of chips that belong to the same folded layout, so
+                    // you can still see WHAT is in there. The unified shape is
+                    // a single chip instead — see `ToolbarTabChip`.
+                    .background {
+                        ForEach(layoutGroupRuns(engine.chrome.tabs), id: \.group) { run in
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color.primary.opacity(isLightTheme ? 0.11 : 0.16))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(Color.primary.opacity(0.22), lineWidth: 1)
+                                )
+                                // Wider than the chips it holds, so the grouping
+                                // reads as a container rather than as a tint
+                                // hidden behind them.
+                                .frame(
+                                    width: max(0, run.maxX - run.minX + 14),
+                                    height: Self.tabLabelFrameH
+                                )
+                                .position(
+                                    x: (run.minX + run.maxX) / 2 - chipRowOrigin.x,
+                                    y: Self.tabLabelFrameH / 2
+                                )
                         }
                     }
                     // ONE capsule for the whole strip, following the active
@@ -1219,6 +1302,9 @@ struct ContentView: View {
                         }
                     }
                     .padding(.horizontal, 2)
+                    .onGeometryChange(for: CGPoint.self) { proxy in
+                        proxy.frame(in: .named(Self.tabStripSpace)).origin
+                    } action: { chipRowOrigin = $0 }
                     // Insert/remove AND reorder — the value is the ORDER of
                     // stable ids, which only now actually changes on a drag.
                     .animation(
@@ -1321,9 +1407,23 @@ struct ContentView: View {
                 onPick: { held in draggingTab = held },
                 onClick: { slot in
                     focused = true
-                    engine.gotoTab(slot)
+                    // The chip's own `action:` never runs for clicks — this
+                    // overlay owns them (see the comment above) — so the
+                    // layout routing has to live here too, not only there.
+                    guard let tab = engine.chrome.tabs.first(where: { $0.id == slot })
+                    else {
+                        engine.gotoTab(slot)
+                        return
+                    }
+                    if tab.isLayout || (tab.group != 0 && !tab.active) {
+                        engine.activateLayout(tab.group)
+                    } else {
+                        engine.gotoTab(slot)
+                    }
                 },
-                onEnd: { draggingTab = nil }
+                onEnd: { draggingTab = nil },
+                onFoldUp: { engine.foldLayout() },
+                onFoldDown: { engine.unfoldLayout() }
             )
         )
         .zIndex(1)
@@ -4912,6 +5012,8 @@ private struct TabStripMouse: NSViewRepresentable {
     var onPick: (Int) -> Void
     var onClick: (Int) -> Void
     var onEnd: () -> Void
+    var onFoldUp: () -> Void = {}
+    var onFoldDown: () -> Void = {}
 
     final class Catcher: NSView {
         var slotAt: ((CGFloat) -> Int?)?
@@ -4930,6 +5032,9 @@ private struct TabStripMouse: NSViewRepresentable {
         /// shake. Requiring the cursor to travel before swapping again rides
         /// over that window without needing to know how long it is.
         private var lastSwapX: CGFloat?
+        private var lastFoldAt: TimeInterval = 0
+        var onFoldUp: (() -> Void)?
+        var onFoldDown: (() -> Void)?
 
         /// THE fix. Without it AppKit takes the press to drag the window and
         /// none of the handlers below ever run.
@@ -4969,6 +5074,12 @@ private struct TabStripMouse: NSViewRepresentable {
                 // mouseDown regardless, but answering honestly here keeps a
                 // drag that wanders past the last chip from being handed off.
                 return self
+            case .scrollWheel:
+                // Claim ONLY the deliberate vertical flick that folds a layout.
+                // Ordinary horizontal tab scrolling has to fall through to the
+                // `ScrollView` underneath, and it does — by not being claimed
+                // here at all, rather than by being forwarded afterwards.
+                return Catcher.isFoldFlick(e) ? self : nil
             default:
                 return nil
             }
@@ -5008,6 +5119,58 @@ private struct TabStripMouse: NSViewRepresentable {
             lastSwapX = cur
         }
 
+        /// Fold / unfold on a fast vertical flick (J7).
+        ///
+        /// Two things this must not become. It must not fire during ordinary
+        /// horizontal tab scrolling, so it needs a velocity floor **and** a
+        /// dominant-axis test rather than merely `deltaY > 0`. And it must not
+        /// be one-way — scrolling down while a layout is active unfolds it, or
+        /// the gesture is a trap.
+        override func scrollWheel(with event: NSEvent) {
+            guard Catcher.isFoldFlick(event) else {
+                super.scrollWheel(with: event)
+                return
+            }
+            // One fold per gesture: a trackpad flick arrives as a burst of
+            // events and every one of them clears the floor.
+            let now = event.timestamp
+            if now - lastFoldAt < 0.6 { return }
+            lastFoldAt = now
+            if Catcher.isUpward(event) { onFoldUp?() } else { onFoldDown?() }
+        }
+
+        /// A fast, dominantly-vertical flick — the fold gesture.
+        ///
+        /// Both halves matter. Without the dominant-axis test, scrolling a long
+        /// tab strip sideways folds the layout by accident; without the
+        /// velocity floor, so does a slow drift.
+        static func isFoldFlick(_ e: NSEvent) -> Bool {
+            let dy = e.scrollingDeltaY
+            let dx = e.scrollingDeltaX
+            guard abs(dy) > abs(dx) * 1.5 else { return false }
+            // The floor's UNIT depends on the device. A trackpad reports
+            // points and drifts, so it needs a real threshold; a mouse wheel
+            // reports detents, and one detent is already a deliberate act — a
+            // points floor is unreachable for it, which is why a wheel could
+            // not fold at all.
+            return e.hasPreciseScrollingDeltas ? abs(dy) >= foldVelocity : abs(dy) >= 1
+        }
+
+        /// Did the user's hand move UP?
+        ///
+        /// `scrollingDeltaY` is in content space, so its sign flips with the
+        /// "natural scrolling" preference — reading it raw makes the gesture
+        /// mean the opposite thing on half the machines.
+        /// `isDirectionInvertedFromDevice` reports when it has been flipped,
+        /// which is what turns a content delta back into an intent.
+        static func isUpward(_ e: NSEvent) -> Bool {
+            e.isDirectionInvertedFromDevice ? e.scrollingDeltaY < 0 : e.scrollingDeltaY > 0
+        }
+
+        /// Points per event. A deliberate flick clears this; a slow drag or a
+        /// mouse wheel's gentle detent does not.
+        private static let foldVelocity: CGFloat = 6
+
         // `mouseMoved` needs a tracking area to be delivered at all.
         override func updateTrackingAreas() {
             super.updateTrackingAreas()
@@ -5045,6 +5208,8 @@ private struct TabStripMouse: NSViewRepresentable {
         v.onPick = onPick
         v.onClick = onClick
         v.onEnd = onEnd
+        v.onFoldUp = onFoldUp
+        v.onFoldDown = onFoldDown
     }
 }
 

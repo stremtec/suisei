@@ -282,96 +282,50 @@ no text in the running app and keystrokes land in the project tree's filter —
 see `SUISEI-TAB-AUDIT.md` §3.3. Both are terminal-subsystem faults, on code
 paths this step did not touch, and both reproduce with a single unsplit pane.
 
-### S6 · Layout tabs (J7)
+### S6 · Layout tabs (J7) — **DONE**
 
-The interaction, as specified:
+A fast upward flick over the tab strip folds whatever the editor is showing
+into one entry. The four transitions land as designed: the **fold is silent**
+(the layout tab is active, so nothing on screen changes), **leaving clears the
+desk** (the editor comes down to that one document while the arrangement waits
+in its tab), **coming back restores it** including each pane's scroll, and a
+fast flick down **unfolds**.
 
-> Whatever the editor is showing — a single file, a 2- or 3-way split, or the
-> full four-pane `+` — put the mouse near the tab bar and **scroll up quickly**.
-> A tab is added: the files currently visible in the editor are bundled into
-> one, and a new tab called **"layout 1"** appears. Switch to another tab and
-> the editor is cleared down to that one document. To unfold, be *in* the
-> layout tab and scroll down quickly.
+`LayoutTab` parks S3's tree *and its panes* — snapshotted together, so
+restoring is a lookup rather than a rebuild. That is the payoff for building
+this on S3: a layout tab needs no state of its own.
 
-So a layout is not a separate bar to switch between — it is **a tab like any
-other**, and the gesture is a *fold*: several open documents collapse into one
-entry that remembers how they were arranged.
+**Two strip shapes**, switchable from the tab's right-click menu:
 
-**What a layout tab holds.** With S3 and S1 in place this is just the tree:
+* **Grouped** — the documents keep their chips and the strip draws one rounded
+  grey container around the run, so you can still see what is in there.
+  Clicking any member chip restores the arrangement: the group *is* the layout.
+* **Unified** — a single chip carrying the layout's name.
 
-```rust
-enum TabContent {
-    Document(BufferId),
-    Layout { name: String, tree: Layout },   // Layout is S3's node type
-}
-```
+Both are expressed with two fields per chip (`tab_groups`, `tab_is_layout`)
+rather than a second concept in the strip, so the drag, the travelling capsule
+and the context menu all keep working unchanged.
 
-The `Layout` already names a `BufferId` per leaf plus each pane's scroll and
-cursor, so a layout tab is a complete description of what was on screen. It
-needs no new state — which is the argument for doing S3 before this, not
-alongside it.
+Three things this turned up:
 
-**The four transitions.** Worth stating separately, because only the second one
-is visible and it is the point of the feature:
+* **The gesture had to be claimed at hit-test time.** The strip's AppKit
+  overlay is transparent to everything that is not a left press (that is what
+  restored the `+` and the context menu), so scroll events never reached it.
+  It now claims *only* a dominantly-vertical fast flick — which means ordinary
+  horizontal tab scrolling falls through by never being claimed, instead of
+  being forwarded afterwards and hoping.
+* **The velocity floor's unit depends on the device.** A trackpad reports
+  points and drifts; a wheel reports detents, and a points floor is
+  unreachable for it — so a mouse could not fold at all.
+* **`scrollingDeltaY` is content-space** and its sign flips with the "natural
+  scrolling" preference, which would make the gesture mean the opposite thing
+  on half the machines. `isDirectionInvertedFromDevice` turns the delta back
+  into an intent.
 
-1. **Fold** — wrap the current tree in a `TabContent::Layout`, put it at the
-   active tab's slot, and drop the documents it names from the strip as
-   individual entries. The layout tab is now active, so *nothing on screen
-   changes* except the strip. The fold is deliberately quiet.
-2. **Switch away** — activating any other tab installs that tab's own content,
-   which for a document is a single leaf. The splits come off the screen
-   wholesale; the arrangement is not lost, it is in the layout tab. This is
-   the payoff, and it is why the fold is worth doing at all: it clears the
-   desk in one gesture without closing anything.
-3. **Switch back** — activating the layout tab reinstalls its tree, per-pane
-   scroll and cursor included, because the tree carries them.
-4. **Unfold** — a fast downward scroll *while the layout tab is active*. Its
-   documents return to the strip as individual tabs at the layout tab's slot,
-   the layout tab disappears, and the editor keeps showing the same
-   arrangement. Exact inverse of the fold, and equally quiet.
-
-Hovering an inactive layout tab and scrolling down does nothing. The unfold is
-bound to the tab you are in, not the tab under the pointer — otherwise a stray
-scroll while reaching for another tab detonates a layout.
-
-**The strip stops being a list of buffers.** This is the one real consequence
-for earlier steps. Today "every open document has a tab" is an invariant, and
-S5 leans on it (`convert_focused_pane_to_terminal` assumes the displaced
-document is already in the strip). Once a layout tab exists that is no longer
-true — its documents are open but not individually listed. So:
-
-* Converting a pane to a terminal **inside a layout** must lift the displaced
-  document out of the tree and into the strip as its own tab. Otherwise the
-  buffer is named by nothing and becomes unreachable.
-* Closing a layout tab closes the documents it holds. It should therefore run
-  the same unsaved-changes guard a document tab runs, once per document, not
-  skip it because the tab "is a layout".
-
-**Naming.** "layout 1", "layout 2" … lowest unused number, so a fresh fold
-never takes the name of a live layout. Renameable later; not worth a dialog on
-the gesture.
-
-**The gesture.** A fast upward scroll with the pointer over the tab strip. Two
-things it must not become:
-
-* An accidental fold during ordinary horizontal tab scrolling — so it needs a
-  velocity floor and a dominant-axis test, not merely `deltaY > 0`.
-* Irreversible — hence transition 4 above.
-
-`TabStripMouse` already owns the strip's mouse events for exactly the reasons
-in §1, so `scrollWheel` belongs on the same view rather than in a competing
-SwiftUI gesture.
-
-**Gate:** open a four-pane `+`, fold it, switch to another document — the
-editor shows that document alone, no dividers. Switch back — all four panes
-return with their scroll positions. Scroll down inside the layout tab — four
-tabs are back in the strip and the `+` is still on screen. Round-trip the whole
-sequence twice; nothing accumulates.
-
-**Order.** This is last on purpose. Folding a layout means serialising the split
-tree, and until S3 exists there is no tree to serialise — only a flat vector
-with one `kind` and one `ratio`, which cannot describe the four-pane `+` the
-feature is meant to capture.
+**Gate — met**, by test (`folding_parks_the_arrangement_and_leaving_clears_the_desk`,
+plus refusal on a single pane and the style toggle) and by hand: fold a
+two-pane split, switch to another tab and watch the editor come down to one
+pane, click a member chip and get the arrangement back.
 
 ---
 

@@ -14,3 +14,6 @@ pub mod journal;
 pub mod runtime;
 
 pub use runtime::Engine;
+
+/// Short local name for core's layout style, used by the compositor.
+pub use suisei_core::layout_tab::LayoutStyle as LayoutStyleAlias;
