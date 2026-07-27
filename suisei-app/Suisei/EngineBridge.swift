@@ -72,6 +72,14 @@ struct EditorPaneSnap: Equatable, Identifiable {
     /// can only describe two panes — three asked for 150% of the width and the
     /// first pane got clipped off-screen.
     var rect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+    /// This pane runs its own shell.
+    var isTerminal: Bool = false
+    /// That shell's rows and caret. Pulled per pane: terminal panes are
+    /// separate processes, and one shared snapshot made them all show the same
+    /// session.
+    var termLines: [String] = []
+    var termCursorRow: Int = 0
+    var termCursorCol: Int = 0
 }
 
 /// 0 = none, 1 = vertical (side-by-side), 2 = horizontal (stacked).
@@ -893,16 +901,20 @@ final class EngineBridge: ObservableObject {
     /// Mode::Terminal (side/full focus), or the full-panel terminal bound to the
     /// focused split pane (core `terminal_window_focused` routes those too).
     var terminalOwnsKeys: Bool {
-        let t = chrome.terminal
-        guard t.open else { return false }
-        if focus == .terminal { return true }
-        if t.fullPanel {
-            if let bound = t.paneBound {
-                return !editorSplit.isSplit || editorSplit.focus == bound
-            }
+        // A focused terminal PANE owns typing even though the engine stays in
+        // `Mode::Editor` — that mode belongs to the docked shell. Without this
+        // the face took printable keys down the editor's insert path, so a
+        // terminal pane received Enter (not printable, so it fell through to
+        // the raw dispatch) and nothing else: pressing keys produced a bare
+        // new prompt and the characters went into the document.
+        if editorSplit.panes.indices.contains(editorSplit.focus),
+           editorSplit.panes[editorSplit.focus].isTerminal
+        {
             return true
         }
-        return false
+        // Docked terminal (⌃T) — its own mode.
+        guard chrome.terminal.open else { return false }
+        return focus == .terminal
     }
 
     func dispatch(code: SuiseiKey, ch: UInt32 = 0, fNum: UInt8 = 0, mods: SuiseiMod = []) {
@@ -1343,7 +1355,7 @@ final class EngineBridge: ObservableObject {
         guard let engine else { return nil }
         var snap = SuiseiChromeSnapshot()
         guard suisei_engine_chrome(engine, &snap) != 0 else { return nil }
-        let (lines, split) = decodeEditorLinesAndSplit(from: snap)
+        let (lines, split) = decodeEditorLinesAndSplit(from: snap, engine: engine)
         let paint = EditorPaintSnap(
             lines: lines,
             split: split,
@@ -2271,6 +2283,18 @@ final class EngineBridge: ObservableObject {
     }
 
     /// Route keys to the PTY (clicking the terminal) or back to the editor.
+    /// Point the keyboard at a terminal **pane**.
+    ///
+    /// Deliberately not `focusTerminal(true)`: that enters `Mode::Terminal`,
+    /// which is the *docked* shell's mode, and it routed every keystroke to
+    /// the dock instead of the pane the user clicked. A pane terminal stays in
+    /// `Mode::Editor` — core sees the focused pane is a terminal and hands it
+    /// the keys.
+    func focusTerminalPane(_ index: Int) {
+        reclaimKeyboardFromTextFields()
+        focusPane(index)
+    }
+
     func focusTerminal(_ on: Bool) {
         guard let engine else { return }
         // Same trap as the palette: giving the terminal focus in the *engine*
@@ -2964,12 +2988,20 @@ final class EngineBridge: ObservableObject {
 
     private func resolveCharacter(event: NSEvent) -> Character? {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if let s = event.charactersIgnoringModifiers {
-            for u in s.unicodeScalars where u.value >= 32 && u.value != 127 {
-                return Character(u)
-            }
-        }
-        if let s = event.characters {
+        let chording = flags.contains(.command)
+            || flags.contains(.control)
+            || flags.contains(.option)
+        // `charactersIgnoringModifiers` is the UNSHIFTED key. That is exactly
+        // what a chord wants — ⇧⌘T is "t" — and exactly wrong for typing,
+        // where it turns every capital into lower case. It was preferred
+        // unconditionally, so `echo HELLO` reached the shell as `echo hello`
+        // and typing into the palette could not produce a capital either. The
+        // editor escaped it only because its canvas takes the
+        // `NSTextInputClient` path instead of this one.
+        let order: [String?] = chording
+            ? [event.charactersIgnoringModifiers, event.characters]
+            : [event.characters, event.charactersIgnoringModifiers]
+        for s in order.compactMap({ $0 }) {
             for u in s.unicodeScalars where u.value >= 32 && u.value != 127 {
                 return Character(u)
             }
@@ -3038,7 +3070,7 @@ final class EngineBridge: ObservableObject {
         }
 
         let (lines, split) = PerfProbe.measure("  decodeEditorLinesAndSplit") {
-            decodeEditorLinesAndSplit(from: snap)
+            decodeEditorLinesAndSplit(from: snap, engine: engine)
         }
         lastFrameGen = snap.frame_gen
         let frac = CGFloat(snap.scroll_frac)
@@ -3109,7 +3141,10 @@ final class EngineBridge: ObservableObject {
         }
     }
 
-    private func decodeEditorLinesAndSplit(from snap: SuiseiChromeSnapshot) -> ([EditorLine], SplitSnap) {
+    private func decodeEditorLinesAndSplit(
+        from snap: SuiseiChromeSnapshot,
+        engine: OpaquePointer
+    ) -> ([EditorLine], SplitSnap) {
         var allLines: [EditorLine] = []
         let vis = Int(snap.visible_line_count)
         let stride = MemoryLayout<SuiseiEditorLineC>.stride
@@ -3158,13 +3193,22 @@ final class EngineBridge: ObservableObject {
         let ratio = snap.split_ratio
 
         if kind == 0 || paneCount < 2 {
-            let single = EditorPaneSnap(
+            var single = EditorPaneSnap(
                 id: 0, focused: true, tabIndex: Int(snap.tab_active),
                 scroll: snap.scroll, hscroll: snap.hscroll,
                 docLineCount: snap.line_count, lines: allLines
             )
+            // The unsplit pane is synthesised by the FFI rather than walked out
+            // of the pane array, but it can still be a terminal.
+            single.isTerminal = withUnsafeBytes(of: snap.panes) { raw in
+                raw.baseAddress!.load(fromByteOffset: 17, as: UInt8.self) != 0
+            }
             // Stamp paneId 0 on all lines.
-            return (allLines, SplitSnap(kind: 0, ratio: 0.5, focus: 0, panes: [single]))
+            return (
+                allLines,
+                SplitSnap(kind: 0, ratio: 0.5, focus: 0,
+                          panes: attachPaneTerminals(engine, [single]))
+            )
         }
 
         // C fixed arrays import as tuples in Swift — walk via raw memory.
@@ -3181,6 +3225,8 @@ final class EngineBridge: ObservableObject {
                 let lineStart = base.load(fromByteOffset: 8, as: UInt32.self)
                 let lineCount = base.load(fromByteOffset: 12, as: UInt32.self)
                 let focusedFlag = base.load(fromByteOffset: 16, as: UInt8.self)
+                // offset 17: is_terminal (a former pad byte).
+                let isTerm = base.load(fromByteOffset: 17, as: UInt8.self) != 0
                 // offset 20: doc_line_count, 24: hscroll (after 4 pad bytes at 16..19)
                 let docLineCount = base.load(fromByteOffset: 20, as: UInt32.self)
                 let hscroll = base.load(fromByteOffset: 24, as: UInt32.self)
@@ -3214,14 +3260,18 @@ final class EngineBridge: ObservableObject {
                     rect: CGRect(
                         x: CGFloat(rx), y: CGFloat(ry),
                         width: CGFloat(rw), height: CGFloat(rh)
-                    )
+                    ),
+                    isTerminal: isTerm
                 ))
             }
         }
         // `lines` = focused pane only (never the packed multi-pane stream).
         return (
             focusedLines.isEmpty ? allLines : focusedLines,
-            SplitSnap(kind: kind, ratio: ratio == 0 ? 0.5 : ratio, focus: focus, panes: panes)
+            SplitSnap(
+                kind: kind, ratio: ratio == 0 ? 0.5 : ratio, focus: focus,
+                panes: attachPaneTerminals(engine, panes)
+            )
         )
     }
 
@@ -3257,7 +3307,7 @@ final class EngineBridge: ObservableObject {
             }
         }
 
-        let (lines, split) = decodeEditorLinesAndSplit(from: snap)
+        let (lines, split) = decodeEditorLinesAndSplit(from: snap, engine: engine)
         if lines != editorLines { editorLines = lines }
         if split != editorSplit { editorSplit = split }
         // Always adopt Core residual (caret/goto clear it to 0).
@@ -3754,6 +3804,36 @@ final class EngineBridge: ObservableObject {
             selected: Int(snap.selected),
             items: items
         )
+    }
+
+    /// Fill in each terminal pane's own rows.
+    ///
+    /// Only terminal panes are pulled, so this is usually zero work and at most
+    /// four. It cannot come from the chrome's single terminal snapshot: these
+    /// are separate processes, and sharing one snapshot is precisely what made
+    /// two terminal panes mirror each other.
+    private func attachPaneTerminals(_ engine: OpaquePointer, _ panes: [EditorPaneSnap])
+        -> [EditorPaneSnap]
+    {
+        guard panes.contains(where: \.isTerminal) else { return panes }
+        var out = panes
+        for i in out.indices where out[i].isTerminal {
+            var snap = SuiseiTerminalSnapshot()
+            guard suisei_engine_terminal_for_pane(engine, UInt32(i), &snap) != 0 else { continue }
+            var lines: [String] = []
+            let n = Int(snap.count)
+            withUnsafeBytes(of: snap.lines) { raw in
+                let cap = Int(SUISEI_TERM_LINE)
+                for j in 0..<min(n, Int(SUISEI_MAX_TERM_LINES)) {
+                    let b = raw.baseAddress!.advanced(by: j * cap)
+                    lines.append(String(cString: b.assumingMemoryBound(to: CChar.self)))
+                }
+            }
+            out[i].termLines = lines
+            out[i].termCursorRow = Int(snap.cursor_row)
+            out[i].termCursorCol = Int(snap.cursor_col)
+        }
+        return out
     }
 
     private func loadTerminal(_ engine: OpaquePointer) -> TerminalSnap {

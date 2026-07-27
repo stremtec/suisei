@@ -185,33 +185,44 @@ at all — core ships a normalised rect per pane and the face places them
 absolutely, finding dividers where rects share an edge. P5 was the gate and it
 is met.
 
-### 3.3 The terminal renders and cannot be seen or typed into
+### 3.3 The terminal: four faults, all now fixed
 
-Found while verifying J6, and **not caused by it** — both reproduce with a
-single unsplit pane, on code paths the split work never touched.
+Found while verifying J6. None were caused by the split work — all reproduce
+with a single unsplit pane — but they made the terminal unusable, so they are
+recorded together.
 
 **Contrast.** `terminalGridBg` was the editor background nudged 3.5% toward
 black, which in the light theme is very nearly white, while core paints the
-shell's default foreground as rgb(200,200,200). That is a contrast ratio of
-about 1.35:1 — the terminal rendered perfectly and was invisible. The SGR
-backgrounds the parser produces are tints (`.opacity(0.45)`) meant to sit over
-a *dark* grid, which is the same assumption from the other side. Fixed: the
-terminal grid is dark in both themes, as it is in Xcode, VS Code and iTerm.
+shell's default foreground as rgb(200,200,200): a contrast ratio of about
+1.35:1. The terminal rendered perfectly and was invisible. The caret had the
+same problem from the other side — it was drawn in the *editor's* foreground,
+near-black, which is why the shell appeared to have no cursor. Both now use a
+terminal palette: dark grid, light ink, in either theme.
 
-**Still blank after that fix**, and unexplained. Established: the engine's
-snapshot really does carry the prompt (read in-process — 40 lines, line 0 is
-`asill@… suisei %`); the face receives non-empty lines (the header's
-"starting…" branch does not appear); `TermCanvas` clears its row cache on every
-change and is `isFlipped`; and the grid fills its whole area with the
-background, so it is sized and drawing. So lines arrive and no glyphs land.
-Not chased further — it is a terminal-subsystem bug, not a layout one.
+**Scrolled past the prompt.** The trailing-blank trim tested `row == " "`,
+which was true back when core sent bare spaces for empty rows. Core wraps every
+row in colour escapes now, so nothing was ever trimmed: a fresh shell handed
+over ~40 rows of decorated blanks, the canvas grew to fit them all, and
+stick-to-bottom scrolled straight past the one row with the prompt. The blank
+test now strips escapes first, and stick-to-bottom requires the view to have
+been scrollable at all — it was trivially "at the bottom" on the very first
+apply, when the canvas still had zero height.
 
-**Keyboard.** Clicking the terminal gives it focus in the *engine* but not in
-AppKit, so with the project tree's filter still first responder every keystroke
-went on landing in that filter — the same trap as §3.1. `focusTerminal(true)`
-now reclaims the responder, but this could not be confirmed end to end: typing
-still reached the filter afterwards, which says something further is re-taking
-focus. Open.
+**Keyboard.** Two separate holds. Clicking gave the terminal focus in the
+engine but never took the window's first responder, so keystrokes kept landing
+in the project tree's filter (§3.1 again); `TermCanvas` now accepts and claims
+first responder itself. And the face's `terminalOwnsKeys` only recognised the
+*docked* shell's mode, so with a terminal pane focused printable keys went down
+the editor's insert path — the pane received Enter (not printable, so it fell
+through to the raw dispatch) and nothing else, which looked like a shell that
+answered every keystroke with a bare new prompt.
+
+**Case.** `resolveCharacter` preferred `charactersIgnoringModifiers`, the
+UNSHIFTED key — right for chords (⇧⌘T is "t"), wrong for typing, so no capital
+could be produced on any surface that uses the key monitor. The editor escaped
+it only because its canvas takes the `NSTextInputClient` path. Core then had to
+learn to re-apply the SHIFT modifier when writing a letter to a PTY, since its
+key model carries case as a modifier rather than in the character.
 
 ### Still open
 `terminal.pane_bound` is a pane **index** into a list whose order the tree can

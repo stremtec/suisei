@@ -146,7 +146,16 @@ pub struct App {
     pub mouse: MouseState,
     pub viewport: EditorViewport,
     pub explorer: Explorer,
+    /// The **docked** terminal (⌃T). Pane terminals are separate processes,
+    /// one per pane, in `pane_terminals`.
     pub terminal: Terminal,
+    /// A shell per terminal pane, keyed by the id its pane carries.
+    ///
+    /// There used to be exactly one `Terminal` for everything, so a second
+    /// terminal pane was a second *view* of the same session — typing in one
+    /// echoed in the other, and converting a second pane moved the shell
+    /// instead of starting one.
+    pub pane_terminals: std::collections::HashMap<crate::split::TerminalId, Terminal>,
     pub explorer_width: u16,
     pub terminal_width: u16,
     pub resize_target: Option<ResizeTarget>,
@@ -506,6 +515,7 @@ impl Default for App {
             viewport: EditorViewport::default(),
             explorer: Explorer::new(),
             terminal: Terminal::new(),
+            pane_terminals: std::collections::HashMap::new(),
             explorer_width: 22,
             terminal_width: 30,
             resize_target: None,
@@ -2031,13 +2041,11 @@ impl App {
 
 
     pub fn toggle_terminal_side(&mut self) {
-        if self.terminal.open && self.split.terminal_pane().is_none() {
+        if self.terminal.open {
             self.terminal.open = false;
             self.terminal.shutdown();
             self.mode = Mode::Editor;
         } else {
-            // Switch a pane terminal back to the dock, or open the dock.
-            self.restore_terminal_pane();
             self.terminal.close_confirm = false;
             self.terminal.open = true;
             self.terminal.start(self.filename.as_ref());
@@ -2045,10 +2053,31 @@ impl App {
         }
     }
 
-    /// Put the terminal pane back to the document it displaced, if there is
-    /// one. Returns that document.
-    fn restore_terminal_pane(&mut self) -> Option<BufferId> {
-        let restored = self.split.clear_terminal()?;
+    /// The shell running in the pane at `idx`, if that pane is a terminal.
+    pub fn pane_terminal(&self, idx: usize) -> Option<&Terminal> {
+        let id = self.split.panes.get(idx)?.terminal_id()?;
+        self.pane_terminals.get(&id)
+    }
+
+    pub fn pane_terminal_mut(&mut self, idx: usize) -> Option<&mut Terminal> {
+        let id = self.split.panes.get(idx)?.terminal_id()?;
+        self.pane_terminals.get_mut(&id)
+    }
+
+    /// The shell the keyboard is pointed at — the focused pane's, if it is a
+    /// terminal.
+    pub fn focused_pane_terminal_mut(&mut self) -> Option<&mut Terminal> {
+        let idx = self.split.focus_index();
+        self.pane_terminal_mut(idx)
+    }
+
+    /// Put the pane at `idx` back to the document its terminal displaced, and
+    /// end that shell. Returns the document.
+    fn restore_terminal_pane(&mut self, idx: usize) -> Option<BufferId> {
+        let (id, restored) = self.split.clear_terminal_at(idx)?;
+        if let Some(mut t) = self.pane_terminals.remove(&id) {
+            t.shutdown();
+        }
         // The displaced document has been in the tab bar the whole time (the
         // strip lists buffers, not panes), so there is nothing to re-open —
         // just make it the pane's content again.
@@ -2070,43 +2099,47 @@ impl App {
     /// open and reachable: the tab strip lists *buffers*, not panes, so it is
     /// already there.
     pub fn toggle_terminal_full(&mut self) {
-        // Second press on the terminal's own pane closes it.
-        if self.split.terminal_pane() == Some(self.split.focus_index()) {
+        let idx = self.split.focus_index();
+        // Second press on a terminal pane closes that pane's shell.
+        if self.split.panes.get(idx).is_some_and(|p| p.is_terminal()) {
             self.confirm_close_pane_terminal(true);
             return;
         }
-        // A terminal elsewhere moves here rather than spawning a second one.
-        self.split.clear_terminal();
-
         self.park_focused_pane();
-        let idx = self.split.focus_index();
-        if let Some(displaced) = self.split.make_terminal(idx) {
-            // Make the displaced document the active tab so it is obvious
-            // where it went. It was never closed.
-            if let Some(i) = self.buffer_index(displaced) {
-                self.goto_tab(i);
-            }
+        let Some((tid, displaced)) = self.split.make_terminal(idx) else {
+            return;
+        };
+        // Make the displaced document the active tab so it is obvious where it
+        // went. It was never closed.
+        if let Some(i) = self.buffer_index(displaced) {
+            self.goto_tab(i);
         }
-        self.terminal.close_confirm = false;
-        self.terminal.open = true;
+
+        // A shell of its own. Converting a second pane used to *move* the one
+        // terminal here instead, because there was only ever one — which also
+        // made two terminal panes two views of the same session.
         let cols = if self.split.is_split() {
             (self.viewport.width / 2).max(40)
         } else {
             self.viewport.width.max(40)
         };
         let rows = self.viewport.height.max(24);
-        self.terminal.resize(cols, rows);
-        if !self.terminal.started {
-            let root = self.project_root();
-            let anchor = self.filename.clone().unwrap_or_else(|| root.join("."));
-            self.terminal.start(Some(&anchor));
-        }
+        let root = self.project_root();
+        let anchor = self.filename.clone().unwrap_or_else(|| root.join("."));
+        let mut term = Terminal::new();
+        term.open = true;
+        term.close_confirm = false;
+        term.resize(cols, rows);
+        term.start(Some(&anchor));
+        let started = term.started;
+        self.pane_terminals.insert(tid, term);
+
         // Critical: stay in Normal — terminal is a pane, not a mode that
         // swallows layout shortcuts / opens the side Debug terminal.
         if matches!(self.mode, Mode::Terminal | Mode::Editor) {
             self.mode = Mode::Editor;
         }
-        self.message = if self.terminal.started {
+        self.message = if started {
             "Terminal pane · keys → shell · ⌃⇧T close · ^W w other pane".into()
         } else {
             "Terminal: failed to spawn shell (PTY)".into()
@@ -2115,11 +2148,14 @@ impl App {
 
     /// Whether the focused split pane is showing the Ctrl+Shift+T terminal.
     pub fn terminal_window_focused(&self) -> bool {
-        self.terminal.open && self.split.terminal_pane() == Some(self.split.focus_index())
+        self.split
+            .panes
+            .get(self.split.focus_index())
+            .is_some_and(|p| p.is_terminal())
     }
 
     pub fn request_close_pane_terminal(&mut self) {
-        if !self.terminal.open || self.split.terminal_pane().is_none() {
+        if !self.terminal_window_focused() {
             return;
         }
         if self.terminal.close_confirm {
@@ -2138,15 +2174,14 @@ impl App {
             self.message = "Close cancelled".into();
             return;
         }
-        if self.split.terminal_pane().is_none() {
+        let idx = self.split.focus_index();
+        if self.split.panes.get(idx).is_none_or(|p| !p.is_terminal()) {
             return;
         }
-        // The pane goes back to the document it displaced. No split to
-        // collapse, because ⌃⇧T never conjured one — which is why
+        // The pane goes back to the document it displaced and its shell ends.
+        // No split to collapse, because ⌃⇧T never conjured one — which is why
         // `owns_split` is gone rather than merely unused.
-        let restored = self.restore_terminal_pane();
-        self.terminal.open = false;
-        self.terminal.shutdown();
+        let restored = self.restore_terminal_pane(idx);
         if let Some(id) = restored {
             if let Some(i) = self.buffer_index(id) {
                 self.goto_tab(i);
@@ -3352,10 +3387,10 @@ impl App {
         // repair. This used to be a match with a `Some(b - 1)` arm shifting
         // `pane_bound` down whenever a lower pane closed — patching a model
         // after the fact instead of it being right.
-        if self.terminal.open && self.split.focused_pane().is_terminal() {
-            self.terminal.open = false;
-            self.terminal.close_confirm = false;
-            self.terminal.shutdown();
+        if let Some(id) = self.split.focused_pane().terminal_id() {
+            if let Some(mut t) = self.pane_terminals.remove(&id) {
+                t.shutdown();
+            }
         }
         let survivor = self.split.remove_focused();
         if self.split.is_split() {

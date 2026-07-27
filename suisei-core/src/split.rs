@@ -35,6 +35,10 @@ pub enum Axis {
     Row,
 }
 
+/// Stable handle to a running shell. Never reused, like [`BufferId`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TerminalId(pub u32);
+
 /// What a pane is showing.
 ///
 /// "This pane is a terminal" used to be spread across four fields on
@@ -45,9 +49,14 @@ pub enum Axis {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneContent {
     Document(BufferId),
-    /// The terminal runs here. `restore` is the document this pane was showing
-    /// before, so closing the terminal puts it back instead of leaving a blank.
-    Terminal { restore: BufferId },
+    /// A shell runs here. `id` names **which** shell: panes each get their own,
+    /// so two terminal panes are two processes. They shared one `App.terminal`
+    /// at first, which made every terminal pane a second view of the same
+    /// session — they looked linked because they were.
+    ///
+    /// `restore` is the document this pane was showing before, so closing the
+    /// terminal puts it back instead of leaving a blank.
+    Terminal { id: TerminalId, restore: BufferId },
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +88,15 @@ impl Pane {
     /// header and its restore path have something to point at.
     pub fn buffer(&self) -> BufferId {
         match self.content {
-            PaneContent::Document(id) | PaneContent::Terminal { restore: id } => id,
+            PaneContent::Document(id) | PaneContent::Terminal { restore: id, .. } => id,
+        }
+    }
+
+    /// The shell this pane runs, if it is a terminal.
+    pub fn terminal_id(&self) -> Option<TerminalId> {
+        match self.content {
+            PaneContent::Terminal { id, .. } => Some(id),
+            PaneContent::Document(_) => None,
         }
     }
 
@@ -87,7 +104,7 @@ impl Pane {
         self.content = match self.content {
             PaneContent::Document(_) => PaneContent::Document(id),
             // Retarget what the terminal will restore, without evicting it.
-            PaneContent::Terminal { .. } => PaneContent::Terminal { restore: id },
+            PaneContent::Terminal { id: t, .. } => PaneContent::Terminal { id: t, restore: id },
         };
     }
 
@@ -142,6 +159,7 @@ pub struct SplitState {
     /// After `Ctrl+W`, waiting for the chord.
     pub pending_chord: bool,
     next_id: u32,
+    next_terminal_id: u32,
 }
 
 impl Default for SplitState {
@@ -153,6 +171,7 @@ impl Default for SplitState {
             focus: first,
             pending_chord: false,
             next_id: 2,
+            next_terminal_id: 1,
         }
     }
 }
@@ -533,33 +552,43 @@ impl SplitState {
         self.panes.iter().position(|p| p.is_terminal())
     }
 
-    /// Turn the pane at `idx` into a terminal, remembering the document it
-    /// displaces. Returns that document so the caller can make sure it stays
-    /// reachable from the tab bar.
-    pub fn make_terminal(&mut self, idx: usize) -> Option<BufferId> {
-        let p = self.panes.get_mut(idx)?;
-        if p.is_terminal() {
+    /// Every pane running a shell, in visual order.
+    pub fn terminal_panes(&self) -> Vec<(usize, TerminalId)> {
+        self.panes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| p.terminal_id().map(|t| (i, t)))
+            .collect()
+    }
+
+    /// Turn the pane at `idx` into a terminal with a fresh shell id,
+    /// remembering the document it displaces. Returns `(shell, displaced)`.
+    pub fn make_terminal(&mut self, idx: usize) -> Option<(TerminalId, BufferId)> {
+        if self.panes.get(idx)?.is_terminal() {
             return None;
         }
+        let id = TerminalId(self.next_terminal_id);
+        self.next_terminal_id = self.next_terminal_id.wrapping_add(1);
+        let p = self.panes.get_mut(idx)?;
         let restore = p.buffer();
-        p.content = PaneContent::Terminal { restore };
+        p.content = PaneContent::Terminal { id, restore };
         p.scroll = 0;
         p.hscroll = 0;
         p.cursor = (0, 0);
-        Some(restore)
+        Some((id, restore))
     }
 
-    /// Put the terminal pane back to the document it displaced. Returns that
-    /// document, or `None` when no pane is a terminal.
-    pub fn clear_terminal(&mut self) -> Option<BufferId> {
-        let idx = self.terminal_pane()?;
+    /// Put the pane at `idx` back to the document its terminal displaced.
+    /// Returns `(shell that ended, document restored)`.
+    pub fn clear_terminal_at(&mut self, idx: usize) -> Option<(TerminalId, BufferId)> {
         let p = self.panes.get_mut(idx)?;
+        let id = p.terminal_id()?;
         let restore = p.buffer();
         p.content = PaneContent::Document(restore);
         p.scroll = 0;
         p.hscroll = 0;
         p.cursor = (0, 0);
-        Some(restore)
+        Some((id, restore))
     }
 
     // ---- internals -------------------------------------------------------

@@ -819,6 +819,16 @@ struct ContentView: View {
             : mixColor(editorBg, .black, 0.18)
     }
 
+    /// Default ink for the terminal grid — and the colour of its block caret.
+    ///
+    /// This used to be the *editor's* foreground, which in the light theme is
+    /// near-black: a dark caret on a dark terminal, which is why the shell
+    /// appeared to have no cursor at all. It has to match the grid it sits on,
+    /// not the editor beside it.
+    private var terminalGridFg: Color {
+        Color(red: 0.85, green: 0.86, blue: 0.88)
+    }
+
     /// The docked terminal region is filled with the GRID's own colour.
     ///
     /// It used to be its own barely-there tint, one shade off the grid. The
@@ -2367,7 +2377,7 @@ struct ContentView: View {
                 cursorCol: engine.chrome.terminal.cursorCol,
                 fontSize: 12,
                 bg: NSColor(terminalGridBg),
-                fg: NSColor(fg),
+                fg: NSColor(terminalGridFg),
                 onScrollback: { engine.terminalScroll($0) }
             )
             .frame(width: geo.size.width, height: geo.size.height)
@@ -4022,7 +4032,33 @@ struct ContentView: View {
 
     /// Ctrl/Cmd+Shift+T body — PTY output (header optional: split path bar already has one).
     /// Sizes the PTY grid to the visible pane and takes key focus on click.
-    private func terminalPaneBody(showClose: Bool, showHeader: Bool = true) -> some View {
+    /// `pane` = a terminal pane's own shell; `nil` = the docked terminal.
+    ///
+    /// These are different processes. Painting every terminal pane from
+    /// `chrome.terminal` made them all views of one session.
+    private func terminalPaneBody(
+        showClose: Bool,
+        showHeader: Bool = true,
+        pane: EditorPaneSnap? = nil
+    ) -> some View {
+        let termLines = pane?.termLines ?? engine.chrome.terminal.lines
+        let termRow = pane?.termCursorRow ?? engine.chrome.terminal.cursorRow
+        let termCol = pane?.termCursorCol ?? engine.chrome.terminal.cursorCol
+        return terminalPaneBodyInner(
+            showClose: showClose, showHeader: showHeader,
+            lines: termLines, cursorRow: termRow, cursorCol: termCol,
+            paneIndex: pane?.id
+        )
+    }
+
+    private func terminalPaneBodyInner(
+        showClose: Bool,
+        showHeader: Bool,
+        lines termLines: [String],
+        cursorRow termRow: Int,
+        cursorCol termCol: Int,
+        paneIndex: Int?
+    ) -> some View {
         VStack(spacing: 0) {
             if showHeader {
                 HStack(spacing: 8) {
@@ -4032,7 +4068,7 @@ struct ContentView: View {
                     Text("Terminal")
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
-                    if engine.chrome.terminal.lines.isEmpty {
+                    if termLines.isEmpty {
                         Text("starting…")
                             .font(.system(size: 10, design: .rounded))
                             .foregroundStyle(.secondary)
@@ -4057,12 +4093,19 @@ struct ContentView: View {
 
             GeometryReader { geo in
                 TerminalGridView(
-                    lines: engine.chrome.terminal.lines,
-                    cursorRow: engine.chrome.terminal.cursorRow,
-                    cursorCol: engine.chrome.terminal.cursorCol,
+                    lines: termLines,
+                    cursorRow: termRow,
+                    cursorCol: termCol,
                     fontSize: 12,
                     bg: NSColor(terminalGridBg),
-                    fg: NSColor(fg)
+                    fg: NSColor(terminalGridFg),
+                    onFocus: {
+                        if let idx = paneIndex {
+                            engine.focusTerminalPane(idx)
+                        } else {
+                            engine.focusTerminal(true)
+                        }
+                    }
                 )
                 .frame(width: geo.size.width, height: geo.size.height)
                 .onAppear { reportTerminalCells(geo.size) }
@@ -4071,12 +4114,16 @@ struct ContentView: View {
         }
         .background(editorBg)
         .contentShape(Rectangle())
+        // NOTE: no `focused = true` here. That drives the root container's
+        // `@FocusState`, which takes the window's first responder straight back
+        // off the terminal canvas — undoing the click that just gave it the
+        // keyboard. The canvas claims the responder itself in `mouseDown`.
         .onTapGesture {
-            if let bound = engine.chrome.terminal.paneBound {
-                engine.focusPane(bound)
+            if let idx = paneIndex {
+                engine.focusTerminalPane(idx)
+            } else {
+                engine.focusTerminal(true)
             }
-            engine.focusTerminal(true)
-            focused = true
         }
     }
 
@@ -4085,9 +4132,9 @@ struct ContentView: View {
             Group {
                 if engine.editorSplit.isSplit {
                     splitEditorLayout(size: geo.size)
-                } else if engine.chrome.terminal.open && engine.chrome.terminal.fullPanel {
-                    // Unsplit whole-main terminal (rare — open path usually creates a split).
-                    terminalPaneBody(showClose: true)
+                } else if let only = engine.editorSplit.panes.first, only.isTerminal {
+                    // Unsplit, and the single pane was converted to a terminal.
+                    terminalPaneBody(showClose: true, pane: only)
                 } else {
                     editorSurface(
                         lines: engine.editorLines.isEmpty ? engine.chrome.lines : engine.editorLines,
@@ -4218,7 +4265,7 @@ struct ContentView: View {
     /// One Xcode editor column: path bar (file for this pane) + text surface.
     /// When ⌃⇧T full terminal is bound to this pane, paint the PTY here instead.
     private func editorColumn(pane: EditorPaneSnap, contentSize: CGSize) -> some View {
-        let termHere = engine.chrome.terminal.isBoundToPane(pane.id)
+        let termHere = pane.isTerminal
         return VStack(spacing: 0) {
             if termHere {
                 // Single chrome bar (do not also paint terminalPaneBody header).
@@ -4229,7 +4276,7 @@ struct ContentView: View {
                     Text("Terminal")
                         .font(.system(size: 11, weight: pane.focused ? .semibold : .regular))
                         .foregroundStyle(pane.focused ? fg : dim)
-                    if engine.chrome.terminal.lines.isEmpty {
+                    if pane.termLines.isEmpty {
                         Text("starting…")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
@@ -4256,7 +4303,7 @@ struct ContentView: View {
                     Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
                 }
 
-                terminalPaneBody(showClose: false, showHeader: false)
+                terminalPaneBody(showClose: false, showHeader: false, pane: pane)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 panePathBar(pane: pane)
@@ -5400,6 +5447,8 @@ private struct TerminalGridView: NSViewRepresentable {
     var fg: NSColor
     /// Wheel past the ends of the live grid; positive = older output.
     var onScrollback: (Int32) -> Void = { _ in }
+    /// Called when the grid takes the keyboard, so the engine can follow.
+    var onFocus: () -> Void = {}
 
     func makeNSView(context: Context) -> TermScroll {
         TermScroll()
@@ -5409,6 +5458,7 @@ private struct TerminalGridView: NSViewRepresentable {
         view.cursorRow = cursorRow
         view.cursorCol = cursorCol
         view.onScrollback = onScrollback
+        view.canvas.onFocusRequest = onFocus
         view.apply(lines: lines, fontSize: fontSize, bg: bg, fg: fg)
     }
 }
@@ -5494,16 +5544,49 @@ private final class TermScroll: NSScrollView {
         canvas.needsDisplay = true
     }
 
+    /// A row with nothing on it once the SGR escapes are stripped.
+    ///
+    /// The trim below used to test `row == " "`, which was true back when core
+    /// sent bare spaces for empty rows. Core wraps **every** row in colour
+    /// escapes now, so no row ever equalled `" "` and nothing was ever
+    /// trimmed: a fresh shell handed over ~40 rows of decorated blanks, the
+    /// canvas grew to fit all of them, and the stick-to-bottom below scrolled
+    /// straight past the one row with the prompt on it. That is the reported
+    /// "터미널을 생성할때마다 스크롤이 맨 아래로 되면서 시작 메시지가 안보인다".
+    private static func isBlankRow(_ s: String) -> Bool {
+        var i = s.startIndex
+        while i < s.endIndex {
+            if s[i] == "\u{1b}" {
+                var j = s.index(after: i)
+                if j < s.endIndex, s[j] == "[" {
+                    j = s.index(after: j)
+                    while j < s.endIndex, !s[j].isLetter { j = s.index(after: j) }
+                    if j < s.endIndex { j = s.index(after: j) }
+                }
+                i = j
+            } else {
+                if !s[i].isWhitespace { return false }
+                i = s.index(after: i)
+            }
+        }
+        return true
+    }
+
     func apply(lines: [String], fontSize: CGFloat, bg: NSColor, fg: NSColor) {
-        // Core hands the WHOLE grid (empty rows as " "): untrimmed, a fresh
-        // 44-row shell overflowed the panel and bottom-stick scrolled the
-        // prompt half off the top. Trailing blanks carry no information.
+        // Trailing blanks carry no information, and keeping them is what makes
+        // the grid taller than the viewport in the first place.
         var lines = lines
-        while lines.count > 1, lines.last == " " {
+        while lines.count > 1, Self.isBlankRow(lines[lines.count - 1]) {
             lines.removeLast()
         }
         let lineH = fontSize + 5
-        let wasAtBottom = documentVisibleRect.maxY >= canvas.frame.height - lineH * 2
+        // Only stick to the bottom if there was a bottom to be at. Without the
+        // `scrollable` test this was true on the very first apply — the canvas
+        // still had zero height — so the terminal jumped to the end of itself
+        // before it had drawn anything.
+        let scrollable = canvas.frame.height > contentView.bounds.height + 1
+        let wasAtBottom = scrollable
+            && documentVisibleRect.maxY >= canvas.frame.height - lineH * 2
         let changed = canvas.set(lines: lines, fontSize: fontSize, bg: bg, fg: fg)
         lastRowCount = lines.count
         lastFontSize = fontSize
@@ -5533,8 +5616,28 @@ private final class TermCanvas: NSView {
     private var fg: NSColor = .white
     private var rowCache: [Int: CTLine] = [:]
 
+    /// Told when this canvas takes the keyboard, so the engine can point the
+    /// shell at it too.
+    var onFocusRequest: (() -> Void)?
+
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
+
+    /// The terminal has to be able to *hold* the keyboard, not just be told it
+    /// has focus.
+    ///
+    /// Clicking it set focus in the engine and left the window's first
+    /// responder wherever it was — usually the project tree's filter, which is
+    /// an `NSTextField`, so `editorOwnsKeyEvents` stood down and every
+    /// keystroke went on landing in that filter. A plain `NSView` as first
+    /// responder is exactly what that check wants: not a text field, so the
+    /// monitor takes the key and routes it to the PTY.
+    override var acceptsFirstResponder: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        onFocusRequest?()
+    }
 
     /// Returns true when content changed (caller sticks to bottom).
     func set(lines: [String], fontSize: CGFloat, bg: NSColor, fg: NSColor) -> Bool {

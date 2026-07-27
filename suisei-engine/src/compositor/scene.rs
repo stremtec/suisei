@@ -102,6 +102,8 @@ pub struct PaneScene {
     pub doc_version: u64,
     /// Row budget the snapshot was built with (patch-path reuse key).
     pub band_rows: u32,
+    /// This pane runs a shell of its own.
+    pub is_terminal: bool,
     /// Normalised rect within the editor area, straight from the layout tree.
     /// The face places panes by these instead of re-deriving geometry from a
     /// kind and a ratio, which it could only ever get right for two panes.
@@ -301,6 +303,9 @@ pub struct ChromeScene {
     pub lines: Vec<EditorLineScene>,
     /// 0 none, 1 vertical, 2 horizontal
     pub split_kind: u8,
+    /// Unsplit, and the single pane runs a shell. The FFI synthesises pane 0
+    /// on that path instead of walking the pane array, so it needs telling.
+    pub pane0_is_terminal: bool,
     pub split_ratio: f32,
     pub pane_focus: u8,
     /// Empty when unsplit; when split, one entry per pane (lines packed for FFI).
@@ -461,6 +466,7 @@ pub fn patch_chrome_editor_scroll(
     chrome.buffer_version = app.buffer.version();
     chrome.lines = lines;
     chrome.split_kind = split_kind;
+    chrome.pane0_is_terminal = app.split.panes.first().is_some_and(|p| p.is_terminal());
     chrome.split_ratio = split_ratio;
     chrome.pane_focus = pane_focus;
     chrome.panes = panes;
@@ -588,6 +594,7 @@ pub fn compose(
             tabs,
             lines,
             split_kind,
+            pane0_is_terminal: app.split.panes.first().is_some_and(|p| p.is_terminal()),
             split_ratio,
             pane_focus,
             panes,
@@ -1589,15 +1596,14 @@ fn build_terminal(app: &App) -> TerminalScene {
     if lines.is_empty() {
         lines.push(" ".into());
     }
-    // Both derived from the layout tree, which owns where the terminal is.
-    // The face's contract is unchanged — it still asks "is this a pane
-    // terminal, and which pane" — but nothing can disagree about the answer
-    // any more, because there is only one place it is written down.
-    let pane_bound = app.split.terminal_pane().map(|i| i as u32);
+    // This snapshot is the DOCKED terminal. Pane shells are separate processes
+    // and the face pulls each one by pane index, because there can be several
+    // and they must not be conflated — which is exactly what one shared
+    // snapshot did.
     TerminalScene {
         open: true,
-        full_panel: pane_bound.is_some(),
-        pane_bound,
+        full_panel: false,
+        pane_bound: None,
         lines,
     }
 }
@@ -1804,6 +1810,7 @@ fn build_editor_surfaces(
                     && p.hscroll == eff_hscroll
                     && p.doc_version == doc_version
                     && p.band_rows == rows_each as u32
+                    && p.is_terminal == pane.is_terminal()
                     && p.rect == rect
                     && p.doc_line_count == doc_line_count
             }) {
@@ -1839,6 +1846,7 @@ fn build_editor_surfaces(
             lines,
             doc_version,
             band_rows: rows_each as u32,
+            is_terminal: pane.is_terminal(),
             rect,
         });
     }

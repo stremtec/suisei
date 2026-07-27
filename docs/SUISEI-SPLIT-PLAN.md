@@ -231,14 +231,25 @@ lower pane closed, which §1.1 called out as the tell: a model being corrected
 after the fact instead of being right. A pane that closes takes its terminal
 with it; there are no indices to repair.
 
-**Deferred: multiple concurrent terminals.** The plan's gate was "two terminal
-panes at once". That needs a `HashMap<TerminalId, Terminal>`, a PTY and a pump
-per entry, and an FFI that ships more than one terminal snapshot — and nobody
-has asked for it. The part that was causing the reported instability is the
-placement, and that is done. Recorded here rather than quietly dropped.
+**Multiple concurrent terminals — also done**, after being deferred once on
+the argument that "nobody has asked for it". That was wrong, and it was wrong
+in a way worth recording: with one shared `App.terminal`, a second terminal
+pane was a second *view* of the same session, and converting a second pane
+**moved** the shell rather than starting one. The user's report was "두개
+에디터 전부 각각 터미널 띄우는게 작동 안함 … 터미널이 연동되는것같은 오류" —
+both symptoms are that single shared PTY, so the deferral did not scope the
+work down, it left the feature broken.
 
-**Gate — met** for what shipped: `App.terminal` has no location fields left,
-and the terminal follows its pane.
+`PaneContent::Terminal` now carries a `TerminalId`, and `App.pane_terminals`
+holds one `Terminal` per pane. `App.terminal` is the **docked** shell (⌃T)
+only. Every pane shell is polled on tick, so a build in one keeps running while
+you work in another. The face pulls rows per pane through
+`suisei_engine_terminal_for_pane`; the pane's `is_terminal` flag rides in a
+byte that was already padding, so `SuiseiPaneC` did not change size.
+
+**Gate — met.** `two_terminal_panes_are_two_shells` (engine), and by hand: two
+panes, `echo LEFT_ONLY` in one and `echo RIGHT_ONLY` in the other, each showing
+only its own output.
 
 ### S5 · J6 as specified — **DONE**
 `convert_focused_pane_to_terminal()`:

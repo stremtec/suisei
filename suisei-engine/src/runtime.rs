@@ -596,6 +596,14 @@ impl Engine {
             self.shell.dirty = true;
             need_full = true;
         }
+        // Every pane shell flows, not just the focused one — a build running in
+        // one terminal pane must keep going while you type in another.
+        for t in self.app.pane_terminals.values_mut() {
+            t.poll();
+            if t.take_damage() {
+                self.shell.dirty = true;
+            }
+        }
         if self.app.terminal.open || matches!(self.app.mode, Mode::Terminal) {
             // Face never paints TUI rows that call start() — boot PTY here if deferred.
             if !self.app.terminal.started {
@@ -838,7 +846,7 @@ impl Engine {
             Some(grid) => grid,
             None => {
                 let cols = self.app.viewport.width.max(40);
-                let rows = if self.app.split.terminal_pane().is_some() {
+                let rows = if !self.app.pane_terminals.is_empty() {
                     self.app.viewport.height.max(24)
                 } else {
                     self.app.viewport.height.max(8).min(24).max(8)
@@ -2296,6 +2304,7 @@ mod tests {
             "no split is created — the focused pane is converted in place"
         );
         assert_eq!(eng.app.split.terminal_pane(), Some(1), "the focused pane runs it");
+        assert_eq!(eng.app.pane_terminals.len(), 1, "one shell, for that pane");
         assert!(eng.app.split.panes[1].is_terminal());
         assert!(!eng.app.split.panes[0].is_terminal(), "the other pane is untouched");
         assert_eq!(
@@ -2313,7 +2322,44 @@ mod tests {
         eng.app.toggle_terminal_full();
         assert_eq!(eng.app.split.terminal_pane(), None, "terminal gone");
         assert_eq!(eng.app.split.pane_count(), panes_before, "still no split churn");
-        assert!(!eng.app.terminal.open);
+        assert!(eng.app.pane_terminals.is_empty(), "its shell ended with it");
+    }
+
+    /// Each terminal pane is its OWN process.
+    ///
+    /// One `App.terminal` served every terminal pane at first, so a second
+    /// pane was a second view of the same session — they mirrored each other —
+    /// and converting a second pane moved the shell instead of starting one.
+    #[test]
+    fn two_terminal_panes_are_two_shells() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.recompose();
+        eng.split_vertical();
+
+        eng.focus_pane(0);
+        eng.app.toggle_terminal_full();
+        eng.focus_pane(1);
+        eng.app.toggle_terminal_full();
+
+        assert_eq!(eng.app.split.pane_count(), 2, "still two panes");
+        let ids: Vec<_> = eng
+            .app
+            .split
+            .panes
+            .iter()
+            .filter_map(|p| p.terminal_id())
+            .collect();
+        assert_eq!(ids.len(), 2, "both panes run a shell");
+        assert_ne!(ids[0], ids[1], "and they are different shells");
+        assert_eq!(eng.app.pane_terminals.len(), 2, "two live processes");
+
+        // Closing one leaves the other alone.
+        eng.focus_pane(1);
+        eng.app.toggle_terminal_full();
+        assert_eq!(eng.app.pane_terminals.len(), 1);
+        assert!(eng.app.split.panes[0].is_terminal(), "pane 0 kept its shell");
+        assert!(!eng.app.split.panes[1].is_terminal());
     }
 
     /// Esc closes the file palette, all the way through `gui_escape`.

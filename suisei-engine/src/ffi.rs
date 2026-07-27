@@ -60,6 +60,7 @@ pub struct SuiseiPaneC {
     pub line_start: u32,
     pub line_count: u32,
     pub focused: u8,
+    /// 1 when this pane runs its own shell (see `suisei_engine_terminal_for_pane`).
     pub _pad0: u8,
     pub _pad1: u8,
     pub _pad2: u8,
@@ -435,7 +436,7 @@ pub extern "C" fn suisei_engine_chrome(
             line_start: 0,
             line_count: line_n as u32,
             focused: 1,
-            _pad0: 0,
+            _pad0: u8::from(chrome.pane0_is_terminal),
             _pad1: 0,
             _pad2: 0,
             doc_line_count: chrome.line_count,
@@ -462,11 +463,13 @@ pub extern "C" fn suisei_engine_chrome(
                 line_start: start,
                 line_count: take as u32,
                 focused: u8::from(pane.focused),
+                // Reuses a pad byte — no size change, so the pane stride and
+                // every offset after it stay put.
+                _pad0: u8::from(pane.is_terminal),
                 rect_x: pane.rect.x,
                 rect_y: pane.rect.y,
                 rect_w: pane.rect.w,
                 rect_h: pane.rect.h,
-                _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,
                 doc_line_count: pane.doc_line_count,
@@ -1585,6 +1588,46 @@ pub extern "C" fn suisei_engine_terminal(
     o.cursor_row = crow as u32;
     o.cursor_col = ccol as u32;
     for (i, line) in t.lines.iter().take(n).enumerate() {
+        write_cstr(&mut o.lines[i], line);
+    }
+    1
+}
+
+/// Rows for the shell running in a specific pane.
+///
+/// Pane terminals are separate processes, so there is no single "the terminal"
+/// to ask for. `suisei_engine_terminal` remains the docked one.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_terminal_for_pane(
+    ptr: *const SuiseiEngine,
+    pane: u32,
+    out: *mut SuiseiTerminalSnapshot,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let eng = unsafe { &*ptr };
+    let Some(term) = eng.0.app().pane_terminal(pane as usize) else {
+        return 0;
+    };
+    let o = unsafe { &mut *out };
+    o.open = 1;
+    o.full_panel = 1;
+    o.pane_bound = pane;
+    let lines: Vec<String> = term
+        .visible_rows_sgr()
+        .into_iter()
+        .take(SUISEI_MAX_TERM_LINES)
+        .collect();
+    let n = lines.len();
+    o.count = n as u32;
+    for row in o.lines.iter_mut().skip(n) {
+        row[0] = 0;
+    }
+    let (ccol, crow) = term.cursor_position();
+    o.cursor_row = crow as u32;
+    o.cursor_col = ccol as u32;
+    for (i, line) in lines.iter().enumerate() {
         write_cstr(&mut o.lines[i], line);
     }
     1

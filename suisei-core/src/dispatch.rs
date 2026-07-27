@@ -578,7 +578,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     match app.mode {
         Mode::Editor => {}
         Mode::Explorer => handle_explorer(app, code),
-        Mode::Terminal => handle_terminal(app, code),
+        Mode::Terminal => handle_terminal(app, code, modifiers),
         Mode::Search => handle_search_input(app, code),
         Mode::Palette => handle_palette(app, code),
         Mode::SourceControl => handle_scm(app, code),
@@ -2033,7 +2033,9 @@ fn handle_pane_terminal_window(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> bool {
-    app.terminal.poll();
+    if let Some(t) = app.focused_pane_terminal_mut() {
+        t.poll();
+    }
 
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
@@ -2097,32 +2099,38 @@ fn handle_pane_terminal_window(
     }
 
     // ── Everything else → PTY ───────────────────────────────────────────
+    // From here on every key belongs to THIS pane's shell. Each terminal pane
+    // owns its own process, so the write target is the focused pane's, never a
+    // single shared `App.terminal`.
+    let Some(term) = app.focused_pane_terminal_mut() else {
+        return true;
+    };
     // Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+L … as real control bytes
     if ctrl && !super_key {
         if let KeyCode::Char(c) = code {
             let lower = c.to_ascii_lowercase();
             if lower.is_ascii_lowercase() {
                 let byte = (lower as u8) - b'a' + 1;
-                app.terminal.write_input(&[byte]);
+                term.write_input(&[byte]);
                 return true;
             }
         }
         // Ctrl+Arrow etc. — still useful in some REPLs
         match code {
             KeyCode::Left => {
-                app.terminal.write_input(b"\x1b[1;5D");
+                term.write_input(b"\x1b[1;5D");
                 return true;
             }
             KeyCode::Right => {
-                app.terminal.write_input(b"\x1b[1;5C");
+                term.write_input(b"\x1b[1;5C");
                 return true;
             }
             KeyCode::Up => {
-                app.terminal.write_input(b"\x1b[1;5A");
+                term.write_input(b"\x1b[1;5A");
                 return true;
             }
             KeyCode::Down => {
-                app.terminal.write_input(b"\x1b[1;5B");
+                term.write_input(b"\x1b[1;5B");
                 return true;
             }
             _ => {}
@@ -2136,54 +2144,74 @@ fn handle_pane_terminal_window(
             buf[0] = 0x1b;
             let s = c.encode_utf8(&mut buf[1..]);
             let n = 1 + s.len();
-            app.terminal.write_input(&buf[..n]);
+            term.write_input(&buf[..n]);
             return true;
         }
     }
 
-    write_terminal_key(app, code);
+    write_terminal_key(term, apply_shift_for_pty(code, shift));
     true
 }
 
-fn write_terminal_key(app: &mut App, code: KeyCode) {
+/// Re-apply Shift to a letter on its way to the PTY.
+///
+/// Core's key model has no separate uppercase key: the face lowercases letters
+/// and carries the case as `KeyModifiers::SHIFT`, which is what the editor's
+/// own bindings expect. `write_terminal_key` only ever saw the `KeyCode`, so
+/// the shell was handed the lowercased character and `echo HELLO` arrived as
+/// `echo hello`. Non-letters need no help — they cross with their real glyph.
+fn apply_shift_for_pty(code: KeyCode, shift: bool) -> KeyCode {
     match code {
-        KeyCode::Enter => app.terminal.write_input(b"\r"),
-        KeyCode::Backspace => app.terminal.write_input(&[0x7f]),
-        KeyCode::Tab => app.terminal.write_input(b"\t"),
+        KeyCode::Char(c) if shift && c.is_lowercase() => {
+            let mut up = c.to_uppercase();
+            match (up.next(), up.next()) {
+                (Some(u), None) => KeyCode::Char(u),
+                _ => code,
+            }
+        }
+        other => other,
+    }
+}
+
+fn write_terminal_key(term: &mut crate::term::Terminal, code: KeyCode) {
+    match code {
+        KeyCode::Enter => term.write_input(b"\r"),
+        KeyCode::Backspace => term.write_input(&[0x7f]),
+        KeyCode::Tab => term.write_input(b"\t"),
         // Arrows honor DECCKM (vim/less switch to application cursor keys).
         KeyCode::Left => {
-            let seq = app.terminal.arrow_seq('D');
-            app.terminal.write_input(seq);
+            let seq = term.arrow_seq('D');
+            term.write_input(seq);
         }
         KeyCode::Right => {
-            let seq = app.terminal.arrow_seq('C');
-            app.terminal.write_input(seq);
+            let seq = term.arrow_seq('C');
+            term.write_input(seq);
         }
         KeyCode::Up => {
-            let seq = app.terminal.arrow_seq('A');
-            app.terminal.write_input(seq);
+            let seq = term.arrow_seq('A');
+            term.write_input(seq);
         }
         KeyCode::Down => {
-            let seq = app.terminal.arrow_seq('B');
-            app.terminal.write_input(seq);
+            let seq = term.arrow_seq('B');
+            term.write_input(seq);
         }
-        KeyCode::Home => app.terminal.write_input(b"\x1b[H"),
-        KeyCode::End => app.terminal.write_input(b"\x1b[F"),
-        KeyCode::PageUp => app.terminal.scroll_up(3),
-        KeyCode::PageDown => app.terminal.scroll_down(3),
-        KeyCode::Delete => app.terminal.write_input(b"\x1b[3~"),
-        KeyCode::Esc => app.terminal.write_input(b"\x1b"),
+        KeyCode::Home => term.write_input(b"\x1b[H"),
+        KeyCode::End => term.write_input(b"\x1b[F"),
+        KeyCode::PageUp => term.scroll_up(3),
+        KeyCode::PageDown => term.scroll_down(3),
+        KeyCode::Delete => term.write_input(b"\x1b[3~"),
+        KeyCode::Esc => term.write_input(b"\x1b"),
         KeyCode::Char(c) => {
             let mut buf = [0u8; 4];
             let s = c.encode_utf8(&mut buf);
-            app.terminal.write_input(s.as_bytes());
+            term.write_input(s.as_bytes());
         }
         _ => {}
     }
 }
 
 /// Side-panel terminal (Ctrl+T) — still Mode::Terminal.
-fn handle_terminal(app: &mut App, code: KeyCode) {
+fn handle_terminal(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.terminal.poll();
 
     match code {
@@ -2198,7 +2226,10 @@ fn handle_terminal(app: &mut App, code: KeyCode) {
             app.terminal.shutdown();
             app.mode = Mode::Editor;
         }
-        other => write_terminal_key(app, other),
+        other => write_terminal_key(
+            &mut app.terminal,
+            apply_shift_for_pty(other, modifiers.contains(KeyModifiers::SHIFT)),
+        ),
     }
 }
 

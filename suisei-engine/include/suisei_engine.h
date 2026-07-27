@@ -76,7 +76,7 @@ typedef struct SuiseiPaneC {
   uint32_t line_start; /* index into lines[] */
   uint32_t line_count;
   uint8_t focused;
-  uint8_t _pad0;
+  uint8_t is_terminal; /* pane runs its own shell */
   uint8_t _pad1;
   uint8_t _pad2;
   uint32_t doc_line_count; /* total lines in this pane's buffer */
@@ -414,6 +414,8 @@ typedef struct SuiseiThemeSnapshot {
 
 uint8_t suisei_engine_completions(const SuiseiEngine *ptr, SuiseiCompletionsSnapshot *out);
 uint8_t suisei_engine_terminal(const SuiseiEngine *ptr, SuiseiTerminalSnapshot *out);
+uint8_t suisei_engine_terminal_for_pane(const SuiseiEngine *e, uint32_t pane,
+                                        SuiseiTerminalSnapshot *out);
 /* Scroll the terminal panel through its scrollback; positive = older output. */
 void suisei_engine_terminal_scroll(SuiseiEngine *ptr, int32_t delta_rows);
 uint8_t suisei_engine_status_extra(const SuiseiEngine *ptr, SuiseiStatusExtra *out);
