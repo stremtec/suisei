@@ -800,8 +800,23 @@ struct ContentView: View {
 
     /// The terminal grid's own background — behind the glyphs AND behind the
     /// whole panel, so no sliver of another fill can show at its edges.
+    /// The terminal grid is dark in **both** themes.
+    ///
+    /// It used to be the editor background nudged 3.5% toward black, which in
+    /// the light theme is very nearly white — and core paints the shell's
+    /// default foreground as rgb(200,200,200). Light grey on near-white is a
+    /// contrast ratio of about 1.35:1, so the terminal rendered perfectly and
+    /// could not be seen at all. The parser's SGR backgrounds are tints
+    /// (`.opacity(0.45)`) meant to sit *over* a dark grid, which is the other
+    /// half of the same assumption.
+    ///
+    /// A dark terminal inside a light editor is the norm — Xcode, VS Code and
+    /// iTerm all do it — so this fixes the contrast without inventing a
+    /// light-terminal palette core does not emit.
     private var terminalGridBg: Color {
-        mixColor(editorBg, .black, isLightTheme ? 0.035 : 0.18)
+        isLightTheme
+            ? Color(red: 0.10, green: 0.11, blue: 0.13)
+            : mixColor(editorBg, .black, 0.18)
     }
 
     /// The docked terminal region is filled with the GRID's own colour.
@@ -4046,7 +4061,7 @@ struct ContentView: View {
                     cursorRow: engine.chrome.terminal.cursorRow,
                     cursorCol: engine.chrome.terminal.cursorCol,
                     fontSize: 12,
-                    bg: NSColor(mixColor(editorBg, .black, isLightTheme ? 0.035 : 0.18)),
+                    bg: NSColor(terminalGridBg),
                     fg: NSColor(fg)
                 )
                 .frame(width: geo.size.width, height: geo.size.height)

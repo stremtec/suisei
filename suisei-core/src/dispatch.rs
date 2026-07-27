@@ -2190,7 +2190,7 @@ fn handle_terminal(app: &mut App, code: KeyCode) {
         KeyCode::Esc => {
             // Side terminal: Esc closes. Full-panel shouldn't land here, but if
             // it does, send Esc to PTY rather than stealing it.
-            if app.terminal.full_panel {
+            if app.split.terminal_pane().is_some() {
                 app.terminal.write_input(b"\x1b");
                 return;
             }

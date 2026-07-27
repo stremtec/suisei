@@ -2273,6 +2273,11 @@ final class EngineBridge: ObservableObject {
     /// Route keys to the PTY (clicking the terminal) or back to the editor.
     func focusTerminal(_ on: Bool) {
         guard let engine else { return }
+        // Same trap as the palette: giving the terminal focus in the *engine*
+        // does nothing about the window's first responder, so with the project
+        // tree's filter still focused the shell was handed the keyboard in
+        // name only and every keystroke went on landing in that filter.
+        if on { reclaimKeyboardFromTextFields() }
         suisei_engine_focus_terminal(engine, on ? 1 : 0)
         refreshChrome()
     }

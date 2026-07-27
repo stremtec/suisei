@@ -1589,17 +1589,14 @@ fn build_terminal(app: &App) -> TerminalScene {
     if lines.is_empty() {
         lines.push(" ".into());
     }
-    let pane_bound = if app.terminal.full_panel {
-        app.terminal
-            .pane_bound
-            .map(|i| i as u32)
-            .or(Some(app.split.focus_index() as u32))
-    } else {
-        None
-    };
+    // Both derived from the layout tree, which owns where the terminal is.
+    // The face's contract is unchanged — it still asks "is this a pane
+    // terminal, and which pane" — but nothing can disagree about the answer
+    // any more, because there is only one place it is written down.
+    let pane_bound = app.split.terminal_pane().map(|i| i as u32);
     TerminalScene {
         open: true,
-        full_panel: app.terminal.full_panel,
+        full_panel: pane_bound.is_some(),
         pane_bound,
         lines,
     }
@@ -1907,7 +1904,7 @@ fn build_lines_at(
         // Strict: a pane whose document is closed has no cursor in `tab`, and
         // `pane_tab`'s fallback to the active tab would hand over someone
         // else's row.
-        .find(|p| app.buffer_index(p.buffer) == Some(tab))
+        .find(|p| app.buffer_index(p.buffer()) == Some(tab))
     {
         p.cursor.0
     } else {

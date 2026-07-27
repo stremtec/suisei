@@ -214,7 +214,8 @@ impl Engine {
         self.ensure_terminal_started();
         let mut fresh = suisei_core::term::Terminal::new();
         fresh.open = true;
-        fresh.full_panel = self.app.terminal.full_panel;
+        // Where the terminal lives is the layout tree's business now, so a
+        // session swap carries nothing about placement.
         std::mem::swap(&mut self.app.terminal, &mut fresh);
         // `fresh` now holds the previously active session — park it in place.
         self.parked_terminals
@@ -837,7 +838,7 @@ impl Engine {
             Some(grid) => grid,
             None => {
                 let cols = self.app.viewport.width.max(40);
-                let rows = if self.app.terminal.full_panel {
+                let rows = if self.app.split.terminal_pane().is_some() {
                     self.app.viewport.height.max(24)
                 } else {
                     self.app.viewport.height.max(8).min(24).max(8)
@@ -2259,6 +2260,60 @@ mod tests {
         eng.focus_pane(1);
         eng.focus_pane(0);
         assert_eq!(eng.app.scroll, parked, "still there after a second round trip");
+    }
+
+    /// J6 as specified: ⌃⇧T turns the **focused pane** into a terminal and
+    /// leaves the document it displaced reachable from the tab bar. No split
+    /// is created and none is destroyed.
+    ///
+    /// What used to happen instead: a *new split* was conjured to host the
+    /// shell, the document was never displaced, and `owns_split` was recorded
+    /// so the conjured split could be collapsed again later.
+    #[test]
+    fn terminal_takes_over_the_focused_pane_and_leaves_the_file_reachable() {
+        let dir = std::env::temp_dir().join("suisei_j6_pane_terminal");
+        let _ = std::fs::create_dir_all(&dir);
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&a, "DOC_AAA\n").unwrap();
+        std::fs::write(&b, "DOC_BBB\n").unwrap();
+
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.app = App::open_file(a.to_str().unwrap());
+        eng.recompose();
+        eng.split_vertical();
+        eng.focus_pane(1);
+        eng.app.open_new_tab(b.to_str().unwrap());
+        eng.recompose();
+
+        let panes_before = eng.app.split.pane_count();
+        let tabs_before = eng.app.buffers.len();
+
+        eng.app.toggle_terminal_full();
+        assert_eq!(
+            eng.app.split.pane_count(),
+            panes_before,
+            "no split is created — the focused pane is converted in place"
+        );
+        assert_eq!(eng.app.split.terminal_pane(), Some(1), "the focused pane runs it");
+        assert!(eng.app.split.panes[1].is_terminal());
+        assert!(!eng.app.split.panes[0].is_terminal(), "the other pane is untouched");
+        assert_eq!(
+            eng.app.buffers.len(),
+            tabs_before,
+            "the displaced document is still open — the strip lists buffers"
+        );
+        assert!(
+            eng.app.buffers.iter().any(|t| t.filename.as_deref()
+                == Some(std::path::Path::new(&b))),
+            "and it is still b.txt, reachable from the tab bar"
+        );
+
+        // Toggling again puts the pane back on the document it displaced.
+        eng.app.toggle_terminal_full();
+        assert_eq!(eng.app.split.terminal_pane(), None, "terminal gone");
+        assert_eq!(eng.app.split.pane_count(), panes_before, "still no split churn");
+        assert!(!eng.app.terminal.open);
     }
 
     /// Esc closes the file palette, all the way through `gui_escape`.

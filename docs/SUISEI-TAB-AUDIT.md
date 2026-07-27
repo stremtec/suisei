@@ -185,6 +185,34 @@ at all — core ships a normalised rect per pane and the face places them
 absolutely, finding dividers where rects share an edge. P5 was the gate and it
 is met.
 
+### 3.3 The terminal renders and cannot be seen or typed into
+
+Found while verifying J6, and **not caused by it** — both reproduce with a
+single unsplit pane, on code paths the split work never touched.
+
+**Contrast.** `terminalGridBg` was the editor background nudged 3.5% toward
+black, which in the light theme is very nearly white, while core paints the
+shell's default foreground as rgb(200,200,200). That is a contrast ratio of
+about 1.35:1 — the terminal rendered perfectly and was invisible. The SGR
+backgrounds the parser produces are tints (`.opacity(0.45)`) meant to sit over
+a *dark* grid, which is the same assumption from the other side. Fixed: the
+terminal grid is dark in both themes, as it is in Xcode, VS Code and iTerm.
+
+**Still blank after that fix**, and unexplained. Established: the engine's
+snapshot really does carry the prompt (read in-process — 40 lines, line 0 is
+`asill@… suisei %`); the face receives non-empty lines (the header's
+"starting…" branch does not appear); `TermCanvas` clears its row cache on every
+change and is `isFlipped`; and the grid fills its whole area with the
+background, so it is sized and drawing. So lines arrive and no glyphs land.
+Not chased further — it is a terminal-subsystem bug, not a layout one.
+
+**Keyboard.** Clicking the terminal gives it focus in the *engine* but not in
+AppKit, so with the project tree's filter still first responder every keystroke
+went on landing in that filter — the same trap as §3.1. `focusTerminal(true)`
+now reclaims the responder, but this could not be confirmed end to end: typing
+still reached the filter afterwards, which says something further is re-taking
+focus. Open.
+
 ### Still open
 `terminal.pane_bound` is a pane **index** into a list whose order the tree can
 change — the last positional handle in this area, and S4's job. J6 (pane →

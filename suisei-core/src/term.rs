@@ -14,15 +14,6 @@ use unicode_width::UnicodeWidthChar;
 
 pub struct Terminal {
     pub open: bool,
-    /// When true, terminal fills an editor slot (Ctrl+Shift+T)
-    /// instead of the side panel (Ctrl+T).
-    pub full_panel: bool,
-    /// When split is active, full terminal is bound to this pane index only
-    /// (`None` = fill the whole main editor area).
-    pub pane_bound: Option<usize>,
-    /// Ctrl+Shift+T created the split it lives in (single view before) —
-    /// closing the terminal must collapse that split back too.
-    pub owns_split: bool,
     /// Screen contents changed since the last `take_damage()` — lets faces
     /// repaint only when the PTY actually produced output instead of
     /// unconditionally every tick (that 20Hz republish made editor scrolling
@@ -148,9 +139,6 @@ impl Default for Terminal {
         let (cols, rows) = (80, 24);
         Self {
             open: false,
-            full_panel: false,
-            pane_bound: None,
-            owns_split: false,
             damage: false,
             rows: blank_grid(cols, rows),
             saved_primary: None,
@@ -349,8 +337,6 @@ impl Terminal {
         self.rx = None;
         self.started = false;
         self.open = false;
-        self.full_panel = false;
-        self.pane_bound = None;
         self.close_confirm = false;
         self.pending.clear();
         self.alt_screen = false;

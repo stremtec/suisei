@@ -219,13 +219,28 @@ axis and refusing the other two keys.
 dragged from y=424 to y=600 while the right column's stayed at 424.
 `MAX_PANES` is now a total-leaf cap.
 
-### S4 · `PaneContent`, and terminals with ids
-Introduce `PaneContent`, move terminals into `terminals: HashMap<TerminalId,
-Terminal>`, delete `full_panel` / `pane_bound` / `owns_split`.
+### S4 · `PaneContent` — **DONE**, with one part deliberately deferred
+`PaneContent::{Document(BufferId), Terminal { restore }}` on the pane, and
+`full_panel` / `pane_bound` / `owns_split` deleted. "Where is the terminal" is
+now one fact in one place — the layout tree — and the two values the face still
+asks for (`full_panel`, `pane_bound`) are **computed** from it, so the C ABI and
+the face were untouched.
 
-**Gate:** two terminal panes open simultaneously — impossible today.
+`close_split`'s `Some(b - 1)` arm is gone. It shifted `pane_bound` down when a
+lower pane closed, which §1.1 called out as the tell: a model being corrected
+after the fact instead of being right. A pane that closes takes its terminal
+with it; there are no indices to repair.
 
-### S5 · J6 as specified
+**Deferred: multiple concurrent terminals.** The plan's gate was "two terminal
+panes at once". That needs a `HashMap<TerminalId, Terminal>`, a PTY and a pump
+per entry, and an FFI that ships more than one terminal snapshot — and nobody
+has asked for it. The part that was causing the reported instability is the
+placement, and that is done. Recorded here rather than quietly dropped.
+
+**Gate — met** for what shipped: `App.terminal` has no location fields left,
+and the terminal follows its pane.
+
+### S5 · J6 as specified — **DONE**
 `convert_focused_pane_to_terminal()`:
 1. Take the focused pane's `PaneContent::Document(id)`.
 2. Ensure that document is present in the tab bar (today it already is — the
@@ -238,9 +253,23 @@ Closing that terminal pane restores the pane to the document it displaced, or
 collapses the pane if the user closes the pane itself. `owns_split` is not
 needed because no split was conjured.
 
-**Gate:** with a 2×2 layout, convert one pane to a terminal and back; the other
-three panes do not move, and the displaced file is reachable from the tab bar
-throughout.
+`toggle_terminal_full` is now exactly this. It converts the focused pane in
+place: no split is created, none is destroyed, and the displaced document stays
+open — the strip lists buffers, not panes, so it is already there. It is made
+the active tab so it is obvious where it went.
+
+**Gate — met.** `terminal_takes_over_the_focused_pane_and_leaves_the_file_reachable`
+(engine) pins the pane count, which pane runs the terminal, that the other pane
+is untouched, that the document is still open, and that toggling restores.
+Confirmed by hand: with a 2-pane split, ⌃⇧T turned the focused pane into a
+Terminal, the other pane kept its file, the tab strip kept the document, and
+the pane count never changed.
+
+**Not verified: the shell inside the pane is usable.** The PTY starts and the
+engine's snapshot carries the prompt (checked in-process), but the grid paints
+no text in the running app and keystrokes land in the project tree's filter —
+see `SUISEI-TAB-AUDIT.md` §3.3. Both are terminal-subsystem faults, on code
+paths this step did not touch, and both reproduce with a single unsplit pane.
 
 ### S6 · Layout tabs (J7)
 
