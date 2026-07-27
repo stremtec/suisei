@@ -64,8 +64,27 @@ struct ContentView: View {
     @State private var tabFrames: [Int: CGRect] = [:]
     static let tabStripSpace = "suisei.tabstrip"
 
+    /// Which chip sits under `x`. Used for CLICKS, where "contains" is right.
     private func tabSlot(at x: CGFloat) -> Int? {
         tabFrames.first { $0.value.minX <= x && x <= $0.value.maxX }?.key
+    }
+
+    /// One-step neighbour swap while dragging, decided by the neighbour's
+    /// MIDPOINT rather than its bounds.
+    ///
+    /// `tabSlot(at:)` swaps the moment the cursor touches a neighbour's edge —
+    /// and the swap moves the chips, which puts the cursor back over the
+    /// original, which swaps it straight back. That oscillation is the shake
+    /// when a dragged tab sits ambiguously over another. Requiring the cursor
+    /// to pass the neighbour's midpoint is stable: once the swap lands, the
+    /// next midpoint is a whole chip away, so there is no return trip.
+    ///
+    /// One step at a time, so a fast drag walks the chips instead of teleporting
+    /// past the ones it crossed.
+    private func tabDragTarget(held: Int, x: CGFloat) -> Int? {
+        if let next = tabFrames[held + 1], x > next.midX { return held + 1 }
+        if held > 0, let prev = tabFrames[held - 1], x < prev.midX { return held - 1 }
+        return nil
     }
 
     /// While the pill is in flight (click travel or drag) it turns to Liquid
@@ -1254,6 +1273,7 @@ struct ContentView: View {
         .overlay(
             TabStripMouse(
                 slotAt: { x in tabSlot(at: x) },
+                targetFor: { held, x in tabDragTarget(held: held, x: x) },
                 onDrag: { held, to in
                     if engine.moveTab(from: held, to: to) { draggingTab = to }
                 },
@@ -4771,8 +4791,10 @@ private struct SplitCapsule: Shape {
 /// Because this overlay is then the hit view, it owns clicks as well as drags
 /// and hands both back through closures.
 private struct TabStripMouse: NSViewRepresentable {
-    /// Which tab sits at an x in the strip's own coordinates.
+    /// Which tab sits at an x in the strip's own coordinates (for clicks).
     var slotAt: (CGFloat) -> Int?
+    /// The one-step swap target while dragging, or nil to stay put.
+    var targetFor: (Int, CGFloat) -> Int?
     var onDrag: (Int, Int) -> Void
     var onPick: (Int) -> Void
     var onClick: (Int) -> Void
@@ -4780,6 +4802,7 @@ private struct TabStripMouse: NSViewRepresentable {
 
     final class Catcher: NSView {
         var slotAt: ((CGFloat) -> Int?)?
+        var targetFor: ((Int, CGFloat) -> Int?)?
         var onDrag: ((Int, Int) -> Void)?
         var onPick: ((Int) -> Void)?
         var onClick: ((Int) -> Void)?
@@ -4788,6 +4811,12 @@ private struct TabStripMouse: NSViewRepresentable {
         private var held: Int?
         private var startX: CGFloat = 0
         private var moved = false
+        /// Where the last swap happened. The chip frames are re-measured
+        /// asynchronously, so for a frame or two after a move they still
+        /// describe the OLD order — acting on those is the other half of the
+        /// shake. Requiring the cursor to travel before swapping again rides
+        /// over that window without needing to know how long it is.
+        private var lastSwapX: CGFloat?
 
         /// THE fix. Without it AppKit takes the press to drag the window and
         /// none of the handlers below ever run.
@@ -4822,9 +4851,12 @@ private struct TabStripMouse: NSViewRepresentable {
                 moved = true
                 if let held { onPick?(held) }
             }
-            guard moved, let from = held, let to = slotAt?(cur), to != from else { return }
+            guard moved, let from = held else { return }
+            if let last = lastSwapX, abs(cur - last) < 6 { return }
+            guard let to = targetFor?(from, cur), to != from else { return }
             onDrag?(from, to)
             held = to
+            lastSwapX = cur
         }
 
         // `mouseMoved` needs a tracking area to be delivered at all.
@@ -4844,6 +4876,7 @@ private struct TabStripMouse: NSViewRepresentable {
             }
             held = nil
             moved = false
+            lastSwapX = nil
             onEnd?()
         }
     }
@@ -4858,6 +4891,7 @@ private struct TabStripMouse: NSViewRepresentable {
 
     private func apply(to v: Catcher) {
         v.slotAt = slotAt
+        v.targetFor = targetFor
         v.onDrag = onDrag
         v.onPick = onPick
         v.onClick = onClick

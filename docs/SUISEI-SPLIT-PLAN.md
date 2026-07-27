@@ -181,10 +181,57 @@ needed because no split was conjured.
 three panes do not move, and the displaced file is reachable from the tab bar
 throughout.
 
-### S6 · Layout persistence (J7 depends on this)
-With a `Layout` tree and stable ids, serialising a layout is straightforward,
-which is what J7's "layout tab bar" needs. Not part of this plan beyond making
-it possible.
+### S6 · Layout tabs (J7)
+
+The interaction, as specified:
+
+> Whatever the editor is showing — a single file, a 2- or 3-way split, or the
+> full four-pane `+` — put the mouse near the tab bar and **scroll up quickly**.
+> A tab is added: the files currently visible in the editor are bundled into
+> one, and a new tab called **"layout 1"** appears.
+
+So a layout is not a separate bar to switch between — it is **a tab like any
+other**, and the gesture is a *fold*: several open documents collapse into one
+entry that remembers how they were arranged.
+
+**What a layout tab holds.** With S3 and S1 in place this is just the tree:
+
+```rust
+enum TabContent {
+    Document(BufferId),
+    Layout { name: String, tree: Layout },   // Layout is S3's node type
+}
+```
+
+The `Layout` already names a `BufferId` per leaf plus each pane's scroll and
+cursor, so a layout tab is a complete description of what was on screen. It
+needs no new state — which is the argument for doing S3 before this, not
+alongside it.
+
+**Folding.** Take the current tree, wrap it in a `TabContent::Layout`, and put
+it where the active tab was; the documents it names stay open, they are simply
+no longer *individually* in the strip. Restoring is the inverse: activating a
+layout tab installs its tree.
+
+**Naming.** "layout 1", "layout 2" … by creation order. Renameable later; not
+worth a dialog on the gesture.
+
+**The gesture.** A fast upward scroll with the pointer over the tab strip. Two
+things it must not become:
+
+* An accidental fold during ordinary horizontal tab scrolling — so it needs a
+  velocity floor and a dominant-axis test, not merely `deltaY > 0`.
+* Irreversible — a fast scroll *down* over a layout tab should unfold it back
+  into its documents, or the gesture is a trap.
+
+`TabStripMouse` already owns the strip's mouse events for exactly the reasons
+in §1, so `scrollWheel` belongs on the same view rather than in a competing
+SwiftUI gesture.
+
+**Order.** This is last on purpose. Folding a layout means serialising the split
+tree, and until S3 exists there is no tree to serialise — only a flat vector
+with one `kind` and one `ratio`, which cannot describe the four-pane `+` the
+feature is meant to capture.
 
 ---
 

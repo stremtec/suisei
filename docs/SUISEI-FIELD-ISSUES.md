@@ -305,38 +305,46 @@ highlighted for a frame). Caught in a mid-flight capture on the first attempt.
 One consumer (`isSource: false`) against many anchors (`isSource: true`) is the
 construction that cannot do that.
 
-### J4 · Tabs cannot be reordered · **HALF DONE** — the move works, the grab does not
+### J4 · Tabs cannot be reordered · FIXED (2026-07-27)
 
-**Done and tested:** `App::move_tab(from, to)` carries every index that points
-into `buffers` with the move — the active tab and every split pane's
-`tab_index`. Panes address their document by position
-(`SUISEI-SPLIT-PLAN.md` §1.1), so a reorder that moved only the vector would
-leave each pane showing whatever slid into its slot. Two regression tests cover
-both directions, the pane remap and the no-ops. Exposed as
-`suisei_engine_move_tab` / `EngineBridge.moveTab`.
+**The move.** `App::move_tab(from, to)` carries every index that points into
+`buffers` with it — the active tab and every split pane's `tab_index`. Panes
+address their document by position (`SUISEI-SPLIT-PLAN.md` §1.1), so a reorder
+that moved only the vector would leave each pane showing whatever slid into its
+slot. Two regression tests cover both directions, the pane remap and the no-ops.
 
-**Not done:** getting a mouse drag on a tab chip to *reach* anything. Four
-approaches, each one built and driven against the running app, each one
-measured rather than assumed:
+**The grab took six attempts and the answer was not in SwiftUI.** The strip sits
+in the window's **titlebar region** (`.fullSizeContentView`, hidden titlebar),
+and AppKit drags the window from any view there whose `mouseDownCanMoveWindow`
+is true — consuming the mouseDown *before* SwiftUI gesture arbitration runs.
 
 | approach | result |
 |---|---|
-| `.onDrag` / `.onDrop` (system drag session) | never starts — the chip's own `simultaneousGesture(DragGesture(minimumDistance: 0))` pre-empts the press |
-| per-chip `DragGesture` + `simultaneousGesture` | chip is a `Button`; its recogniser claims the movement |
-| row-level `highPriorityGesture` | `onChanged` **never fires** (probe-confirmed). Dragging moved the **window** — the top bar has a full-bleed `WindowDragGesture` layer under the strip |
-| AppKit `NSView` overlay, `hitTest` + `acceptsFirstMouse` | `mouseDown` **never fires** (probe-confirmed) |
+| `.onDrag` / `.onDrop` | session never starts |
+| per-chip `DragGesture` | the chip is a `Button`; its recogniser claims the movement |
+| row-level `highPriorityGesture` | `onChanged` never fires (probe-confirmed) |
+| AppKit overlay, `hitTest` + `acceptsFirstMouse` | `mouseDown` never fires — no `mouseDownCanMoveWindow` override |
+| the navigator rail's own `simultaneousGesture` shape | nothing; also [reported not to fire on macOS](https://developer.apple.com/forums/thread/718959) |
+| `.zIndex` over the `WindowDragGesture` layer | nothing — ordering cannot beat a claimant that is not in SwiftUI's arbitration |
 
-The third row is the strongest evidence: the press is being claimed by the top
-bar's `WindowDragGesture`, which is a full-bleed `Color.clear` layer behind the
-tabs in the top bar's `ZStack`.
+Mouse handling is an AppKit overlay overriding `mouseDownCanMoveWindow` to
+false. Being the hit view it owns clicks too, and hands them back. Note for
+anything else placed in that band: **`isMovableByWindowBackground = false` does
+not cover this** — it is titlebar dragging, not background dragging.
 
-Next things to try, in order:
-1. **Stop that layer being full-bleed.** Give the window drag only the regions
-   that should drag the window, so the strip's area is not over it at all.
-   This addresses the measured cause directly.
-2. Check whether the strip's `.mask(...)` is breaking hit-testing for anything
-   other than the Buttons — a `.contentShape(Rectangle())` after the mask would
-   rule it in or out.
+**The animations needed plan step S1.** `ForEach` identity was the slot index,
+so a reorder left the identity list unchanged (`[0,1,2,3]`) and only titles
+swapped in place — SwiftUI had nothing to move, and the reorder read as a
+teleport. `BufferTab` now carries a stable `id`, shipped per tab as `tab_ids`.
+The grabbed chip also lifts (scale + shadow) rather than only dimming.
+
+**And it oscillated.** Held ambiguously over a neighbour, a dragged tab swapped,
+unswapped and swapped again: "whichever chip contains the cursor" fires the
+moment the cursor touches an edge, and the swap moves the chips so the cursor is
+back over the original. Swapping only on crossing the neighbour's **midpoint**
+is stable — afterwards the next midpoint is a whole chip away. A 6pt travel
+requirement between swaps covers the rest: chip frames are re-measured
+asynchronously, so for a frame after a move they still describe the old order.
 
 ### S1 (partial) · Stable tab ids · DONE (2026-07-27)
 `BufferTab.id`, monotonic and never reused, carried to the face as `tab_ids` in
