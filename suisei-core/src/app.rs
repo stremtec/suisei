@@ -2073,7 +2073,7 @@ impl App {
             self.split
                 .open_split(crate::split::SplitKind::Vertical, tab, scroll, cur);
             self.split.set_focus(1);
-            self.sync_split_from_active();
+            self.park_focused_pane();
             self.terminal.owns_split = true;
         }
         self.terminal.full_panel = true;
@@ -3192,7 +3192,6 @@ impl App {
         self.buffer.cursor.col = col.min(line.chars().count());
         self.buffer.clamp_col();
         self.update_scroll();
-        self.sync_split_from_active();
         self.message = format!("→ {}:{}:{}", path, row + 1, col + 1);
     }
 
@@ -3342,7 +3341,7 @@ impl App {
     fn open_split_kind(&mut self, kind: crate::split::SplitKind, label: &str) {
         use crate::split::SplitAdd;
         self.save_state_to_tab();
-        self.sync_split_from_active();
+        self.park_focused_pane();
         let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
         let r = self
             .split
@@ -3390,7 +3389,7 @@ impl App {
         }
         let survivor = self.split.remove_focused();
         if self.split.is_split() {
-            self.apply_focused_pane();
+            self.load_focused_pane();
             self.message = format!("Pane closed · {} left", self.split.pane_count());
             return;
         }
@@ -3436,20 +3435,17 @@ impl App {
         if next == cur as usize {
             return;
         }
-        self.sync_split_from_active();
-        self.split.set_focus(next);
-        self.apply_focused_pane();
+        self.focus_pane_to(next);
         self.message = format!("Pane {}", next + 1);
     }
 
-    /// Persist active buffer scroll into the focused pane, then switch focus.
     pub fn focus_other_pane(&mut self) {
         if !self.split.is_split() {
             return;
         }
-        self.sync_split_from_active();
-        self.split.focus_other();
-        self.apply_focused_pane();
+        let n = self.split.panes.len();
+        let cur = self.split.focus.min(n.saturating_sub(1));
+        self.focus_pane_to((cur + 1) % n);
         self.message = format!("Pane {}", self.split.focus + 1);
     }
 
@@ -3457,13 +3453,28 @@ impl App {
         if !self.split.is_split() {
             return;
         }
-        self.sync_split_from_active();
-        self.split.set_focus(idx);
-        self.apply_focused_pane();
+        self.focus_pane_to(idx);
     }
 
-    /// Write current scroll/tab/hscroll into focused pane slot.
-    pub fn sync_split_from_active(&mut self) {
+    /// Park the focused pane's viewport into its slot.
+    ///
+    /// **The focused pane's slot is stale by design.** `App` holds the live
+    /// document, scroll, hscroll and cursor for whichever pane has focus; the
+    /// slots hold the *other* panes. Nothing needs syncing while the user
+    /// works, because there is only ever one authority at a time.
+    ///
+    /// This is not how it used to be. Both copies were meant to be live at
+    /// once, kept in step by four functions —`sync_split_from_active`,
+    /// `sync_focused_pane_viewport`, `sync_focused_pane_tab` and the write
+    /// buried in `update_scroll` — called from twenty-odd sites, each of which
+    /// had to remember. Every forgotten call left the two disagreeing, and the
+    /// symptom surfaced later and somewhere else: a pane that scrolled back to
+    /// a stale position, a cursor that jumped on focus change.
+    ///
+    /// The compositor already worked this way for the *document* — it reads
+    /// `current_buffer` for the focused pane and the slot only for the others
+    /// (`scene.rs`). This extends that rule to the rest of the pane state.
+    fn park_focused_pane(&mut self) {
         if !self.split.is_split() {
             return;
         }
@@ -3476,18 +3487,9 @@ impl App {
         p.cursor = cur;
     }
 
-    /// Keep focused pane's scroll/hscroll mirrors live (call after wheel / pan).
-    pub fn sync_focused_pane_viewport(&mut self) {
-        if !self.split.is_split() {
-            return;
-        }
-        let p = self.split.focused_pane_mut();
-        p.scroll = self.scroll;
-        p.hscroll = self.hscroll;
-    }
-
-    /// Load focused pane's tab into the active editor.
-    pub fn apply_focused_pane(&mut self) {
+    /// Load the focused pane's slot into `App`, the inverse of
+    /// [`App::park_focused_pane`].
+    fn load_focused_pane(&mut self) {
         if !self.split.is_split() {
             return;
         }
@@ -3501,27 +3503,39 @@ impl App {
                 self.refresh_git();
             }
         }
-        // Per-pane cursor (clamped — the buffer may have changed underneath).
+        // Clamped — the buffer may have changed underneath this pane.
         let max_row = self.buffer.line_count().saturating_sub(1);
         self.buffer.cursor.row = pane.cursor.0.min(max_row);
         self.buffer.cursor.col = pane.cursor.1;
         self.buffer.clamp_col();
-        self.scroll = pane.scroll;
+        self.scroll = pane.scroll.min(max_row);
         self.hscroll = if self.wrap_lines { 0 } else { pane.hscroll };
-        self.update_scroll();
+        // NO `update_scroll()`. It re-derives the scroll from the CARET, so a
+        // pane scrolled away from its cursor — scrolled with the wheel, which
+        // does not move the caret — snapped straight back to the top the
+        // moment focus returned to it. That *was* the "pane scrolls back to a
+        // stale position" report. The pane's parked scroll is authoritative;
+        // the caret being off-view is exactly the state the user left.
+        //
+        // `Engine::goto_tab` learned the same lesson for tabs already.
     }
 
-    /// Assign a different tab to the focused pane (e.g. after gt in a split).
-    pub fn sync_focused_pane_tab(&mut self) {
-        if self.split.is_split() {
-            let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
-            let id = self.current_buffer_id();
-            let p = self.split.focused_pane_mut();
-            p.buffer = id;
-            p.scroll = self.scroll;
-            p.hscroll = self.hscroll;
-            p.cursor = cur;
+    /// Move focus to `idx`. **The only way focus changes.**
+    ///
+    /// Park then load, in that order, in one place. The whole point of S2 is
+    /// that this is the single moment where the two copies of a pane's
+    /// viewport have to agree, so it is the only code that has to be right.
+    pub fn focus_pane_to(&mut self, idx: usize) {
+        if !self.split.is_split() {
+            return;
         }
+        let idx = idx.min(self.split.panes.len() - 1);
+        if idx == self.split.focus.min(self.split.panes.len() - 1) {
+            return;
+        }
+        self.park_focused_pane();
+        self.split.set_focus(idx);
+        self.load_focused_pane();
     }
 
     fn run_palette_command(&mut self, id: &str) {
@@ -4489,13 +4503,8 @@ impl App {
             self.scroll = cursor_row;
         }
 
-        // Keep focused split pane scroll in sync
-        if self.split.is_split() {
-            let id = self.current_buffer_id();
-            let p = self.split.focused_pane_mut();
-            p.scroll = self.scroll;
-            p.buffer = id;
-        }
+        // NOTE: deliberately does NOT write into the focused pane's slot.
+        // That slot is stale until focus leaves — see `park_focused_pane`.
     }
 
     fn line_visual_width(buffer: &crate::buffer::Buffer, row: usize) -> usize {
@@ -4785,7 +4794,6 @@ impl App {
                 self.restore_state_from_tab();
                 self.lsp_restart_for_current();
                 self.refresh_git();
-                self.sync_focused_pane_tab();
                 self.message = format!("Switched to: {}", abs_path.display());
                 return;
             }
@@ -4817,7 +4825,6 @@ impl App {
         self.lsp_synced_path = Some(abs_path.clone());
         self.lsp_synced_hash = text_hash(&text);
         self.refresh_git();
-        self.sync_focused_pane_tab();
         self.message = format!("Opened: {}", abs_path.display());
         self.fire_hook(crate::hooks::HookEvent::Open);
     }
@@ -4831,7 +4838,6 @@ impl App {
         self.restore_state_from_tab();
         self.lsp_restart_for_current();
         self.refresh_git();
-        self.sync_focused_pane_tab();
     }
 
     pub fn prev_tab(&mut self) {
@@ -4847,7 +4853,6 @@ impl App {
         self.restore_state_from_tab();
         self.lsp_restart_for_current();
         self.refresh_git();
-        self.sync_focused_pane_tab();
     }
 
     pub fn lsp_restart_for_current(&mut self) {
@@ -5046,6 +5051,42 @@ impl App {
             return;
         }
         self.message = String::from("Code action had no edit/command");
+    }
+
+    /// Close the tab at `idx`, leaving the editor showing whatever it was
+    /// showing — unless that is the document being closed.
+    ///
+    /// The tab strip's close button used to route through
+    /// `goto_tab(idx); close_current_tab()`, which had to make the doomed tab
+    /// active first and then put the editor back afterwards. Every attempt at
+    /// "putting it back" was a guess, because by then the information had been
+    /// overwritten. Not moving in the first place is the fix.
+    pub fn close_tab_at(&mut self, idx: usize) {
+        let n = self.buffers.len();
+        if idx >= n {
+            return;
+        }
+        if idx == self.current_buffer || n <= 1 {
+            self.close_current_tab();
+            return;
+        }
+        // Same bookkeeping `close_current_tab` does for the tab it drops.
+        if let Some(tab) = self.buffers.get_mut(idx) {
+            if tab.filename.is_some() {
+                let text = tab.buffer.text();
+                tab.undo_stack.finish(self.undo_caching, &text);
+            }
+        }
+        let closed = self.buffers[idx].id;
+        self.buffers.remove(idx);
+        if self.current_buffer > idx {
+            self.current_buffer -= 1;
+        }
+        // No `restore_state_from_tab`: the active document did not change, so
+        // there is nothing to reload and nothing to disturb.
+        let adopt = self.current_buffer_id();
+        self.split.repoint(closed, adopt);
+        self.message = String::from("Buffer closed");
     }
 
     pub fn close_current_tab(&mut self) {
@@ -5363,6 +5404,42 @@ mod tests {
         assert_eq!(app.current_buffer, 0, "the active tab followed its document");
         let panes: Vec<usize> = app.split.panes.iter().map(|p| app.pane_tab(p)).collect();
         assert_eq!(panes, [2, 0, 1], "every pane still shows the file it showed");
+    }
+
+    /// Closing a tab that is not the active one leaves the editor alone.
+    ///
+    /// The strip's close button used to `goto_tab(idx)` first, which made the
+    /// doomed document active and then had to put the editor back from
+    /// information it had already overwritten.
+    #[test]
+    fn closing_an_inactive_tab_does_not_move_the_editor() {
+        let mut app = app_with("a");
+        for name in ["b", "c"] {
+            let tab_id = app.take_tab_id();
+            app.buffers.push(BufferTab {
+                id: tab_id,
+                buffer: crate::buffer::Buffer::from_string(name),
+                filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
+                scroll: 0,
+                modified: false,
+                saved_hash: EMPTY_TEXT_HASH,
+                undo_stack: UndoStack::new(),
+                file_mtime: None,
+            });
+        }
+        app.save_state_to_tab();
+        app.goto_tab(2); // c is active
+        assert_eq!(app.buffer.line(0), "c");
+
+        app.close_tab_at(0); // drop a
+        assert_eq!(app.buffers.len(), 2);
+        assert_eq!(app.buffer.line(0), "c", "the editor still shows c");
+        assert_eq!(app.current_buffer, 1, "and the index followed c's move");
+
+        // Closing the active one still behaves like the old path.
+        app.close_tab_at(1);
+        assert_eq!(app.buffers.len(), 1);
+        assert_eq!(app.buffer.line(0), "b");
     }
 
     /// The other direction, and the no-ops.

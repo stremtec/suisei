@@ -190,7 +190,6 @@ impl App {
             self.buffer.cursor(),
         ));
         self.update_scroll();
-        self.sync_split_from_active();
         self.message = format!("Jumped to definition: {}:{}", loc.path, loc.row + 1);
     }
 }

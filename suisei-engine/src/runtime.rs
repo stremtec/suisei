@@ -817,7 +817,6 @@ impl Engine {
         self.sync_viewport_to_app();
         self.app.scroll_by_lines(delta_lines);
         // Keep split pane mirrors in sync so inactive panes paint correctly.
-        self.app.sync_focused_pane_viewport();
         // Scroll never moves the caret — only the window.
         self.recompose_scroll();
     }
@@ -887,7 +886,6 @@ impl Engine {
             self.app.hscroll.saturating_add(delta_cols as usize)
         };
         self.app.set_hscroll(next);
-        self.app.sync_focused_pane_viewport();
         self.recompose_scroll();
     }
 
@@ -905,7 +903,6 @@ impl Engine {
         } else {
             self.app.hscroll = 0;
         }
-        self.app.sync_focused_pane_viewport();
     }
 
     /// Absolute scroll position for native NSScrollView faces.
@@ -922,7 +919,6 @@ impl Engine {
         } else {
             self.app.hscroll = 0;
         }
-        self.app.sync_focused_pane_viewport();
         let after = (self.app.scroll, self.app.hscroll);
         if before == after {
             return;
@@ -957,7 +953,6 @@ impl Engine {
         if before == after {
             return;
         }
-        self.app.sync_focused_pane_viewport();
         self.recompose_scroll();
     }
 
@@ -1266,7 +1261,6 @@ impl Engine {
         let vis = self.app.viewport.height.max(1) as usize;
         let target = (line_1based as usize).saturating_sub(1);
         self.app.scroll_to_line(target.saturating_sub(vis / 2));
-        self.app.sync_focused_pane_viewport();
         self.recompose();
     }
 
@@ -1439,9 +1433,11 @@ impl Engine {
     }
 
     pub fn goto_tab(&mut self, index: u32) {
+        // In a split the focused pane follows the document the user picked —
+        // and that is automatic now: `App` IS the focused pane's state, so
+        // changing the active document changes what that pane shows. The old
+        // `sync_focused_pane_tab()` here was writing the same fact twice.
         self.app.goto_tab(index as usize);
-        // In a split, the focused pane follows the document the user picked.
-        self.app.sync_focused_pane_tab();
         // NO `update_scroll()` here. It re-derives the scroll from the CARET,
         // so a tab scrolled to line 7000 with the caret still at line 1 snapped
         // straight back to the top. The tab's saved scroll is authoritative.
@@ -1454,17 +1450,11 @@ impl Engine {
             return;
         }
         let idx = (index as usize).min(n.saturating_sub(1));
-        self.app.goto_tab(idx);
-        self.app.close_current_tab();
-        // The focused pane keeps its document and the editor follows it.
-        //
-        // `sync_focused_pane_tab()` used to be here and ran the other way:
-        // closing *any* tab dragged the focused pane onto whatever landed in
-        // the closed slot, because `goto_tab` above had to make the doomed tab
-        // active first. `close_current_tab` already repoints panes that were
-        // showing the closed document, so the only thing left to do is not
-        // disturb the ones that weren't.
-        self.app.apply_focused_pane();
+        // Closes that tab in place. This used to be
+        // `goto_tab(idx); close_current_tab(); <put the editor back>`, where
+        // the last step could only guess, because making the doomed tab active
+        // had already destroyed what it was trying to restore.
+        self.app.close_tab_at(idx);
         self.app.update_scroll();
         self.recompose();
     }
@@ -2219,6 +2209,48 @@ mod tests {
         assert_eq!(eng.app.buffers.len(), 2);
         assert!(paints(&eng, 0, "DOC_BBB"), "left pane must still paint B");
         assert!(paints(&eng, 1, "DOC_CCC"), "right pane must still paint C");
+    }
+
+    /// The §S2 gate: a pane's viewport survives focus leaving and coming back.
+    ///
+    /// Two things had to be true and neither was. The focused pane's scroll
+    /// had to be parked somewhere before focus moved (it was written to the
+    /// slot from ~20 scattered call sites, any one of which could be missed),
+    /// and restoring it had to not immediately undo itself — the old
+    /// `apply_focused_pane` finished with `update_scroll()`, which re-derives
+    /// scroll from the caret and therefore threw away any scroll the wheel had
+    /// produced, since the wheel does not move the caret.
+    #[test]
+    fn a_pane_keeps_its_viewport_across_focus_changes() {
+        let dir = std::env::temp_dir().join("suisei_pane_viewport");
+        let _ = std::fs::create_dir_all(&dir);
+        let long = dir.join("long.txt");
+        let body: String = (0..400).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&long, &body).unwrap();
+
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.app = App::open_file(long.to_str().unwrap());
+        eng.recompose();
+        eng.split_vertical();
+
+        // Scroll pane 0 with the wheel — the caret stays at the top.
+        eng.focus_pane(0);
+        eng.scroll_by(40);
+        let parked = eng.app.scroll;
+        assert!(parked > 0, "pane 0 should have scrolled, got {parked}");
+        assert_eq!(eng.app.buffer.cursor().row, 0, "the wheel must not move the caret");
+
+        eng.focus_pane(1);
+        assert_eq!(eng.app.scroll, 0, "pane 1 has its own viewport");
+
+        eng.focus_pane(0);
+        assert_eq!(eng.app.scroll, parked, "pane 0 came back to where it was");
+
+        // And again, to catch a park that only works the first time.
+        eng.focus_pane(1);
+        eng.focus_pane(0);
+        assert_eq!(eng.app.scroll, parked, "still there after a second round trip");
     }
 
     /// Esc closes the file palette, all the way through `gui_escape`.
