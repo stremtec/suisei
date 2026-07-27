@@ -1275,12 +1275,20 @@ impl Engine {
     }
 
     /// Live split-divider drag from the face.
-    pub fn split_set_ratio(&mut self, ratio: f32) {
-        if !self.app.split.is_split() || !ratio.is_finite() {
+    ///
+    /// Takes the two panes the divider sits between and how far it moved, as a
+    /// fraction of the whole editor along that axis. This replaced
+    /// `split_set_ratio(f32)`, which could only ever address one divider —
+    /// with three panes there are two, and both were driven by that one
+    /// number.
+    pub fn split_resize(&mut self, a: u32, b: u32, delta: f32) {
+        if !self.app.split.is_split() || !delta.is_finite() {
             return;
         }
-        self.app.split.ratio = ratio.clamp(0.15, 0.85);
-        self.recompose_scroll();
+        if self.app.split.resize_between(a as usize, b as usize, delta) {
+            // Full recompose: the pane rects are part of the chrome snapshot.
+            self.recompose();
+        }
     }
 
     /// Toggle a breakpoint on a specific 1-based line of the current file

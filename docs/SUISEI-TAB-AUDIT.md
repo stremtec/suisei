@@ -60,10 +60,10 @@ that way; the rest is the same edit.
 | | Feature | | Notes |
 |---|---|---|---|
 | P1 | Split Editor Right, 2 panes | ✅ | |
-| P2 | Split Editor Right, **3+ panes** | ❌ | see 2.1 — the first pane is pushed off-screen |
-| P3 | Split Below while split vertically | ⚠️ | correctly refused ("Already split the other way"), but the refusal is the limitation S3 removes |
+| P2 | Split Editor Right, **3+ panes** | ❌→✅ | see 2.1 — fixed twice: F2 stopped the clipping, S3 replaced the stopgap |
+| P3 | Split Below while split vertically | ❌→✅ | was refused outright; the tree makes the four-pane `+` reachable |
 | P4 | Divider drag, 2 panes | ✅ | |
-| P5 | Divider drag, 3 panes | ❌ | two dividers, one `ratio` — both drive the same number |
+| P5 | Divider drag, 3+ panes | ❌→✅ | N−1 independent dividers, from per-child weights |
 | P6 | Focus Next Pane | ✅ | |
 | P7 | Click a pane to focus it | ✅ | |
 | P8 | Pane header `+` (open a file into this pane) | ✅ | focuses the pane, then opens the palette |
@@ -174,19 +174,18 @@ and demotes one step that turned out not to be causing visible harm.
 Each is independently verifiable in the running app, which is how they were
 found — and all three are done and verified there.
 
-### Phase 1 — S2, one owner for the focused pane
-Unchanged from the plan. Demoted below Phase 0 because P10 shows the
-duplication is not currently producing a visible fault.
+### Phase 1 — S2, one owner for the focused pane — **DONE**
+Demoted below Phase 0 because P10 showed no visible fault. Writing its gate
+found one anyway: restoring a pane re-derived scroll from the caret, so any
+pane scrolled with the wheel snapped to the top when focus came back.
 
-### Phase 2 — S3, the layout tree
-Unchanged, and now with two extra jobs the audit turned up:
+### Phase 2 — S3, the layout tree — **DONE**
+Both audit-derived jobs landed. `splitEditorLayout` no longer computes geometry
+at all — core ships a normalised rect per pane and the face places them
+absolutely, finding dividers where rects share an edge. P5 was the gate and it
+is met.
 
-* `splitEditorLayout` must consume the tree's weights, not `ratio` — F2 is a
-  placeholder for exactly this.
-* P5 (three dividers dragging independently) is a *gate* for S3, not a separate
-  bug to fix. It cannot be fixed before the tree exists, because there is one
-  `ratio` and there are two dividers.
-
-### Not in this pass
-P3's mixed-split refusal is S3's job. J6 (pane → terminal) and J7 (layout tabs)
-stay where the plan puts them, after S3.
+### Still open
+`terminal.pane_bound` is a pane **index** into a list whose order the tree can
+change — the last positional handle in this area, and S4's job. J6 (pane →
+terminal) and J7 (layout tabs) stay where the plan puts them.

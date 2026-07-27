@@ -2070,15 +2070,19 @@ impl App {
             let tab = self.current_buffer_id();
             let scroll = self.scroll;
             let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
-            self.split
-                .open_split(crate::split::SplitKind::Vertical, tab, scroll, cur);
+            self.split.split_focused(crate::split::Axis::Col);
+            if let Some(p) = self.split.panes.last_mut() {
+                p.buffer = tab;
+                p.scroll = scroll;
+                p.cursor = cur;
+            }
             self.split.set_focus(1);
             self.park_focused_pane();
             self.terminal.owns_split = true;
         }
         self.terminal.full_panel = true;
         self.terminal.pane_bound =
-            Some(self.split.focus.min(self.split.panes.len().saturating_sub(1)));
+            Some(self.split.focus_index());
         self.terminal.close_confirm = false;
         self.terminal.open = true;
         // Size + start PTY now (desktop face has no TUI first-paint start hook).
@@ -2114,7 +2118,7 @@ impl App {
         }
         match self.terminal.pane_bound {
             Some(i) if self.split.is_split() => {
-                self.split.focus.min(self.split.panes.len().saturating_sub(1)) == i
+                self.split.focus_index() == i
             }
             // Unsplit but still full_panel (split closed under us)
             _ => true,
@@ -2151,7 +2155,7 @@ impl App {
                 let bound = self
                     .terminal
                     .pane_bound
-                    .unwrap_or(self.split.focus)
+                    .unwrap_or_else(|| self.split.focus_index())
                     .min(self.split.panes.len().saturating_sub(1));
                 self.split.set_focus(bound);
                 self.close_split(); // shuts the PTY down with its pane
@@ -3331,21 +3335,20 @@ impl App {
     // ── Splits ──────────────────────────────────────────
 
     pub fn split_vertical(&mut self) {
-        self.open_split_kind(crate::split::SplitKind::Vertical, "Vertical");
+        self.open_split_kind(crate::split::Axis::Col, "Vertical");
     }
 
     pub fn split_horizontal(&mut self) {
-        self.open_split_kind(crate::split::SplitKind::Horizontal, "Horizontal");
+        self.open_split_kind(crate::split::Axis::Row, "Horizontal");
     }
 
-    fn open_split_kind(&mut self, kind: crate::split::SplitKind, label: &str) {
+    fn open_split_kind(&mut self, axis: crate::split::Axis, label: &str) {
         use crate::split::SplitAdd;
         self.save_state_to_tab();
+        // Park first: `split_focused` copies the focused pane's slot into the
+        // new pane, and the focused slot is stale until parked (see S2).
         self.park_focused_pane();
-        let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
-        let r = self
-            .split
-            .open_split(kind, self.current_buffer_id(), self.scroll, cur);
+        let r = self.split.split_focused(axis);
         self.message = match r {
             SplitAdd::Opened => {
                 format!("{label} split · Ctrl+W w cycle · Ctrl+W q close")
@@ -3355,9 +3358,6 @@ impl App {
                 self.split.pane_count()
             ),
             SplitAdd::Full => format!("Max {} panes", crate::split::MAX_PANES),
-            SplitAdd::MixedKind => {
-                "Already split the other way — Ctrl+W q panes first".into()
-            }
         };
     }
 
@@ -3367,10 +3367,7 @@ impl App {
         if !self.split.is_split() {
             return;
         }
-        let closed = self
-            .split
-            .focus
-            .min(self.split.panes.len().saturating_sub(1));
+        let closed = self.split.focus_index();
         // Pane terminal dies with its pane; higher indices shift down.
         if self.terminal.open && self.terminal.full_panel {
             match self.terminal.pane_bound {
@@ -3411,8 +3408,10 @@ impl App {
             self.buffer.cursor.row = p.cursor.0.min(max_row);
             self.buffer.cursor.col = p.cursor.1;
             self.buffer.clamp_col();
-            self.scroll = p.scroll;
-            self.update_scroll();
+            self.scroll = p.scroll.min(max_row);
+            // No `update_scroll()` — same reason as `load_focused_pane`: it
+            // re-derives scroll from the caret and would throw away the
+            // survivor's viewport.
         }
         self.message = String::from("Pane closed");
     }
@@ -3423,18 +3422,39 @@ impl App {
         if !self.split.is_split() {
             return;
         }
-        let vertical = self.split.kind == crate::split::SplitKind::Vertical;
-        let delta: isize = match (vertical, dir) {
-            (true, 'h') | (false, 'k') => -1,
-            (true, 'l') | (false, 'j') => 1,
-            _ => return, // off-axis — splits are single-direction
-        };
-        let n = self.split.panes.len() as isize;
-        let cur = self.split.focus.min(self.split.panes.len().saturating_sub(1)) as isize;
-        let next = (cur + delta).clamp(0, n - 1) as usize;
-        if next == cur as usize {
-            return;
+        // Genuinely directional now. This used to step +1/-1 along the single
+        // split axis and refuse the other two keys outright, because there was
+        // only ever one axis. With a tree the layout is two-dimensional, so
+        // pick the nearest pane that actually lies that way and overlaps on
+        // the perpendicular axis.
+        let rects = self.split.rects();
+        let here = self.split.focus_index();
+        let Some(from) = rects.get(here).copied() else { return };
+        let (cx, cy) = (from.x + from.w / 2.0, from.y + from.h / 2.0);
+        let mut best: Option<(f32, usize)> = None;
+        for (i, r) in rects.iter().enumerate() {
+            if i == here {
+                continue;
+            }
+            let (rx, ry) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let (ok, dist) = match dir {
+                'h' => (rx < cx, cx - rx),
+                'l' => (rx > cx, rx - cx),
+                'k' => (ry < cy, cy - ry),
+                'j' => (ry > cy, ry - cy),
+                _ => return,
+            };
+            // Must share some extent perpendicular to the move, or "left" can
+            // land on a pane that is really diagonally opposite.
+            let overlaps = match dir {
+                'h' | 'l' => r.y < from.y + from.h && from.y < r.y + r.h,
+                _ => r.x < from.x + from.w && from.x < r.x + r.w,
+            };
+            if ok && overlaps && best.map_or(true, |(d, _)| dist < d) {
+                best = Some((dist, i));
+            }
         }
+        let Some((_, next)) = best else { return };
         self.focus_pane_to(next);
         self.message = format!("Pane {}", next + 1);
     }
@@ -3444,9 +3464,9 @@ impl App {
             return;
         }
         let n = self.split.panes.len();
-        let cur = self.split.focus.min(n.saturating_sub(1));
+        let cur = self.split.focus_index();
         self.focus_pane_to((cur + 1) % n);
-        self.message = format!("Pane {}", self.split.focus + 1);
+        self.message = format!("Pane {}", self.split.focus_index() + 1);
     }
 
     pub fn focus_pane(&mut self, idx: usize) {
@@ -3475,9 +3495,10 @@ impl App {
     /// `current_buffer` for the focused pane and the slot only for the others
     /// (`scene.rs`). This extends that rule to the rest of the pane state.
     fn park_focused_pane(&mut self) {
-        if !self.split.is_split() {
-            return;
-        }
+        // Unconditional, even with a single pane. There is always exactly one
+        // focused pane now, and the first split copies the focused pane's slot
+        // into the new one — so a slot that was never parked would hand the
+        // fresh pane an empty document and a cursor at the origin.
         let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
         let id = self.current_buffer_id();
         let p = self.split.focused_pane_mut();
@@ -3530,7 +3551,7 @@ impl App {
             return;
         }
         let idx = idx.min(self.split.panes.len() - 1);
-        if idx == self.split.focus.min(self.split.panes.len() - 1) {
+        if idx == self.split.focus_index() {
             return;
         }
         self.park_focused_pane();
@@ -5152,6 +5173,21 @@ pub use crate::fs_atomic::atomic_write_file;
 mod tests {
     use super::*;
 
+    /// Give the app `docs.len()` side-by-side panes, one per document.
+    ///
+    /// Assigning `split.panes` directly no longer works: the tree owns the
+    /// structure and the vector is a view of it, so a hand-built vector has no
+    /// matching leaves.
+    fn panes_on(app: &mut App, docs: &[BufferId]) {
+        for _ in 1..docs.len() {
+            app.split.split_focused(crate::split::Axis::Col);
+        }
+        for (p, id) in app.split.panes.iter_mut().zip(docs) {
+            p.buffer = *id;
+        }
+        app.split.set_focus(0);
+    }
+
     fn app_with(text: &str) -> App {
         let mut app = App::new();
         app.buffer = Buffer::from_string(text);
@@ -5393,10 +5429,7 @@ mod tests {
 
         // Three panes, one on each of the first three tabs.
         let ids: Vec<BufferId> = app.buffers.iter().take(3).map(|t| t.id).collect();
-        app.split.panes = ids
-            .iter()
-            .map(|&id| crate::split::Pane { buffer: id, ..Default::default() })
-            .collect();
+        panes_on(&mut app, &ids);
         app.goto_tab(1); // park + restore properly; a bare assignment leaves
                          // `App.buffer` showing a different tab's text
         assert!(app.move_tab(0, 2));
@@ -5461,7 +5494,7 @@ mod tests {
         }
         app.save_state_to_tab();
         let c_id = app.buffers[2].id;
-        app.split.panes = vec![crate::split::Pane { buffer: c_id, ..Default::default() }];
+        panes_on(&mut app, &[c_id]);
         app.goto_tab(2);
 
         // c moves to the front: a b c → c a b
@@ -5510,11 +5543,7 @@ mod tests {
 
         // Two panes on c and d, then make a the active tab and close it.
         let (c_id, d_id) = (app.buffers[2].id, app.buffers[3].id);
-        app.split.kind = crate::split::SplitKind::Vertical;
-        app.split.panes = vec![
-            crate::split::Pane { buffer: c_id, ..Default::default() },
-            crate::split::Pane { buffer: d_id, ..Default::default() },
-        ];
+        panes_on(&mut app, &[c_id, d_id]);
         app.goto_tab(0);
         assert_eq!(shown(&app), ["c", "d"]);
 

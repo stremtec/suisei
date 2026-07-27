@@ -102,6 +102,10 @@ pub struct PaneScene {
     pub doc_version: u64,
     /// Row budget the snapshot was built with (patch-path reuse key).
     pub band_rows: u32,
+    /// Normalised rect within the editor area, straight from the layout tree.
+    /// The face places panes by these instead of re-deriving geometry from a
+    /// kind and a ratio, which it could only ever get right for two panes.
+    pub rect: suisei_core::split::Rect,
 }
 
 #[derive(Debug, Clone)]
@@ -367,7 +371,7 @@ pub fn build_editor_band(
     } else {
         let n = app.split.pane_count().max(1);
         let idx = pane.min(n.saturating_sub(1));
-        let focus = app.split.focus.min(n.saturating_sub(1));
+        let focus = app.split.focus_index();
         if idx == focus {
             (app.current_buffer, true)
         } else {
@@ -1589,7 +1593,7 @@ fn build_terminal(app: &App) -> TerminalScene {
         app.terminal
             .pane_bound
             .map(|i| i as u32)
-            .or(Some(app.split.focus.min(app.split.panes.len().saturating_sub(1)) as u32))
+            .or(Some(app.split.focus_index() as u32))
     } else {
         None
     };
@@ -1736,7 +1740,6 @@ fn build_editor_surfaces(
     sel: Option<(Position, Position)>,
     prev_panes: Vec<PaneScene>,
 ) -> (Vec<EditorLineScene>, u8, f32, u8, Vec<PaneScene>) {
-    use suisei_core::split::SplitKind;
 
     if !app.split.is_split() {
         let lines = build_visible_lines_from_buffer(
@@ -1751,28 +1754,27 @@ fn build_editor_surfaces(
         return (lines, 0, 0.5, 0, Vec::new());
     }
 
-    let kind = match app.split.kind {
-        SplitKind::Vertical => 1u8,
-        SplitKind::Horizontal => 2u8,
-        SplitKind::None => 0u8,
-    };
+    // `kind` is now just "is there a split" — the shape lives in the rects.
+    let kind = 1u8;
     let n = app.split.pane_count().max(1);
-    // Side-by-side (Vertical): each pane keeps full height — do NOT divide rows by n
-    // (that was the "only half the editor paints" bug).
-    // Stacked (Horizontal): share height across panes.
     // Reserve ~2 rows for per-pane path bar chrome in the face.
     const PATH_BAR_ROWS: usize = 2;
     const MAX_PACKED_LINES: usize = 256;
-    let rows_each = match app.split.kind {
-        SplitKind::Vertical | SplitKind::None => rows.saturating_sub(PATH_BAR_ROWS).max(8),
-        SplitKind::Horizontal => {
-            let share = (rows / n).max(4);
-            share.saturating_sub(PATH_BAR_ROWS).max(4)
-        }
+    let rects = app.split.rects();
+    // Row budget PER PANE, from that pane's own share of the height. This used
+    // to be one number for the whole layout, picked by `kind`: full height for
+    // a vertical split, rows/n for a horizontal one. A tree can have both at
+    // once, so a single number cannot describe it.
+    let rows_for = |i: usize| -> usize {
+        let h = rects.get(i).map(|r: &suisei_core::split::Rect| r.h).unwrap_or(1.0);
+        let share = ((rows as f32) * h) as usize;
+        share
+            .saturating_sub(PATH_BAR_ROWS)
+            .max(4)
+            .min(MAX_PACKED_LINES / n)
+            .max(4)
     };
-    // Cap so n panes fit the packed lines[] ABI budget.
-    let rows_each = rows_each.min(MAX_PACKED_LINES / n).max(4);
-    let focus = app.split.focus.min(n.saturating_sub(1));
+    let focus = app.split.focus_index();
     let mut panes = Vec::with_capacity(n);
     let mut focused_lines = Vec::new();
 
@@ -1780,6 +1782,8 @@ fn build_editor_surfaces(
     let mut prev_panes = prev_panes;
     for (i, pane) in app.split.panes.iter().take(n).enumerate() {
         let focused = i == focus;
+        let rows_each = rows_for(i);
+        let rect = rects.get(i).copied().unwrap_or(suisei_core::split::Rect::FULL);
         let (tab, pane_scroll, pane_hscroll, pane_cursor) = if focused {
             (
                 app.current_buffer,
@@ -1803,6 +1807,7 @@ fn build_editor_surfaces(
                     && p.hscroll == eff_hscroll
                     && p.doc_version == doc_version
                     && p.band_rows == rows_each as u32
+                    && p.rect == rect
                     && p.doc_line_count == doc_line_count
             }) {
                 panes.push(prev_panes.swap_remove(idx));
@@ -1837,16 +1842,11 @@ fn build_editor_surfaces(
             lines,
             doc_version,
             band_rows: rows_each as u32,
+            rect,
         });
     }
 
-    (
-        focused_lines,
-        kind,
-        app.split.ratio.clamp(0.2, 0.8),
-        focus as u8,
-        panes,
-    )
+    (focused_lines, kind, 0.5, focus as u8, panes)
 }
 
 fn buffer_for_tab(app: &App, tab: usize) -> &suisei_core::buffer::Buffer {

@@ -103,7 +103,6 @@ struct ContentView: View {
     /// Find-bar caret blink driver.
     @State private var findCaretBlink = false
     /// Split divider drag override (committed to Core on release).
-    @State private var liveSplitRatio: Double? = nil
     /// Minimap toggle (View menu).
     @AppStorage("suisei.minimap") private var minimapEnabled = true
     /// Live window-resize HUD (blur + dimensions).
@@ -4103,106 +4102,102 @@ struct ContentView: View {
         .layoutPriority(0)
     }
 
-    /// Fraction of the split axis that pane `idx` of `n` gets.
-    ///
-    /// `ratio` describes ONE divider, so it can only place two panes. The old
-    /// formula gave `ratio` to pane 0 and `1 - ratio` to *every* other pane,
-    /// which for three panes asked for 150% of the axis: the `HStack`
-    /// overflowed, centred, and clipped the surplus off both ends — taking the
-    /// first pane's title and gutter off-screen with it. See
-    /// `SUISEI-TAB-AUDIT.md` §2.1 for the measurements.
-    ///
-    /// Beyond two panes the honest answer is equal shares. This is a stopgap:
-    /// plan step S3 replaces `ratio` with a weight per child, which is also the
-    /// only way three dividers can ever drag independently.
-    private func paneFraction(_ idx: Int, of n: Int, ratio: CGFloat) -> CGFloat {
-        guard n > 2 else { return idx == 0 ? ratio : 1 - ratio }
-        return 1 / CGFloat(n)
+    /// A divider between two panes, derived from their rects sharing an edge.
+    struct PaneSeam: Identifiable {
+        var a: Int
+        var b: Int
+        /// True when the seam is vertical (the panes sit side by side).
+        var vertical: Bool
+        /// Position and extent of the seam in normalised editor coordinates.
+        var at: CGFloat
+        var from: CGFloat
+        var to: CGFloat
+        var id: String { "\(a)-\(b)-\(vertical)" }
     }
 
-    /// Xcode assistant-style columns: each pane has its own path bar + buffer.
-    /// Split ratio comes from Core; the divider drags live (local override,
-    /// committed to Core on release).
-    @ViewBuilder
-    private func splitEditorLayout(size: CGSize) -> some View {
-        let split = engine.editorSplit
-        let panes = split.panes
-        let pathH: CGFloat = 26
-        let n = panes.count
-        let ratio = CGFloat(liveSplitRatio ?? Double(split.ratio == 0 ? 0.5 : split.ratio))
-        if split.kind == 1 {
-            HStack(spacing: 0) {
-                ForEach(Array(panes.enumerated()), id: \.element.id) { idx, pane in
-                    if idx > 0 {
-                        SplitDivider(
-                            vertical: true,
-                            fg: fg,
-                            accent: accent,
-                            onDrag: { delta in
-                                let base = liveSplitRatio ?? Double(ratio)
-                                liveSplitRatio = min(0.85, max(0.15, base + Double(delta / max(1, size.width))))
-                            },
-                            onEnd: {
-                                if let r = liveSplitRatio {
-                                    engine.splitSetRatio(r)
-                                }
-                                liveSplitRatio = nil
-                            }
-                        )
+    /// Find every draggable seam in the current layout.
+    ///
+    /// Two panes share a seam when one's trailing edge is the other's leading
+    /// edge and they overlap on the perpendicular axis. Deriving them from the
+    /// rects means the face never has to know the tree — and it gets N-1
+    /// independent dividers for free, where the old `ratio` gave one for the
+    /// whole layout no matter how many panes there were.
+    private func paneSeams(_ panes: [EditorPaneSnap]) -> [PaneSeam] {
+        var out: [PaneSeam] = []
+        let eps: CGFloat = 0.001
+        for (i, p) in panes.enumerated() {
+            for (j, q) in panes.enumerated() where i != j {
+                // q immediately right of p
+                if abs(p.rect.maxX - q.rect.minX) < eps {
+                    let lo = max(p.rect.minY, q.rect.minY)
+                    let hi = min(p.rect.maxY, q.rect.maxY)
+                    if hi - lo > eps {
+                        out.append(PaneSeam(a: i, b: j, vertical: true,
+                                            at: q.rect.minX, from: lo, to: hi))
                     }
-                    editorColumn(
-                        pane: pane,
-                        contentSize: CGSize(
-                            width: max(40, size.width * paneFraction(idx, of: n, ratio: ratio) - 4),
-                            height: max(40, size.height - pathH)
-                        )
-                    )
-                    .frame(
-                        width: max(
-                            40,
-                            size.width * paneFraction(idx, of: n, ratio: ratio) - (idx > 0 ? 7 : 0)
-                        )
-                    )
-                    .frame(maxHeight: .infinity)
                 }
-            }
-        } else {
-            VStack(spacing: 0) {
-                ForEach(Array(panes.enumerated()), id: \.element.id) { idx, pane in
-                    if idx > 0 {
-                        SplitDivider(
-                            vertical: false,
-                            fg: fg,
-                            accent: accent,
-                            onDrag: { delta in
-                                let base = liveSplitRatio ?? Double(ratio)
-                                liveSplitRatio = min(0.85, max(0.15, base + Double(delta / max(1, size.height))))
-                            },
-                            onEnd: {
-                                if let r = liveSplitRatio {
-                                    engine.splitSetRatio(r)
-                                }
-                                liveSplitRatio = nil
-                            }
-                        )
+                // q immediately below p
+                if abs(p.rect.maxY - q.rect.minY) < eps {
+                    let lo = max(p.rect.minX, q.rect.minX)
+                    let hi = min(p.rect.maxX, q.rect.maxX)
+                    if hi - lo > eps {
+                        out.append(PaneSeam(a: i, b: j, vertical: false,
+                                            at: q.rect.minY, from: lo, to: hi))
                     }
-                    editorColumn(
-                        pane: pane,
-                        contentSize: CGSize(
-                            width: size.width,
-                            height: max(40, size.height * paneFraction(idx, of: n, ratio: ratio) - pathH)
-                        )
-                    )
-                    .frame(
-                        height: max(
-                            40,
-                            size.height * paneFraction(idx, of: n, ratio: ratio) - (idx > 0 ? 7 : 0)
-                        )
-                    )
-                    .frame(maxWidth: .infinity)
                 }
             }
         }
+        return out
+    }
+
+    /// Panes placed by the rects core computed from its layout tree.
+    ///
+    /// Absolute placement, not an `HStack`/`VStack`. Stacks could only express
+    /// one axis for the whole layout, which is why the four-pane `+` was
+    /// unreachable and why three panes overflowed: the old code asked for
+    /// `ratio` and `1 - ratio` and handed the second to every pane after the
+    /// first. The tree already knows the answer; this just draws it.
+    @ViewBuilder
+    private func splitEditorLayout(size: CGSize) -> some View {
+        let panes = engine.editorSplit.panes
+        let pathH: CGFloat = 26
+        ZStack(alignment: .topLeading) {
+            ForEach(Array(panes.enumerated()), id: \.element.id) { _, pane in
+                let w = max(40, size.width * pane.rect.width - 1)
+                let h = max(40, size.height * pane.rect.height - 1)
+                editorColumn(
+                    pane: pane,
+                    contentSize: CGSize(width: max(40, w - 4), height: max(40, h - pathH))
+                )
+                .frame(width: w, height: h)
+                .offset(x: size.width * pane.rect.minX, y: size.height * pane.rect.minY)
+            }
+            ForEach(paneSeams(panes)) { seam in
+                SplitDivider(
+                    vertical: seam.vertical,
+                    fg: fg,
+                    accent: accent,
+                    onDrag: { delta in
+                        let axis = seam.vertical ? size.width : size.height
+                        engine.splitResize(seam.a, seam.b, delta: Double(delta / max(1, axis)))
+                    },
+                    onEnd: {}
+                )
+                .frame(
+                    width: seam.vertical ? 7 : size.width * (seam.to - seam.from),
+                    height: seam.vertical ? size.height * (seam.to - seam.from) : 7
+                )
+                .offset(
+                    x: seam.vertical
+                        ? size.width * seam.at - 3.5
+                        : size.width * seam.from,
+                    y: seam.vertical
+                        ? size.height * seam.from
+                        : size.height * seam.at - 3.5
+                )
+            }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 
     /// One Xcode editor column: path bar (file for this pane) + text surface.

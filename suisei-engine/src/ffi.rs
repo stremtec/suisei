@@ -67,6 +67,13 @@ pub struct SuiseiPaneC {
     pub doc_line_count: u32,
     /// Per-pane horizontal pan (0 when wrap on).
     pub hscroll: u32,
+    /// Normalised rect within the editor area (0..1), from the layout tree.
+    /// The face places panes by these; it no longer re-derives geometry from
+    /// `split_kind` + `split_ratio`, which only worked for two panes.
+    pub rect_x: f32,
+    pub rect_y: f32,
+    pub rect_w: f32,
+    pub rect_h: f32,
 }
 
 #[repr(C)]
@@ -433,6 +440,11 @@ pub extern "C" fn suisei_engine_chrome(
             _pad2: 0,
             doc_line_count: chrome.line_count,
             hscroll: chrome.hscroll,
+            // Unsplit: the one pane is the whole editor.
+            rect_x: 0.0,
+            rect_y: 0.0,
+            rect_w: 1.0,
+            rect_h: 1.0,
         };
         for (i, line) in chrome.lines.iter().take(line_n).enumerate() {
             write_editor_line(&mut o.lines[i], line);
@@ -450,6 +462,10 @@ pub extern "C" fn suisei_engine_chrome(
                 line_start: start,
                 line_count: take as u32,
                 focused: u8::from(pane.focused),
+                rect_x: pane.rect.x,
+                rect_y: pane.rect.y,
+                rect_w: pane.rect.w,
+                rect_h: pane.rect.h,
                 _pad0: 0,
                 _pad1: 0,
                 _pad2: 0,
@@ -1167,12 +1183,17 @@ pub extern "C" fn suisei_engine_editor_band(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_split_set_ratio(ptr: *mut SuiseiEngine, ratio: f32) {
+pub extern "C" fn suisei_engine_split_resize(
+    ptr: *mut SuiseiEngine,
+    pane_a: u32,
+    pane_b: u32,
+    delta: f32,
+) {
     if ptr.is_null() {
         return;
     }
     unsafe {
-        (*ptr).0.split_set_ratio(ratio);
+        (*ptr).0.split_resize(pane_a, pane_b, delta);
     }
 }
 

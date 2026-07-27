@@ -164,20 +164,60 @@ app.
 synchronously by the one function that reshuffles the vector, and S2 removes it
 outright by making the focused pane the owner.
 
-### S2 · One source of truth for the focused pane
-Move `scroll`/`hscroll`/`cursor` ownership entirely into the pane and make the
-`App` fields read through. Delete both sync functions.
+### S2 · One source of truth for the focused pane — **DONE**
+Landed the other way round from the sketch above, and better for it. Rather
+than making `App`'s fields read through to the pane (83 call sites), **`App`
+*is* the focused pane** and the slots hold the others. The focused slot is
+stale by design, so nothing needs syncing while the user works; park and load
+happen in `focus_pane_to`, the only way focus changes. All twenty-odd
+`sync_*` calls are gone, as are three of the four functions.
 
-**Gate:** split, scroll one pane, switch focus twice, come back — position is
-exactly where it was. Today this is the most common "unstable" report.
+This is the rule the compositor already followed for the *document* — it reads
+`current_buffer` for the focused pane and the slot only for the others. The
+duplication was the anomaly.
 
-### S3 · Layout tree
-Replace `kind` + flat `panes` + `ratio` with the `Layout` tree and per-child
-weights. Keep the existing key bindings pointing at the new model.
+Writing the gate turned up the bug behind the actual complaint: restoring a
+pane finished with `update_scroll()`, which re-derives scroll from the **caret**.
+The wheel does not move the caret, so a pane scrolled with the wheel snapped
+back to the top the instant focus returned. That is "a pane that scrolls back
+to a stale position", verbatim.
 
-**Gate:** vertical split, then horizontal-split one side; three dividers all
-drag independently; `MAX_PANES` becomes a total-leaf cap rather than a
-one-direction cap.
+**Gate — met.** `a_pane_keeps_its_viewport_across_focus_changes`, verified to
+fail against the old code (0 instead of 40).
+
+### S3 · Layout tree — **DONE**
+`kind` + `ratio` are gone. `SplitState` holds a `Layout` tree with a per-child
+weight list; `panes` survives as a flat list kept in **visual order**, derived
+from the tree, so index-addressed callers (compositor, FFI pane array, face)
+needed no rework.
+
+The face no longer derives geometry at all. Core computes a normalised `Rect`
+per pane and ships it in `SuiseiPaneC` (`rect_x/y/w/h`, +16 bytes per pane —
+the ABI guard moved with it). The face places panes absolutely by those rects
+and finds dividers by looking for panes whose rects share an edge, which gives
+N−1 independent dividers for free.
+
+Three things fell out that the step did not predict:
+
+* **Row budgets are per pane now.** The old code picked one `rows_each` for the
+  whole layout from `kind` — full height for a vertical split, `rows/n` for a
+  horizontal one. A tree has both at once, so one number cannot describe it.
+* **Repeated same-axis splits equalise.** Halving only the focused pane gives
+  1/2, 1/4, 1/8, 1/8 for four "split right"s, which is not what anyone means by
+  splitting four ways. New siblings redistribute evenly, vim-style.
+* **`park_focused_pane` had to stop skipping the unsplit case.** With the tree
+  there is always exactly one pane, and the first split copies the focused
+  pane's slot into the new pane — so a slot that was never parked handed the
+  fresh pane an empty document.
+
+`focus_dir` is genuinely directional now: it picks the nearest pane that lies
+that way and overlaps perpendicular, instead of stepping ±1 along the single
+axis and refusing the other two keys.
+
+**Gate — met**, in the running app: the four-pane `+` (impossible before —
+`SplitAdd::MixedKind` refused it outright), and the left column's divider
+dragged from y=424 to y=600 while the right column's stayed at 424.
+`MAX_PANES` is now a total-leaf cap.
 
 ### S4 · `PaneContent`, and terminals with ids
 Introduce `PaneContent`, move terminals into `terminals: HashMap<TerminalId,

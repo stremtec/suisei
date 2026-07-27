@@ -67,6 +67,11 @@ struct EditorPaneSnap: Equatable, Identifiable {
     /// Total lines in this pane's buffer (scrollbar / clamp).
     var docLineCount: UInt32
     var lines: [EditorLine]
+    /// Normalised rect within the editor area, straight from core's layout
+    /// tree. The face used to re-derive geometry from `kind` + `ratio`, which
+    /// can only describe two panes — three asked for 150% of the width and the
+    /// first pane got clipped off-screen.
+    var rect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
 }
 
 /// 0 = none, 1 = vertical (side-by-side), 2 = horizontal (stacked).
@@ -2175,10 +2180,19 @@ final class EngineBridge: ObservableObject {
     }
 
     /// Live split-divider drag.
-    func splitSetRatio(_ ratio: Double) {
+    /// Drag the divider between two panes.
+    ///
+    /// `delta` is a fraction of the whole editor along that divider's axis.
+    /// This replaced `splitSetRatio`, which addressed the single `ratio` that
+    /// the entire layout shared — with three panes there are two dividers and
+    /// both moved together.
+    func splitResize(_ a: Int, _ b: Int, delta: Double) {
         guard let engine else { return }
-        suisei_engine_split_set_ratio(engine, Float(ratio))
-        refreshEditorPaintOnly()
+        suisei_engine_split_resize(engine, UInt32(a), UInt32(b), Float(delta))
+        // Chrome, not paint-only: the pane rects the layout is drawn from live
+        // in the chrome snapshot, so a paint-only refresh moved the divider in
+        // core and left the face drawing the old geometry.
+        refreshChrome()
     }
 
     struct MinimapData: Equatable {
@@ -3165,6 +3179,11 @@ final class EngineBridge: ObservableObject {
                 // offset 20: doc_line_count, 24: hscroll (after 4 pad bytes at 16..19)
                 let docLineCount = base.load(fromByteOffset: 20, as: UInt32.self)
                 let hscroll = base.load(fromByteOffset: 24, as: UInt32.self)
+                // offsets 28..40: the pane's normalised rect.
+                let rx = base.load(fromByteOffset: 28, as: Float.self)
+                let ry = base.load(fromByteOffset: 32, as: Float.self)
+                let rw = base.load(fromByteOffset: 36, as: Float.self)
+                let rh = base.load(fromByteOffset: 40, as: Float.self)
                 let start = Int(lineStart)
                 let count = Int(lineCount)
                 var paneLines: [EditorLine] = []
@@ -3186,7 +3205,11 @@ final class EngineBridge: ObservableObject {
                     scroll: scroll,
                     hscroll: hscroll,
                     docLineCount: max(1, docLineCount),
-                    lines: paneLines
+                    lines: paneLines,
+                    rect: CGRect(
+                        x: CGFloat(rx), y: CGFloat(ry),
+                        width: CGFloat(rw), height: CGFloat(rh)
+                    )
                 ))
             }
         }

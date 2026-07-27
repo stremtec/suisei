@@ -81,6 +81,11 @@ typedef struct SuiseiPaneC {
   uint8_t _pad2;
   uint32_t doc_line_count; /* total lines in this pane's buffer */
   uint32_t hscroll;        /* per-pane horizontal pan (0 when wrap on) */
+  /* Normalised rect within the editor area (0..1), from the layout tree. */
+  float rect_x;
+  float rect_y;
+  float rect_w;
+  float rect_h;
 } SuiseiPaneC;
 
 typedef struct SuiseiChromeSnapshot {
@@ -182,7 +187,8 @@ uint8_t suisei_engine_editor_band(
     const SuiseiEngine *ptr, uint32_t pane, uint32_t start_row, uint32_t max_rows,
     SuiseiBandC *out);
 
-void suisei_engine_split_set_ratio(SuiseiEngine *ptr, float ratio);
+void suisei_engine_split_resize(SuiseiEngine *e, uint32_t pane_a,
+                                uint32_t pane_b, float delta);
 void suisei_engine_toggle_breakpoint_line(SuiseiEngine *ptr, uint32_t line_1based);
 
 /* ── Minimap overview (downsampled) ────────────────────────────────── */

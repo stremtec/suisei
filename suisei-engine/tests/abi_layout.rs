@@ -105,6 +105,7 @@ fn editor_line_c_layout() {
 //  16  focused       (u8)
 //  20  doc_line_count (u32)
 //  24  hscroll       (u32)
+//  28  rect_x/y/w/h  (4 x f32)
 
 #[test]
 fn pane_c_layout() {
@@ -115,7 +116,11 @@ fn pane_c_layout() {
     assert_eq!(offset_of!(SuiseiPaneC, focused), 16);
     assert_eq!(offset_of!(SuiseiPaneC, doc_line_count), 20);
     assert_eq!(offset_of!(SuiseiPaneC, hscroll), 24);
-    assert_eq!(size_of::<SuiseiPaneC>(), 28, "SuiseiPaneC stride");
+    assert_eq!(offset_of!(SuiseiPaneC, rect_x), 28);
+    assert_eq!(offset_of!(SuiseiPaneC, rect_y), 32);
+    assert_eq!(offset_of!(SuiseiPaneC, rect_w), 36);
+    assert_eq!(offset_of!(SuiseiPaneC, rect_h), 40);
+    assert_eq!(size_of::<SuiseiPaneC>(), 44, "SuiseiPaneC stride");
 }
 
 // ─── SuiseiChromeSnapshot (key fields) ────────────────────────────────────────

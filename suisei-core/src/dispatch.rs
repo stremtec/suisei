@@ -286,8 +286,8 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             KeyCode::Char('l') | KeyCode::Right => app.focus_dir('l'),
             KeyCode::Char('k') | KeyCode::Up => app.focus_dir('k'),
             KeyCode::Char('j') | KeyCode::Down => app.focus_dir('j'),
-            KeyCode::Char('>') => app.split.adjust_ratio(0.05),
-            KeyCode::Char('<') => app.split.adjust_ratio(-0.05),
+            KeyCode::Char('>') => app.split.adjust_focused(0.05),
+            KeyCode::Char('<') => app.split.adjust_focused(-0.05),
             KeyCode::Esc => {
                 app.message.clear();
             }
