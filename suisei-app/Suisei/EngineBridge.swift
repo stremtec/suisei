@@ -1017,6 +1017,29 @@ final class EngineBridge: ObservableObject {
     /// Insert then.
     private var panelOwnsTyping: Bool { focus.ownsTyping }
 
+    /// Take the keyboard back from a native text field.
+    ///
+    /// `editorOwnsKeyEvents` deliberately stands down while an `NSTextField` or
+    /// `NSTextView` is the window's first responder — otherwise the project
+    /// tree's filter could not be typed into. The gap is what happens when an
+    /// engine-owned overlay opens *while* that field still holds focus: the
+    /// palette appears on screen and is completely deaf. Its filter gets
+    /// nothing, Esc gets nothing, and the keystrokes go on landing in the tree
+    /// filter behind it. Measured exactly that way — typing "s1_b" with the
+    /// file palette open filtered the project tree instead.
+    ///
+    /// So opening one has to reclaim the responder. `nil` hands it to the
+    /// window, which is enough for `editorOwnsKeyEvents` to say yes.
+    func reclaimKeyboardFromTextFields() {
+        guard let win = NSApp.keyWindow ?? NSApp.mainWindow,
+              let responder = win.firstResponder,
+              !(responder is EditorCanvasView),
+              responder is NSTextView || responder is NSTextField
+                  || responder is NSTextInputClient
+        else { return }
+        win.makeFirstResponder(nil)
+    }
+
     /// Give the editor the keyboard back.
     ///
     /// There is no Insert mode to land in any more — the editor is one state

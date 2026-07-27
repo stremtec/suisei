@@ -2221,6 +2221,23 @@ mod tests {
         assert!(paints(&eng, 1, "DOC_CCC"), "right pane must still paint C");
     }
 
+    /// Esc closes the file palette, all the way through `gui_escape`.
+    ///
+    /// Written to settle where an "Esc does not close the palette" report
+    /// lived. It is not here: core routes Esc to `handle_palette`, the engine
+    /// front-end does not intercept it, and the palette shuts. Anything that
+    /// still looks stuck is above this line, in key delivery.
+    #[test]
+    fn esc_closes_the_file_palette() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.app.open_file_palette();
+        assert!(eng.app.palette.open, "palette should be open");
+        eng.gui_escape();
+        assert!(!eng.app.palette.open, "Esc must close the palette");
+        assert!(matches!(eng.app.mode, Mode::Editor));
+    }
+
     #[test]
     fn blank_tab_after_file_does_not_reenter_welcome() {
         let dir = std::env::temp_dir().join("suisei_blank_tab_welcome");

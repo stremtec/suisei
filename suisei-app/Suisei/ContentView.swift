@@ -411,6 +411,17 @@ struct ContentView: View {
             }
         }
         .animation(.snappy(duration: 0.22), value: engine.chrome.palette.open)
+        // An overlay that owns its keys has to actually be given them. Opening
+        // one while the project tree's filter still holds first responder left
+        // it deaf — see `reclaimKeyboardFromTextFields`. Keyed off the engine's
+        // own open flags so every route in is covered (⌘P, the pane header +,
+        // the menus), not just the call site that happened to be tested.
+        .onChange(of: engine.chrome.palette.open) { _, open in
+            if open { engine.reclaimKeyboardFromTextFields() }
+        }
+        .onChange(of: engine.chrome.search.open) { _, open in
+            if open { engine.reclaimKeyboardFromTextFields() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willStartLiveResizeNotification)) { note in
             guard let w = note.object as? NSWindow, isEditorWindow(w) else { return }
             engine.windowLiveResizing = true
@@ -4092,6 +4103,23 @@ struct ContentView: View {
         .layoutPriority(0)
     }
 
+    /// Fraction of the split axis that pane `idx` of `n` gets.
+    ///
+    /// `ratio` describes ONE divider, so it can only place two panes. The old
+    /// formula gave `ratio` to pane 0 and `1 - ratio` to *every* other pane,
+    /// which for three panes asked for 150% of the axis: the `HStack`
+    /// overflowed, centred, and clipped the surplus off both ends — taking the
+    /// first pane's title and gutter off-screen with it. See
+    /// `SUISEI-TAB-AUDIT.md` §2.1 for the measurements.
+    ///
+    /// Beyond two panes the honest answer is equal shares. This is a stopgap:
+    /// plan step S3 replaces `ratio` with a weight per child, which is also the
+    /// only way three dividers can ever drag independently.
+    private func paneFraction(_ idx: Int, of n: Int, ratio: CGFloat) -> CGFloat {
+        guard n > 2 else { return idx == 0 ? ratio : 1 - ratio }
+        return 1 / CGFloat(n)
+    }
+
     /// Xcode assistant-style columns: each pane has its own path bar + buffer.
     /// Split ratio comes from Core; the divider drags live (local override,
     /// committed to Core on release).
@@ -4100,6 +4128,7 @@ struct ContentView: View {
         let split = engine.editorSplit
         let panes = split.panes
         let pathH: CGFloat = 26
+        let n = panes.count
         let ratio = CGFloat(liveSplitRatio ?? Double(split.ratio == 0 ? 0.5 : split.ratio))
         if split.kind == 1 {
             HStack(spacing: 0) {
@@ -4124,11 +4153,16 @@ struct ContentView: View {
                     editorColumn(
                         pane: pane,
                         contentSize: CGSize(
-                            width: max(40, (idx == 0 ? size.width * ratio : size.width * (1 - ratio)) - 4),
+                            width: max(40, size.width * paneFraction(idx, of: n, ratio: ratio) - 4),
                             height: max(40, size.height - pathH)
                         )
                     )
-                    .frame(width: max(40, (idx == 0 ? size.width * ratio : size.width * (1 - ratio)) - (idx > 0 ? 7 : 0)))
+                    .frame(
+                        width: max(
+                            40,
+                            size.width * paneFraction(idx, of: n, ratio: ratio) - (idx > 0 ? 7 : 0)
+                        )
+                    )
                     .frame(maxHeight: .infinity)
                 }
             }
@@ -4156,10 +4190,15 @@ struct ContentView: View {
                         pane: pane,
                         contentSize: CGSize(
                             width: size.width,
-                            height: max(40, (idx == 0 ? size.height * ratio : size.height * (1 - ratio)) - pathH)
+                            height: max(40, size.height * paneFraction(idx, of: n, ratio: ratio) - pathH)
                         )
                     )
-                    .frame(height: max(40, (idx == 0 ? size.height * ratio : size.height * (1 - ratio)) - (idx > 0 ? 7 : 0)))
+                    .frame(
+                        height: max(
+                            40,
+                            size.height * paneFraction(idx, of: n, ratio: ratio) - (idx > 0 ? 7 : 0)
+                        )
+                    )
                     .frame(maxWidth: .infinity)
                 }
             }
@@ -4825,23 +4864,39 @@ private struct TabStripMouse: NSViewRepresentable {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         override var isFlipped: Bool { true }
 
-        /// Be transparent to anything that is not a left-button drag.
+        /// Claim a plain left press **on a chip**, and nothing else.
         ///
-        /// This view sits *over* the chips, so whatever it hit-tests, the chips
-        /// never see. It claimed right-clicks too and answered them with
-        /// nothing, which silently removed the strip's "Close Tab" context
-        /// menu — a regression from the reorder work, not a missing feature.
-        /// Ctrl+click arrives as a left press and opens the same menu, so it
-        /// has to step aside for that as well.
+        /// This view sits *over* the whole strip, so whatever it hit-tests, the
+        /// views beneath never see. Claiming the lot cost three things at once,
+        /// all of them regressions from the reorder work rather than features
+        /// that were never built:
+        ///
+        /// * right-clicks reached a view with no `menu(for:)`, so the strip's
+        ///   "Close Tab" context menu silently stopped existing;
+        /// * presses on the `+` were swallowed — `mouseUp` only routes a click
+        ///   onward when `slotAt` finds a chip, and over the `+` there is none,
+        ///   so the `Button` never fired;
+        /// * the gaps between chips stopped falling through to the window-drag
+        ///   layer underneath.
+        ///
+        /// Ctrl+click arrives as a left press and opens the context menu, so it
+        /// has to step aside for that too.
         override func hitTest(_ point: NSPoint) -> NSView? {
+            guard super.hitTest(point) != nil else { return nil }
             guard let e = NSApp.currentEvent else { return super.hitTest(point) }
             switch e.type {
-            case .rightMouseDown, .rightMouseUp, .rightMouseDragged:
-                return nil
-            case .leftMouseDown where e.modifierFlags.contains(.control):
-                return nil
+            case .leftMouseDown where !e.modifierFlags.contains(.control):
+                // `hitTest` is handed a point in the SUPERVIEW's space; the
+                // chip frames are measured in this view's own.
+                let local = superview.map { convert(point, from: $0) } ?? point
+                return slotAt?(local.x) != nil ? self : nil
+            case .leftMouseDragged, .leftMouseUp:
+                // Mid-gesture. AppKit routes these to whoever took the
+                // mouseDown regardless, but answering honestly here keeps a
+                // drag that wanders past the last chip from being handed off.
+                return self
             default:
-                return super.hitTest(point)
+                return nil
             }
         }
 
