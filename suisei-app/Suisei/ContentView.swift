@@ -4825,6 +4825,26 @@ private struct TabStripMouse: NSViewRepresentable {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         override var isFlipped: Bool { true }
 
+        /// Be transparent to anything that is not a left-button drag.
+        ///
+        /// This view sits *over* the chips, so whatever it hit-tests, the chips
+        /// never see. It claimed right-clicks too and answered them with
+        /// nothing, which silently removed the strip's "Close Tab" context
+        /// menu — a regression from the reorder work, not a missing feature.
+        /// Ctrl+click arrives as a left press and opens the same menu, so it
+        /// has to step aside for that as well.
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let e = NSApp.currentEvent else { return super.hitTest(point) }
+            switch e.type {
+            case .rightMouseDown, .rightMouseUp, .rightMouseDragged:
+                return nil
+            case .leftMouseDown where e.modifierFlags.contains(.control):
+                return nil
+            default:
+                return super.hitTest(point)
+            }
+        }
+
         private func x(of event: NSEvent) -> CGFloat {
             convert(event.locationInWindow, from: nil).x
         }

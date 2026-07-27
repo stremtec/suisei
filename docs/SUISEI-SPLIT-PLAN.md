@@ -13,7 +13,7 @@ terminal-pane code in `app.rs`.
 
 ## 1. Why it is unstable — the actual mechanisms
 
-### 1.1 Panes address content by **index**, and indices move
+### 1.1 Panes address content by **index**, and indices move — *fixed in S1*
 
 ```rust
 pub struct Pane {
@@ -134,14 +134,35 @@ deleted rather than made more careful.
 
 Nothing here is a big-bang rewrite; each step leaves the app working.
 
-### S1 · Stable buffer ids *(no visible change)*
-Add `BufferId` to `BufferTab`, a `next_id` counter on `App`, and a
-`buffer_index(BufferId)` lookup. Convert `Pane.tab_index` to
-`Pane.buffer: BufferId`. Everything else keeps working through the lookup.
+### S1 · Stable buffer ids — **DONE**
+`BufferId` on `BufferTab`, a `next_tab_id` counter on `App`, and a
+`buffer_index(BufferId)` lookup. `Pane.tab_index` became `Pane.buffer:
+BufferId`; the paint path resolves id → index at its boundary, so the C ABI
+(`SuiseiPaneC.tab_index`) is unchanged.
 
-**Gate:** open four tabs, split, close the *first* tab. Both panes still show
-what they showed. Today they shift by one. Regression test in
-`suisei-core`.
+Two things fell out that the step did not predict:
+
+* `SplitState::clamp_tabs` is gone. It clamped *out-of-range* pane indices,
+  which is why closing tab 0 of four was silent — the indices stayed in range
+  and simply named different files. Its replacement, `repoint(gone, adopt)`,
+  handles the one case ids actually have: the document a pane was showing is
+  closed. It resets that pane's scroll and cursor too, since those were
+  coordinates in a file that no longer exists.
+* `Engine::close_tab` ended with `sync_focused_pane_tab()`, which pushed the
+  newly active document *into* the focused pane — so closing any tab dragged
+  the focused pane along even after the ids landed. It now calls
+  `apply_focused_pane()`: the pane keeps its document and the editor follows
+  it, which is also the direction S2 takes.
+
+**Gate — met.** Four tabs, split, close the first: both panes still show what
+they showed. Covered by `closing_a_tab_leaves_the_other_panes_on_their_own_documents`
+(core) and `closing_a_tab_leaves_split_panes_painting_their_own_files`
+(engine, through the real paint path), and confirmed by hand in the packaged
+app.
+
+`App::current_buffer` is still a position. That is deliberate: it is repaired
+synchronously by the one function that reshuffles the vector, and S2 removes it
+outright by making the focused pane the owner.
 
 ### S2 · One source of truth for the focused pane
 Move `scroll`/`hscroll`/`cursor` ownership entirely into the pane and make the

@@ -352,20 +352,27 @@ the chrome snapshot. Brought forward from the split plan because the tab strip
 cannot animate a reorder without it — `ForEach` keyed on the slot index leaves
 the identity list unchanged when tabs swap.
 
-**Remaining for S1:** `Pane.tab_index` still addresses documents by position,
-and `App::move_tab` / `close_tab` repair those indices by hand. That hand-repair
-is exactly what the step exists to delete.
+**S1 is now complete.** `Pane.tab_index` is `Pane.buffer: BufferId`, so
+`App::move_tab` repairs nothing — reordering the strip cannot change a
+document's identity. Details and the two surprises in
+[`SUISEI-SPLIT-PLAN.md`](SUISEI-SPLIT-PLAN.md) §S1.
+
+One regression from the reorder work, found while verifying that: the AppKit
+overlay that owns the strip's mouse events also claimed right-clicks and
+answered them with nothing, silently removing the strip's "Close Tab" context
+menu. It now hit-tests transparent for anything that is not a left-button drag,
+ctrl+click included.
 
 ### J5 · Editor split is unstable · PLANNED — **priority 2**
 ### J6 · "Turn this pane into a terminal" is unstable · PLANNED
 Both need rebuilding rather than repair. Causes and an ordered plan are in
-[`SUISEI-SPLIT-PLAN.md`](SUISEI-SPLIT-PLAN.md). The short version: panes address
-content by **index** (`Pane.tab_index`, `terminal.pane_bound`) so closing or
-reordering anything silently repoints them; the focused pane's scroll/cursor
-exists in two places kept in step by hand; one `kind` and one `ratio` serve the
-whole layout, so mixed splits are refused outright and three panes cannot be
-resized; and the terminal's location is spread across four fields that can
-disagree. J6 as specified — convert the focused pane, displace its document to
+[`SUISEI-SPLIT-PLAN.md`](SUISEI-SPLIT-PLAN.md). The short version: panes
+addressed content by **index** so closing or reordering anything silently
+repointed them (**fixed** — S1); `terminal.pane_bound` is still an index
+(S4); the focused pane's scroll/cursor exists in two places kept in step by
+hand (S2); one `kind` and one `ratio` serve the whole layout, so mixed splits
+are refused outright and three panes cannot be resized (S3); and the terminal's
+location is spread across four fields that can disagree (S4). J6 as specified — convert the focused pane, displace its document to
 the tab bar — is not implemented at all; the current code opens a *new split*
 instead.
 

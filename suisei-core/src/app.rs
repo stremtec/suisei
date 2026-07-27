@@ -320,7 +320,9 @@ pub struct App {
     /// once per change instead of the old pre-edit push_undo notification.
     lsp_synced_path: Option<PathBuf>,
     lsp_synced_hash: u64,
-    /// Source of `BufferTab::id`. Monotonic; ids are never reused.
+    /// Source of `BufferTab::id`. Monotonic; ids are never reused. Starts past
+    /// [`FIRST_TAB_ID`] because the tab a fresh `App` opens with is not handed
+    /// out by `take_tab_id`.
     next_tab_id: u64,
     /// Buffer version at the last dirty-flag re-check, so an idle document is
     /// never re-hashed. See [`App::recheck_modified`].
@@ -341,17 +343,34 @@ pub struct App {
     saved_hash: u64,
 }
 
+/// Stable handle to an open document, issued by [`App::take_tab_id`].
+///
+/// Monotonic and never reused, which is the whole point: a handle to a closed
+/// document resolves to `None` rather than to whichever document has since
+/// moved into that slot. Anything that outlives a single call — a split pane,
+/// and later a layout tree — holds one of these instead of a position in
+/// `App::buffers`.
+///
+/// `BufferId::default()` is the never-issued id (`take_tab_id` starts at 1), so
+/// a zero-valued handle is "nothing", not "the first tab".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BufferId(pub u64);
+
+/// The document a fresh `App` starts with. Deliberately not `BufferId(0)` —
+/// that value is the never-issued one, and a default-constructed `Pane` holds
+/// it, so putting a real document there would make every unset pane silently
+/// resolve to the first tab.
+pub const FIRST_TAB_ID: BufferId = BufferId(1);
+
 #[derive(Clone)]
 pub struct BufferTab {
     /// Stable for this tab's lifetime and never reused.
     ///
-    /// Everything else addresses a tab by its POSITION in `buffers`, which
-    /// moves whenever one is closed or reordered. The face needs an identity
-    /// that does not: with an index as its list identity, dragging a tab left
-    /// the identity list unchanged and only the titles swapped in place, so
-    /// there was nothing for it to animate. See `SUISEI-SPLIT-PLAN.md` §S1 —
-    /// panes should key off this too, which is the remainder of that step.
-    pub id: u64,
+    /// The face needs a list identity that does not move: with an index as its
+    /// identity, dragging a tab left the identity list unchanged and only the
+    /// titles swapped in place, so there was nothing for it to animate. Split
+    /// panes address their document by this too — see [`BufferId`].
+    pub id: BufferId,
     pub buffer: Buffer,
     pub filename: Option<PathBuf>,
     pub scroll: usize,
@@ -501,7 +520,7 @@ impl Default for App {
             xlc_separator_y: 0,
             file_mtime: None,
             buffers: vec![BufferTab {
-                id: 0,
+                id: FIRST_TAB_ID,
                 buffer: Buffer::new(),
                 filename: None,
                 scroll: 0,
@@ -589,7 +608,7 @@ impl Default for App {
             rename_pending: false,
             lsp_synced_path: None,
             lsp_synced_hash: 0,
-            next_tab_id: 1,
+            next_tab_id: FIRST_TAB_ID.0 + 1,
             saved_hash: EMPTY_TEXT_HASH,
             dirty_checked_version: 0,
             content_width: 0,
@@ -1013,7 +1032,7 @@ impl App {
             undo_stack: undo.clone(),
             file_mtime: mtime,
             buffers: vec![BufferTab {
-                id: 0,
+                id: FIRST_TAB_ID,
                 buffer,
                 filename: Some(abs_path.clone()),
                 scroll: 0,
@@ -1284,7 +1303,6 @@ impl App {
         });
         self.current_buffer = self.buffers.len() - 1;
         self.restore_state_from_tab();
-        self.split.clamp_tabs(self.buffers.len());
         self.refresh_git();
         self.mode = Mode::Editor;
         self.message = "New tab · i insert · Ctrl+P files · :e <file>".into();
@@ -2049,7 +2067,7 @@ impl App {
         // Open as a window: ensure a split exists so the editor stays visible.
         self.terminal.owns_split = false;
         if !self.split.is_split() {
-            let tab = self.current_buffer;
+            let tab = self.current_buffer_id();
             let scroll = self.scroll;
             let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
             self.split
@@ -3328,7 +3346,7 @@ impl App {
         let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
         let r = self
             .split
-            .open_split(kind, self.current_buffer, self.scroll, cur);
+            .open_split(kind, self.current_buffer_id(), self.scroll, cur);
         self.message = match r {
             SplitAdd::Opened => {
                 format!("{label} split · Ctrl+W w cycle · Ctrl+W q close")
@@ -3381,12 +3399,14 @@ impl App {
             self.terminal.pane_bound = None; // continues as the full-main window
         }
         if let Some(p) = survivor {
-            if p.tab_index != self.current_buffer && p.tab_index < self.buffers.len() {
-                self.save_state_to_tab();
-                self.current_buffer = p.tab_index;
-                self.restore_state_from_tab();
-                self.lsp_restart_for_current();
-                self.refresh_git();
+            if let Some(idx) = self.buffer_index(p.buffer) {
+                if idx != self.current_buffer {
+                    self.save_state_to_tab();
+                    self.current_buffer = idx;
+                    self.restore_state_from_tab();
+                    self.lsp_restart_for_current();
+                    self.refresh_git();
+                }
             }
             let max_row = self.buffer.line_count().saturating_sub(1);
             self.buffer.cursor.row = p.cursor.0.min(max_row);
@@ -3448,8 +3468,9 @@ impl App {
             return;
         }
         let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
+        let id = self.current_buffer_id();
         let p = self.split.focused_pane_mut();
-        p.tab_index = self.current_buffer;
+        p.buffer = id;
         p.scroll = self.scroll;
         p.hscroll = self.hscroll;
         p.cursor = cur;
@@ -3471,12 +3492,14 @@ impl App {
             return;
         }
         let pane = self.split.focused_pane().clone();
-        if pane.tab_index != self.current_buffer && pane.tab_index < self.buffers.len() {
-            self.save_state_to_tab();
-            self.current_buffer = pane.tab_index;
-            self.restore_state_from_tab();
-            self.lsp_restart_for_current();
-            self.refresh_git();
+        if let Some(idx) = self.buffer_index(pane.buffer) {
+            if idx != self.current_buffer {
+                self.save_state_to_tab();
+                self.current_buffer = idx;
+                self.restore_state_from_tab();
+                self.lsp_restart_for_current();
+                self.refresh_git();
+            }
         }
         // Per-pane cursor (clamped — the buffer may have changed underneath).
         let max_row = self.buffer.line_count().saturating_sub(1);
@@ -3492,8 +3515,9 @@ impl App {
     pub fn sync_focused_pane_tab(&mut self) {
         if self.split.is_split() {
             let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
+            let id = self.current_buffer_id();
             let p = self.split.focused_pane_mut();
-            p.tab_index = self.current_buffer;
+            p.buffer = id;
             p.scroll = self.scroll;
             p.hscroll = self.hscroll;
             p.cursor = cur;
@@ -3763,19 +3787,38 @@ impl App {
 
     /// Next unused tab id. Monotonic — a closed tab's id never comes back, so
     /// a stale reference can be detected rather than silently resolving.
-    fn take_tab_id(&mut self) -> u64 {
+    fn take_tab_id(&mut self) -> BufferId {
         let id = self.next_tab_id;
         self.next_tab_id = self.next_tab_id.wrapping_add(1);
-        id
+        BufferId(id)
+    }
+
+    /// Position of `id` in `buffers`, or `None` if that document is closed.
+    pub fn buffer_index(&self, id: BufferId) -> Option<usize> {
+        self.buffers.iter().position(|t| t.id == id)
+    }
+
+    /// Stable handle for the active document.
+    pub fn current_buffer_id(&self) -> BufferId {
+        self.buffers
+            .get(self.current_buffer)
+            .map(|t| t.id)
+            .unwrap_or_default()
+    }
+
+    /// Which tab a pane is showing, falling back to the active one when its
+    /// document has been closed. Panes must always render *something*, so the
+    /// paint path wants this; anything asking "is this pane's document X?"
+    /// wants [`App::buffer_index`] and its honest `None`.
+    pub fn pane_tab(&self, pane: &crate::split::Pane) -> usize {
+        self.buffer_index(pane.buffer).unwrap_or(self.current_buffer)
     }
 
     /// Move the tab at `from` to sit at `to`, as a tab-bar drag does.
     ///
-    /// Every index that points into `buffers` has to move with it: the active
-    /// tab, and every split pane's `tab_index`. Panes address their document by
-    /// POSITION (see `SUISEI-SPLIT-PLAN.md` §1.1), so a reorder that forgot
-    /// them would silently repoint each pane at whatever slid into its slot —
-    /// the same class of bug that closing a tab already has.
+    /// Panes need no repair here: they hold a [`BufferId`], and reordering the
+    /// vector does not change any document's identity. Only `current_buffer` —
+    /// still a position — has to follow the move.
     ///
     /// Returns false when the move is a no-op or out of range.
     pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
@@ -3802,9 +3845,6 @@ impl App {
             }
         };
         self.current_buffer = remap(self.current_buffer);
-        for pane in &mut self.split.panes {
-            pane.tab_index = remap(pane.tab_index);
-        }
         self.restore_state_from_tab();
         true
     }
@@ -4451,9 +4491,10 @@ impl App {
 
         // Keep focused split pane scroll in sync
         if self.split.is_split() {
+            let id = self.current_buffer_id();
             let p = self.split.focused_pane_mut();
             p.scroll = self.scroll;
-            p.tab_index = self.current_buffer;
+            p.buffer = id;
         }
     }
 
@@ -5016,6 +5057,7 @@ impl App {
                 tab.undo_stack.finish(self.undo_caching, &text);
             }
         }
+        let closed = self.current_buffer_id();
         if self.buffers.len() <= 1 {
             self.lsp.shutdown();
             self.buffer = Buffer::new();
@@ -5037,6 +5079,9 @@ impl App {
                 undo_stack: self.undo_stack.clone(),
                 file_mtime: None,
             };
+            // The slot survives but the document in it does not, so the id
+            // changed and any pane still naming the old one has to follow.
+            self.split.repoint(closed, fresh_id);
             return;
         }
 
@@ -5045,6 +5090,12 @@ impl App {
             self.current_buffer = self.buffers.len() - 1;
         }
         self.restore_state_from_tab();
+        // Panes showing the closed document adopt the newly active one. Every
+        // other pane is untouched — that is the point of ids. With indices,
+        // closing tab 0 of four shifted all three of the others by one and
+        // nothing here noticed.
+        let adopt = self.current_buffer_id();
+        self.split.repoint(closed, adopt);
         // Re-point the LSP at the newly current tab (same language → reuse the
         // running server; different → restart). The old unconditional shutdown
         // left the surviving tabs with no LSP at all.
@@ -5271,10 +5322,9 @@ mod tests {
         );
     }
 
-    /// A tab-bar drag must carry every index that points into `buffers` with
-    /// it. Panes address their document by POSITION, so a reorder that moved
-    /// only the vector would leave each pane showing whatever slid into its
-    /// slot.
+    /// A tab-bar drag reshuffles `buffers`. Panes hold a `BufferId`, so a
+    /// document keeps its pane no matter where it lands in the strip — this
+    /// pins that, and that `current_buffer` (still a position) follows.
     #[test]
     fn moving_a_tab_carries_the_active_index_and_every_pane() {
         let mut app = app_with("a");
@@ -5301,17 +5351,17 @@ mod tests {
         assert_eq!(names(&app), ["a", "b", "c", "d"]);
 
         // Three panes, one on each of the first three tabs.
-        app.split.panes = vec![
-            crate::split::Pane { tab_index: 0, ..Default::default() },
-            crate::split::Pane { tab_index: 1, ..Default::default() },
-            crate::split::Pane { tab_index: 2, ..Default::default() },
-        ];
+        let ids: Vec<BufferId> = app.buffers.iter().take(3).map(|t| t.id).collect();
+        app.split.panes = ids
+            .iter()
+            .map(|&id| crate::split::Pane { buffer: id, ..Default::default() })
+            .collect();
         app.goto_tab(1); // park + restore properly; a bare assignment leaves
                          // `App.buffer` showing a different tab's text
         assert!(app.move_tab(0, 2));
         assert_eq!(names(&app), ["b", "c", "a", "d"]);
         assert_eq!(app.current_buffer, 0, "the active tab followed its document");
-        let panes: Vec<usize> = app.split.panes.iter().map(|p| p.tab_index).collect();
+        let panes: Vec<usize> = app.split.panes.iter().map(|p| app.pane_tab(p)).collect();
         assert_eq!(panes, [2, 0, 1], "every pane still shows the file it showed");
     }
 
@@ -5333,7 +5383,8 @@ mod tests {
             });
         }
         app.save_state_to_tab();
-        app.split.panes = vec![crate::split::Pane { tab_index: 2, ..Default::default() }];
+        let c_id = app.buffers[2].id;
+        app.split.panes = vec![crate::split::Pane { buffer: c_id, ..Default::default() }];
         app.goto_tab(2);
 
         // c moves to the front: a b c → c a b
@@ -5341,11 +5392,75 @@ mod tests {
         let names: Vec<String> = app.buffers.iter().map(|t| t.buffer.line(0).to_string()).collect();
         assert_eq!(names, ["c", "a", "b"]);
         assert_eq!(app.current_buffer, 0);
-        assert_eq!(app.split.panes[0].tab_index, 0);
+        assert_eq!(app.pane_tab(&app.split.panes[0]), 0);
 
         assert!(!app.move_tab(1, 1), "a move onto itself is a no-op");
         assert!(!app.move_tab(0, 9), "out of range is refused");
         assert!(!app.move_tab(9, 0));
+    }
+
+    /// Open four tabs, split, close the *first* one. Every pane still shows
+    /// the document it was showing.
+    ///
+    /// This is the gate for `SUISEI-SPLIT-PLAN.md` §S1. With `tab_index` the
+    /// panes each slid one document to the left and nothing complained,
+    /// because the indices were still in range — `clamp_tabs` only ever caught
+    /// the panes that fell off the end.
+    #[test]
+    fn closing_a_tab_leaves_the_other_panes_on_their_own_documents() {
+        let mut app = app_with("a");
+        for name in ["b", "c", "d"] {
+            let tab_id = app.take_tab_id();
+            app.buffers.push(BufferTab {
+                id: tab_id,
+                buffer: crate::buffer::Buffer::from_string(name),
+                filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
+                scroll: 0,
+                modified: false,
+                saved_hash: EMPTY_TEXT_HASH,
+                undo_stack: UndoStack::new(),
+                file_mtime: None,
+            });
+        }
+        app.save_state_to_tab();
+        let shown = |app: &App| -> Vec<String> {
+            app.split
+                .panes
+                .iter()
+                .map(|p| app.buffers[app.pane_tab(p)].buffer.line(0).to_string())
+                .collect()
+        };
+
+        // Two panes on c and d, then make a the active tab and close it.
+        let (c_id, d_id) = (app.buffers[2].id, app.buffers[3].id);
+        app.split.kind = crate::split::SplitKind::Vertical;
+        app.split.panes = vec![
+            crate::split::Pane { buffer: c_id, ..Default::default() },
+            crate::split::Pane { buffer: d_id, ..Default::default() },
+        ];
+        app.goto_tab(0);
+        assert_eq!(shown(&app), ["c", "d"]);
+
+        app.close_current_tab();
+        assert_eq!(
+            app.buffers.iter().map(|t| t.buffer.line(0).to_string()).collect::<Vec<_>>(),
+            ["b", "c", "d"]
+        );
+        assert_eq!(shown(&app), ["c", "d"], "panes followed their documents");
+
+        // A pane whose own document is closed adopts the active one rather
+        // than dangling — and does not keep coordinates from the dead file.
+        // The second pane moves to b so that "adopted the active tab" and
+        // "happened to already show it" are different answers.
+        app.split.panes[1].buffer = app.buffers[0].id; // panes: c, b
+        app.split.panes[0].scroll = 7;
+        app.split.panes[0].cursor = (9, 3);
+        app.goto_tab(1); // c
+        app.close_current_tab(); // d slides into c's slot and becomes active
+        assert_eq!(app.buffers[app.current_buffer].buffer.line(0), "d");
+        assert_eq!(shown(&app), ["d", "b"], "only the orphaned pane moved");
+        assert_eq!(app.split.panes[0].scroll, 0);
+        assert_eq!(app.split.panes[0].cursor, (0, 0));
     }
 
     /// `modified` was a one-way latch: set by every edit, cleared only by a

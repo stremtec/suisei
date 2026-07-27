@@ -3,6 +3,8 @@
 //! to the focused one (Vim-style enough for daily use; no mixed-direction
 //! trees yet).
 
+use crate::app::BufferId;
+
 /// Hard cap — panes get unusably narrow beyond this.
 pub const MAX_PANES: usize = 4;
 
@@ -18,7 +20,15 @@ pub enum SplitKind {
 
 #[derive(Debug, Clone)]
 pub struct Pane {
-    pub tab_index: usize,
+    /// The document this pane shows, by stable id — **not** by position.
+    ///
+    /// Positions move: closing a tab or dragging one along the strip shifts
+    /// every slot after it, and a pane holding a position is then pointing at
+    /// whatever slid underneath it. That was `tab_index`, and it is the bug
+    /// class described in `SUISEI-SPLIT-PLAN.md` §1.1. An id that never comes
+    /// back means a stale reference fails to resolve — visible and repairable
+    /// — instead of silently naming the wrong file.
+    pub buffer: BufferId,
     pub scroll: usize,
     /// Horizontal pan (visual columns) when wrap_lines is off — per pane.
     pub hscroll: usize,
@@ -29,7 +39,9 @@ pub struct Pane {
 impl Default for Pane {
     fn default() -> Self {
         Self {
-            tab_index: 0,
+            // `BufferId::default()` is the never-issued id, so a default pane
+            // resolves to nothing and falls back to the active document.
+            buffer: BufferId::default(),
             scroll: 0,
             hscroll: 0,
             cursor: (0, 0),
@@ -106,7 +118,7 @@ impl SplitState {
     pub fn open_split(
         &mut self,
         kind: SplitKind,
-        tab: usize,
+        tab: BufferId,
         scroll: usize,
         cursor: (usize, usize),
     ) -> SplitAdd {
@@ -127,7 +139,7 @@ impl SplitState {
             self.panes.insert(
                 at,
                 Pane {
-                    tab_index: tab,
+                    buffer: tab,
                     scroll,
                     hscroll: 0,
                     cursor,
@@ -141,14 +153,14 @@ impl SplitState {
         self.focus = 0;
         self.panes = vec![
             Pane {
-                tab_index: tab,
+                buffer: tab,
                 scroll,
                 hscroll: 0,
                 cursor,
             },
             // Second pane starts on same tab (VS Code-ish); user can switch later.
             Pane {
-                tab_index: tab,
+                buffer: tab,
                 scroll,
                 hscroll: 0,
                 cursor,
@@ -214,14 +226,26 @@ impl SplitState {
         self.ratio = 0.5;
     }
 
-    /// Keep pane tab indices valid after tab close/reorder.
-    pub fn clamp_tabs(&mut self, n_tabs: usize) {
-        if n_tabs == 0 {
-            return;
-        }
+    /// Repoint every pane showing `gone` at `adopt`, for when a document is
+    /// closed out from under a split.
+    ///
+    /// This is the *whole* repair surface now. `clamp_tabs` used to sit here
+    /// and clamp out-of-range indices after any tab change, which is why
+    /// closing tab 0 of four quietly slid every pane one document to the left:
+    /// the indices stayed in range, so there was nothing to clamp, and each
+    /// pane went on pointing at a slot that now held a different file. Ids do
+    /// not have an in-range-but-wrong state — either the document is still
+    /// open or it is not.
+    pub fn repoint(&mut self, gone: BufferId, adopt: BufferId) {
         for p in &mut self.panes {
-            if p.tab_index >= n_tabs {
-                p.tab_index = n_tabs - 1;
+            if p.buffer == gone {
+                p.buffer = adopt;
+                // The old scroll and cursor were coordinates in a document that
+                // is no longer there; carrying them over lands the caret at an
+                // arbitrary row of an unrelated file.
+                p.scroll = 0;
+                p.hscroll = 0;
+                p.cursor = (0, 0);
             }
         }
     }
@@ -234,41 +258,41 @@ mod tests {
     #[test]
     fn repeated_splits_add_panes_up_to_cap() {
         let mut s = SplitState::new();
-        assert_eq!(s.open_split(SplitKind::Vertical, 0, 0, (0, 0)), SplitAdd::Opened);
+        assert_eq!(s.open_split(SplitKind::Vertical, BufferId(0), 0, (0, 0)), SplitAdd::Opened);
         assert_eq!(s.pane_count(), 2);
-        assert_eq!(s.open_split(SplitKind::Vertical, 1, 3, (3, 0)), SplitAdd::Added);
+        assert_eq!(s.open_split(SplitKind::Vertical, BufferId(1), 3, (3, 0)), SplitAdd::Added);
         assert_eq!(s.pane_count(), 3);
         // New pane sits next to previous focus and takes focus.
         assert_eq!(s.focus, 1);
-        assert_eq!(s.focused_pane().tab_index, 1);
-        assert_eq!(s.open_split(SplitKind::Vertical, 0, 0, (0, 0)), SplitAdd::Added);
+        assert_eq!(s.focused_pane().buffer, BufferId(1));
+        assert_eq!(s.open_split(SplitKind::Vertical, BufferId(0), 0, (0, 0)), SplitAdd::Added);
         assert_eq!(s.pane_count(), 4);
-        assert_eq!(s.open_split(SplitKind::Vertical, 0, 0, (0, 0)), SplitAdd::Full);
-        assert_eq!(s.open_split(SplitKind::Horizontal, 0, 0, (0, 0)), SplitAdd::MixedKind);
+        assert_eq!(s.open_split(SplitKind::Vertical, BufferId(0), 0, (0, 0)), SplitAdd::Full);
+        assert_eq!(s.open_split(SplitKind::Horizontal, BufferId(0), 0, (0, 0)), SplitAdd::MixedKind);
     }
 
     #[test]
     fn remove_focused_collapses_to_single() {
         let mut s = SplitState::new();
-        s.open_split(SplitKind::Vertical, 0, 0, (0, 0));
-        s.open_split(SplitKind::Vertical, 2, 9, (9, 0)); // 3 panes, focus=1 (tab 2)
+        s.open_split(SplitKind::Vertical, BufferId(0), 0, (0, 0));
+        s.open_split(SplitKind::Vertical, BufferId(2), 9, (9, 0)); // 3 panes, focus=1 (tab 2)
         s.set_focus(1);
         let survivor = s.remove_focused().expect("still split");
         // Focus falls to the neighbor at the same index.
         assert!(s.is_split());
         assert_eq!(s.pane_count(), 2);
-        assert_eq!(survivor.tab_index, s.focused_pane().tab_index);
+        assert_eq!(survivor.buffer, s.focused_pane().buffer);
         // Removing again collapses the split and yields the last survivor.
         let last = s.remove_focused().expect("survivor");
         assert!(!s.is_split());
-        assert_eq!(last.tab_index, 0);
+        assert_eq!(last.buffer, BufferId(0));
     }
 
     #[test]
     fn focus_cycles_all_panes() {
         let mut s = SplitState::new();
-        s.open_split(SplitKind::Horizontal, 0, 0, (0, 0));
-        s.open_split(SplitKind::Horizontal, 0, 0, (0, 0));
+        s.open_split(SplitKind::Horizontal, BufferId(0), 0, (0, 0));
+        s.open_split(SplitKind::Horizontal, BufferId(0), 0, (0, 0));
         assert_eq!(s.pane_count(), 3);
         s.set_focus(0);
         s.focus_other();

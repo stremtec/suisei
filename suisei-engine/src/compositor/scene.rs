@@ -372,7 +372,7 @@ pub fn build_editor_band(
             (app.current_buffer, true)
         } else {
             (
-                app.split.panes.get(idx).map(|p| p.tab_index).unwrap_or(0),
+                app.split.panes.get(idx).map(|p| app.pane_tab(p)).unwrap_or(0),
                 false,
             )
         }
@@ -1708,7 +1708,7 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
             tab.modified
         };
         out.push(TabScene {
-            id: tab.id,
+            id: tab.id.0,
             title,
             dirty,
             active: is_current,
@@ -1788,7 +1788,7 @@ fn build_editor_surfaces(
                 (app.buffer.cursor.row, app.buffer.cursor.col),
             )
         } else {
-            (pane.tab_index, pane.scroll, pane.hscroll, pane.cursor)
+            (app.pane_tab(pane), pane.scroll, pane.hscroll, pane.cursor)
         };
         let buf = buffer_for_tab(app, tab);
         let doc_line_count = buf.line_count() as u32;
@@ -1904,7 +1904,10 @@ fn build_lines_at(
         .split
         .panes
         .iter()
-        .find(|p| p.tab_index == tab)
+        // Strict: a pane whose document is closed has no cursor in `tab`, and
+        // `pane_tab`'s fallback to the active tab would hand over someone
+        // else's row.
+        .find(|p| app.buffer_index(p.buffer) == Some(tab))
     {
         p.cursor.0
     } else {

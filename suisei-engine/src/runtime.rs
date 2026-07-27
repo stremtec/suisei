@@ -1456,7 +1456,15 @@ impl Engine {
         let idx = (index as usize).min(n.saturating_sub(1));
         self.app.goto_tab(idx);
         self.app.close_current_tab();
-        self.app.sync_focused_pane_tab();
+        // The focused pane keeps its document and the editor follows it.
+        //
+        // `sync_focused_pane_tab()` used to be here and ran the other way:
+        // closing *any* tab dragged the focused pane onto whatever landed in
+        // the closed slot, because `goto_tab` above had to make the doomed tab
+        // active first. `close_current_tab` already repoints panes that were
+        // showing the closed document, so the only thing left to do is not
+        // disturb the ones that weren't.
+        self.app.apply_focused_pane();
         self.app.update_scroll();
         self.recompose();
     }
@@ -2165,6 +2173,52 @@ mod tests {
                 .any(|l| l.text.contains("left") || l.text.contains("LEFT_ONLY_AAA")),
             "left still A"
         );
+    }
+
+    /// The §S1 gate from `SUISEI-SPLIT-PLAN.md`, driven through the real paint
+    /// path: with two panes on two files, closing an *unrelated* third tab
+    /// leaves both panes painting what they were painting.
+    ///
+    /// Two separate mechanisms used to break this and they cancelled out in no
+    /// useful way. Panes addressed documents by position, so removing an
+    /// earlier tab slid every pane one file along; and `close_tab` finished by
+    /// pushing the newly active document into the focused pane. Both are gone
+    /// — panes hold a `BufferId` and the editor follows the pane.
+    #[test]
+    fn closing_a_tab_leaves_split_panes_painting_their_own_files() {
+        let dir = std::env::temp_dir().join("suisei_close_tab_panes");
+        let _ = std::fs::create_dir_all(&dir);
+        let (a, b, c) = (dir.join("a.txt"), dir.join("b.txt"), dir.join("c.txt"));
+        std::fs::write(&a, format!("DOC_AAA\n{}", "a\n".repeat(40))).unwrap();
+        std::fs::write(&b, format!("DOC_BBB\n{}", "b\n".repeat(40))).unwrap();
+        std::fs::write(&c, format!("DOC_CCC\n{}", "c\n".repeat(40))).unwrap();
+
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.app = App::open_file(a.to_str().unwrap());
+        eng.recompose();
+        eng.split_vertical();
+        eng.focus_pane(0);
+        eng.app.open_new_tab(b.to_str().unwrap());
+        eng.focus_pane(1);
+        eng.app.open_new_tab(c.to_str().unwrap());
+        eng.recompose();
+
+        let paints = |eng: &Engine, pane: usize, mark: &str| -> bool {
+            eng.last_diff.chrome.as_ref().unwrap().panes[pane]
+                .lines
+                .iter()
+                .any(|l| l.text.contains(mark))
+        };
+        assert_eq!(eng.app.buffers.len(), 3);
+        assert!(paints(&eng, 0, "DOC_BBB"), "left pane starts on B");
+        assert!(paints(&eng, 1, "DOC_CCC"), "right pane starts on C");
+
+        // Close tab A — the one file no pane is showing.
+        eng.close_tab(0);
+        assert_eq!(eng.app.buffers.len(), 2);
+        assert!(paints(&eng, 0, "DOC_BBB"), "left pane must still paint B");
+        assert!(paints(&eng, 1, "DOC_CCC"), "right pane must still paint C");
     }
 
     #[test]

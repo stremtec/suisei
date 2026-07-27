@@ -48,7 +48,7 @@ pub mod dispatch;
 pub mod key;
 pub use fs_atomic::atomic_write_file;
 pub use app::{
-    App, BufferTab, EditorContextMenu, EditorCtxItem, EditorViewport, Mode, MouseState,
+    App, BufferId, BufferTab, EditorContextMenu, EditorCtxItem, EditorViewport, Mode, MouseState,
     ProcMetrics, ResizeTarget, SplitSepHit,
 };
 pub use key::{KeyCode, KeyEvent, KeyModifiers};
