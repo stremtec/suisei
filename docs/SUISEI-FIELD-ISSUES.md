@@ -369,11 +369,20 @@ disagree. J6 as specified — convert the focused pane, displace its document to
 the tab bar — is not implemented at all; the current code opens a *new split*
 instead.
 
-### J7 · No editor layout save / restore · OPEN
-VS Code-like tab behaviour is missing. The intended shape is specific: a fast
-scroll up or down near the tab bar reveals a **separate layout tab bar**, so
-layouts are switchable the way documents are. Design first, then build — this
-is a feature, not a defect.
+### J7 · No editor layout save / restore · DESIGNED, blocked on S3
+A feature, not a defect. The design is settled and written up as
+[`SUISEI-SPLIT-PLAN.md`](SUISEI-SPLIT-PLAN.md) §S6.
+
+Shape: a fast upward scroll over the tab strip **folds** whatever the editor is
+showing — one file, a 2/3-way split, or the four-pane `+` — into a single tab
+called "layout 1". A layout is a tab like any other, not a separate bar. The
+fold itself changes nothing on screen; the payoff is the next tab switch, which
+clears the editor down to that one document while the arrangement waits in its
+tab. Scrolling down *inside* the layout tab unfolds it.
+
+Blocked on S3: folding means serialising the split tree, and there is no tree
+yet — one `kind` and one `ratio` for the whole layout cannot describe the `+`
+this is meant to capture.
 
 ---
 
