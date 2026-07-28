@@ -338,6 +338,8 @@ pub struct App {
     /// [`FIRST_TAB_ID`] because the tab a fresh `App` opens with is not handed
     /// out by `take_tab_id`.
     next_tab_id: u64,
+    /// Source of terminal ids for pane terminals. Monotonic; never reused.
+    next_terminal_id: u32,
     /// Buffer version at the last dirty-flag re-check, so an idle document is
     /// never re-hashed. See [`App::recheck_modified`].
     dirty_checked_version: u64,
@@ -394,6 +396,9 @@ pub struct BufferTab {
     pub saved_hash: u64,
     pub undo_stack: UndoStack,
     pub file_mtime: Option<std::time::SystemTime>,
+    /// This tab is a terminal pane. The shell lives in `App::pane_terminals`
+    /// keyed by this id. `None` for ordinary document tabs.
+    pub terminal: Option<crate::split::TerminalId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -545,6 +550,7 @@ impl Default for App {
                 saved_hash: EMPTY_TEXT_HASH,
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
+                terminal: None,
             }],
             current_buffer: 0,
             syntax: SyntaxEngine::new(),
@@ -626,6 +632,7 @@ impl Default for App {
             lsp_synced_path: None,
             lsp_synced_hash: 0,
             next_tab_id: FIRST_TAB_ID.0 + 1,
+            next_terminal_id: 1,
             saved_hash: EMPTY_TEXT_HASH,
             dirty_checked_version: 0,
             content_width: 0,
@@ -1057,6 +1064,7 @@ impl App {
                 saved_hash: on_disk_hash,
                 undo_stack: undo,
                 file_mtime: mtime,
+                terminal: None,
             }],
             current_buffer: 0,
             ..Self::default()
@@ -1317,6 +1325,7 @@ impl App {
             saved_hash: EMPTY_TEXT_HASH,
             undo_stack: undo,
             file_mtime: None,
+            terminal: None,
         });
         self.current_buffer = self.buffers.len() - 1;
         self.restore_state_from_tab();
@@ -2060,71 +2069,61 @@ impl App {
         }
     }
 
-    /// The shell running in the pane at `idx`, if that pane is a terminal.
+    /// The shell running in the pane at `idx`, if that pane shows a terminal tab.
     pub fn pane_terminal(&self, idx: usize) -> Option<&Terminal> {
-        let id = self.split.panes.get(idx)?.terminal_id()?;
-        self.pane_terminals.get(&id)
+        let buf_id = self.split.panes.get(idx)?.buffer;
+        let tab = self.buffers.iter().find(|t| t.id == buf_id)?;
+        let tid = tab.terminal?;
+        self.pane_terminals.get(&tid)
     }
 
     pub fn pane_terminal_mut(&mut self, idx: usize) -> Option<&mut Terminal> {
-        let id = self.split.panes.get(idx)?.terminal_id()?;
-        self.pane_terminals.get_mut(&id)
+        let buf_id = self.split.panes.get(idx)?.buffer;
+        let tab = self.buffers.iter().find(|t| t.id == buf_id)?;
+        let tid = tab.terminal?;
+        self.pane_terminals.get_mut(&tid)
     }
 
-    /// The shell the keyboard is pointed at — the focused pane's, if it is a
-    /// terminal.
+    /// The shell the keyboard is pointed at — the focused pane's, if it shows
+    /// a terminal tab.
     pub fn focused_pane_terminal_mut(&mut self) -> Option<&mut Terminal> {
         let idx = self.split.focus_index();
         self.pane_terminal_mut(idx)
     }
 
-    /// Put the pane at `idx` back to the document its terminal displaced, and
-    /// end that shell. Returns the document.
-    fn restore_terminal_pane(&mut self, idx: usize) -> Option<BufferId> {
-        let (id, restored) = self.split.clear_terminal_at(idx)?;
-        if let Some(mut t) = self.pane_terminals.remove(&id) {
-            t.shutdown();
-        }
-        // The displaced document has been in the tab bar the whole time (the
-        // strip lists buffers, not panes), so there is nothing to re-open —
-        // just make it the pane's content again.
-        Some(restored)
+    /// Whether the focused pane currently shows a terminal tab.
+    pub fn terminal_window_focused(&self) -> bool {
+        let buf_id = match self.split.panes.get(self.split.focus_index()) {
+            Some(p) => p.buffer,
+            None => return false,
+        };
+        self.is_terminal_tab(buf_id)
     }
 
-    /// Ctrl+Shift+T — **turn the focused pane into a terminal**, and send the
-    /// document that was there back to the tab bar.
-    ///
-    /// This is J6 as it was actually specified, and it is a different feature
-    /// from what used to be here. The old code *created a new split* and put a
-    /// terminal in the new pane: the document was never displaced, nothing
-    /// returned to the tab bar, and being already split changed the behaviour
-    /// again. It also had to record `owns_split` so it could collapse the
-    /// split it had conjured — a field that existed only to undo a side effect
-    /// that should not have happened.
-    ///
-    /// No split is created and none is destroyed. The pane's document stays
-    /// open and reachable: the tab strip lists *buffers*, not panes, so it is
-    /// already there.
-    pub fn toggle_terminal_full(&mut self) {
-        let idx = self.split.focus_index();
-        // Second press on a terminal pane closes that pane's shell.
-        if self.split.panes.get(idx).is_some_and(|p| p.is_terminal()) {
-            self.confirm_close_pane_terminal(true);
-            return;
-        }
-        self.park_focused_pane();
-        let Some((tid, displaced)) = self.split.make_terminal(idx) else {
-            return;
-        };
-        // Make the displaced document the active tab so it is obvious where it
-        // went. It was never closed.
-        if let Some(i) = self.buffer_index(displaced) {
-            self.goto_tab(i);
-        }
+    /// Whether the tab identified by `id` is a terminal tab.
+    pub fn is_terminal_tab(&self, id: BufferId) -> bool {
+        self.buffers.iter()
+            .find(|t| t.id == id)
+            .is_some_and(|t| t.terminal.is_some())
+    }
 
-        // A shell of its own. Converting a second pane used to *move* the one
-        // terminal here instead, because there was only ever one — which also
-        // made two terminal panes two views of the same session.
+    /// Ctrl+Shift+T — open a terminal as a **tab** in the focused pane.
+    ///
+    /// A terminal is just a [`BufferTab`] whose `terminal` field is set; the
+    /// pane shows it like any other document. Pressing ⌃⇧T again while a
+    /// terminal tab is focused closes it (the tab closes, the shell ends).
+    pub fn toggle_terminal_full(&mut self) {
+        // Second press on a terminal tab closes it.
+        if self.terminal_window_focused() {
+            self.close_current_tab();
+            return;
+        }
+        // The focused pane's document BEFORE this open — an active layout has
+        // to swap it out for the terminal tab, exactly like `open_new_tab`.
+        let replacing = self.current_buffer_id();
+        self.park_focused_pane();
+
+        // Spawn a shell of its own.
         let cols = if self.split.is_split() {
             (self.viewport.width / 2).max(40)
         } else {
@@ -2139,26 +2138,41 @@ impl App {
         term.resize(cols, rows);
         term.start(Some(&anchor));
         let started = term.started;
+
+        let tid = crate::split::TerminalId(self.next_terminal_id);
+        self.next_terminal_id = self.next_terminal_id.wrapping_add(1);
         self.pane_terminals.insert(tid, term);
 
-        // Critical: stay in Normal — terminal is a pane, not a mode that
-        // swallows layout shortcuts / opens the side Debug terminal.
+        // Create a tab for the terminal and switch to it.
+        let tab_id = self.take_tab_id();
+        self.buffers.push(BufferTab {
+            id: tab_id,
+            buffer: Buffer::new(),
+            filename: None,
+            scroll: 0,
+            modified: false,
+            saved_hash: EMPTY_TEXT_HASH,
+            undo_stack: UndoStack::new(),
+            file_mtime: None,
+            terminal: Some(tid),
+        });
+        self.current_buffer = self.buffers.len() - 1;
+        self.restore_state_from_tab();
+        // Point the focused pane at the new terminal tab.
+        self.split.focused_pane_mut().buffer = tab_id;
+        // An active layout swaps the displaced document out of its membership
+        // for the terminal tab, and re-gathers so the group stays contiguous.
+        self.swap_focused_doc_in_active_layout(replacing, tab_id);
+
+        // Stay in Editor mode — the terminal is a tab, not a mode.
         if matches!(self.mode, Mode::Terminal | Mode::Editor) {
             self.mode = Mode::Editor;
         }
         self.message = if started {
-            "Terminal pane · keys → shell · ⌃⇧T close · ^W w other pane".into()
+            "Terminal tab · keys → shell · ⌃⇧T close · ^W w other pane".into()
         } else {
             "Terminal: failed to spawn shell (PTY)".into()
         };
-    }
-
-    /// Whether the focused split pane is showing the Ctrl+Shift+T terminal.
-    pub fn terminal_window_focused(&self) -> bool {
-        self.split
-            .panes
-            .get(self.split.focus_index())
-            .is_some_and(|p| p.is_terminal())
     }
 
     pub fn request_close_pane_terminal(&mut self) {
@@ -2166,7 +2180,6 @@ impl App {
             return;
         }
         if self.terminal.close_confirm {
-            // Second Ctrl+Shift+W while confirming — cancel
             self.terminal.close_confirm = false;
             self.message = "Close cancelled".into();
             return;
@@ -2181,19 +2194,10 @@ impl App {
             self.message = "Close cancelled".into();
             return;
         }
-        let idx = self.split.focus_index();
-        if self.split.panes.get(idx).is_none_or(|p| !p.is_terminal()) {
+        if !self.terminal_window_focused() {
             return;
         }
-        // The pane goes back to the document it displaced and its shell ends.
-        // No split to collapse, because ⌃⇧T never conjured one — which is why
-        // `owns_split` is gone rather than merely unused.
-        let restored = self.restore_terminal_pane(idx);
-        if let Some(id) = restored {
-            if let Some(i) = self.buffer_index(id) {
-                self.goto_tab(i);
-            }
-        }
+        self.close_current_tab();
         if matches!(self.mode, Mode::Terminal) {
             self.mode = Mode::Editor;
         }
@@ -3390,13 +3394,13 @@ impl App {
         if !self.split.is_split() {
             return;
         }
-        // The terminal dies with its pane, and there are no indices to
-        // repair. This used to be a match with a `Some(b - 1)` arm shifting
-        // `pane_bound` down whenever a lower pane closed — patching a model
-        // after the fact instead of it being right.
-        if let Some(id) = self.split.focused_pane().terminal_id() {
-            if let Some(mut t) = self.pane_terminals.remove(&id) {
-                t.shutdown();
+        // If the focused pane shows a terminal tab, end the shell.
+        let buf_id = self.split.focused_pane().buffer;
+        if let Some(tab) = self.buffers.iter().find(|t| t.id == buf_id) {
+            if let Some(tid) = tab.terminal {
+                if let Some(mut t) = self.pane_terminals.remove(&tid) {
+                    t.shutdown();
+                }
             }
         }
         let survivor = self.split.remove_focused();
@@ -3407,7 +3411,7 @@ impl App {
         }
         // Collapsed to a single view: adopt the survivor snapshot.
         if let Some(p) = survivor {
-            if let Some(idx) = self.buffer_index(p.buffer()) {
+            if let Some(idx) = self.buffer_index(p.buffer) {
                 if idx != self.current_buffer {
                     self.save_state_to_tab();
                     self.current_buffer = idx;
@@ -3514,7 +3518,7 @@ impl App {
         let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
         let id = self.current_buffer_id();
         let p = self.split.focused_pane_mut();
-        p.set_buffer(id);
+        p.buffer = id;
         p.scroll = self.scroll;
         p.hscroll = self.hscroll;
         p.cursor = cur;
@@ -3527,7 +3531,7 @@ impl App {
             return;
         }
         let pane = self.split.focused_pane().clone();
-        if let Some(idx) = self.buffer_index(pane.buffer()) {
+        if let Some(idx) = self.buffer_index(pane.buffer) {
             if idx != self.current_buffer {
                 self.save_state_to_tab();
                 self.current_buffer = idx;
@@ -3878,7 +3882,7 @@ impl App {
         let (tree, panes) = self.split.snapshot();
         let mut docs: Vec<BufferId> = Vec::new();
         for p in &panes {
-            let b = p.buffer();
+            let b = p.buffer;
             if b != BufferId::default() && !docs.contains(&b) {
                 docs.push(b);
             }
@@ -3886,6 +3890,13 @@ impl App {
         if docs.is_empty() {
             return false;
         }
+        // Strip order: gather the folded documents into one contiguous run, so
+        // the grouped container draws around its members alone and never
+        // swallows an unrelated tab that happens to sit between two of them
+        // (folding panes on 1·2·3·5 while 4 sits in the strip used to pull 4
+        // inside the grey round). Panes address documents by id, so this
+        // changes only the order the strip draws, never what a pane shows.
+        self.gather_folded_docs(&docs);
         let id = self.take_tab_id().0;
         let name = crate::layout_tab::next_name(&self.layouts);
         self.layouts.push(crate::layout_tab::LayoutTab {
@@ -3899,6 +3910,81 @@ impl App {
         self.active_layout = Some(id);
         self.message = "Folded into a layout tab · scroll down here to unfold".into();
         true
+    }
+
+    /// Reorder `buffers` so the folded documents form one contiguous run,
+    /// sitting where the first of them already was. Called by [`App::fold_layout`].
+    ///
+    /// The grouped strip shape draws one rounded container from the first
+    /// member's left edge to the last member's right edge. If an unrelated tab
+    /// sits between two members, that container swallows it visually. Gathering
+    /// the members first makes the container exact. Panes address documents by
+    /// [`BufferId`], so this touches only the order the strip draws, never what
+    /// a pane shows.
+    fn gather_folded_docs(&mut self, docs: &[BufferId]) {
+        let n = self.buffers.len();
+        if docs.len() < 2 || n < 2 {
+            return;
+        }
+        let Some(anchor) = self.buffers.iter().position(|t| docs.contains(&t.id)) else {
+            return;
+        };
+        // Already one contiguous run — nothing to gather.
+        if anchor + docs.len() <= n
+            && self.buffers[anchor..anchor + docs.len()]
+                .iter()
+                .all(|t| docs.contains(&t.id))
+        {
+            return;
+        }
+        let active_id = self.current_buffer_id();
+        // `partition` keeps each side's relative order, so the members keep
+        // their existing strip order among themselves.
+        let (members, mut others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.buffers)
+            .into_iter()
+            .partition(|t| docs.contains(&t.id));
+        let at = anchor.min(others.len());
+        others.splice(at..at, members);
+        self.buffers = others;
+        // `current_buffer` is a position; repoint it at the active document.
+        // The live buffer/scroll/cursor in `App` are the active document and do
+        // not depend on its slot, so no save/restore round-trip is needed.
+        if let Some(i) = self.buffers.iter().position(|t| t.id == active_id) {
+            self.current_buffer = i;
+        }
+    }
+
+    /// Keep the active layout's membership honest after the focused pane's
+    /// document changed from `replacing` to `opened`.
+    ///
+    /// Opening a file replaces what the focused pane shows. If that pane was
+    /// part of a folded layout, the layout's member list has to follow: the
+    /// displaced document leaves, the opened one takes its place. Without this
+    /// the new file appears as a loose chip outside the group while the
+    /// displaced one lingers inside it, shown by no pane.
+    fn swap_focused_doc_in_active_layout(&mut self, replacing: BufferId, opened: BufferId) {
+        let Some(id) = self.active_layout else { return };
+        if replacing == opened {
+            return;
+        }
+        let Some(l) = self.layouts.iter_mut().find(|l| l.id == id) else {
+            return;
+        };
+        // Already a member (opening a document another pane of this layout
+        // shows) — membership is unchanged, only focus moves.
+        if l.docs.contains(&opened) {
+            return;
+        }
+        let Some(i) = l.docs.iter().position(|d| *d == replacing) else {
+            return;
+        };
+        l.docs[i] = opened;
+        // The new document sits at the END of `buffers` (just pushed), while
+        // the displaced one sat inside the group's run — so the members are no
+        // longer contiguous and the grey container would swallow whatever sits
+        // between them. Re-gather, exactly as `fold_layout` does.
+        let docs = l.docs.clone();
+        self.gather_folded_docs(&docs);
     }
 
     /// Unfold the **active** layout: its documents return to the strip as
@@ -3922,7 +4008,12 @@ impl App {
     }
 
     /// Show a layout: install its tree, exactly as it was parked.
-    pub fn activate_layout(&mut self, id: u64) -> bool {
+    ///
+    /// `focus_doc` names the document the caller wants focused — a grouped
+    /// chip click carries the document it represents, so the arrangement comes
+    /// back with that pane in front rather than always the first one in the
+    /// tree. `None` keeps the tree's own order (unified chip, programmatic).
+    pub fn activate_layout(&mut self, id: u64, focus_doc: Option<BufferId>) -> bool {
         let Some(l) = self.layouts.iter().find(|l| l.id == id) else {
             return false;
         };
@@ -3934,6 +4025,11 @@ impl App {
         // pane was scrolled to.
         self.split.restore(tree, panes);
         self.active_layout = Some(id);
+        if let Some(doc) = focus_doc {
+            if let Some(idx) = self.split.panes.iter().position(|p| p.buffer == doc) {
+                self.split.set_focus(idx);
+            }
+        }
         self.load_focused_pane();
         true
     }
@@ -3951,6 +4047,15 @@ impl App {
     /// their own chip unless their layout is drawn grouped.
     pub fn layout_holding(&self, doc: BufferId) -> Option<&crate::layout_tab::LayoutTab> {
         self.layouts.iter().find(|l| l.holds(doc))
+    }
+
+    /// Remove a closed document from any layout's membership. Called by
+    /// `close_current_tab` / `close_tab_at` so the group never references a
+    /// document that no longer exists.
+    fn remove_doc_from_layouts(&mut self, doc: BufferId) {
+        for l in &mut self.layouts {
+            l.docs.retain(|d| *d != doc);
+        }
     }
 
     /// Next unused tab id. Monotonic — a closed tab's id never comes back, so
@@ -3979,7 +4084,7 @@ impl App {
     /// paint path wants this; anything asking "is this pane's document X?"
     /// wants [`App::buffer_index`] and its honest `None`.
     pub fn pane_tab(&self, pane: &crate::split::Pane) -> usize {
-        self.buffer_index(pane.buffer()).unwrap_or(self.current_buffer)
+        self.buffer_index(pane.buffer).unwrap_or(self.current_buffer)
     }
 
     /// Move the tab at `from` to sit at `to`, as a tab-bar drag does.
@@ -3988,10 +4093,16 @@ impl App {
     /// vector does not change any document's identity. Only `current_buffer` —
     /// still a position — has to follow the move.
     ///
-    /// Returns false when the move is a no-op or out of range.
+    /// Returns false when the move is a no-op or out of range, or when it
+    /// would break a folded layout's group — dragging an outside tab into a
+    /// group's run (or a member out of it) is refused, so the grouped strip
+    /// shape always wraps its members alone.
     pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
         let n = self.buffers.len();
         if from >= n || to >= n || from == to {
+            return false;
+        }
+        if !self.move_keeps_groups_contiguous(from, to) {
             return false;
         }
         // The active tab's state lives in `App` until it is parked, so park it
@@ -4014,6 +4125,44 @@ impl App {
         };
         self.current_buffer = remap(self.current_buffer);
         self.restore_state_from_tab();
+        true
+    }
+
+    /// Would moving the tab at `from` to `to` leave every folded layout's
+    /// members as one contiguous run in the strip?
+    ///
+    /// A grouped layout paints one rounded container from its first member's
+    /// left edge to its last member's right edge; a non-member sitting inside
+    /// that span is swallowed visually. So a reorder is only legal when it
+    /// keeps each group's members adjacent — which also refuses dragging an
+    /// outside tab into a group and dragging a member out of one.
+    fn move_keeps_groups_contiguous(&self, from: usize, to: usize) -> bool {
+        if self.layouts.is_empty() {
+            return true;
+        }
+        let group_of = |t: &BufferTab| -> u64 {
+            self.layouts
+                .iter()
+                .find(|l| l.holds(t.id))
+                .map(|l| l.id)
+                .unwrap_or(0)
+        };
+        let mut order: Vec<u64> = self.buffers.iter().map(group_of).collect();
+        let g = order.remove(from);
+        order.insert(to, g);
+        // A group is contiguous iff, once seen, it never reappears after a
+        // different group has intervened.
+        let mut seen = std::collections::HashSet::new();
+        let mut prev: u64 = 0;
+        for &grp in &order {
+            if grp != 0 && grp != prev && seen.contains(&grp) {
+                return false;
+            }
+            if grp != 0 {
+                seen.insert(grp);
+            }
+            prev = grp;
+        }
         true
     }
 
@@ -4933,6 +5082,12 @@ impl App {
     }
 
     pub fn open_new_tab(&mut self, path: &str) {
+        // The focused pane's document BEFORE this open. Opening replaces what
+        // the focused pane shows (S2: `App` IS the focused pane), so an active
+        // layout has to swap this document out of its membership for the one
+        // being opened — else the new file lands as a loose chip outside the
+        // group while the displaced one lingers inside it, shown by no pane.
+        let replacing = self.current_buffer_id();
         self.save_state_to_tab();
 
         let pathbuf = PathBuf::from(path);
@@ -4946,6 +5101,7 @@ impl App {
             if tab.filename.as_ref() == Some(&abs_path) {
                 self.current_buffer = i;
                 self.restore_state_from_tab();
+                self.swap_focused_doc_in_active_layout(replacing, self.current_buffer_id());
                 self.lsp_restart_for_current();
                 self.refresh_git();
                 self.message = format!("Switched to: {}", abs_path.display());
@@ -4970,9 +5126,11 @@ impl App {
             saved_hash: text_hash(&content),
             undo_stack: undo,
             file_mtime: mtime,
+            terminal: None,
         });
         self.current_buffer = self.buffers.len() - 1;
         self.restore_state_from_tab();
+        self.swap_focused_doc_in_active_layout(replacing, self.current_buffer_id());
         let text = self.buffer.text();
         self.lsp
             .auto_start_with_text(&abs_path.display().to_string(), Some(&text));
@@ -5231,7 +5389,17 @@ impl App {
                 tab.undo_stack.finish(self.undo_caching, &text);
             }
         }
+        // If the closing tab is a terminal, end its shell.
+        if let Some(tab) = self.buffers.get(idx) {
+            if let Some(tid) = tab.terminal {
+                if let Some(mut t) = self.pane_terminals.remove(&tid) {
+                    t.shutdown();
+                }
+            }
+        }
         let closed = self.buffers[idx].id;
+        // Drop the closed document from any layout's membership.
+        self.remove_doc_from_layouts(closed);
         self.buffers.remove(idx);
         if self.current_buffer > idx {
             self.current_buffer -= 1;
@@ -5253,6 +5421,16 @@ impl App {
             }
         }
         let closed = self.current_buffer_id();
+        // If the closing tab is a terminal, end its shell.
+        if let Some(tab) = self.buffers.get(self.current_buffer) {
+            if let Some(tid) = tab.terminal {
+                if let Some(mut t) = self.pane_terminals.remove(&tid) {
+                    t.shutdown();
+                }
+            }
+        }
+        // Drop the closed document from any layout's membership.
+        self.remove_doc_from_layouts(closed);
         if self.buffers.len() <= 1 {
             self.lsp.shutdown();
             self.buffer = Buffer::new();
@@ -5273,6 +5451,7 @@ impl App {
                 saved_hash: EMPTY_TEXT_HASH,
                 undo_stack: self.undo_stack.clone(),
                 file_mtime: None,
+                terminal: None,
             };
             // The slot survives but the document in it does not, so the id
             // changed and any pane still naming the old one has to follow.
@@ -5316,7 +5495,7 @@ mod tests {
             app.split.split_focused(crate::split::Axis::Col);
         }
         for (p, id) in app.split.panes.iter_mut().zip(docs) {
-            p.set_buffer(*id);
+            p.buffer = *id;
         }
         app.split.set_focus(0);
     }
@@ -5549,6 +5728,7 @@ mod tests {
                 saved_hash: EMPTY_TEXT_HASH,
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
+                terminal: None,
             });
         }
         app.save_state_to_tab(); // tab 0 mirrors the active buffer
@@ -5591,6 +5771,7 @@ mod tests {
                 saved_hash: EMPTY_TEXT_HASH,
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
+                terminal: None,
             });
         }
         app.save_state_to_tab();
@@ -5623,6 +5804,7 @@ mod tests {
                 saved_hash: EMPTY_TEXT_HASH,
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
+                terminal: None,
             });
         }
         app.save_state_to_tab();
@@ -5647,7 +5829,7 @@ mod tests {
         assert_eq!(app.layouts.len(), 1, "the arrangement is not lost, it is parked");
 
         // 3 · Switch back — the arrangement returns.
-        assert!(app.activate_layout(layout_id));
+        assert!(app.activate_layout(layout_id, None));
         assert_eq!(app.split.pane_count(), 2);
         let shown: Vec<usize> = app.split.panes.iter().map(|p| app.pane_tab(p)).collect();
         assert_eq!(shown, vec![0, 1], "both panes on the documents they had");
@@ -5683,6 +5865,7 @@ mod tests {
             saved_hash: EMPTY_TEXT_HASH,
             undo_stack: UndoStack::new(),
             file_mtime: None,
+            terminal: None,
         });
         app.save_state_to_tab();
         let (a_id, b_id) = (app.buffers[0].id, app.buffers[1].id);
@@ -5713,6 +5896,7 @@ mod tests {
                 saved_hash: EMPTY_TEXT_HASH,
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
+                terminal: None,
             });
         }
         app.save_state_to_tab();
@@ -5730,6 +5914,157 @@ mod tests {
         assert!(!app.move_tab(1, 1), "a move onto itself is a no-op");
         assert!(!app.move_tab(0, 9), "out of range is refused");
         assert!(!app.move_tab(9, 0));
+    }
+
+    /// Give the app `n` named tabs (the first reuses the one `app_with` made)
+    /// and return their ids in strip order.
+    fn tabs_named(app: &mut App, names: &[&str]) -> Vec<BufferId> {
+        app.buffer = Buffer::from_string(names[0]);
+        app.buffers[0].buffer = app.buffer.clone();
+        app.buffers[0].filename = Some(PathBuf::from(format!("/tmp/{}.txt", names[0])));
+        for name in &names[1..] {
+            let tab_id = app.take_tab_id();
+            app.buffers.push(BufferTab {
+                id: tab_id,
+                buffer: Buffer::from_string(*name),
+                filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
+                scroll: 0,
+                modified: false,
+                saved_hash: EMPTY_TEXT_HASH,
+                undo_stack: UndoStack::new(),
+                file_mtime: None,
+                terminal: None,
+            });
+        }
+        app.save_state_to_tab();
+        app.buffers.iter().map(|t| t.id).collect()
+    }
+
+    /// Folding gathers its members into one contiguous run, so the grouped
+    /// strip container never swallows a tab that sat between two of them.
+    /// Panes on 1·2·3·5 with 4 loose in the strip: the fold pulls 5 up beside
+    /// 3 and leaves 4 after the group — not inside it.
+    #[test]
+    fn folding_gathers_its_members_into_one_contiguous_run() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c", "d", "e"]);
+        // Panes show a·b·c·e; d is loose.
+        panes_on(&mut app, &[ids[0], ids[1], ids[2], ids[4]]);
+        app.goto_tab(0);
+        assert!(app.fold_layout());
+
+        let names: Vec<String> =
+            app.buffers.iter().map(|t| t.buffer.line(0).to_string()).collect();
+        assert_eq!(names, ["a", "b", "c", "e", "d"], "members gathered, d pushed after");
+        assert_eq!(app.current_buffer, 0, "the active tab kept its identity");
+        // The panes still show exactly what they showed — gathering only moved
+        // the strip order, never a pane's document.
+        let shown: Vec<usize> = app.split.panes.iter().map(|p| app.pane_tab(p)).collect();
+        assert_eq!(shown, vec![0, 1, 2, 3], "panes follow their documents by id");
+    }
+
+    /// A reorder that would break a folded group is refused — both dragging an
+    /// outside tab into the group's run and dragging a member out of it.
+    #[test]
+    fn a_reorder_cannot_break_a_folded_group() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c", "d", "e"]);
+        panes_on(&mut app, &[ids[0], ids[1], ids[2], ids[4]]);
+        app.goto_tab(0);
+        assert!(app.fold_layout());
+        // Strip is now a b c e | d, with a·b·c·e grouped.
+        let names = |app: &App| -> Vec<String> {
+            app.buffers.iter().map(|t| t.buffer.line(0).to_string()).collect()
+        };
+        assert_eq!(names(&app), ["a", "b", "c", "e", "d"]);
+
+        // Dragging d (slot 4) into the middle of the group is refused.
+        assert!(!app.move_tab(4, 1), "an outside tab cannot enter the group");
+        assert_eq!(names(&app), ["a", "b", "c", "e", "d"], "strip unchanged");
+
+        // Dragging a member (b, slot 1) out past d is refused too.
+        assert!(!app.move_tab(1, 4), "a member cannot leave the group");
+        assert_eq!(names(&app), ["a", "b", "c", "e", "d"]);
+
+        // Reordering WITHIN the group is fine — the run stays contiguous.
+        assert!(app.move_tab(0, 2), "members may reorder among themselves");
+        assert_eq!(names(&app), ["b", "c", "a", "e", "d"]);
+    }
+
+    /// Open a new file while a folded layout is active and one pane focused:
+    /// the focused pane takes the new document, which joins the group in the
+    /// displaced document's place — the displaced one leaves the group rather
+    /// than lingering inside it shown by no pane, and the new one does not
+    /// appear as a loose chip outside.
+    #[test]
+    fn opening_a_file_swaps_the_focused_pane_in_and_out_of_the_group() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c", "d"]);
+        panes_on(&mut app, &ids); // four panes, one per document
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        // Focus the 4th pane (document d). Folding is silent — the arrangement
+        // stays on screen — so this is a pane click, not a tab switch.
+        app.focus_pane_to(3);
+        assert_eq!(app.pane_tab(&app.split.focused_pane()), 3);
+
+        // Open a brand-new file into the focused pane.
+        let dir = std::env::temp_dir().join("suisei-open-swap");
+        let _ = std::fs::create_dir_all(&dir);
+        let new_path = dir.join("e.txt");
+        std::fs::write(&new_path, "e").unwrap();
+        app.open_new_tab(new_path.to_str().unwrap());
+
+        // The focused pane now shows the new document. (The focused pane's
+        // live document IS `current_buffer` — its slot is stale by design until
+        // the next park, and the compositor reads it that way too.)
+        let new_id = app.current_buffer_id();
+        assert_ne!(new_id, ids[3], "focused pane took the new file, not the old");
+
+        // …and the group's membership followed: d out, e in.
+        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        assert!(docs.contains(&new_id), "the new file joined the group");
+        assert!(!docs.contains(&ids[3]), "the displaced file left the group");
+        assert_eq!(docs.len(), 4, "membership size is unchanged");
+
+        // The members must be contiguous in the strip, or the grey container
+        // swallows whatever sits between them. e was pushed at the end of
+        // buffers; gather pulls it back beside the other members.
+        let strip: Vec<BufferId> = app.buffers.iter().map(|t| t.id).collect();
+        let first = strip.iter().position(|id| docs.contains(id)).unwrap();
+        let run = &strip[first..first + docs.len()];
+        assert!(run.iter().all(|id| docs.contains(id)),
+            "members form one contiguous run in the strip: {strip:?}");
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    /// Activating a layout with a named document brings THAT pane to the
+    /// front, not always the first one in the tree — so clicking a grouped
+    /// chip lands on the document it represents.
+    #[test]
+    fn activating_a_layout_focuses_the_named_document() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c", "d"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        // Leave the layout — the desk clears to one document.
+        app.goto_tab(2);
+        assert_eq!(app.active_layout, None);
+        assert!(!app.split.is_split());
+
+        // Come back asking for the 3rd document — its pane takes focus.
+        assert!(app.activate_layout(layout_id, Some(ids[2])));
+        assert_eq!(app.split.pane_count(), 4);
+        assert_eq!(app.current_buffer_id(), ids[2], "the named document is focused");
+        assert_eq!(app.split.focus_index(), 2);
+
+        // And with no preference, the tree's own first pane leads.
+        app.goto_tab(0);
+        assert!(app.activate_layout(layout_id, None));
+        assert_eq!(app.split.focus_index(), 0);
     }
 
     /// Open four tabs, split, close the *first* one. Every pane still shows
@@ -5753,6 +6088,7 @@ mod tests {
                 saved_hash: EMPTY_TEXT_HASH,
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
+                terminal: None,
             });
         }
         app.save_state_to_tab();
@@ -5781,7 +6117,7 @@ mod tests {
         // than dangling — and does not keep coordinates from the dead file.
         // The second pane moves to b so that "adopted the active tab" and
         // "happened to already show it" are different answers.
-        app.split.panes[1].set_buffer(app.buffers[0].id); // panes: c, b
+        app.split.panes[1].buffer = app.buffers[0].id; // panes: c, b
         app.split.panes[0].scroll = 7;
         app.split.panes[0].cursor = (9, 3);
         app.goto_tab(1); // c
@@ -6088,6 +6424,246 @@ mod tests {
         assert_eq!(app.buffer.line(0), "fn a() {}");
         let _ = std::fs::remove_file(&f1);
         let _ = std::fs::remove_file(&f2);
+    }
+
+    // ── Brutal layout + terminal integration tests ──────────────────────
+
+    /// Helper: create a temp file with content, return its path.
+    fn tmp_file(name: &str, content: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("suisei-brutal");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join(name);
+        std::fs::write(&p, content).unwrap();
+        p
+    }
+
+    /// 4분할 + 그룹 상태에서 2번 pane에 ⌃⇧T: 터미널 탭이 2번 자리에
+    /// 들어가고, 밀려난 문서는 그룹 밖으로, strip은 연속 유지.
+    #[test]
+    fn terminal_in_layout_swaps_into_the_group_at_the_focused_pane() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c", "d"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        // Focus pane 1 (document b).
+        app.focus_pane_to(1);
+        assert_eq!(app.current_buffer_id(), ids[1]);
+
+        // ⌃⇧T — terminal tab replaces b in the group.
+        app.toggle_terminal_full();
+        let term_id = app.current_buffer_id();
+        assert_ne!(term_id, ids[1], "a new terminal tab was created");
+        assert!(app.is_terminal_tab(term_id));
+
+        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        assert!(docs.contains(&term_id), "terminal joined the group");
+        assert!(!docs.contains(&ids[1]), "displaced doc left the group");
+        assert_eq!(docs.len(), 4, "group size unchanged");
+
+        // Strip must be contiguous.
+        let strip: Vec<BufferId> = app.buffers.iter().map(|t| t.id).collect();
+        let first = strip.iter().position(|id| docs.contains(id)).unwrap();
+        let run = &strip[first..first + docs.len()];
+        assert!(run.iter().all(|id| docs.contains(id)), "members contiguous: {strip:?}");
+    }
+
+    /// 터미널 탭을 닫으면 그룹에서 빠지고, pane은 adopt 탭으로 repoint.
+    #[test]
+    fn closing_a_terminal_tab_removes_it_from_the_group() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        app.focus_pane_to(0);
+        app.toggle_terminal_full();
+        let term_id = app.current_buffer_id();
+        assert!(app.is_terminal_tab(term_id));
+
+        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        assert!(docs.contains(&term_id));
+
+        // Close the terminal tab.
+        app.close_current_tab();
+        assert!(!app.buffers.iter().any(|t| t.id == term_id), "terminal tab gone");
+        assert!(app.pane_terminals.is_empty(), "shell ended");
+
+        // The group no longer contains the terminal.
+        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        assert!(!docs.contains(&term_id), "terminal left the group on close");
+    }
+
+    /// 이미 그룹 멤버인 문서를 다시 열면 멤버십 불변 (swap 스킵).
+    #[test]
+    fn opening_an_already_member_document_does_not_change_membership() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+        let docs_before = app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs.clone();
+
+        // Open "b" again — it is already a member.
+        app.focus_pane_to(0);
+        app.open_new_tab("/tmp/b.txt");
+        let docs_after = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        assert_eq!(docs_before, *docs_after, "membership unchanged when opening a member");
+    }
+
+    /// 터미널 탭이 있는 상태에서 fold: 터미널도 그룹 멤버로 참여.
+    #[test]
+    fn folding_with_a_terminal_tab_includes_it_in_the_group() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b"]);
+        panes_on(&mut app, &ids);
+
+        // Turn pane 0 into a terminal first.
+        app.focus_pane_to(0);
+        app.toggle_terminal_full();
+        let term_id = app.current_buffer_id();
+        assert!(app.is_terminal_tab(term_id));
+
+        // Now fold — both panes (terminal + b) go into the group.
+        assert!(app.fold_layout());
+        let docs = &app.layouts[0].docs;
+        assert!(docs.contains(&term_id), "terminal tab is a group member");
+        assert!(docs.contains(&ids[1]), "document b is a group member");
+        assert_eq!(docs.len(), 2);
+    }
+
+    /// 두 그룹이 있을 때 드래그가 둘 다 안 깨뜨림.
+    #[test]
+    fn reorder_guard_protects_both_groups_simultaneously() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c", "d", "e", "f"]);
+        // Group 1: a, b. Group 2: e, f. c, d loose.
+        panes_on(&mut app, &[ids[0], ids[1]]);
+        assert!(app.fold_layout());
+        let g1 = app.layouts[0].id;
+
+        // Switch away, set up group 2.
+        app.goto_tab(4);
+        panes_on(&mut app, &[ids[4], ids[5]]);
+        assert!(app.fold_layout());
+        // The new layout is the last one pushed; the first is still parked.
+        let g2 = app.layouts.last().unwrap().id;
+        assert_ne!(g1, g2);
+
+        // Strip: [a,b](g1) c d [e,f](g2)
+        // Dragging c between a and b breaks g1.
+        assert!(!app.move_tab(2, 1), "cannot split group 1");
+        // Dragging d between e and f breaks g2.
+        assert!(!app.move_tab(3, 4), "cannot split group 2");
+        // Dragging c to the very front is fine — groups stay contiguous.
+        assert!(app.move_tab(2, 0), "moving outside both groups is allowed");
+    }
+
+    /// 그룹 멤버 탭을 close_tab_at으로 닫으면 그룹에서 빠짐.
+    #[test]
+    fn closing_a_group_member_by_index_removes_it_from_the_group() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        // Close "b" (index 1) — not the current tab.
+        app.goto_tab(0);
+        app.close_tab_at(1);
+        assert!(!app.buffers.iter().any(|t| t.id == ids[1]), "b is gone");
+
+        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        assert!(!docs.contains(&ids[1]), "b left the group");
+        assert_eq!(docs.len(), 2, "a and c remain");
+    }
+
+    /// 레이아웃 활성화 시 터미널 탭을 focus_doc으로 지정하면 그 pane에 포커스.
+    #[test]
+    fn activating_a_layout_can_focus_a_terminal_tab() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b"]);
+        panes_on(&mut app, &ids);
+        app.focus_pane_to(1);
+        app.toggle_terminal_full();
+        let term_id = app.current_buffer_id();
+        assert!(app.is_terminal_tab(term_id));
+
+        // Fold so the arrangement is parked as a layout.
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        // Leave the layout.
+        app.goto_tab(0);
+        assert_eq!(app.active_layout, None);
+
+        // Come back asking for the terminal tab.
+        assert!(app.activate_layout(layout_id, Some(term_id)));
+        assert_eq!(app.current_buffer_id(), term_id, "terminal pane is focused");
+    }
+
+    /// 터미널 탭이 그룹에 있을 때 move_tab으로 그룹 내부 재정렬은 허용.
+    #[test]
+    fn terminal_tab_can_reorder_within_its_group() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+
+        // Turn pane 0 into a terminal.
+        app.focus_pane_to(0);
+        app.toggle_terminal_full();
+        let term_id = app.current_buffer_id();
+
+        // After swap + gather: [a, b, c, term] with group run [b, c, term].
+        // Swap the terminal with its adjacent group member (not a non-member).
+        let term_slot = app.buffers.iter().position(|t| t.id == term_id).unwrap();
+        let docs = &app.layouts[0].docs;
+        let neighbor = if term_slot > 0 && docs.contains(&app.buffers[term_slot - 1].id) {
+            term_slot - 1
+        } else {
+            term_slot + 1
+        };
+        assert!(docs.contains(&app.buffers[neighbor].id), "neighbor is a group member");
+        assert!(app.move_tab(term_slot, neighbor), "reorder within group is allowed");
+    }
+
+    /// 5개 탭, 3개만 pane에 (1,3,5), fold → gather 후 strip 연속,
+    /// 그 상태에서 3번 pane에 새 파일 열기 → swap + re-gather.
+    #[test]
+    fn open_into_a_sparse_pane_layout_swaps_and_regathers() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c", "d", "e"]);
+        // Panes on a, c, e (slots 0, 2, 4).
+        panes_on(&mut app, &[ids[0], ids[2], ids[4]]);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        // After gather: [a, c, e, b, d] — members contiguous.
+        let docs = app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs.clone();
+        assert_eq!(docs.len(), 3);
+
+        // Focus pane 1 (document c) and open a new file.
+        app.focus_pane_to(1);
+        assert_eq!(app.current_buffer_id(), ids[2], "pane 1 shows c");
+        let new_path = tmp_file("sparse_new.txt", "new");
+        app.open_new_tab(new_path.to_str().unwrap());
+        let new_id = app.current_buffer_id();
+        assert_ne!(new_id, ids[2]);
+
+        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        assert!(docs.contains(&new_id), "new file in group");
+        assert!(!docs.contains(&ids[2]), "c left the group");
+        assert_eq!(docs.len(), 3);
+
+        // Strip still contiguous.
+        let strip: Vec<BufferId> = app.buffers.iter().map(|t| t.id).collect();
+        let first = strip.iter().position(|id| docs.contains(id)).unwrap();
+        let run = &strip[first..first + docs.len()];
+        assert!(run.iter().all(|id| docs.contains(id)), "contiguous: {strip:?}");
+        let _ = std::fs::remove_file(&new_path);
     }
 }
 

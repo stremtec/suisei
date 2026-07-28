@@ -1208,8 +1208,9 @@ struct ContentView: View {
                                         // is the layout, so clicking any of its
                                         // documents restores the arrangement
                                         // rather than opening that one file
-                                        // alone.
-                                        engine.activateLayout(tab.group)
+                                        // alone, with that document's pane in
+                                        // front.
+                                        engine.activateLayout(tab.group, focusDoc: tab.stableId)
                                     } else {
                                         engine.gotoTab(tab.id)
                                     }
@@ -1415,8 +1416,12 @@ struct ContentView: View {
                         engine.gotoTab(slot)
                         return
                     }
-                    if tab.isLayout || (tab.group != 0 && !tab.active) {
+                    if tab.isLayout {
                         engine.activateLayout(tab.group)
+                    } else if tab.group != 0, !tab.active {
+                        // A grouped chip click restores the arrangement with
+                        // THIS document's pane in front, not always the first.
+                        engine.activateLayout(tab.group, focusDoc: tab.stableId)
                     } else {
                         engine.gotoTab(slot)
                     }

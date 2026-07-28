@@ -125,6 +125,8 @@ typedef struct SuiseiChromeSnapshot {
      non-zero value are one folded layout. */
   uint64_t tab_groups[SUISEI_MAX_TABS];
   uint8_t tab_is_layout[SUISEI_MAX_TABS];
+  /* 1 when the tab is a terminal (a shell runs in it). */
+  uint8_t tab_is_terminal[SUISEI_MAX_TABS];
   /* Split: 0 none, 1 vertical (side-by-side), 2 horizontal (stacked). */
   uint8_t split_kind;
   uint8_t pane_count;
@@ -252,7 +254,7 @@ void suisei_engine_paste_text(SuiseiEngine *ptr, const char *text);
 void suisei_engine_terminal_resize(SuiseiEngine *ptr, uint32_t cols, uint32_t rows);
 uint8_t suisei_engine_fold_layout(SuiseiEngine *e);
 uint8_t suisei_engine_unfold_layout(SuiseiEngine *e);
-uint8_t suisei_engine_activate_layout(SuiseiEngine *e, uint64_t id);
+uint8_t suisei_engine_activate_layout(SuiseiEngine *e, uint64_t id, uint64_t focus_doc);
 uint8_t suisei_engine_toggle_layout_style(SuiseiEngine *e, uint64_t id);
 void suisei_engine_toggle_terminal_dock(SuiseiEngine *e);
 void suisei_engine_focus_terminal(SuiseiEngine *ptr, uint8_t on);

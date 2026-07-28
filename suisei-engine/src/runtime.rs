@@ -1169,8 +1169,12 @@ impl Engine {
         ok
     }
 
-    pub fn activate_layout(&mut self, id: u64) -> bool {
-        let ok = self.app.activate_layout(id);
+    pub fn activate_layout(&mut self, id: u64, focus_doc: u64) -> bool {
+        // 0 is the never-issued buffer id — "no preference", keep the tree's
+        // own focus order. A grouped chip click passes its document so the
+        // arrangement comes back with that pane in front.
+        let doc = (focus_doc != 0).then(|| suisei_core::BufferId(focus_doc));
+        let ok = self.app.activate_layout(id, doc);
         if ok {
             self.app.update_scroll();
             self.recompose();
@@ -2354,26 +2358,15 @@ mod tests {
         assert_eq!(
             eng.app.split.pane_count(),
             panes_before,
-            "no split is created — the focused pane is converted in place"
+            "no split is created — the terminal is a tab in the focused pane"
         );
-        assert_eq!(eng.app.split.terminal_pane(), Some(1), "the focused pane runs it");
-        assert_eq!(eng.app.pane_terminals.len(), 1, "one shell, for that pane");
-        assert!(eng.app.split.panes[1].is_terminal());
-        assert!(!eng.app.split.panes[0].is_terminal(), "the other pane is untouched");
-        assert_eq!(
-            eng.app.buffers.len(),
-            tabs_before,
-            "the displaced document is still open — the strip lists buffers"
-        );
-        assert!(
-            eng.app.buffers.iter().any(|t| t.filename.as_deref()
-                == Some(std::path::Path::new(&b))),
-            "and it is still b.txt, reachable from the tab bar"
-        );
+        assert_eq!(eng.app.buffers.len(), tabs_before + 1, "a terminal tab was added");
+        assert_eq!(eng.app.pane_terminals.len(), 1, "one shell, for that tab");
+        assert!(eng.app.terminal_window_focused(), "focused pane shows the terminal tab");
 
-        // Toggling again puts the pane back on the document it displaced.
+        // Toggling again closes the terminal tab.
         eng.app.toggle_terminal_full();
-        assert_eq!(eng.app.split.terminal_pane(), None, "terminal gone");
+        assert_eq!(eng.app.buffers.len(), tabs_before, "terminal tab removed");
         assert_eq!(eng.app.split.pane_count(), panes_before, "still no split churn");
         assert!(eng.app.pane_terminals.is_empty(), "its shell ended with it");
     }
@@ -2396,23 +2389,15 @@ mod tests {
         eng.app.toggle_terminal_full();
 
         assert_eq!(eng.app.split.pane_count(), 2, "still two panes");
-        let ids: Vec<_> = eng
-            .app
-            .split
-            .panes
-            .iter()
-            .filter_map(|p| p.terminal_id())
-            .collect();
-        assert_eq!(ids.len(), 2, "both panes run a shell");
-        assert_ne!(ids[0], ids[1], "and they are different shells");
         assert_eq!(eng.app.pane_terminals.len(), 2, "two live processes");
+        let ids: Vec<_> = eng.app.pane_terminals.keys().collect();
+        assert_ne!(ids[0], ids[1], "and they are different shells");
 
-        // Closing one leaves the other alone.
+        // Closing one leaves the other's shell alone.
         eng.focus_pane(1);
         eng.app.toggle_terminal_full();
-        assert_eq!(eng.app.pane_terminals.len(), 1);
-        assert!(eng.app.split.panes[0].is_terminal(), "pane 0 kept its shell");
-        assert!(!eng.app.split.panes[1].is_terminal());
+        assert_eq!(eng.app.pane_terminals.len(), 1, "one shell ended");
+        assert!(eng.app.is_terminal_tab(eng.app.split.panes[0].buffer), "pane 0 kept its shell");
     }
 
     /// Esc closes the file palette, all the way through `gui_escape`.

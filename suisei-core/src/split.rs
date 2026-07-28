@@ -39,32 +39,13 @@ pub enum Axis {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TerminalId(pub u32);
 
-/// What a pane is showing.
-///
-/// "This pane is a terminal" used to be spread across four fields on
-/// `App.terminal` — `open`, `full_panel`, `pane_bound`, `owns_split` — which
-/// nothing kept consistent, and one of which (`owns_split`) was the terminal
-/// remembering *why the split existed* so it could undo it later. It is a
-/// property of the pane, so it lives on the pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaneContent {
-    Document(BufferId),
-    /// A shell runs here. `id` names **which** shell: panes each get their own,
-    /// so two terminal panes are two processes. They shared one `App.terminal`
-    /// at first, which made every terminal pane a second view of the same
-    /// session — they looked linked because they were.
-    ///
-    /// `restore` is the document this pane was showing before, so closing the
-    /// terminal puts it back instead of leaving a blank.
-    Terminal { id: TerminalId, restore: BufferId },
-}
-
 #[derive(Debug, Clone)]
 pub struct Pane {
     pub id: PaneId,
-    /// Addressed by stable id — **not** by position. See
-    /// `SUISEI-SPLIT-PLAN.md` §1.1.
-    pub content: PaneContent,
+    /// The document this pane shows, addressed by stable id — **not** by
+    /// position. A terminal is just a [`BufferTab`] whose `terminal` field is
+    /// set; the pane does not know or care. See `SUISEI-SPLIT-PLAN.md` §1.1.
+    pub buffer: BufferId,
     pub scroll: usize,
     /// Horizontal pan (visual columns) when wrap_lines is off — per pane.
     pub hscroll: usize,
@@ -76,40 +57,11 @@ impl Pane {
     fn new(id: PaneId) -> Self {
         Self {
             id,
-            content: PaneContent::Document(BufferId::default()),
+            buffer: BufferId::default(),
             scroll: 0,
             hscroll: 0,
             cursor: (0, 0),
         }
-    }
-
-    /// The document associated with this pane — the one it shows, or the one a
-    /// terminal displaced. A terminal pane still names a document so its
-    /// header and its restore path have something to point at.
-    pub fn buffer(&self) -> BufferId {
-        match self.content {
-            PaneContent::Document(id) | PaneContent::Terminal { restore: id, .. } => id,
-        }
-    }
-
-    /// The shell this pane runs, if it is a terminal.
-    pub fn terminal_id(&self) -> Option<TerminalId> {
-        match self.content {
-            PaneContent::Terminal { id, .. } => Some(id),
-            PaneContent::Document(_) => None,
-        }
-    }
-
-    pub fn set_buffer(&mut self, id: BufferId) {
-        self.content = match self.content {
-            PaneContent::Document(_) => PaneContent::Document(id),
-            // Retarget what the terminal will restore, without evicting it.
-            PaneContent::Terminal { id: t, .. } => PaneContent::Terminal { id: t, restore: id },
-        };
-    }
-
-    pub fn is_terminal(&self) -> bool {
-        matches!(self.content, PaneContent::Terminal { .. })
     }
 }
 
@@ -159,7 +111,6 @@ pub struct SplitState {
     /// After `Ctrl+W`, waiting for the chord.
     pub pending_chord: bool,
     next_id: u32,
-    next_terminal_id: u32,
 }
 
 impl Default for SplitState {
@@ -171,7 +122,6 @@ impl Default for SplitState {
             focus: first,
             pending_chord: false,
             next_id: 2,
-            next_terminal_id: 1,
         }
     }
 }
@@ -287,7 +237,7 @@ impl SplitState {
         if let Some(src) = self.panes.iter().find(|p| p.id == target) {
             // The new pane starts on the same document and viewport, VS Code
             // style; the user retargets it from there.
-            pane.content = src.content;
+            pane.buffer = src.buffer;
             pane.scroll = src.scroll;
             pane.hscroll = src.hscroll;
             pane.cursor = src.cursor;
@@ -530,65 +480,14 @@ impl SplitState {
     /// closed out from under a split.
     pub fn repoint(&mut self, gone: BufferId, adopt: BufferId) {
         for p in &mut self.panes {
-            if p.buffer() == gone {
-                p.set_buffer(adopt);
+            if p.buffer == gone {
+                p.buffer = adopt;
                 // Coordinates in a document that is no longer there.
                 p.scroll = 0;
                 p.hscroll = 0;
                 p.cursor = (0, 0);
             }
         }
-    }
-
-    // ---- terminal placement ---------------------------------------------
-
-    /// Visual index of the pane running the terminal, if any.
-    ///
-    /// This replaces `terminal.pane_bound` — and, with it, the hand-written
-    /// patch-up (`Some(b - 1)`) that shifted the index when a lower pane
-    /// closed. There is nothing to shift: the terminal is a property of a
-    /// pane, and a pane that closes takes it along.
-    pub fn terminal_pane(&self) -> Option<usize> {
-        self.panes.iter().position(|p| p.is_terminal())
-    }
-
-    /// Every pane running a shell, in visual order.
-    pub fn terminal_panes(&self) -> Vec<(usize, TerminalId)> {
-        self.panes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| p.terminal_id().map(|t| (i, t)))
-            .collect()
-    }
-
-    /// Turn the pane at `idx` into a terminal with a fresh shell id,
-    /// remembering the document it displaces. Returns `(shell, displaced)`.
-    pub fn make_terminal(&mut self, idx: usize) -> Option<(TerminalId, BufferId)> {
-        if self.panes.get(idx)?.is_terminal() {
-            return None;
-        }
-        let id = TerminalId(self.next_terminal_id);
-        self.next_terminal_id = self.next_terminal_id.wrapping_add(1);
-        let p = self.panes.get_mut(idx)?;
-        let restore = p.buffer();
-        p.content = PaneContent::Terminal { id, restore };
-        p.scroll = 0;
-        p.hscroll = 0;
-        p.cursor = (0, 0);
-        Some((id, restore))
-    }
-
-    /// Put the pane at `idx` back to the document its terminal displaced.
-    /// Returns `(shell that ended, document restored)`.
-    pub fn clear_terminal_at(&mut self, idx: usize) -> Option<(TerminalId, BufferId)> {
-        let p = self.panes.get_mut(idx)?;
-        let id = p.terminal_id()?;
-        let restore = p.buffer();
-        p.content = PaneContent::Document(restore);
-        p.scroll = 0;
-        p.hscroll = 0;
-        p.cursor = (0, 0);
-        Some((id, restore))
     }
 
     // ---- folding ---------------------------------------------------------
@@ -625,7 +524,7 @@ impl SplitState {
         let id = PaneId(self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         let mut pane = Pane::new(id);
-        pane.content = PaneContent::Document(doc);
+        pane.buffer = doc;
         self.root = Layout::Leaf(id);
         self.panes = vec![pane];
         self.focus = id;

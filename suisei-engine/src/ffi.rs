@@ -117,6 +117,8 @@ pub struct SuiseiChromeSnapshot {
     pub tab_groups: [u64; SUISEI_MAX_TABS],
     /// 1 when the chip IS a layout (unified style) rather than a document.
     pub tab_is_layout: [u8; SUISEI_MAX_TABS],
+    /// 1 when the tab is a terminal (a shell runs in it).
+    pub tab_is_terminal: [u8; SUISEI_MAX_TABS],
     /// 0 none, 1 vertical, 2 horizontal
     pub split_kind: u8,
     pub pane_count: u8,
@@ -421,6 +423,7 @@ pub extern "C" fn suisei_engine_chrome(
         o.tab_ids[i] = tab.id;
         o.tab_groups[i] = tab.group;
         o.tab_is_layout[i] = u8::from(tab.is_layout);
+        o.tab_is_terminal[i] = u8::from(tab.is_terminal);
         write_cstr(&mut o.tab_titles[i], &tab.title);
     }
 
@@ -1001,11 +1004,11 @@ pub extern "C" fn suisei_engine_unfold_layout(ptr: *mut SuiseiEngine) -> u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_activate_layout(ptr: *mut SuiseiEngine, id: u64) -> u8 {
+pub extern "C" fn suisei_engine_activate_layout(ptr: *mut SuiseiEngine, id: u64, focus_doc: u64) -> u8 {
     if ptr.is_null() {
         return 0;
     }
-    unsafe { u8::from((*ptr).0.activate_layout(id)) }
+    unsafe { u8::from((*ptr).0.activate_layout(id, focus_doc)) }
 }
 
 /// Switch a layout between grouped and unified strip shapes.

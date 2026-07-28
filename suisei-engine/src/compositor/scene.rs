@@ -60,6 +60,8 @@ pub struct TabScene {
     pub group: u64,
     /// This chip *is* a layout (unified style), not a document.
     pub is_layout: bool,
+    /// This tab is a terminal — a shell runs in it.
+    pub is_terminal: bool,
 }
 
 /// Highlight span in visual-column space (tab-expanded coordinates).
@@ -477,7 +479,7 @@ pub fn patch_chrome_editor_scroll(
     chrome.buffer_version = app.buffer.version();
     chrome.lines = lines;
     chrome.split_kind = split_kind;
-    chrome.pane0_is_terminal = app.split.panes.first().is_some_and(|p| p.is_terminal());
+    chrome.pane0_is_terminal = app.split.panes.first().is_some_and(|p| app.is_terminal_tab(p.buffer));
     chrome.split_ratio = split_ratio;
     chrome.pane_focus = pane_focus;
     chrome.panes = panes;
@@ -605,7 +607,7 @@ pub fn compose(
             tabs,
             lines,
             split_kind,
-            pane0_is_terminal: app.split.panes.first().is_some_and(|p| p.is_terminal()),
+            pane0_is_terminal: app.split.panes.first().is_some_and(|p| app.is_terminal_tab(p.buffer)),
             split_ratio,
             pane_focus,
             panes,
@@ -1710,16 +1712,21 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
     let mut out = Vec::with_capacity(app.buffers.len().max(1));
     for (i, tab) in app.buffers.iter().enumerate() {
         let is_current = i == app.current_buffer;
+        let is_term = tab.terminal.is_some();
         let filename = if is_current {
             app.filename.as_ref()
         } else {
             tab.filename.as_ref()
         };
-        let title = filename
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("[No Name]")
-            .to_string();
+        let title = if is_term {
+            "Terminal".to_string()
+        } else {
+            filename
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("[No Name]")
+                .to_string()
+        };
         let dirty = if is_current {
             app.modified
         } else {
@@ -1741,6 +1748,7 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
             active: is_current,
             group: group.0,
             is_layout: false,
+            is_terminal: is_term,
         });
     }
     // Unified layouts get one chip of their own, appended after the loose
@@ -1754,6 +1762,7 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
                 active: app.active_layout == Some(l.id),
                 group: l.id,
                 is_layout: true,
+                is_terminal: false,
             });
         }
     }
@@ -1765,6 +1774,7 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
             active: true,
             group: 0,
             is_layout: false,
+            is_terminal: false,
         });
     }
     out
@@ -1848,7 +1858,7 @@ fn build_editor_surfaces(
                     && p.hscroll == eff_hscroll
                     && p.doc_version == doc_version
                     && p.band_rows == rows_each as u32
-                    && p.is_terminal == pane.is_terminal()
+                    && p.is_terminal == app.is_terminal_tab(pane.buffer)
                     && p.rect == rect
                     && p.doc_line_count == doc_line_count
             }) {
@@ -1884,7 +1894,7 @@ fn build_editor_surfaces(
             lines,
             doc_version,
             band_rows: rows_each as u32,
-            is_terminal: pane.is_terminal(),
+            is_terminal: app.is_terminal_tab(pane.buffer),
             rect,
         });
     }
@@ -1950,7 +1960,7 @@ fn build_lines_at(
         // Strict: a pane whose document is closed has no cursor in `tab`, and
         // `pane_tab`'s fallback to the active tab would hand over someone
         // else's row.
-        .find(|p| app.buffer_index(p.buffer()) == Some(tab))
+        .find(|p| app.buffer_index(p.buffer) == Some(tab))
     {
         p.cursor.0
     } else {

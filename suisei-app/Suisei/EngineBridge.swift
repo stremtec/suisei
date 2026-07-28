@@ -111,6 +111,8 @@ struct TabItem: Equatable, Identifiable {
     /// single chip with `isLayout` set.
     var group: UInt64 = 0
     var isLayout: Bool = false
+    /// This tab is a terminal — a shell runs in it.
+    var isTerminal: Bool = false
 }
 
 struct ExplorerEntry: Equatable, Identifiable {
@@ -1389,6 +1391,7 @@ final class EngineBridge: ObservableObject {
                 let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
                 let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
                 let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
+                let isTerminal = withUnsafeBytes(of: snap.tab_is_terminal) { Array($0.bindMemory(to: UInt8.self)) }
                 let titleCap = Int(SUISEI_TITLE_CAP)
                 for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
                     let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
@@ -1400,7 +1403,8 @@ final class EngineBridge: ObservableObject {
                         dirty: dirtyRaw[i] != 0,
                         active: i == Int(snap.tab_active),
                         group: groups[i],
-                        isLayout: isLayout[i] != 0
+                        isLayout: isLayout[i] != 0,
+                        isTerminal: isTerminal[i] != 0
                     ))
                 }
             }
@@ -2325,9 +2329,9 @@ final class EngineBridge: ObservableObject {
         return ok
     }
 
-    func activateLayout(_ id: UInt64) {
+    func activateLayout(_ id: UInt64, focusDoc: UInt64 = 0) {
         guard let engine else { return }
-        if suisei_engine_activate_layout(engine, id) != 0 { refreshChrome() }
+        if suisei_engine_activate_layout(engine, id, focusDoc) != 0 { refreshChrome() }
     }
 
     /// Switch a layout between the grouped and unified strip shapes.
@@ -3119,6 +3123,7 @@ final class EngineBridge: ObservableObject {
                 let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
                 let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
                 let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
+                let isTerminal = withUnsafeBytes(of: snap.tab_is_terminal) { Array($0.bindMemory(to: UInt8.self)) }
                 let titleCap = Int(SUISEI_TITLE_CAP)
                 for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
                     let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
@@ -3130,7 +3135,8 @@ final class EngineBridge: ObservableObject {
                         dirty: dirtyRaw[i] != 0,
                         active: i == Int(snap.tab_active),
                         group: groups[i],
-                        isLayout: isLayout[i] != 0
+                        isLayout: isLayout[i] != 0,
+                        isTerminal: isTerminal[i] != 0
                     ))
                 }
             }
@@ -3361,6 +3367,7 @@ final class EngineBridge: ObservableObject {
                 let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
                 let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
                 let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
+                let isTerminal = withUnsafeBytes(of: snap.tab_is_terminal) { Array($0.bindMemory(to: UInt8.self)) }
                 let titleCap = Int(SUISEI_TITLE_CAP)
                 for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
                     let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
@@ -3372,7 +3379,8 @@ final class EngineBridge: ObservableObject {
                         dirty: dirtyRaw[i] != 0,
                         active: i == Int(snap.tab_active),
                         group: groups[i],
-                        isLayout: isLayout[i] != 0
+                        isLayout: isLayout[i] != 0,
+                        isTerminal: isTerminal[i] != 0
                     ))
                 }
             }

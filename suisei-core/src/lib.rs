@@ -72,7 +72,7 @@ pub use settings::{
     help_entries, HelpEntry, SettingRow, SettingsAction, SettingsPage, SettingsPanel,
 };
 pub use pet::PetState;
-pub use split::{Axis, Layout, Pane, PaneId, SplitState};
+pub use split::{Axis, Layout, Pane, PaneId, SplitState, TerminalId};
 pub use layout_tab::{LayoutStyle, LayoutTab};
 pub use workspace_search::{SearchHit, WorkspaceSearch};
 pub use call_hierarchy::{CallDirection, CallHierarchyState, CallItem};

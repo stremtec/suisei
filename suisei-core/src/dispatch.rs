@@ -2216,12 +2216,8 @@ fn handle_terminal(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 
     match code {
         KeyCode::Esc => {
-            // Side terminal: Esc closes. Full-panel shouldn't land here, but if
-            // it does, send Esc to PTY rather than stealing it.
-            if app.split.terminal_pane().is_some() {
-                app.terminal.write_input(b"\x1b");
-                return;
-            }
+            // Side terminal: Esc closes. Pane terminals are tabs now and
+            // handled by `handle_pane_terminal_window` before this runs.
             app.terminal.open = false;
             app.terminal.shutdown();
             app.mode = Mode::Editor;
