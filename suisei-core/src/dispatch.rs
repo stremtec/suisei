@@ -12,16 +12,27 @@ impl App {
     }
 }
 
-/// Paste OS clipboard into the focused terminal PTY (text, or image path).
+/// Paste OS clipboard into the terminal PTY that owns the keyboard — the
+/// focused pane's shell when there is one, else the dock (text, or image
+/// path). The old dock-only target silently dropped ⌘V in pane terminals.
 fn paste_clipboard_to_terminal(app: &mut App) {
     if let Some(text) = crate::clipboard::paste() {
         if !text.is_empty() {
-            app.terminal.paste_input(&text);
+            if let Some(t) = app.focused_pane_terminal_mut() {
+                t.paste_input(&text);
+            } else {
+                app.terminal.paste_input(&text);
+            }
             return;
         }
     }
     if let Some(p) = crate::clipboard::paste_image_to_temp() {
-        app.terminal.paste_input(&p.to_string_lossy());
+        let path = p.to_string_lossy().to_string();
+        if let Some(t) = app.focused_pane_terminal_mut() {
+            t.paste_input(&path);
+        } else {
+            app.terminal.paste_input(&path);
+        }
         app.message = String::from("Pasted image → terminal");
     }
 }
@@ -47,8 +58,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             // macOS-standard text motions — the GUI face routes ⌘-arrows and
             // ⌘⌫ straight here; without these they fell into vim handling
             // ("shortcuts feel vim-tuned" complaint).
-            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
-            | KeyCode::Backspace
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Backspace
                 if matches!(app.mode, Mode::Editor) =>
             {
                 match code {
@@ -93,10 +103,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 }
                 // Shift+V under cmd_like → pretty preview toggle (VS Code Markdown preview).
                 if modifiers.contains(KeyModifiers::SHIFT) {
-                    if matches!(
-                        app.mode,
-                        Mode::Editor | Mode::Preview | Mode::Explorer
-                    ) {
+                    if matches!(app.mode, Mode::Editor | Mode::Preview | Mode::Explorer) {
                         app.toggle_preview();
                     }
                     return;
@@ -166,9 +173,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             }
             KeyCode::Char('i') | KeyCode::Char('I') => {
                 // Ctrl+Shift+I — format document (VS Code-ish)
-                if modifiers.contains(KeyModifiers::SHIFT)
-                    && matches!(app.mode, Mode::Editor)
-                {
+                if modifiers.contains(KeyModifiers::SHIFT) && matches!(app.mode, Mode::Editor) {
                     app.format_document();
                     return;
                 }
@@ -193,20 +198,14 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             }
             KeyCode::Char(',') => {
                 // Ctrl/Cmd+, — Settings (VS Code convention)
-                if matches!(
-                    app.mode,
-                    Mode::Editor | Mode::Settings | Mode::Explorer
-                ) {
+                if matches!(app.mode, Mode::Editor | Mode::Settings | Mode::Explorer) {
                     app.open_settings();
                 }
                 return;
             }
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 // Cmd+S (macOS) — save (Ctrl+S is handled in the CONTROL block below)
-                if matches!(
-                    app.mode,
-                    Mode::Editor
-                ) {
+                if matches!(app.mode, Mode::Editor) {
                     app.save_file();
                 }
                 return;
@@ -349,26 +348,19 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             app.message = String::from("Ctrl+W — s split · v vsplit · w focus · q close");
             return;
         }
-        if matches!(code, KeyCode::Char('.'))
-            && matches!(app.mode, Mode::Editor)
-        {
+        if matches!(code, KeyCode::Char('.')) && matches!(app.mode, Mode::Editor) {
             // Ctrl+. — code actions / quick fix
             app.request_code_actions();
             return;
         }
-        if matches!(code, KeyCode::Char('v') | KeyCode::Char('V'))
-            && app.mode == Mode::Editor
-        {
+        if matches!(code, KeyCode::Char('v') | KeyCode::Char('V')) && app.mode == Mode::Editor {
             app.clipboard_paste();
             return;
         }
     }
 
     // ── DAP debug function keys (any editor mode) ───────────────────
-    if matches!(
-        app.mode,
-        Mode::Editor | Mode::Debug
-    ) {
+    if matches!(app.mode, Mode::Editor | Mode::Debug) {
         match code {
             KeyCode::F(5) => {
                 if modifiers.contains(KeyModifiers::SHIFT) {
@@ -418,7 +410,10 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     if modifiers.contains(KeyModifiers::CONTROL) {
         let ctrl_char = match code {
             KeyCode::Char(c) => c,
-            _ => { /* fall through */ '?' },
+            _ => {
+                /* fall through */
+                '?'
+            }
         };
 
         if ctrl_char == 'q' {
@@ -447,9 +442,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 app.multi_cursor_add_next();
                 return;
             }
-            if modifiers.contains(KeyModifiers::ALT)
-                && matches!(app.mode, Mode::Editor)
-            {
+            if modifiers.contains(KeyModifiers::ALT) && matches!(app.mode, Mode::Editor) {
                 match code {
                     KeyCode::Down | KeyCode::Char('j') => {
                         app.multi_cursor_add_below();
@@ -463,103 +456,94 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 }
             }
             match code {
-            KeyCode::Char('s') => {
-                // Ctrl+S save
-                if matches!(app.mode, Mode::Editor) {
-                    app.save_file();
-                }
-                return;
-            }
-            KeyCode::Char('r') => {
-                // Ctrl+R redo
-                if app.mode == Mode::Editor {
-                    app.redo();
-                }
-                return;
-            }
-            KeyCode::Char('o') => {
-                // Ctrl+O jump back
-                if app.mode == Mode::Editor {
-                    app.jump_back();
-                }
-                return;
-            }
-            KeyCode::Char('i') => {
-                // Ctrl+I jump forward
-                if app.mode == Mode::Editor {
-                    app.jump_forward();
-                }
-                return;
-            }
-            KeyCode::Char('p') => {
-                // Ctrl+P — quick open files (VS Code)
-                if app.mode == Mode::Editor || app.mode == Mode::Editor {
-                    app.open_file_palette();
-                }
-                return;
-            }
-            KeyCode::Char('a') => {
-                if app.mode == Mode::Editor {
-                    trigger_completion(app);
-                }
-                return;
-            }
-            KeyCode::Char('g') => {
-                // Ctrl+G — light SCM (from workbench: step back to SCM)
-                if matches!(
-                    app.mode,
-                    Mode::Editor | Mode::SourceControl | Mode::GitWorkbench | Mode::Explorer
-                ) {
-                    app.toggle_scm();
-                }
-                return;
-            }
-            KeyCode::Char('d') | KeyCode::Char('D')
-                if modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                // Ctrl+Shift+D — debug panel (VS Code-ish)
-                if matches!(
-                    app.mode,
-                    Mode::Editor | Mode::Debug | Mode::Explorer
-                ) {
-                    app.toggle_debug_panel();
-                }
-                return;
-            }
-            KeyCode::Char(',') => {
-                // Ctrl+, without requiring Shift (some terminals only send CONTROL)
-                if matches!(
-                    app.mode,
-                    Mode::Editor | Mode::Settings | Mode::Explorer
-                ) {
-                    app.open_settings();
-                }
-                return;
-            }
-            KeyCode::Char('b') | KeyCode::Char('B') => {
-                // Ctrl+B — git blame side panel (slide-in, flame colors)
-                if matches!(
-                    app.mode,
-                    Mode::Editor | Mode::Explorer
-                ) {
-                    app.toggle_blame();
+                KeyCode::Char('s') => {
+                    // Ctrl+S save
+                    if matches!(app.mode, Mode::Editor) {
+                        app.save_file();
+                    }
                     return;
                 }
-            }
-            KeyCode::Char('f') => {
-                if matches!(app.mode, Mode::Editor | Mode::Explorer) {
-                    if app.explorer.open {
-                        app.explorer.close();
-                        app.mode = Mode::Editor;
-                    } else {
-                        app.explorer.toggle_at(app.filename.as_ref());
-                        app.mode = Mode::Explorer;
+                KeyCode::Char('r') => {
+                    // Ctrl+R redo
+                    if app.mode == Mode::Editor {
+                        app.redo();
+                    }
+                    return;
+                }
+                KeyCode::Char('o') => {
+                    // Ctrl+O jump back
+                    if app.mode == Mode::Editor {
+                        app.jump_back();
+                    }
+                    return;
+                }
+                KeyCode::Char('i') => {
+                    // Ctrl+I jump forward
+                    if app.mode == Mode::Editor {
+                        app.jump_forward();
+                    }
+                    return;
+                }
+                KeyCode::Char('p') => {
+                    // Ctrl+P — quick open files (VS Code)
+                    if app.mode == Mode::Editor || app.mode == Mode::Editor {
+                        app.open_file_palette();
+                    }
+                    return;
+                }
+                KeyCode::Char('a') => {
+                    if app.mode == Mode::Editor {
+                        trigger_completion(app);
+                    }
+                    return;
+                }
+                KeyCode::Char('g') => {
+                    // Ctrl+G — light SCM (from workbench: step back to SCM)
+                    if matches!(
+                        app.mode,
+                        Mode::Editor | Mode::SourceControl | Mode::GitWorkbench | Mode::Explorer
+                    ) {
+                        app.toggle_scm();
+                    }
+                    return;
+                }
+                KeyCode::Char('d') | KeyCode::Char('D')
+                    if modifiers.contains(KeyModifiers::SHIFT) =>
+                {
+                    // Ctrl+Shift+D — debug panel (VS Code-ish)
+                    if matches!(app.mode, Mode::Editor | Mode::Debug | Mode::Explorer) {
+                        app.toggle_debug_panel();
+                    }
+                    return;
+                }
+                KeyCode::Char(',') => {
+                    // Ctrl+, without requiring Shift (some terminals only send CONTROL)
+                    if matches!(app.mode, Mode::Editor | Mode::Settings | Mode::Explorer) {
+                        app.open_settings();
+                    }
+                    return;
+                }
+                KeyCode::Char('b') | KeyCode::Char('B') => {
+                    // Ctrl+B — git blame side panel (slide-in, flame colors)
+                    if matches!(app.mode, Mode::Editor | Mode::Explorer) {
+                        app.toggle_blame();
+                        return;
                     }
                 }
-                return;
+                KeyCode::Char('f') => {
+                    if matches!(app.mode, Mode::Editor | Mode::Explorer) {
+                        if app.explorer.open {
+                            app.explorer.close();
+                            app.mode = Mode::Editor;
+                        } else {
+                            app.explorer.toggle_at(app.filename.as_ref());
+                            app.mode = Mode::Explorer;
+                        }
+                    }
+                    return;
+                }
+                _ => {}
             }
-            _ => {}
-        }
         } else if let KeyCode::Char(c) = code {
             let ctrl_byte = if c.is_ascii_lowercase() {
                 c as u8 - b'a' + 1
@@ -590,9 +574,6 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         Mode::CallHierarchy => handle_call_hierarchy(app, code),
     }
 }
-
-
-
 
 fn handle_palette(app: &mut App, code: KeyCode) {
     match code {
@@ -645,11 +626,7 @@ fn handle_workspace_search(app: &mut App, code: KeyCode) {
             if let Some(hit) = app.workspace_search.selected_hit().cloned() {
                 app.workspace_search.close();
                 app.mode = Mode::Editor;
-                app.goto_file_location(
-                    &hit.path.display().to_string(),
-                    hit.row,
-                    hit.col,
-                );
+                app.goto_file_location(&hit.path.display().to_string(), hit.row, hit.col);
             }
         }
         KeyCode::Char('r') if !app.workspace_search.replace_focus => {
@@ -672,8 +649,7 @@ fn handle_workspace_search(app: &mut App, code: KeyCode) {
                             }
                         }
                         app.workspace_search.run_search();
-                        app.workspace_search.status =
-                            format!("Replaced in {}", hit.path.display());
+                        app.workspace_search.status = format!("Replaced in {}", hit.path.display());
                     }
                     Ok(false) => {
                         app.workspace_search.status = "Pattern not found on line".into();
@@ -724,24 +700,6 @@ fn handle_settings(app: &mut App, code: KeyCode) {
         KeyCode::BackTab => app.settings.prev_page(),
         KeyCode::Down | KeyCode::Char('j') => app.settings.move_sel(1),
         KeyCode::Up | KeyCode::Char('k') => app.settings.move_sel(-1),
-        KeyCode::Left | KeyCode::Char('h') => {
-            let (mx, my) = app.pet_pos_max();
-            if matches!(
-                app.settings.nudge_pet(-1, mx, my),
-                crate::settings::SettingsAction::ApplyPet
-            ) {
-                app.apply_settings_draft();
-            }
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            let (mx, my) = app.pet_pos_max();
-            if matches!(
-                app.settings.nudge_pet(1, mx, my),
-                crate::settings::SettingsAction::ApplyPet
-            ) {
-                app.apply_settings_draft();
-            }
-        }
         KeyCode::PageDown => {
             for _ in 0..8 {
                 app.settings.move_sel(1);
@@ -761,7 +719,7 @@ fn handle_settings(app: &mut App, code: KeyCode) {
                 // no-op in headless/core dispatch
                 app.message = if app.gpu_acc {
                     if app.gpu_active() {
-                        format!("gpu_acc on · {}", app.term_caps_summary)
+                        "gpu_acc on".to_string()
                     } else {
                         "gpu_acc on · host is basic (limited enhancements)".into()
                     }
@@ -776,29 +734,6 @@ fn handle_settings(app: &mut App, code: KeyCode) {
                     .status
                     .clone()
                     .unwrap_or_else(|| "LSP settings applied".into());
-            }
-            SettingsAction::ApplyPet => {
-                let force = app
-                    .settings
-                    .status
-                    .as_deref()
-                    .is_some_and(|s| s.starts_with("Reloading"));
-                // Keep draft x/y as saved — paint clamps for the live terminal.
-                app.apply_settings_draft();
-                if force {
-                    let p = crate::pet::expand_path(&app.settings.draft.pet_path);
-                    let ps = p.display().to_string();
-                    if !app.settings.draft.pet_path.is_empty() {
-                        app.pet.load_path(&ps);
-                        app.pet.enabled =
-                            app.settings.draft.pet_enabled && app.pet.has_frames();
-                    }
-                }
-                app.message = app
-                    .settings
-                    .status
-                    .clone()
-                    .unwrap_or_else(|| "Pet settings applied".into());
             }
             SettingsAction::OpenWorkbench => {
                 app.close_settings();
@@ -822,7 +757,7 @@ fn handle_settings(app: &mut App, code: KeyCode) {
             app.settings.selected = 1; // first theme
         }
         KeyCode::Char('3') => {
-            app.settings.page = SettingsPage::Pet;
+            app.settings.page = SettingsPage::Extensions;
             app.settings.selected = 0;
         }
         KeyCode::Char('4') => {
@@ -835,12 +770,6 @@ fn handle_settings(app: &mut App, code: KeyCode) {
         _ => {}
     }
 }
-
-
-
-
-
-
 
 fn handle_call_hierarchy(app: &mut App, code: KeyCode) {
     match code {
@@ -859,8 +788,7 @@ fn handle_call_hierarchy(app: &mut App, code: KeyCode) {
                 if !item.path.is_empty() && std::path::Path::new(&item.path).is_file() {
                     app.push_jump();
                     app.open_new_tab(&item.path);
-                    app.buffer.cursor.row =
-                        item.row.min(app.buffer.line_count().saturating_sub(1));
+                    app.buffer.cursor.row = item.row.min(app.buffer.line_count().saturating_sub(1));
                     app.buffer.cursor.col = item.col;
                     app.buffer.clamp_col();
                     app.update_scroll();
@@ -882,7 +810,6 @@ fn handle_call_hierarchy(app: &mut App, code: KeyCode) {
         _ => {}
     }
 }
-
 
 /// DAP debugger panel (Ctrl+Shift+D / F5).
 /// Esc unfocuses (panel stays); `q` closes the panel.
@@ -926,8 +853,7 @@ fn handle_debug(app: &mut App, code: KeyCode) {
                     let line = *line;
                     if std::path::Path::new(&path).is_file() {
                         app.open_new_tab(&path);
-                        app.buffer.cursor.row =
-                            line.min(app.buffer.line_count().saturating_sub(1));
+                        app.buffer.cursor.row = line.min(app.buffer.line_count().saturating_sub(1));
                         app.buffer.move_to_line_start();
                         app.update_scroll();
                     }
@@ -951,9 +877,7 @@ fn handle_debug(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char('c') if app.dap.pane != DebugPane::Console => app.dap_start_or_continue(),
         KeyCode::Char('n') if app.dap.pane != DebugPane::Console => app.dap_step_over(),
-        KeyCode::Char('i') | KeyCode::Char('s')
-            if app.dap.pane != DebugPane::Console =>
-        {
+        KeyCode::Char('i') | KeyCode::Char('s') if app.dap.pane != DebugPane::Console => {
             app.dap_step_into()
         }
         KeyCode::Char('o') if app.dap.pane != DebugPane::Console => app.dap_step_out(),
@@ -965,9 +889,7 @@ fn handle_debug(app: &mut App, code: KeyCode) {
                 app.message = "▶ restart".into();
             }
         }
-        KeyCode::Char('x') | KeyCode::Char('S')
-            if app.dap.pane != DebugPane::Console =>
-        {
+        KeyCode::Char('x') | KeyCode::Char('S') if app.dap.pane != DebugPane::Console => {
             app.dap_stop()
         }
         KeyCode::Char('b') if app.dap.pane != DebugPane::Console => app.dap_toggle_breakpoint(),
@@ -1231,9 +1153,7 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
             }
         }
         // ── PR / Issue filter typing ─────────────────────
-        KeyCode::Char(c)
-            if app.git_wb.pr_filter_mode && app.git_wb.tab == GitTab::PullRequests =>
-        {
+        KeyCode::Char(c) if app.git_wb.pr_filter_mode && app.git_wb.tab == GitTab::PullRequests => {
             if !c.is_control() {
                 app.git_wb.pr_filter.push(c);
                 app.git_wb.refilter_prs();
@@ -1247,18 +1167,14 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
             app.git_wb.refilter_prs();
             return;
         }
-        KeyCode::Char(c)
-            if app.git_wb.issue_filter_mode && app.git_wb.tab == GitTab::Issues =>
-        {
+        KeyCode::Char(c) if app.git_wb.issue_filter_mode && app.git_wb.tab == GitTab::Issues => {
             if !c.is_control() {
                 app.git_wb.issue_filter.push(c);
                 app.git_wb.refilter_issues();
             }
             return;
         }
-        KeyCode::Backspace
-            if app.git_wb.issue_filter_mode && app.git_wb.tab == GitTab::Issues =>
-        {
+        KeyCode::Backspace if app.git_wb.issue_filter_mode && app.git_wb.tab == GitTab::Issues => {
             app.git_wb.issue_filter.pop();
             app.git_wb.refilter_issues();
             return;
@@ -1342,11 +1258,8 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
                         // Load detail + move focus to Files (stay docked)
                         match app.git_wb.focus_files_pane() {
                             Ok(()) => {
-                                app.message = app
-                                    .git_wb
-                                    .message
-                                    .clone()
-                                    .unwrap_or_else(|| "Files".into());
+                                app.message =
+                                    app.git_wb.message.clone().unwrap_or_else(|| "Files".into());
                             }
                             Err(e) => app.message = e,
                         }
@@ -1379,8 +1292,7 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
             GitTab::Issues => {
                 if app.git_wb.issue_filter_mode {
                     app.git_wb.issue_filter_mode = false;
-                    app.message =
-                        format!("Filter: {} result(s)", app.git_wb.issue_filtered.len());
+                    app.message = format!("Filter: {} result(s)", app.git_wb.issue_filtered.len());
                 } else if let Some(it) = app.git_wb.selected_issue() {
                     let n = it.number.to_string();
                     if let Some(ref root) = app.git_wb.root {
@@ -1395,11 +1307,7 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
             }
             GitTab::Auth => match app.git_wb.run_auth_action() {
                 Ok(()) => {
-                    app.message = app
-                        .git_wb
-                        .message
-                        .clone()
-                        .unwrap_or_else(|| "OK".into());
+                    app.message = app.git_wb.message.clone().unwrap_or_else(|| "OK".into());
                 }
                 Err(e) => app.message = e,
             },
@@ -1474,24 +1382,20 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
                 Err(e) => app.message = e,
             }
         }
-        KeyCode::Char('a') if app.git_wb.tab == GitTab::Status => {
-            match app.git_wb.stage_all() {
-                Ok(()) => {
-                    app.message = app.git_wb.message.clone().unwrap_or_default();
-                    app.refresh_git();
-                }
-                Err(e) => app.message = e,
+        KeyCode::Char('a') if app.git_wb.tab == GitTab::Status => match app.git_wb.stage_all() {
+            Ok(()) => {
+                app.message = app.git_wb.message.clone().unwrap_or_default();
+                app.refresh_git();
             }
-        }
-        KeyCode::Char('A') if app.git_wb.tab == GitTab::Status => {
-            match app.git_wb.unstage_all() {
-                Ok(()) => {
-                    app.message = app.git_wb.message.clone().unwrap_or_default();
-                    app.refresh_git();
-                }
-                Err(e) => app.message = e,
+            Err(e) => app.message = e,
+        },
+        KeyCode::Char('A') if app.git_wb.tab == GitTab::Status => match app.git_wb.unstage_all() {
+            Ok(()) => {
+                app.message = app.git_wb.message.clone().unwrap_or_default();
+                app.refresh_git();
             }
-        }
+            Err(e) => app.message = e,
+        },
         KeyCode::Char('x') if app.git_wb.tab == GitTab::Status => {
             if let Err(e) = app.git_wb.begin_discard_selected() {
                 app.message = e;
@@ -1545,17 +1449,24 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
         },
         KeyCode::Char('f') if !matches!(app.git_wb.tab, GitTab::Auth) => {
             // Background — toolbar spinner plays; result lands via poll_loading.
-            app.message = app.git_wb.remote_action(crate::git_workbench::RemoteAction::Fetch);
+            app.message = app
+                .git_wb
+                .remote_action(crate::git_workbench::RemoteAction::Fetch);
         }
         KeyCode::Char('p') if !matches!(app.git_wb.tab, GitTab::Auth | GitTab::PullRequests) => {
-            app.message = app.git_wb.remote_action(crate::git_workbench::RemoteAction::Pull);
+            app.message = app
+                .git_wb
+                .remote_action(crate::git_workbench::RemoteAction::Pull);
         }
         KeyCode::Char('R') if !matches!(app.git_wb.tab, GitTab::Auth) => {
-            app.message =
-                app.git_wb.remote_action(crate::git_workbench::RemoteAction::PullRebase);
+            app.message = app
+                .git_wb
+                .remote_action(crate::git_workbench::RemoteAction::PullRebase);
         }
         KeyCode::Char('u') => {
-            app.message = app.git_wb.remote_action(crate::git_workbench::RemoteAction::Push);
+            app.message = app
+                .git_wb
+                .remote_action(crate::git_workbench::RemoteAction::Push);
         }
         KeyCode::Char('r') => {
             let hint = app.filename.as_deref();
@@ -1583,7 +1494,11 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char('z') => match app.git_wb.stash() {
             Ok(()) => {
-                app.message = app.git_wb.message.clone().unwrap_or_else(|| "Stashed".into());
+                app.message = app
+                    .git_wb
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "Stashed".into());
                 app.refresh_git();
             }
             Err(e) => app.message = e,
@@ -1655,10 +1570,7 @@ fn handle_git_workbench(app: &mut App, code: KeyCode) {
             }
         }
         KeyCode::Char('g') | KeyCode::Char('c')
-            if !matches!(
-                app.git_wb.tab,
-                GitTab::Commit | GitTab::Diff | GitTab::Auth
-            ) =>
+            if !matches!(app.git_wb.tab, GitTab::Commit | GitTab::Diff | GitTab::Auth) =>
         {
             app.git_wb.from_scm = true;
             app.close_git_workbench();
@@ -1732,8 +1644,7 @@ fn handle_preview(app: &mut App, code: KeyCode) {
                         Ok(msg) => {
                             let playing = player.playing();
                             if let Some(ref path) = app.preview.media_path.clone() {
-                                app.preview.lines =
-                                    crate::media::audio_info_lines(path, playing);
+                                app.preview.lines = crate::media::audio_info_lines(path, playing);
                             }
                             app.message = msg;
                         }
@@ -1907,74 +1818,28 @@ fn handle_scm(app: &mut App, code: KeyCode) {
     }
 }
 
-
-
-
-
-
-
 /// Find-bar key handling. This is a GUI panel that owns the keyboard while
 /// it is open — the same shape as `handle_palette`, not a vim mode.
 fn handle_search_input(app: &mut App, code: KeyCode) {
+    // All of it lives on `App`/`SearchState` now — the handler routes, the
+    // inline match-cycling copy it used to carry is gone (A3-1).
     match code {
-        KeyCode::Esc => {
-            app.cancel_search();
-        }
-        KeyCode::Enter => {
-            app.commit_search();
-        }
-        KeyCode::Backspace => {
-            if app.search_input.is_empty() {
-                app.cancel_search();
-            } else {
-                app.search_input.pop();
-                app.update_search_input();
-            }
-        }
+        KeyCode::Esc => app.cancel_search(),
+        KeyCode::Enter => app.commit_search(),
+        KeyCode::Backspace => app.search_backspace(),
         KeyCode::Delete => {
-            // same as backspace for single-line search
-            if !app.search_input.is_empty() {
-                app.search_input.pop();
+            // Same as backspace for a single-line search, except an empty
+            // bar is not a cancel.
+            if !app.search.input.is_empty() {
+                app.search.input.pop();
                 app.update_search_input();
             }
         }
-        KeyCode::Down => {
-            // Jump to next live match while still typing
-            if !app.search_matches.is_empty() {
-                app.search_current = (app.search_current + 1) % app.search_matches.len();
-                let pos = app.search_matches[app.search_current];
-                app.buffer.cursor = pos;
-                app.update_scroll();
-                app.message = format!(
-                    "/{}/  {}/{}",
-                    app.search_input,
-                    app.search_current + 1,
-                    app.search_matches.len()
-                );
-            }
-        }
-        KeyCode::Up => {
-            if !app.search_matches.is_empty() {
-                app.search_current = if app.search_current == 0 {
-                    app.search_matches.len() - 1
-                } else {
-                    app.search_current - 1
-                };
-                let pos = app.search_matches[app.search_current];
-                app.buffer.cursor = pos;
-                app.update_scroll();
-                app.message = format!(
-                    "/{}/  {}/{}",
-                    app.search_input,
-                    app.search_current + 1,
-                    app.search_matches.len()
-                );
-            }
-        }
+        KeyCode::Down => app.search_cycle(true),
+        KeyCode::Up => app.search_cycle(false),
         KeyCode::Char(c) => {
             if !c.is_control() {
-                app.search_input.push(c);
-                app.update_search_input();
+                app.search_type(c);
             }
         }
         _ => {}
@@ -2028,11 +1893,7 @@ fn open_file(app: &mut App, path: &std::path::PathBuf) {
 /// **Strict PTY policy:** when this returns `true`, the key was fully handled
 /// (almost always sent to the child). Returns `false` only for the tiny
 /// allowlist that must reach editor chrome (Ctrl+W split chord second key, etc.).
-fn handle_pane_terminal_window(
-    app: &mut App,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> bool {
+fn handle_pane_terminal_window(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     if let Some(t) = app.focused_pane_terminal_mut() {
         t.poll();
     }
@@ -2043,7 +1904,7 @@ fn handle_pane_terminal_window(
     let super_key = modifiers.contains(KeyModifiers::SUPER);
 
     // Close confirmation dialog owns y/n/Esc
-    if app.terminal.close_confirm {
+    if app.pane_close_confirm_open() {
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 app.confirm_close_pane_terminal(true);
@@ -2052,8 +1913,7 @@ fn handle_pane_terminal_window(
                 app.confirm_close_pane_terminal(false);
             }
             _ => {
-                app.message =
-                    "Close terminal?  [y]es  /  [n]o · Ctrl+Shift+W cancels".into();
+                app.message = "Close terminal?  [y]es  /  [n]o · Ctrl+Shift+W cancels".into();
             }
         }
         return true;
@@ -2075,9 +1935,7 @@ fn handle_pane_terminal_window(
     // Must precede the Ctrl-byte block below (else Ctrl+Shift+V → literal 0x16).
     // Note: Super+Shift+V is pretty-preview when editor focused; in the terminal
     // pane we always paste (preview is not open here).
-    if (super_key || (ctrl && shift))
-        && matches!(code, KeyCode::Char('v') | KeyCode::Char('V'))
-    {
+    if (super_key || (ctrl && shift)) && matches!(code, KeyCode::Char('v') | KeyCode::Char('V')) {
         paste_clipboard_to_terminal(app);
         return true;
     }
@@ -2229,13 +2087,6 @@ fn handle_terminal(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     }
 }
 
-
-
-
-
-
-
-
 fn trigger_completion(app: &mut App) {
     let prefix = word_before_cursor(app);
     let ext = app.file_extension();
@@ -2246,12 +2097,11 @@ fn trigger_completion(app: &mut App) {
         app.sync_lsp_document();
         if let Some(ref path) = app.filename {
             let c = app.buffer.cursor();
-            app.lsp.request_completion(&path.display().to_string(), c.row, c.col);
+            app.lsp
+                .request_completion(&path.display().to_string(), c.row, c.col);
         }
     }
 }
-
-
 
 fn word_before_cursor(app: &App) -> String {
     let cursor = app.buffer.cursor();
@@ -2270,4 +2120,3 @@ fn word_before_cursor(app: &App) -> String {
 
     chars[start..cursor.col].iter().collect()
 }
-

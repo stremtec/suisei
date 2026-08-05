@@ -43,6 +43,9 @@ struct ToolbarPlainIcon: View {
     /// toggle is its `-0.6`. Optically centring the pair inside its slot costs
     /// the row rhythm the same sub-point, which nothing can see.
     var opticalNudgeX: CGFloat = 0
+    /// Per-symbol vertical optical correction. Positive values move the glyph
+    /// and its hover capsule down while preserving the shared 28×24 hit box.
+    var opticalNudgeY: CGFloat = 0
     var action: () -> Void
     @State private var hovering = false
     @State private var pressed = false
@@ -52,14 +55,16 @@ struct ToolbarPlainIcon: View {
             Image(systemName: systemImage)
                 .font(.system(size: iconSize, weight: .medium))
                 .foregroundStyle(active ? accent : (hovering ? dim.opacity(1) : dim.opacity(0.85)))
-                .frame(width: 28 + (iconSize - 13) * 2, height: 24 + (iconSize - 13) * 2)
+                // Glyphs receive optical size correction without changing
+                // the shared hit box or the rhythm of neighboring actions.
+                .frame(width: 28, height: 24)
                 // Near-circular hover fill (Xcode 26 capsule language).
                 .background(
                     Capsule(style: .continuous)
                         .fill(Color.primary.opacity(hovering || active ? 0.07 : 0))
                 )
                 // AFTER the capsule, so the two move as one.
-                .offset(x: opticalNudgeX)
+                .offset(x: opticalNudgeX, y: opticalNudgeY)
                 .scaleEffect(pressed ? 0.90 : 1)
                 .contentShape(Rectangle())
         }
@@ -81,11 +86,19 @@ struct ToolbarPlainIcon: View {
 struct ToolbarTabChip: View {
     var title: String
     var dirty: Bool
+    /// The file was deleted on disk — chip shows a warning glyph + struck-through
+    /// title so editing a vanished path is obvious.
+    var deleted: Bool = false
     var active: Bool
     var accent: Color
     var fg: Color
     var dim: Color
     var isLight: Bool
+    /// This chip IS a folded layout (unified style), not a document.
+    var isLayout: Bool = false
+    /// Chip sits in a layout group (grouped members) or IS the layout chip.
+    /// Drives the system-blue affordance + black ink so layouts read clearly.
+    var inLayoutGroup: Bool = false
     /// Identity of this chip inside `pillSpace`.
     var tabId: Int
     /// Shared namespace for the active capsule, so it TRAVELS between chips
@@ -106,12 +119,17 @@ struct ToolbarTabChip: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Image(systemName: "doc.text.fill")
+                Image(systemName: deleted
+                    ? "exclamationmark.triangle.fill"
+                    : (isLayout ? "square.on.square" : "doc.text.fill"))
                     .font(.system(size: 10))
-                    .foregroundStyle(active ? accent : dim.opacity(0.85))
+                    .foregroundStyle(deleted
+                        ? Color(nsColor: .systemOrange)
+                        : (active ? accent : dim.opacity(0.85)))
                 Text(title)
                     .font(.system(size: 12, weight: active ? .semibold : .regular))
                     .foregroundStyle(active ? fg : dim)
+                    .strikethrough(deleted, color: Color(nsColor: .systemOrange))
                     .lineLimit(1)
 
                 if showTrailing {
@@ -127,14 +145,26 @@ struct ToolbarTabChip: View {
             .background {
                 // The hover fill belongs to THIS chip. The ACTIVE fill does
                 // not live here at all — the strip draws a single capsule that
-                // follows whichever chip is active. A capsule per chip, each
-                // claiming the same `matchedGeometryEffect` id as a source,
-                // renders twice mid-transition: both the outgoing and incoming
-                // chip appear highlighted for a frame.
+                // follows whichever chip is active.
                 ZStack {
+                    // The system-blue layout shape is drawn once by the strip,
+                    // keyed to the layout group, and persists while grouped
+                    // members are replaced by this unified chip. Drawing a
+                    // second fill here made the destination pop in before the
+                    // persistent shape had finished collapsing.
+                    if isLayout {
+                        Color.clear
+                            .background(
+                                AnimationTraceProbe(key: "layout-chip-\(tabId)")
+                            )
+                    }
                     if hovering, !active {
                         Capsule(style: .continuous)
-                            .fill(Color.primary.opacity(isLight ? 0.06 : 0.10))
+                            .fill(
+                                inLayoutGroup
+                                    ? Color.black.opacity(0.08)
+                                    : Color.primary.opacity(isLight ? 0.06 : 0.10)
+                            )
                     }
                     // Invisible anchor the strip's capsule matches against.
                     Color.clear
@@ -145,7 +175,15 @@ struct ToolbarTabChip: View {
             .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
+        .onHover {
+            hovering = $0
+            // Hover never reaches `tabSlot`: `TabStripMouse.hitTest` only calls
+            // it for `.leftMouseDown` and declines everything else, so the strip
+            // hit-test log is blind to this path. Report which chip SwiftUI
+            // itself believes the cursor is over, so "hovered the layout chip,
+            // Cargo.lock lit up" becomes a checkable statement.
+            TabLog.hover(title, entered: $0)
+        }
         .animation(.snappy(duration: 0.16), value: hovering)
         // NOT `value: active` — the travelling capsule is animated by the
         // strip, which is the only view that contains both the chip it leaves

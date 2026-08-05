@@ -266,11 +266,7 @@ impl ScmPanel {
             return self.anim_from;
         }
         let Some(t0) = self.opened_at else {
-            return if self.open && !self.closing {
-                1.0
-            } else {
-                0.0
-            };
+            return if self.open && !self.closing { 1.0 } else { 0.0 };
         };
         let u = (t0.elapsed().as_millis() as f32 / SCM_ANIM_MS as f32).min(1.0);
         self.anim_from + (self.anim_to - self.anim_from) * u
@@ -283,11 +279,7 @@ impl ScmPanel {
             return self.anim_from;
         }
         let Some(t0) = self.opened_at else {
-            return if self.open && !self.closing {
-                1.0
-            } else {
-                0.0
-            };
+            return if self.open && !self.closing { 1.0 } else { 0.0 };
         };
         let u = (t0.elapsed().as_millis() as f32 / SCM_ANIM_MS as f32).min(1.0);
         self.anim_from + (self.anim_to - self.anim_from) * u

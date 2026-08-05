@@ -136,11 +136,7 @@ pub fn list_branches(root: &Path) -> Result<Vec<BranchInfo>, String> {
     // Remote branches (no current)
     if let Ok(remote) = run_git(
         root,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/remotes",
-        ],
+        &["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
     ) {
         for line in remote.lines() {
             let name = line.trim();
@@ -195,8 +191,7 @@ pub fn create_branch(root: &Path, name: &str) -> Result<String, String> {
 
 pub fn delete_branch(root: &Path, name: &str, force: bool) -> Result<String, String> {
     let flag = if force { "-D" } else { "-d" };
-    run_git(root, &["branch", flag, name])
-        .map(|_| format!("Deleted branch {name}"))
+    run_git(root, &["branch", flag, name]).map(|_| format!("Deleted branch {name}"))
 }
 
 pub fn stage_all(root: &Path) -> Result<String, String> {
@@ -226,21 +221,13 @@ pub fn discard_file(root: &Path, path: &str) -> Result<String, String> {
 }
 
 pub fn cherry_pick(root: &Path, hash: &str) -> Result<String, String> {
-    run_git(root, &["cherry-pick", hash]).map(|o| {
-        o.lines()
-            .next()
-            .unwrap_or("Cherry-picked")
-            .to_string()
-    })
+    run_git(root, &["cherry-pick", hash])
+        .map(|o| o.lines().next().unwrap_or("Cherry-picked").to_string())
 }
 
 pub fn revert_commit(root: &Path, hash: &str) -> Result<String, String> {
-    run_git(root, &["revert", "--no-edit", hash]).map(|o| {
-        o.lines()
-            .next()
-            .unwrap_or("Reverted")
-            .to_string()
-    })
+    run_git(root, &["revert", "--no-edit", hash])
+        .map(|o| o.lines().next().unwrap_or("Reverted").to_string())
 }
 
 pub fn pull_rebase(root: &Path) -> Result<String, String> {
@@ -320,8 +307,7 @@ pub fn log_file(root: &Path, path: &str, limit: usize) -> Result<Vec<CommitSumma
 }
 
 pub fn fetch(root: &Path) -> Result<String, String> {
-    run_git(root, &["fetch", "--all", "--prune"])
-        .map(|_| "Fetched".into())
+    run_git(root, &["fetch", "--all", "--prune"]).map(|_| "Fetched".into())
 }
 
 pub fn pull(root: &Path) -> Result<String, String> {
@@ -338,33 +324,36 @@ pub fn pull(root: &Path) -> Result<String, String> {
 }
 
 pub fn push(root: &Path) -> Result<String, String> {
-    run_git(root, &["push"]).map(|o| {
-        let t = o.trim();
-        if t.is_empty() {
-            // push often writes to stderr even on success — try -u
-            "Pushed".into()
-        } else {
-            t.lines().next().unwrap_or("Pushed").to_string()
-        }
-    }).or_else(|e| {
-        // first push may need -u
-        if e.contains("no upstream") || e.contains("has no upstream") {
-            run_git(root, &["push", "-u", "origin", "HEAD"]).map(|_| "Pushed (set upstream)".into())
-        } else {
-            // git push writes progress to stderr; re-run capturing both
-            let output = Command::new("git")
-                .args(["push"])
-                .current_dir(root)
-                .output()
-                .map_err(|err| format!("git push: {err}"))?;
-            if output.status.success() {
-                Ok("Pushed".into())
+    run_git(root, &["push"])
+        .map(|o| {
+            let t = o.trim();
+            if t.is_empty() {
+                // push often writes to stderr even on success — try -u
+                "Pushed".into()
             } else {
-                let err = String::from_utf8_lossy(&output.stderr);
-                Err(err.lines().next().unwrap_or("push failed").to_string())
+                t.lines().next().unwrap_or("Pushed").to_string()
             }
-        }
-    })
+        })
+        .or_else(|e| {
+            // first push may need -u
+            if e.contains("no upstream") || e.contains("has no upstream") {
+                run_git(root, &["push", "-u", "origin", "HEAD"])
+                    .map(|_| "Pushed (set upstream)".into())
+            } else {
+                // git push writes progress to stderr; re-run capturing both
+                let output = Command::new("git")
+                    .args(["push"])
+                    .current_dir(root)
+                    .output()
+                    .map_err(|err| format!("git push: {err}"))?;
+                if output.status.success() {
+                    Ok("Pushed".into())
+                } else {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    Err(err.lines().next().unwrap_or("push failed").to_string())
+                }
+            }
+        })
 }
 
 pub fn file_diff(root: &Path, path: &str, staged: bool) -> Result<Vec<DiffLine>, String> {
@@ -495,41 +484,25 @@ fn parse_hunk_starts(hunk: &str) -> Option<(u32, u32)> {
 }
 
 pub fn stash_push(root: &Path) -> Result<String, String> {
-    run_git(root, &["stash", "push", "-u"]).map(|o| {
-        o.lines()
-            .next()
-            .unwrap_or("Stashed")
-            .to_string()
-    })
+    run_git(root, &["stash", "push", "-u"])
+        .map(|o| o.lines().next().unwrap_or("Stashed").to_string())
 }
 
 pub fn stash_pop(root: &Path) -> Result<String, String> {
-    run_git(root, &["stash", "pop"]).map(|o| {
-        o.lines()
-            .next()
-            .unwrap_or("Stash applied")
-            .to_string()
-    })
+    run_git(root, &["stash", "pop"])
+        .map(|o| o.lines().next().unwrap_or("Stash applied").to_string())
 }
 
 pub fn stash_apply(root: &Path, index: usize) -> Result<String, String> {
     let refname = format!("stash@{{{index}}}");
-    run_git(root, &["stash", "apply", &refname]).map(|o| {
-        o.lines()
-            .next()
-            .unwrap_or("Stash applied")
-            .to_string()
-    })
+    run_git(root, &["stash", "apply", &refname])
+        .map(|o| o.lines().next().unwrap_or("Stash applied").to_string())
 }
 
 pub fn stash_drop(root: &Path, index: usize) -> Result<String, String> {
     let refname = format!("stash@{{{index}}}");
-    run_git(root, &["stash", "drop", &refname]).map(|o| {
-        o.lines()
-            .next()
-            .unwrap_or("Stash dropped")
-            .to_string()
-    })
+    run_git(root, &["stash", "drop", &refname])
+        .map(|o| o.lines().next().unwrap_or("Stash dropped").to_string())
 }
 
 pub fn stash_show(root: &Path, index: usize) -> Result<String, String> {
@@ -750,10 +723,7 @@ pub fn commit_detail(root: &Path, hash: &str) -> Result<CommitDetail, String> {
 
 /// Diff of one file in a commit vs its first parent.
 pub fn commit_file_diff(root: &Path, hash: &str, path: &str) -> Result<Vec<DiffLine>, String> {
-    let out = run_git(
-        root,
-        &["show", "--no-color", "--format=", hash, "--", path],
-    )?;
+    let out = run_git(root, &["show", "--no-color", "--format=", hash, "--", path])?;
     if out.trim().is_empty() {
         return Ok(vec![DiffLine::new(
             DiffLineKind::Meta,
@@ -769,9 +739,8 @@ mod tests {
 
     #[test]
     fn parse_diff_kinds() {
-        let d = parse_diff(
-            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n context\n",
-        );
+        let d =
+            parse_diff("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n context\n");
         assert!(d.iter().any(|l| l.kind == DiffLineKind::Add));
         assert!(d.iter().any(|l| l.kind == DiffLineKind::Del));
         assert!(d.iter().any(|l| l.kind == DiffLineKind::Hunk));

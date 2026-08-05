@@ -14,10 +14,12 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Stremtec. Closed source — see LICENSE. Suisei is not open-source.</string>
 	<key>CFBundleVersion</key>
 	<string>0.1.0</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>13.0</string>
+	<string>26.0</string>
 	<!-- Menu-bar-only agent: no Dock icon, no app switcher entry. -->
 	<key>LSUIElement</key>
 	<true/>

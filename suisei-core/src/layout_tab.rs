@@ -1,10 +1,11 @@
 //! Layout tabs — the editor's whole arrangement, folded into the tab strip.
 //!
 //! The gesture, as specified: whatever the editor is showing — one file, a 2-
-//! or 3-way split, or the four-pane `+` — scroll up quickly over the tab strip
-//! and it **folds** into one entry. Switching to another tab then clears the
-//! editor down to that one document, because the arrangement is safely in its
-//! tab. Scrolling down while that tab is active unfolds it again.
+//! or 3-way split, or the four-pane `+` — each quick upward scroll over the
+//! tab strip advances one stage: loose split → grouped layout → unified
+//! layout. Each downward scroll reverses one stage. Switching to another tab
+//! clears the editor down to that one document, because the arrangement is
+//! safely in its layout tab.
 //!
 //! A layout is not a separate bar to switch between. It is a tab, and it can
 //! wear one of two shapes in the strip — see [`LayoutStyle`].

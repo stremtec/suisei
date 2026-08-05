@@ -1,0 +1,74 @@
+{
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.04314,0.05490,0.10196,1.00000",
+          "srgb:0.10196,0.07059,0.21176,1.00000"
+        ],
+        "orientation" : {
+          "start" : { "x" : 0.08, "y" : 0.05 },
+          "stop" : { "x" : 0.92, "y" : 0.95 }
+        }
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.01176,0.01569,0.03137,1.00000",
+          "srgb:0.04314,0.02353,0.09020,1.00000"
+        ],
+        "orientation" : {
+          "start" : { "x" : 0.08, "y" : 0.05 },
+          "stop" : { "x" : 0.92, "y" : 0.95 }
+        }
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            { "value" : { "solid" : "srgb:0.85882,0.98824,1.00000,1.00000" } },
+            { "appearance" : "dark", "value" : { "solid" : "srgb:0.94118,1.00000,1.00000,1.00000" } }
+          ],
+          "image-name" : "suisei-fold-core.svg",
+          "name" : "Core Aperture"
+        },
+        {
+          "fill-specializations" : [
+            { "value" : { "linear-gradient" : [ "srgb:0.14902,0.76863,1.00000,1.00000", "srgb:0.18824,0.32157,1.00000,1.00000" ], "orientation" : { "start" : { "x" : 0.12, "y" : 0.12 }, "stop" : { "x" : 0.88, "y" : 0.88 } } } },
+            { "appearance" : "dark", "value" : { "linear-gradient" : [ "srgb:0.25882,0.85882,1.00000,1.00000", "srgb:0.32157,0.40392,1.00000,1.00000" ], "orientation" : { "start" : { "x" : 0.12, "y" : 0.12 }, "stop" : { "x" : 0.88, "y" : 0.88 } } } }
+          ],
+          "image-name" : "suisei-fold-cyan.svg",
+          "name" : "Cyan Fold"
+        },
+        {
+          "fill-specializations" : [
+            { "value" : { "linear-gradient" : [ "srgb:0.47843,0.24314,1.00000,1.00000", "srgb:0.93333,0.28235,0.94118,1.00000" ], "orientation" : { "start" : { "x" : 0.18, "y" : 0.14 }, "stop" : { "x" : 0.82, "y" : 0.86 } } } },
+            { "appearance" : "dark", "value" : { "linear-gradient" : [ "srgb:0.60784,0.36078,1.00000,1.00000", "srgb:1.00000,0.39608,0.91373,1.00000" ], "orientation" : { "start" : { "x" : 0.18, "y" : 0.14 }, "stop" : { "x" : 0.82, "y" : 0.86 } } } }
+          ],
+          "image-name" : "suisei-fold-violet.svg",
+          "name" : "Violet Fold"
+        },
+        {
+          "fill-specializations" : [
+            { "value" : { "solid" : "srgb:0.07843,0.12157,0.27843,1.00000" } },
+            { "appearance" : "dark", "value" : { "solid" : "srgb:0.04314,0.06275,0.16471,1.00000" } }
+          ],
+          "image-name" : "suisei-fold-depth.svg",
+          "name" : "Fold Depth"
+        }
+      ],
+      "name" : "Suisei Fold",
+      "shadow" : { "kind" : "neutral", "opacity" : 0.42 },
+      "translucency" : { "enabled" : true, "value" : 0.18 }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [ "watchOS" ],
+    "squares" : "shared"
+  }
+}

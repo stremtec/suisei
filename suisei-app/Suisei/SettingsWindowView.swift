@@ -7,6 +7,7 @@ struct SettingsWindowView: View {
     @ObservedObject var engine: EngineBridge
     @Environment(\.dismiss) private var dismiss
     @AppStorage("suisei.appearance") private var appearanceMode: String = "system"
+    @State private var engineReferenceExpanded = false
 
     private var s: SettingsSnap { engine.chrome.settings }
     private var theme: ThemeSnap { engine.chrome.theme }
@@ -37,25 +38,25 @@ struct SettingsWindowView: View {
     private let pages: [Page] = [
         Page(id: 1, title: "General", symbol: "gearshape.fill", tint: .gray),
         Page(id: 0, title: "About", symbol: "info.circle.fill", tint: .blue),
-        Page(id: 2, title: "Pet", symbol: "pawprint.fill", tint: .orange),
-        Page(id: 3, title: "Extensions", symbol: "puzzlepiece.extension.fill", tint: .purple),
-        Page(id: 4, title: "Shortcuts", symbol: "keyboard.fill", tint: .indigo),
+        Page(id: 2, title: "Extensions", symbol: "puzzlepiece.extension.fill", tint: .purple),
+        Page(id: 3, title: "Shortcuts", symbol: "keyboard.fill", tint: .indigo),
     ]
 
     var body: some View {
         HSplitView {
             settingsSidebar
-                .frame(minWidth: 190, idealWidth: 210, maxWidth: 240)
+                .frame(minWidth: 176, idealWidth: 188, maxWidth: 208)
 
             settingsDetail
-                .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 536, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 760, minHeight: 520)
         .preferredColorScheme(preferredScheme)
         .background(
             ThemedWindowChrome(
                 background: NSColor.windowBackgroundColor,
-                light: preferredScheme == .light || (preferredScheme == nil && isLightTheme)
+                light: preferredScheme == .light || (preferredScheme == nil && isLightTheme),
+                identifier: WindowChrome.settingsIdentifier
             )
         )
         .onAppear {
@@ -78,59 +79,75 @@ struct SettingsWindowView: View {
     private var settingsSidebar: some View {
         VStack(spacing: 0) {
             // App identity header
-            VStack(spacing: 6) {
+            HStack(spacing: 10) {
                 if let ns = NSImage(named: "Suisei") {
                     Image(nsImage: ns)
                         .resizable()
                         .interpolation(.high)
                         .aspectRatio(1, contentMode: .fit)
-                        .frame(width: 48, height: 48)
-                        .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
+                        .frame(width: 36, height: 36)
+                        .shadow(color: .black.opacity(0.22), radius: 4, y: 1)
                 } else {
                     Image(systemName: "sparkles")
-                        .font(.system(size: 30))
+                        .font(.system(size: 24))
                         .foregroundStyle(.secondary)
-                        .frame(width: 48, height: 48)
+                        .frame(width: 36, height: 36)
                 }
-                Text("Suisei")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("Version \(EngineBridge.engineVersion)")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Suisei")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Version \(EngineBridge.engineVersion)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity)
-            .padding(.top, 18)
-            .padding(.bottom, 12)
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
 
-            List(selection: pageBinding) {
-                ForEach(pages) { page in
-                    HStack(spacing: 8) {
-                        Image(systemName: page.symbol)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 22, height: 22)
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(pages) { page in
+                        Button {
+                            engine.settingsGotoPage(page.id)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: page.symbol)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 22, height: 22)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                            .fill(page.tint.gradient)
+                                    )
+                                Text(page.title)
+                                    .font(.system(size: 13))
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 8)
+                            .frame(height: 32)
                             .background(
-                                RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
-                                    .fill(page.tint.gradient)
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(
+                                        s.pageIndex == page.id
+                                            ? Color.accentColor.opacity(0.14)
+                                            : Color.clear
+                                    )
                             )
-                        Text(page.title)
-                            .font(.system(size: 13))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(page.title)
+                        .accessibilityValue(s.pageIndex == page.id ? "Selected" : "")
                     }
-                    .padding(.vertical, 1)
-                    .tag(page.id)
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
         }
         .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    private var pageBinding: Binding<Int?> {
-        Binding(
-            get: { Optional(s.pageIndex) },
-            set: { if let i = $0 { engine.settingsGotoPage(i) } }
-        )
     }
 
     // MARK: - Detail
@@ -156,12 +173,17 @@ struct SettingsWindowView: View {
                         .transition(.opacity)
                 }
                 Spacer()
-                Button("Save") {
-                    engine.saveSettings()
+                // About, Extensions and Shortcuts are read-only surfaces.
+                // Showing a permanently disabled Save button on every page
+                // implied that those pages contained unsaved controls.
+                if s.pageIndex == 1 {
+                    Button("Save") {
+                        engine.saveSettings()
+                    }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(!s.dirty)
+                    .controlSize(.small)
                 }
-                .keyboardShortcut("s", modifiers: .command)
-                .disabled(!s.dirty)
-                .controlSize(.small)
             }
             .animation(.snappy(duration: 0.2), value: s.dirty)
             .padding(.horizontal, 24)
@@ -172,16 +194,15 @@ struct SettingsWindowView: View {
                 Form {
                     switch s.pageIndex {
                     case 0: aboutSections
-                    case 2: petSections
-                    case 3: extensionsSections
-                    case 4: helpSections
+                    case 2: extensionsSections
+                    case 3: helpSections
                     default: generalSections
                     }
                 }
                 .formStyle(.grouped)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 24)
-                .frame(maxWidth: 660, alignment: .leading)
+                .frame(maxWidth: 720, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .animation(nil, value: s.pageIndex)
             }
@@ -192,7 +213,7 @@ struct SettingsWindowView: View {
     private func retheme() {
         let light = preferredScheme == .light || (preferredScheme == nil && isLightTheme)
         DispatchQueue.main.async {
-            for w in NSApp.windows where w.title == "Settings" {
+            for w in NSApp.windows where w.identifier == WindowChrome.settingsIdentifier {
                 WindowChrome.applyThemedTitlebar(
                     to: w,
                     background: NSColor.windowBackgroundColor,
@@ -223,7 +244,7 @@ struct SettingsWindowView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Suisei").font(.title3.weight(.semibold))
                     Text("Version \(EngineBridge.engineVersion)").foregroundStyle(.secondary)
-                    Text("Native macOS face for the xei engine")
+                    Text("Native macOS editor powered by the Suisei engine")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -232,9 +253,9 @@ struct SettingsWindowView: View {
             .padding(.vertical, 6)
         }
         Section("Details") {
-            LabeledContent("Engine", value: "xei-core \(EngineBridge.engineVersion)")
+            LabeledContent("Engine", value: "suisei-core \(EngineBridge.engineVersion)")
             LabeledContent("Theme", value: theme.name)
-            LabeledContent("Config", value: "~/.xei.toml")
+            LabeledContent("Config", value: "~/.suisei.toml")
         }
     }
 
@@ -242,7 +263,7 @@ struct SettingsWindowView: View {
 
     @ViewBuilder private var generalSections: some View {
         Section {
-            HStack(spacing: 16) {
+            HStack(spacing: 10) {
                 appearanceTile("system", "Auto", preview: .system)
                 appearanceTile("light", "Light", preview: .light)
                 appearanceTile("dark", "Dark", preview: .dark)
@@ -267,14 +288,20 @@ struct SettingsWindowView: View {
         } header: {
             Text("Editor Theme")
         } footer: {
-            Text("“Light” and “Dark” are the production defaults; the rest match the xei terminal themes.")
+            Text("“Light” and “Dark” are the production defaults; the rest match the Suisei terminal themes.")
         }
 
         Section("Editor") {
-            ForEach(editorToggles) { row in
-                Toggle(clean(row.label), isOn: bindToggle(row))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8),
+                ],
+                spacing: 8
+            ) {
+                ForEach(editorToggles) { row in
+                    settingsToggleTile(row)
+                }
             }
             if let tab = s.rows.first(where: { $0.label == "Tab width" }) {
                 Picker("Tab width", selection: bindTabWidth(tab)) {
@@ -292,34 +319,51 @@ struct SettingsWindowView: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
             }
-            ForEach(s.rows.filter { $0.label.hasPrefix("LSP ·") }) { row in
-                LabeledContent(clean(row.label).replacingOccurrences(of: "LSP ·", with: "").trimmingCharacters(in: .whitespaces)) {
-                    Text(row.value)
-                        .font(.caption)
-                        .foregroundStyle(row.value == "default" ? Color.secondary : Color.accentColor)
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8),
+                ],
+                spacing: 6
+            ) {
+                ForEach(s.rows.filter { $0.label.hasPrefix("LSP ·") }) { row in
+                    languageServerTile(row)
                 }
             }
         }
 
         Section("Source Control") {
-            ForEach(s.rows.filter {
-                $0.label.localizedCaseInsensitiveContains("workbench")
-                    || $0.label.localizedCaseInsensitiveContains("SCM")
-            }) { row in
-                Button {
-                    engine.settingsSelect(row.id)
-                    engine.settingsActivate(row.id)
-                } label: {
-                    HStack {
-                        Text(clean(row.label))
-                        Spacer()
-                        Image(systemName: "arrow.up.right")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                ForEach(s.rows.filter {
+                    $0.label.localizedCaseInsensitiveContains("workbench")
+                        || $0.label.localizedCaseInsensitiveContains("SCM")
+                }) { row in
+                    Button {
+                        engine.settingsSelect(row.id)
+                        engine.settingsActivate(row.id)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: row.label.localizedCaseInsensitiveContains("workbench")
+                                  ? "arrow.triangle.branch" : "sidebar.left")
+                                .foregroundStyle(Color.accentColor)
+                            Text(clean(row.label))
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Image(systemName: "arrow.up.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(0.045))
+                        )
+                        .contentShape(Rectangle())
                     }
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }
@@ -393,7 +437,7 @@ struct SettingsWindowView: View {
                 ZStack(alignment: .topLeading) {
                     RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
                         .fill(previewFill(preview))
-                        .frame(width: 92, height: 58)
+                .frame(width: 82, height: 50)
                     HStack(spacing: 3) {
                         Circle().fill(.red.opacity(0.9)).frame(width: 6, height: 6)
                         Circle().fill(.yellow.opacity(0.9)).frame(width: 6, height: 6)
@@ -409,7 +453,7 @@ struct SettingsWindowView: View {
                 .scaleEffect(on ? 1.0 : 0.97)
                 Text(title).font(.caption).foregroundStyle(on ? .primary : .secondary)
             }
-            .frame(width: 100)
+            .frame(width: 88)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -429,31 +473,6 @@ struct SettingsWindowView: View {
 
     // MARK: Other pages
 
-    @ViewBuilder private var petSections: some View {
-        Section {
-            ForEach(s.rows.filter { !$0.isHeader }) { row in
-                if row.value == "on" || row.value == "off" {
-                    Toggle(clean(row.label), isOn: bindToggle(row))
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                } else {
-                    Button {
-                        engine.settingsSelect(row.id)
-                        engine.settingsActivate(row.id)
-                    } label: {
-                        LabeledContent(clean(row.label), value: row.value)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        } header: {
-            Text("Desktop Pet")
-        } footer: {
-            Text("A tiny animated companion — currently a terminal (Kitty/Ghostty) feature.")
-        }
-    }
-
     @ViewBuilder private var extensionsSections: some View {
         Section {
             ForEach(s.rows.filter { !$0.isHeader }) { row in
@@ -467,50 +486,65 @@ struct SettingsWindowView: View {
                 .buttonStyle(.plain)
             }
         } footer: {
-            Text("VS Code-compatible extensions run through the shared xei host.")
+            Text("VS Code-compatible extensions run through the shared Suisei host.")
         }
     }
 
     @ViewBuilder private var helpSections: some View {
         Section {
-            shortcutRow("⌘S", "Save")
-            shortcutRow("⌘P", "Open file")
-            shortcutRow("⇧⌘P", "Command palette")
-            shortcutRow("⌘F", "Find in file")
-            shortcutRow("⌘G / ⇧⌘G", "Next / previous match")
-            shortcutRow("⇧⌘F", "Find in project")
-            shortcutRow("⌘Z / ⇧⌘Z", "Undo / redo")
-            shortcutRow("⌃⇥ / ⌃⇧⇥", "Next / previous tab")
+            shortcutGrid([
+                ("⌘S", "Save"),
+                ("⌘P", "Open file"),
+                ("⇧⌘P", "Command palette"),
+                ("⌘F", "Find in file"),
+                ("⌘G / ⇧⌘G", "Next / previous match"),
+                ("⇧⌘F", "Find in project"),
+                ("⌘Z / ⇧⌘Z", "Undo / redo"),
+                ("⌃⇥ / ⌃⇧⇥", "Next / previous tab"),
+            ])
         } header: {
             Text("Editing")
         }
         Section {
-            shortcutRow("⌘0", "Toggle navigator")
-            shortcutRow("⌥⌘0", "Toggle inspector")
-            shortcutRow("⇧⌘Y", "Toggle debug area")
-            shortcutRow("⌃T", "Terminal in debug area")
-            shortcutRow("⌃⇧T", "Terminal in editor pane")
-            shortcutRow("⇧⌘V", "Pretty preview")
-            shortcutRow("⌃G / ⌃⇧G", "Source control / Git workbench")
-            shortcutRow("⌘, ", "Settings")
+            shortcutGrid([
+                ("⌘0", "Toggle navigator"),
+                ("⌥⌘0", "Toggle inspector"),
+                ("⇧⌘Y", "Toggle debug area"),
+                ("⌃T", "Terminal in debug area"),
+                ("⌃⇧T", "Terminal in editor pane"),
+                ("⇧⌘V", "Pretty preview"),
+                ("⌃G / ⌃⇧G", "Source control / Git workbench"),
+                ("⌘,", "Settings"),
+            ])
         } header: {
             Text("Panels")
         }
         Section {
-            ForEach(s.rows.filter { !$0.isHeader }.prefix(24)) { row in
-                shortcutRow(row.label, row.value)
+            DisclosureGroup(isExpanded: $engineReferenceExpanded) {
+                LazyVStack(spacing: 0) {
+                    ForEach(s.rows.filter { !$0.isHeader }.prefix(24)) { row in
+                        shortcutRow(row.label, row.value)
+                    }
+                }
+                .padding(.top, 6)
+            } label: {
+                HStack {
+                    Text("Show engine commands")
+                    Spacer()
+                    Text("\(min(24, s.rows.filter { !$0.isHeader }.count))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
         } header: {
             Text("Engine Reference")
         } footer: {
-            Text("Full xei keybinding reference — advanced users can drive Core directly.")
+            Text("Full Suisei keybinding reference — advanced users can drive Core directly.")
         }
     }
 
     private func shortcutRow(_ keys: String, _ what: String) -> some View {
-        LabeledContent {
-            Text(what).foregroundStyle(.secondary)
-        } label: {
+        HStack(spacing: 8) {
             Text(keys)
                 .font(.system(size: 12, design: .monospaced))
                 .padding(.horizontal, 6)
@@ -519,7 +553,72 @@ struct SettingsWindowView: View {
                     RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                         .fill(Color.primary.opacity(0.06))
                 )
+            Text(what)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
         }
+        .frame(minHeight: 30)
+    }
+
+    private func shortcutGrid(_ rows: [(String, String)]) -> some View {
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(), spacing: 12),
+                GridItem(.flexible(), spacing: 12),
+            ],
+            alignment: .leading,
+            spacing: 0
+        ) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                shortcutRow(row.0, row.1)
+            }
+        }
+    }
+
+    private func settingsToggleTile(_ row: SettingsRowItem) -> some View {
+        HStack(spacing: 8) {
+            Text(clean(row.label))
+                .font(.system(size: 12))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Toggle("", isOn: bindToggle(row))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: 34)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
+        )
+    }
+
+    private func languageServerTile(_ row: SettingsRowItem) -> some View {
+        let language = clean(row.label)
+            .replacingOccurrences(of: "LSP ·", with: "")
+            .trimmingCharacters(in: .whitespaces)
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(row.value == "default" ? Color.secondary.opacity(0.45) : Color.accentColor)
+                .frame(width: 5, height: 5)
+            Text(language)
+                .font(.system(size: 11))
+                .lineLimit(1)
+            Spacer(minLength: 2)
+            Text(row.value)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .frame(minHeight: 28)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
     }
 
     // MARK: Bindings

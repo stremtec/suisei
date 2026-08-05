@@ -1,8 +1,15 @@
 # Suisei current state and independence roadmap
 
-**Code-verified: 2026-07-23.** This document turns the existing Swift face and
-Rust engine into a prioritised path to an independently usable macOS IDE. It
-does not redefine the long-term product vision in `SUISEI-PLAN.md`.
+> **Historical baseline, code-verified 2026-07-23.** Several ordered patches in
+> this document have since landed: modeless plural selections, native editing
+> commands, a shadow WAL, central `Edit`/`Delta`, incremental LSP sync, an
+> asynchronous syntax worker, stable document ids and a pixel-based core
+> viewport. Use the dated current snapshot at the top of `SUISEI-TODO.md` for
+> open status; retain this document for rationale and acceptance criteria.
+
+This document turns the existing Swift face and Rust engine into a prioritised
+path to an independently usable macOS IDE. It does not redefine the long-term
+product vision in `SUISEI-PLAN.md`.
 
 ## What “independent GUI IDE” means
 

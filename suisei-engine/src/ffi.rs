@@ -1,6 +1,6 @@
 //! C ABI for the Swift face. Fixed buffers — no pointer lifetime traps.
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 
 use crate::bridge::key_from_ffi;
 use crate::runtime::Engine;
@@ -17,6 +17,19 @@ pub const SUISEI_LINE_CAP: usize = 512;
 pub const SUISEI_MSG_CAP: usize = 256;
 pub const SUISEI_PATH_CAP: usize = 512;
 pub const SUISEI_MODE_CAP: usize = 24;
+
+// Panel bits for `suisei_engine_open_panels`. Mirrored in suisei_engine.h and
+// asserted against it in tests/abi_layout.rs.
+pub const SUISEI_PANEL_EXPLORER: u32 = 1 << 0;
+pub const SUISEI_PANEL_PALETTE: u32 = 1 << 1;
+pub const SUISEI_PANEL_SEARCH: u32 = 1 << 2;
+pub const SUISEI_PANEL_COMPLETIONS: u32 = 1 << 3;
+pub const SUISEI_PANEL_TERMINAL: u32 = 1 << 4;
+pub const SUISEI_PANEL_SETTINGS: u32 = 1 << 5;
+pub const SUISEI_PANEL_SCM: u32 = 1 << 6;
+pub const SUISEI_PANEL_GIT_WB: u32 = 1 << 7;
+pub const SUISEI_PANEL_PREVIEW: u32 = 1 << 8;
+pub const SUISEI_PANEL_OUTLINE: u32 = 1 << 9;
 
 pub struct SuiseiEngine(Engine);
 
@@ -62,8 +75,10 @@ pub struct SuiseiPaneC {
     pub focused: u8,
     /// 1 when this pane runs its own shell (see `suisei_engine_terminal_for_pane`).
     pub _pad0: u8,
-    pub _pad1: u8,
-    pub _pad2: u8,
+    /// Pane shell content generation — bumps when the grid changes, so the
+    /// face skips re-pulling a ~300 KiB snapshot it already has. Reuses the
+    /// two pad bytes: no size change, so the pane stride stays put.
+    pub term_gen: u16,
     /// Total lines in this pane's buffer.
     pub doc_line_count: u32,
     /// Per-pane horizontal pan (0 when wrap on).
@@ -119,22 +134,43 @@ pub struct SuiseiChromeSnapshot {
     pub tab_is_layout: [u8; SUISEI_MAX_TABS],
     /// 1 when the tab is a terminal (a shell runs in it).
     pub tab_is_terminal: [u8; SUISEI_MAX_TABS],
-    /// 0 none, 1 vertical, 2 horizontal
-    pub split_kind: u8,
+    /// Retired: the split shape lives in the per-pane rects (`SuiseiPaneC`).
+    /// Kept as pads — renamed, not removed — so every offset after this
+    /// block holds.
+    pub _pad_split_kind: u8,
     pub pane_count: u8,
     pub pane_focus: u8,
     pub _pad_split: u8,
-    pub split_ratio: f32,
+    pub _pad_split_ratio: f32,
     pub panes: [SuiseiPaneC; SUISEI_MAX_PANES],
     pub visible_line_count: u32,
     pub _pad_vis: u32,
-    pub lines: [SuiseiEditorLineC; SUISEI_MAX_LINES],
+    // The packed `lines: [SuiseiEditorLineC; SUISEI_MAX_LINES]` array used to
+    // sit here. It was 176,128 of this struct's 185,440 bytes — 95% — and the
+    // face never decoded a byte of it: the GUI is a PULL renderer, so every
+    // canvas fetches its own rows through `suisei_engine_editor_band` on draw
+    // (`EngineBridge.decodeEditorLinesAndSplit` says so, and hard-codes
+    // `allLines = []`). Carrying it cost a 181 KiB memset here plus another on
+    // the Swift side, per refresh, twenty times a second.
+    //
+    // `SuiseiPaneC::line_start` / `line_count` are now always 0 and stay only
+    // because the face reads the pane struct at hardcoded byte offsets.
+    /// Actual per-pane document titles. Unlike `tab_titles`, this does not
+    /// collapse buffer identity when a layout uses one unified strip chip.
+    pub pane_titles: [[c_char; SUISEI_TITLE_CAP]; SUISEI_MAX_PANES],
 }
 
 fn write_cstr(dst: &mut [c_char], s: &str) {
     dst.fill(0);
+    // Truncate on a char boundary: a mid-UTF-8 cut used to hand the face an
+    // invalid C string, which String(cString:) rendered as replacement-char
+    // garbage at the end of dense CJK / emoji lines.
+    let max = dst.len().saturating_sub(1);
     let bytes = s.as_bytes();
-    let n = bytes.len().min(dst.len().saturating_sub(1));
+    let mut n = bytes.len().min(max);
+    while n > 0 && !s.is_char_boundary(n) {
+        n -= 1;
+    }
     for (i, &b) in bytes.iter().take(n).enumerate() {
         dst[i] = b as c_char;
     }
@@ -191,15 +227,19 @@ fn vcol_for_utf16(eng: &SuiseiEngine, row: u32, utf16_off: u32) -> u32 {
     let row = (row as usize).min(buf.line_count().saturating_sub(1));
     let line = buf.line(row);
     let mut seen_u16 = 0usize;
-    let mut vcol = 0usize;
+    let mut char_col = 0usize;
     for ch in line.chars() {
-        if seen_u16 >= utf16_off as usize {
+        let next = seen_u16.saturating_add(ch.len_utf16());
+        if next > utf16_off as usize {
             break;
         }
-        seen_u16 += ch.len_utf16();
-        vcol += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        seen_u16 = next;
+        char_col += 1;
     }
-    vcol as u32
+    // Delegate width policy to Buffer. In particular, combining marks are
+    // width zero; the previous `.max(1)` invented a cell for every jamo/accent
+    // and made drag-selection drift from what CoreText drew.
+    buf.buffer_col_to_screen_col(row, char_col) as u32
 }
 
 /// Click addressed by UTF-16 offset instead of cell column.
@@ -238,15 +278,24 @@ pub extern "C" fn suisei_engine_drag_utf16(
 /// Pre-parse a file into the syntax cache (project auto-indexing).
 /// Returns 1 when the file was read and parsed.
 #[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_prewarm_file(
-    ptr: *mut SuiseiEngine,
-    path: *const c_char,
-) -> u8 {
+pub extern "C" fn suisei_engine_prewarm_file(ptr: *mut SuiseiEngine, path: *const c_char) -> u8 {
     if ptr.is_null() || path.is_null() {
         return 0;
     }
-    let Ok(p) = (unsafe { CStr::from_ptr(path) }).to_str() else { return 0 };
+    let Ok(p) = (unsafe { CStr::from_ptr(path) }).to_str() else {
+        return 0;
+    };
     unsafe { u8::from((*ptr).0.prewarm_file(p)) }
+}
+
+/// Boot pipeline: warm every language grammar on the syntax worker so the
+/// first file opened highlights with no cold parser/query build.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_warm_grammars(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.warm_grammars() }
 }
 
 /// How many files are pre-parsed right now (diagnostics).
@@ -283,6 +332,48 @@ pub extern "C" fn suisei_engine_completions_open(ptr: *const SuiseiEngine) -> u8
         .map_or(0, |c| u8::from(c.completions.open))
 }
 
+/// Which chrome panels are open, as a bitmask — see `SUISEI_PANEL_*`.
+///
+/// Exists because every panel snapshot is a fixed-size struct (the terminal's
+/// is 300 KiB, the git workbench's 55 KiB, diagnostics' 49 KiB), and the face
+/// used to copy all of them on every refresh and only *then* check whether the
+/// panel was open, discarding the copy if it was not. Four bytes up front lets
+/// it skip the copy entirely. See `docs/SUISEI-GPU-ARCHITECTURE.md` §2.
+///
+/// Answered straight out of the last composed frame, so it costs a few loads
+/// and no allocation.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_open_panels(ptr: *const SuiseiEngine) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let eng = unsafe { &*ptr };
+    let Some(c) = eng.0.last_diff.chrome.as_ref() else {
+        return 0;
+    };
+    let bit = |on: bool, mask: u32| if on { mask } else { 0 };
+    // Explorer: "is there anything to pull", NOT "does it own the keyboard".
+    // The project navigator is docked — it paints its entries whenever it has
+    // them, and `explorer.open` only means Core is routing keys to it. Gating
+    // the pull on the focus flag would blank the tree in Normal mode.
+    bit(
+        c.explorer.open || c.explorer_open || !c.explorer.entries.is_empty(),
+        SUISEI_PANEL_EXPLORER,
+    )
+        | bit(c.palette.open, SUISEI_PANEL_PALETTE)
+        | bit(c.search.open, SUISEI_PANEL_SEARCH)
+        | bit(c.completions.open, SUISEI_PANEL_COMPLETIONS)
+        | bit(c.terminal.open, SUISEI_PANEL_TERMINAL)
+        | bit(c.settings.open, SUISEI_PANEL_SETTINGS)
+        | bit(c.scm.open, SUISEI_PANEL_SCM)
+        | bit(c.git_wb.open, SUISEI_PANEL_GIT_WB)
+        | bit(c.preview.open, SUISEI_PANEL_PREVIEW)
+        // The outline feeds the docked inspector, which has no `open` flag of
+        // its own — it is empty exactly when there is nothing to show, and an
+        // empty pull is the cheap case anyway.
+        | bit(!c.outline.is_empty(), SUISEI_PANEL_OUTLINE)
+}
+
 /// Cheap probe for the typing fast path: is the core ready to take text?
 ///
 /// The face used to answer this by pulling the whole chrome snapshot, which
@@ -297,7 +388,12 @@ pub extern "C" fn suisei_engine_editor_accepts_text(ptr: *const SuiseiEngine) ->
     // editor (not a chrome panel or the terminal) owns the keys. A selection is
     // fine — the fast path replaces it. Was `mode_is_insert`, which pinned the
     // fast path to a vim Insert mode the GUI never enters.
-    unsafe { u8::from(matches!((*ptr).0.app().mode, suisei_core::app::Mode::Editor)) }
+    unsafe {
+        u8::from(matches!(
+            (*ptr).0.app().mode,
+            suisei_core::app::Mode::Editor
+        ))
+    }
 }
 
 /// Reorder the tab bar: move the tab at `from` so it sits at `to`.
@@ -416,10 +512,14 @@ pub extern "C" fn suisei_engine_chrome(
     // branch packed into message suffix is avoided — use separate FFI below
 
     let tab_n = chrome.tabs.len().min(SUISEI_MAX_TABS);
-    o.tab_count = tab_n as u32;
+    // The TRUE count, not the clamped one: tabs past the cap used to vanish
+    // without a trace. The face clamps its own decode loop and shows "+N".
+    o.tab_count = chrome.tabs.len() as u32;
     o.tab_active = chrome.tabs.iter().position(|t| t.active).unwrap_or(0) as u32;
     for (i, tab) in chrome.tabs.iter().take(tab_n).enumerate() {
-        o.tab_dirty[i] = u8::from(tab.dirty);
+        // bit 0 = dirty, bit 1 = deleted-on-disk. Packed into the existing byte
+        // so the fixed C-ABI snapshot layout is untouched.
+        o.tab_dirty[i] = u8::from(tab.dirty) | (u8::from(tab.deleted) << 1);
         o.tab_ids[i] = tab.id;
         o.tab_groups[i] = tab.group;
         o.tab_is_layout[i] = u8::from(tab.is_layout);
@@ -427,16 +527,19 @@ pub extern "C" fn suisei_engine_chrome(
         write_cstr(&mut o.tab_titles[i], &tab.title);
     }
 
-    // Split metadata + packed per-pane lines.
-    o.split_kind = chrome.split_kind;
+    // Split metadata. `split_kind`/`split_ratio` are gone: the shape lives in
+    // the per-pane rects. The ABI bytes stay as pads so every offset after them
+    // holds.
+    //
+    // The packed line stream is gone too — see the note on the struct. Only the
+    // COUNTS are still reported, because they cost four bytes and describe the
+    // scene without carrying it.
     o.pane_focus = chrome.pane_focus;
-    o.split_ratio = chrome.split_ratio;
     let pane_n = chrome.panes.len().min(SUISEI_MAX_PANES);
     o.pane_count = pane_n as u8;
 
-    let mut packed: Vec<&crate::compositor::EditorLineScene> = Vec::new();
     if chrome.panes.is_empty() {
-        // Legacy path: single lines[] stream.
+        // Unsplit: one synthesised pane covering the whole editor.
         let line_n = chrome.lines.len().min(SUISEI_MAX_LINES);
         o.visible_line_count = line_n as u32;
         o.pane_count = 1;
@@ -447,8 +550,11 @@ pub extern "C" fn suisei_engine_chrome(
             line_count: line_n as u32,
             focused: 1,
             _pad0: u8::from(chrome.pane0_is_terminal),
-            _pad1: 0,
-            _pad2: 0,
+            term_gen: if chrome.pane0_is_terminal {
+                engine.0.pane_term_gen(0)
+            } else {
+                0
+            },
             doc_line_count: chrome.line_count,
             hscroll: chrome.hscroll,
             // Unsplit: the one pane is the whole editor.
@@ -457,16 +563,13 @@ pub extern "C" fn suisei_engine_chrome(
             rect_w: 1.0,
             rect_h: 1.0,
         };
-        for (i, line) in chrome.lines.iter().take(line_n).enumerate() {
-            write_editor_line(&mut o.lines[i], line);
-        }
+        write_cstr(&mut o.pane_titles[0], &chrome.pane0_title);
     } else {
+        let mut packed = 0usize;
         for (pi, pane) in chrome.panes.iter().take(pane_n).enumerate() {
-            let start = packed.len() as u32;
-            let take = pane.lines.len().min(SUISEI_MAX_LINES.saturating_sub(packed.len()));
-            for line in pane.lines.iter().take(take) {
-                packed.push(line);
-            }
+            let start = packed as u32;
+            let take = pane.lines.len().min(SUISEI_MAX_LINES.saturating_sub(packed));
+            packed += take;
             o.panes[pi] = SuiseiPaneC {
                 tab_index: pane.tab_index,
                 scroll: pane.scroll,
@@ -476,21 +579,21 @@ pub extern "C" fn suisei_engine_chrome(
                 // Reuses a pad byte — no size change, so the pane stride and
                 // every offset after it stay put.
                 _pad0: u8::from(pane.is_terminal),
+                term_gen: if pane.is_terminal {
+                    engine.0.pane_term_gen(pi)
+                } else {
+                    0
+                },
                 rect_x: pane.rect.x,
                 rect_y: pane.rect.y,
                 rect_w: pane.rect.w,
                 rect_h: pane.rect.h,
-                _pad1: 0,
-                _pad2: 0,
                 doc_line_count: pane.doc_line_count,
                 hscroll: pane.hscroll,
             };
+            write_cstr(&mut o.pane_titles[pi], &pane.title);
         }
-        let line_n = packed.len().min(SUISEI_MAX_LINES);
-        o.visible_line_count = line_n as u32;
-        for (i, line) in packed.iter().take(line_n).enumerate() {
-            write_editor_line(&mut o.lines[i], line);
-        }
+        o.visible_line_count = packed.min(SUISEI_MAX_LINES) as u32;
     }
     1
 }
@@ -528,7 +631,7 @@ pub extern "C" fn suisei_engine_open_path(ptr: *mut SuiseiEngine, path: *const c
         return 0;
     };
     let engine = unsafe { &mut *ptr };
-    let vp = engine.0.app.viewport;
+    let vp = engine.0.app.stage;
     let path_buf = std::path::PathBuf::from(s);
     let has_session = app_has_editor_session(&engine.0.app);
 
@@ -540,25 +643,7 @@ pub extern "C" fn suisei_engine_open_path(ptr: *mut SuiseiEngine, path: *const c
             engine.0.app.explorer.open = true;
             engine.0.app.message = format!("Project {}", s);
         } else {
-            // Cold start: leave Welcome (must set filename or open a file).
-            let first = first_project_file(&path_buf);
-            let mut next = if let Some(ref file) = first {
-                suisei_core::app::App::open_file(&file.display().to_string())
-            } else {
-                let mut a = suisei_core::app::App::default();
-                a.apply_config();
-                a.filename = Some(path_buf.join("Untitled"));
-                a.message = format!("Opened folder {}", s);
-                a
-            };
-            next.viewport = vp;
-            next.explorer.cwd = path_buf.clone();
-            next.explorer.refresh();
-            next.explorer.open = true;
-            if first.is_some() {
-                next.message = format!("Opened project {}", s);
-            }
-            engine.0.app = next;
+            replace_project(engine, &path_buf, s, vp);
         }
     } else if has_session {
         // Multi-tab IDE path: never wipe existing buffers by replacing App.
@@ -574,7 +659,7 @@ pub extern "C" fn suisei_engine_open_path(ptr: *mut SuiseiEngine, path: *const c
         }
     } else {
         let mut next = suisei_core::app::App::open_file(s);
-        next.viewport = vp;
+        next.stage = vp;
         next.message = format!("Opened {}", s);
         if let Some(parent) = path_buf.parent() {
             next.explorer.cwd = parent.to_path_buf();
@@ -583,15 +668,73 @@ pub extern "C" fn suisei_engine_open_path(ptr: *mut SuiseiEngine, path: *const c
         }
         engine.0.app = next;
     }
-    engine.0.sync_viewport_public();
+    // The stage rode along with `next` (or never left); geometry needs no
+    // re-sync — A6 made the pixel stage the single source.
     engine.0.update_scroll_public();
     engine.0.recompose();
     1
 }
 
+/// Replace the current workspace with a directory.
+///
+/// Return codes: 1 switched, 2 refused because at least one tab is dirty,
+/// 0 invalid input. A project switch is allowed to discard clean tabs, never
+/// unsaved edits. Opening an individual file still uses `open_path` and adds a
+/// tab to the current workspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_switch_project(ptr: *mut SuiseiEngine, path: *const c_char) -> u8 {
+    if ptr.is_null() || path.is_null() {
+        return 0;
+    }
+    let cstr = unsafe { CStr::from_ptr(path) };
+    let Ok(s) = cstr.to_str() else {
+        return 0;
+    };
+    let path_buf = std::path::PathBuf::from(s);
+    if !path_buf.is_dir() {
+        return 0;
+    }
+    let engine = unsafe { &mut *ptr };
+    if app_has_dirty_tabs(&engine.0.app) {
+        return 2;
+    }
+    let vp = engine.0.app.stage;
+    replace_project(engine, &path_buf, s, vp);
+    engine.0.update_scroll_public();
+    engine.0.recompose();
+    1
+}
+
+fn replace_project(
+    engine: &mut SuiseiEngine,
+    path: &std::path::Path,
+    display: &str,
+    viewport: suisei_core::app::Stage,
+) {
+    // Leave Welcome (must set filename or open a file).
+    let first = first_project_file(path);
+    let mut next = if let Some(ref file) = first {
+        suisei_core::app::App::open_file(&file.display().to_string())
+    } else {
+        let mut app = suisei_core::app::App::default();
+        app.apply_config();
+        app.filename = Some(path.join("Untitled"));
+        app.message = format!("Opened folder {display}");
+        app
+    };
+    next.stage = viewport;
+    next.explorer.cwd = path.to_path_buf();
+    next.explorer.refresh();
+    next.explorer.open = true;
+    if first.is_some() {
+        next.message = format!("Opened project {display}");
+    }
+    engine.0.app = next;
+}
+
 /// True once the user has left cold Welcome (any real buffer / tree / multi-tab).
 fn app_has_editor_session(app: &suisei_core::app::App) -> bool {
-    if app.buffers.len() > 1 {
+    if app.tabs.buffers.len() > 1 {
         return true;
     }
     if app.filename.is_some() {
@@ -613,6 +756,10 @@ fn app_has_editor_session(app: &suisei_core::app::App) -> bool {
         return true;
     }
     false
+}
+
+fn app_has_dirty_tabs(app: &suisei_core::app::App) -> bool {
+    app.modified || app.tabs.buffers.iter().any(|tab| tab.modified)
 }
 
 /// Engine/core version (workspace `version`), NUL-terminated static string.
@@ -739,11 +886,7 @@ pub extern "C" fn suisei_engine_click(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_drag(
-    ptr: *mut SuiseiEngine,
-    buffer_row: u32,
-    visual_col: u32,
-) {
+pub extern "C" fn suisei_engine_drag(ptr: *mut SuiseiEngine, buffer_row: u32, visual_col: u32) {
     if ptr.is_null() {
         return;
     }
@@ -887,6 +1030,34 @@ pub extern "C" fn suisei_engine_gui_type_char(ptr: *mut SuiseiEngine, ch: u32) {
     }
 }
 
+/// Absolute UTF-16 caret offset in the focused document.
+///
+/// AppKit's NSTextInputClient ranges are document offsets, not line-local
+/// columns. Exposing this keeps IME composition anchored when it starts in the
+/// middle of a Hangul/CJK line.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_caret_utf16_offset(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let app = unsafe { (*ptr).0.app() };
+    let caret = app.buffer.cursor();
+    let mut offset = 0u64;
+    for row in 0..caret.row.min(app.buffer.line_count()) {
+        offset = offset
+            .saturating_add(app.buffer.line(row).encode_utf16().count() as u64)
+            .saturating_add(1); // document newline
+    }
+    offset.saturating_add(
+        app.buffer
+            .line(caret.row)
+            .chars()
+            .take(caret.col)
+            .map(|ch| ch.len_utf16() as u64)
+            .sum::<u64>(),
+    )
+}
+
 /// Backspace with Mac selection semantics (deletes selection if active).
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_gui_delete_backward(ptr: *mut SuiseiEngine) {
@@ -957,6 +1128,30 @@ pub extern "C" fn suisei_engine_find_step(ptr: *mut SuiseiEngine, forward: u8) {
     }
 }
 
+/// Replace the native GUI find field's full value.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_find_set_input(ptr: *mut SuiseiEngine, input: *const c_char) {
+    if ptr.is_null() || input.is_null() {
+        return;
+    }
+    let input = unsafe { CStr::from_ptr(input) }.to_string_lossy();
+    unsafe {
+        (*ptr).0.find_set_input(&input);
+    }
+}
+
+/// Replace the native GUI palette field's full value.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_palette_set_query(ptr: *mut SuiseiEngine, query: *const c_char) {
+    if ptr.is_null() || query.is_null() {
+        return;
+    }
+    let query = unsafe { CStr::from_ptr(query) }.to_string_lossy();
+    unsafe {
+        (*ptr).0.palette_set_query(&query);
+    }
+}
+
 /// Insert text at the caret (or into the PTY when the terminal owns input).
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_paste_text(ptr: *mut SuiseiEngine, text: *const c_char) {
@@ -972,6 +1167,22 @@ pub extern "C" fn suisei_engine_paste_text(ptr: *mut SuiseiEngine, text: *const 
     }
 }
 
+/// Raw keyboard text into the focused terminal's PTY (IME-committed Hangul/CJK,
+/// typed characters) — UTF-8 bytes, not bracketed-paste-wrapped.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_terminal_input(ptr: *mut SuiseiEngine, text: *const c_char) {
+    if ptr.is_null() || text.is_null() {
+        return;
+    }
+    let cstr = unsafe { CStr::from_ptr(text) };
+    let Ok(s) = cstr.to_str() else {
+        return;
+    };
+    unsafe {
+        (*ptr).0.terminal_input(s);
+    }
+}
+
 /// Size the PTY grid to the face terminal panel (cells).
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_terminal_resize(ptr: *mut SuiseiEngine, cols: u32, rows: u32) {
@@ -980,6 +1191,24 @@ pub extern "C" fn suisei_engine_terminal_resize(ptr: *mut SuiseiEngine, cols: u3
     }
     unsafe {
         (*ptr).0.terminal_resize(cols, rows);
+    }
+}
+
+/// Size a PANE terminal's PTY to the face's measured grid (cells). Pane
+/// shells are separate processes — the docked `terminal_resize` never touched
+/// them, so they kept their spawn-time guess forever.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_terminal_resize_pane(
+    ptr: *mut SuiseiEngine,
+    pane: u32,
+    cols: u32,
+    rows: u32,
+) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.terminal_resize_pane(pane, cols, rows);
     }
 }
 
@@ -1004,7 +1233,11 @@ pub extern "C" fn suisei_engine_unfold_layout(ptr: *mut SuiseiEngine) -> u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_activate_layout(ptr: *mut SuiseiEngine, id: u64, focus_doc: u64) -> u8 {
+pub extern "C" fn suisei_engine_activate_layout(
+    ptr: *mut SuiseiEngine,
+    id: u64,
+    focus_doc: u64,
+) -> u8 {
     if ptr.is_null() {
         return 0;
     }
@@ -1018,6 +1251,15 @@ pub extern "C" fn suisei_engine_toggle_layout_style(ptr: *mut SuiseiEngine, id: 
         return 0;
     }
     unsafe { u8::from((*ptr).0.toggle_layout_style(id)) }
+}
+
+/// Layout id that currently owns the desk, or 0 when none (free split / single).
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_active_layout_id(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).0.active_layout_id() }
 }
 
 /// Toggle the docked terminal (⌃T) without going through the key path.
@@ -1051,6 +1293,22 @@ pub extern "C" fn suisei_engine_terminal_scroll(ptr: *mut SuiseiEngine, delta_ro
     }
     unsafe {
         (*ptr).0.terminal_scroll(delta_rows);
+    }
+}
+
+/// Scroll a PANE terminal through its scrollback; positive reveals older
+/// output. The pane twin of `suisei_engine_terminal_scroll`.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_terminal_scroll_pane(
+    ptr: *mut SuiseiEngine,
+    pane: u32,
+    delta_rows: i32,
+) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.terminal_scroll_pane(pane, delta_rows);
     }
 }
 
@@ -1116,7 +1374,6 @@ pub struct SuiseiExplorerSnapshot {
     pub names: [[c_char; SUISEI_EXPLORER_NAME]; SUISEI_MAX_EXPLORER],
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_explorer(
     ptr: *const SuiseiEngine,
@@ -1135,11 +1392,7 @@ pub extern "C" fn suisei_engine_explorer(
     }
     let o = unsafe { &mut *out };
     o.open = u8::from(ex.open);
-    o.selected = ex
-        .entries
-        .iter()
-        .position(|e| e.selected)
-        .unwrap_or(0) as u32;
+    o.selected = ex.entries.iter().position(|e| e.selected).unwrap_or(0) as u32;
     write_cstr(&mut o.cwd, &ex.cwd);
     let n = ex.entries.len().min(SUISEI_MAX_EXPLORER);
     o.count = n as u32;
@@ -1280,10 +1533,7 @@ pub struct SuiseiMinimapC {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_minimap(
-    ptr: *const SuiseiEngine,
-    out: *mut SuiseiMinimapC,
-) -> u8 {
+pub extern "C" fn suisei_engine_minimap(ptr: *const SuiseiEngine, out: *mut SuiseiMinimapC) -> u8 {
     if ptr.is_null() || out.is_null() {
         return 0;
     }
@@ -1399,11 +1649,7 @@ pub extern "C" fn suisei_engine_palette(
     write_cstr(&mut o.query, &p.query);
     let n = p.items.len().min(SUISEI_MAX_PALETTE);
     o.count = n as u32;
-    o.selected = p
-        .items
-        .iter()
-        .position(|i| i.selected)
-        .unwrap_or(0) as u32;
+    o.selected = p.items.iter().position(|i| i.selected).unwrap_or(0) as u32;
     for (i, it) in p.items.iter().take(n).enumerate() {
         write_cstr(&mut o.labels[i], &it.label);
         write_cstr(&mut o.details[i], &it.detail);
@@ -1466,6 +1712,51 @@ pub extern "C" fn suisei_engine_open_blank_tab(ptr: *mut SuiseiEngine) {
     }
 }
 
+/// Activate the tab holding stable id `id` (`BufferTab::id`). Strip slots are
+/// not buffer indices once a folded layout gathers or hides members, so the
+/// face addresses chips by id.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_goto_tab_id(ptr: *mut SuiseiEngine, id: u64) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.goto_tab_id(id);
+    }
+}
+
+/// Close the tab holding stable id `id`.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_close_tab_id(ptr: *mut SuiseiEngine, id: u64) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.close_tab_id(id);
+    }
+}
+
+/// Reorder: move the tab holding `from` onto the strip position of `to`,
+/// both by stable id. Returns 1 on success (refused when the move would
+/// break a folded group's contiguity).
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_move_tab_ids(ptr: *mut SuiseiEngine, from: u64, to: u64) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { u8::from((*ptr).0.move_tab_ids(from, to)) }
+}
+
+/// Drop a layout tab by its id ("Close Tab" on a layout chip). Documents stay
+/// open as loose tabs. Returns 1 on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_drop_layout(ptr: *mut SuiseiEngine, id: u64) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { u8::from((*ptr).0.drop_layout(id)) }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_split_vertical(ptr: *mut SuiseiEngine) {
     if ptr.is_null() {
@@ -1483,6 +1774,26 @@ pub extern "C" fn suisei_engine_split_horizontal(ptr: *mut SuiseiEngine) {
     }
     unsafe {
         (*ptr).0.split_horizontal();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_split_above(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.split_above();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_split_left(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.split_left();
     }
 }
 
@@ -1550,7 +1861,6 @@ pub const SUISEI_MAX_TERM_LINES: usize = 200;
 /// log ran out of budget after roughly a dozen colour changes and the rest of
 /// the line was dropped: the reported "terminal gets cut off".
 pub const SUISEI_TERM_LINE: usize = 1536;
-
 
 #[repr(C)]
 pub struct SuiseiCompletionsSnapshot {
@@ -1682,8 +1992,16 @@ pub extern "C" fn suisei_engine_terminal_for_pane(
         row[0] = 0;
     }
     let (ccol, crow) = term.cursor_position();
-    o.cursor_row = crow as u32;
-    o.cursor_col = ccol as u32;
+    // While the user views scrollback the live caret is not on the screen —
+    // u16::MAX tells the face to suppress the block cursor instead of drawing
+    // it at live-grid coordinates over scrolled-back content.
+    if term.scroll() > 0 {
+        o.cursor_row = u32::from(u16::MAX);
+        o.cursor_col = u32::from(u16::MAX);
+    } else {
+        o.cursor_row = crow as u32;
+        o.cursor_col = ccol as u32;
+    }
     for (i, line) in lines.iter().enumerate() {
         write_cstr(&mut o.lines[i], line);
     }
@@ -1971,6 +2289,30 @@ pub extern "C" fn suisei_engine_scm(ptr: *const SuiseiEngine, out: *mut SuiseiSc
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_scm_select(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.scm_select(row) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_scm_activate(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.scm_activate(row) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_scm_toggle_stage(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.scm_toggle_stage(row) }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_git_wb(
     ptr: *const SuiseiEngine,
     out: *mut SuiseiGitWbSnapshot,
@@ -2000,15 +2342,14 @@ pub extern "C" fn suisei_engine_git_wb(
         o.chip_keys[i] = c.key;
         write_cstr(&mut o.chip_labels[i], &c.label);
     }
-    let pack = |dst: &mut [[c_char; SUISEI_GIT_WB_LINE]; SUISEI_MAX_GIT_COL],
-                src: &[String]|
-     -> u32 {
-        let n = src.len().min(SUISEI_MAX_GIT_COL);
-        for (i, line) in src.iter().take(n).enumerate() {
-            write_cstr(&mut dst[i], line);
-        }
-        n as u32
-    };
+    let pack =
+        |dst: &mut [[c_char; SUISEI_GIT_WB_LINE]; SUISEI_MAX_GIT_COL], src: &[String]| -> u32 {
+            let n = src.len().min(SUISEI_MAX_GIT_COL);
+            for (i, line) in src.iter().take(n).enumerate() {
+                write_cstr(&mut dst[i], line);
+            }
+            n as u32
+        };
     o.changes_count = pack(&mut o.col_changes, &g.col_changes);
     o.log_count = pack(&mut o.col_log, &g.col_log);
     o.files_count = pack(&mut o.col_files, &g.col_files);
@@ -2027,6 +2368,30 @@ pub extern "C" fn suisei_engine_git_wb_set_tab(ptr: *mut SuiseiEngine, key: u32)
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_select_change(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_select_change(row) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_select_history(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_select_history(row) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_select_commit_file(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_select_commit_file(row) }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_save_as(ptr: *mut SuiseiEngine, path: *const c_char) {
     if ptr.is_null() || path.is_null() {
         return;
@@ -2037,6 +2402,16 @@ pub extern "C" fn suisei_engine_save_as(ptr: *mut SuiseiEngine, path: *const c_c
     };
     unsafe {
         (*ptr).0.save_as(s);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_select_special(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.git_wb_select_special(row);
     }
 }
 
@@ -2183,7 +2558,11 @@ pub extern "C" fn suisei_engine_preview(
         o.count = 0;
         return 1;
     }
-    let n = p.lines.len().saturating_sub(start_i).min(SUISEI_MAX_PREVIEW);
+    let n = p
+        .lines
+        .len()
+        .saturating_sub(start_i)
+        .min(SUISEI_MAX_PREVIEW);
     o.count = n as u32;
     for (i, line) in p.lines.iter().skip(start_i).take(n).enumerate() {
         o.styles[i] = line.style;
@@ -2210,6 +2589,36 @@ pub struct SuiseiDiagnosticsSnapshot {
     /// 0 error · 1 warning · 2 info · 3 hint
     pub severities: [u8; SUISEI_MAX_DIAGS],
     pub messages: [[c_char; SUISEI_DIAG_MSG]; SUISEI_MAX_DIAGS],
+}
+
+/// Fingerprint of the current diagnostic set — 0 when there are none.
+///
+/// `suisei_engine_diagnostics` memsets a 48.6 KiB struct and the face then
+/// builds a `String` per entry. Diagnostics change when a language server
+/// answers, not on the 20 Hz tick, so the face compares this first and only
+/// pays for the snapshot when it moves. Hashes positions, severities AND
+/// message text, so a same-position message rewrite is not missed.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_diagnostics_fingerprint(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    use std::hash::{Hash, Hasher};
+    let eng = unsafe { &*ptr };
+    let diags = &eng.0.app().lsp.diagnostics;
+    if diags.is_empty() {
+        return 0;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    diags.len().hash(&mut h);
+    for d in diags.iter().take(SUISEI_MAX_DIAGS) {
+        d.row.hash(&mut h);
+        d.col_start.hash(&mut h);
+        std::mem::discriminant(&d.severity).hash(&mut h);
+        d.message.hash(&mut h);
+    }
+    // 0 is reserved for "no diagnostics" — never collide with it.
+    h.finish() | 1
 }
 
 #[unsafe(no_mangle)]
@@ -2516,6 +2925,56 @@ pub extern "C" fn suisei_engine_replace_all_in_file(
 
 // ─── Shadow WAL recovery (D0) ─────────────────────────────────────────────────
 
+/// Forward a mouse event to a terminal's inner app (xterm tracking).
+/// `pane` = 0xFFFF targets the dock. Returns 1 when the shell consumed the
+/// event (the face should then NOT also act on it — e.g. wheel scrollback).
+/// button: 0 left, 1 middle, 2 right, 64 wheel-up, 65 wheel-down.
+/// x/y: 1-based cell coordinates.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_terminal_mouse(
+    ptr: *mut SuiseiEngine,
+    pane: u32,
+    button: u8,
+    x: u16,
+    y: u16,
+    pressed: u8,
+    motion: u8,
+) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        u8::from(
+            (*ptr)
+                .0
+                .terminal_mouse(pane, button, x, y, pressed != 0, motion != 0),
+        )
+    }
+}
+
+/// Restore the previous session's files + cursors (call once at startup).
+/// Landing named buffers flips the welcome rule, so Welcome yields to the
+/// restored editor.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_restore_session(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.restore_session();
+    }
+}
+
+/// Persist open files + cursors for the next launch.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_save_session(ptr: *const SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    let eng = unsafe { &*ptr };
+    eng.0.save_session();
+}
+
 /// Number of pending crash-recovery entries found on startup.
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_recovery_count(ptr: *const SuiseiEngine) -> u32 {
@@ -2567,8 +3026,8 @@ pub extern "C" fn suisei_engine_recovery_accept(ptr: *mut SuiseiEngine, idx: u32
     eng.0.app.open_new_tab(&entry.file_path);
     // Replace buffer content with the recovered (unsaved) text.
     eng.0.app.buffer = suisei_core::buffer::Buffer::from_string(&entry.text);
-    eng.0.app.buffer.cursor.row = (entry.cursor_row as usize)
-        .min(eng.0.app.buffer.line_count().saturating_sub(1));
+    eng.0.app.buffer.cursor.row =
+        (entry.cursor_row as usize).min(eng.0.app.buffer.line_count().saturating_sub(1));
     // Clamp col too (row is already clamped): a shorter recovered line would
     // otherwise leave the caret past the end and panic on the next edit/paint.
     let line_len = eng
@@ -2594,4 +3053,95 @@ pub extern "C" fn suisei_engine_recovery_discard(ptr: *mut SuiseiEngine, idx: u3
     }
     let eng = unsafe { &mut *ptr };
     eng.0.journal.discard_recovery(idx as usize);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Truncation must land on a char boundary: a mid-UTF-8 cut hands the
+    /// face an invalid C string, which String(cString:) renders as
+    /// replacement-char garbage at the end of dense CJK/emoji lines.
+    #[test]
+    fn write_cstr_truncates_on_char_boundaries() {
+        // 6 bytes total → 5 usable + NUL. "가" is 3 bytes: exactly one fits;
+        // a naive byte cap would take 5 bytes = one char + two stray bytes.
+        let mut dst = [0 as c_char; 6];
+        write_cstr(&mut dst, "가나다");
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(dst.as_ptr() as *const u8, 6) };
+        assert_eq!(&bytes[..3], "가".as_bytes(), "first char intact");
+        assert_eq!(bytes[3], 0, "NUL right after the last full char");
+        assert_eq!(bytes[4], 0, "no stray partial bytes");
+    }
+
+    /// ASCII fills to the brim with the NUL in the last slot.
+    #[test]
+    fn write_cstr_fills_ascii_exactly() {
+        let mut dst = [0 as c_char; 4];
+        write_cstr(&mut dst, "abcdef");
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(dst.as_ptr() as *const u8, 4) };
+        assert_eq!(&bytes[..3], b"abc");
+        assert_eq!(bytes[3], 0);
+    }
+
+    #[test]
+    fn absolute_utf16_caret_offset_counts_cjk_surrogates_and_newlines() {
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        engine.0.app.buffer = suisei_core::buffer::Buffer::from_string("a한🙂\n글b");
+        engine.0.app.buffer.cursor = suisei_core::buffer::Position::new(1, 1);
+        // row 0: a(1)+한(1)+🙂(2)+newline(1), then 글(1)
+        assert_eq!(suisei_engine_caret_utf16_offset(&*engine), 6);
+    }
+
+    #[test]
+    fn utf16_hit_test_does_not_invent_cells_for_combining_marks() {
+        let mut engine = SuiseiEngine(Engine::new());
+        engine.0.app.buffer = suisei_core::buffer::Buffer::from_string("e\u{301}x");
+        assert_eq!(vcol_for_utf16(&engine, 0, 2), 1);
+        assert_eq!(vcol_for_utf16(&engine, 0, 3), 2);
+    }
+
+    #[test]
+    fn project_switch_refuses_dirty_tabs_then_replaces_clean_workspace() {
+        let root =
+            std::env::temp_dir().join(format!("suisei_switch_project_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "# next\n").unwrap();
+        let c_path = std::ffi::CString::new(root.display().to_string()).unwrap();
+
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        engine.0.app.filename = Some("/tmp/old.rs".into());
+        engine.0.app.modified = true;
+        assert_eq!(
+            suisei_engine_switch_project(&mut *engine, c_path.as_ptr()),
+            2,
+            "dirty workspace must not be replaced"
+        );
+        assert_eq!(
+            engine.0.app.filename.as_deref(),
+            Some(std::path::Path::new("/tmp/old.rs"))
+        );
+
+        engine.0.app.modified = false;
+        for tab in &mut engine.0.app.tabs.buffers {
+            tab.modified = false;
+        }
+        assert_eq!(
+            suisei_engine_switch_project(&mut *engine, c_path.as_ptr()),
+            1
+        );
+        assert_eq!(engine.0.app.explorer.cwd, root);
+        assert_eq!(engine.0.app.tabs.buffers.len(), 1);
+        assert!(
+            engine
+                .0
+                .app
+                .filename
+                .as_ref()
+                .is_some_and(|path| path.ends_with("README.md"))
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

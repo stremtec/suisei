@@ -65,40 +65,18 @@ pub struct SyntaxEngine {
 impl Default for SyntaxEngine {
     fn default() -> Self {
         Self {
-            rust: make_lang(
-                tree_sitter_rust::LANGUAGE.into(),
-                tree_sitter_rust::HIGHLIGHTS_QUERY,
-            ),
-            python: make_lang(
-                tree_sitter_python::LANGUAGE.into(),
-                tree_sitter_python::HIGHLIGHTS_QUERY,
-            ),
-            javascript: make_lang(
-                tree_sitter_javascript::LANGUAGE.into(),
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-            ),
-            typescript: make_lang(
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
-            ),
-            tsx: make_lang(
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
-                // TSX uses the same highlights as TS + JSX patterns when available
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
-            ),
-            c: make_lang(
-                tree_sitter_c::LANGUAGE.into(),
-                tree_sitter_c::HIGHLIGHT_QUERY,
-            ),
-            go: make_lang(tree_sitter_go::LANGUAGE.into(), tree_sitter_go::HIGHLIGHTS_QUERY),
-            bash: make_lang(
-                tree_sitter_bash::LANGUAGE.into(),
-                tree_sitter_bash::HIGHLIGHT_QUERY,
-            ),
-            json: make_lang(
-                tree_sitter_json::LANGUAGE.into(),
-                tree_sitter_json::HIGHLIGHTS_QUERY,
-            ),
+            // Grammars compile their highlight queries on first use (A1-6):
+            // the main-thread engine only ADOPTS worker frames and may never
+            // parse at all, so nine query compiles at startup would be waste.
+            rust: None,
+            python: None,
+            javascript: None,
+            typescript: None,
+            tsx: None,
+            c: None,
+            go: None,
+            bash: None,
+            json: None,
             tree: None,
             last_ext: String::new(),
             last_len: 0,
@@ -112,6 +90,19 @@ impl Default for SyntaxEngine {
             active: false,
         }
     }
+}
+
+/// First-use grammar init: the highlight query compiles once, lazily, so an
+/// engine that never parses a language never pays for it.
+fn lazy<'a>(
+    slot: &'a mut Option<LangBundle>,
+    language: Language,
+    source: &str,
+) -> Option<&'a mut LangBundle> {
+    if slot.is_none() {
+        *slot = make_lang(language, source);
+    }
+    slot.as_mut()
 }
 
 fn make_lang(language: Language, source: &str) -> Option<LangBundle> {
@@ -133,6 +124,22 @@ impl SyntaxEngine {
         self.parse_window(text, ext, None)
     }
 
+    /// The live tree, and the exact text it was parsed from.
+    ///
+    /// Both, together, or neither: a tree indexed against stale text yields
+    /// byte offsets that name the wrong identifiers. Completion's scope walk
+    /// (`crate::scope`) is the caller — it needs a parse that is already warm,
+    /// because re-parsing on every keystroke to answer "what is in scope" would
+    /// cost more than the suggestion is worth.
+    pub fn live_tree(&self) -> Option<(&Tree, &str)> {
+        self.tree.as_ref().map(|t| (t, self.last_text.as_str()))
+    }
+
+    /// Extension the live tree was parsed as.
+    pub fn live_ext(&self) -> &str {
+        &self.last_ext
+    }
+
     /// Parse for a known path, seeding from the pre-warmed cache when possible.
     ///
     /// Switching files used to mean a cold parse every time. If the indexer has
@@ -150,8 +157,11 @@ impl SyntaxEngine {
             if !self.last_path.is_empty() && self.tree.is_some() {
                 let tree = self.tree.clone();
                 if let Some(tree) = tree {
-                    let (p, t, e) =
-                        (self.last_path.clone(), self.last_text.clone(), self.last_ext.clone());
+                    let (p, t, e) = (
+                        self.last_path.clone(),
+                        self.last_text.clone(),
+                        self.last_ext.clone(),
+                    );
                     self.store_cached(p, t, tree, e);
                 }
             }
@@ -193,7 +203,9 @@ impl SyntaxEngine {
         if self.cache.contains_key(path) {
             return;
         }
-        let Some(bundle) = self.bundle_for(ext) else { return };
+        let Some(bundle) = self.bundle_for(ext) else {
+            return;
+        };
         let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             bundle.parser.parse(text, None)
         }));
@@ -214,7 +226,11 @@ impl SyntaxEngine {
 
     fn store_cached(&mut self, path: String, text: String, tree: Tree, ext: String) {
         const MAX_CACHED: usize = 48;
-        if self.cache.insert(path.clone(), CachedParse { text, tree, ext }).is_none() {
+        if self
+            .cache
+            .insert(path.clone(), CachedParse { text, tree, ext })
+            .is_none()
+        {
             self.cache_order.push_back(path);
         }
         while self.cache_order.len() > MAX_CACHED {
@@ -224,17 +240,77 @@ impl SyntaxEngine {
         }
     }
 
+    /// Eagerly build every language's parser + highlight query. Grammars are
+    /// otherwise lazy — the first file of a type pays a cold parser+`Query`
+    /// build (query compilation is the slow part). The boot pipeline warms
+    /// them off the worker thread so the first highlight of the first file
+    /// opened — of any language — is instant. Idempotent: `lazy`/`make_lang`
+    /// no-op once a slot is filled.
+    pub fn warm_all(&mut self) {
+        for ext in ["rs", "py", "js", "ts", "tsx", "c", "go", "sh", "json"] {
+            let _ = self.bundle_for(Some(ext));
+        }
+    }
+
     fn bundle_for(&mut self, ext: Option<&str>) -> Option<&mut LangBundle> {
         match ext {
-            Some("rs") => self.rust.as_mut(),
-            Some("py" | "pyi") => self.python.as_mut(),
-            Some("js" | "mjs" | "cjs") | Some("jsx") => self.javascript.as_mut(),
-            Some("ts" | "mts" | "cts") => self.typescript.as_mut(),
-            Some("tsx") => self.tsx.as_mut().or(self.typescript.as_mut()),
-            Some("c" | "h") | Some("cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx") => self.c.as_mut(),
-            Some("go") => self.go.as_mut(),
-            Some("sh" | "bash" | "zsh") => self.bash.as_mut(),
-            Some("json" | "jsonc") => self.json.as_mut(),
+            Some("rs") => lazy(
+                &mut self.rust,
+                tree_sitter_rust::LANGUAGE.into(),
+                tree_sitter_rust::HIGHLIGHTS_QUERY,
+            ),
+            Some("py" | "pyi") => lazy(
+                &mut self.python,
+                tree_sitter_python::LANGUAGE.into(),
+                tree_sitter_python::HIGHLIGHTS_QUERY,
+            ),
+            Some("js" | "mjs" | "cjs") | Some("jsx") => lazy(
+                &mut self.javascript,
+                tree_sitter_javascript::LANGUAGE.into(),
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+            ),
+            Some("ts" | "mts" | "cts") => lazy(
+                &mut self.typescript,
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            ),
+            Some("tsx") => {
+                if self.tsx.is_none() {
+                    self.tsx = make_lang(
+                        tree_sitter_typescript::LANGUAGE_TSX.into(),
+                        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    );
+                }
+                if self.tsx.is_some() {
+                    return self.tsx.as_mut();
+                }
+                // TSX grammar unavailable — degrade to plain TypeScript.
+                lazy(
+                    &mut self.typescript,
+                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                )
+            }
+            Some("c" | "h") | Some("cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx") => lazy(
+                &mut self.c,
+                tree_sitter_c::LANGUAGE.into(),
+                tree_sitter_c::HIGHLIGHT_QUERY,
+            ),
+            Some("go") => lazy(
+                &mut self.go,
+                tree_sitter_go::LANGUAGE.into(),
+                tree_sitter_go::HIGHLIGHTS_QUERY,
+            ),
+            Some("sh" | "bash" | "zsh") => lazy(
+                &mut self.bash,
+                tree_sitter_bash::LANGUAGE.into(),
+                tree_sitter_bash::HIGHLIGHT_QUERY,
+            ),
+            Some("json" | "jsonc") => lazy(
+                &mut self.json,
+                tree_sitter_json::LANGUAGE.into(),
+                tree_sitter_json::HIGHLIGHTS_QUERY,
+            ),
             _ => None,
         }
     }
@@ -265,6 +341,25 @@ impl SyntaxEngine {
             return;
         }
 
+        // Same bytes as the tree on hand — only the WINDOW moved (a scroll).
+        // Re-run the query alone; reparsing identical text is pure waste
+        // (`edit_between` returns None for equal texts, which would force a
+        // full parse instead).
+        if self.active && self.last_ext == ext_str && self.last_fingerprint == fingerprint {
+            if let Some(tree) = self.tree.clone() {
+                if let Some(bundle) = self.bundle_for(ext) {
+                    let requery = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        query_tree(bundle, &tree, text, rows.clone())
+                    }));
+                    if let Ok(tokens) = requery {
+                        self.tokens = tokens;
+                        self.token_rows = rows.unwrap_or(0..usize::MAX);
+                        return;
+                    }
+                }
+            }
+        }
+
         // Reuse the previous tree when this is an edit to the SAME document in
         // the same language. `tree.edit()` tells tree-sitter which bytes moved,
         // turning an O(file) reparse into O(change) — the dominant cost on the
@@ -284,20 +379,72 @@ impl SyntaxEngine {
             None
         };
 
-        let bundle = match ext {
-            Some("rs") => self.rust.as_mut(),
-            Some("py" | "pyi") => self.python.as_mut(),
-            Some("js" | "mjs" | "cjs") => self.javascript.as_mut(),
-            Some("jsx") => self.javascript.as_mut(),
-            Some("ts" | "mts" | "cts") => self.typescript.as_mut(),
-            Some("tsx") => self.tsx.as_mut().or(self.typescript.as_mut()),
-            Some("c" | "h") => self.c.as_mut(),
-            Some("cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx") => self.c.as_mut(),
-            Some("go") => self.go.as_mut(),
-            Some("sh" | "bash" | "zsh") => self.bash.as_mut(),
-            Some("json" | "jsonc") => self.json.as_mut(),
+        let bundle: Option<&mut LangBundle> = match ext {
+            Some("rs") => lazy(
+                &mut self.rust,
+                tree_sitter_rust::LANGUAGE.into(),
+                tree_sitter_rust::HIGHLIGHTS_QUERY,
+            ),
+            Some("py" | "pyi") => lazy(
+                &mut self.python,
+                tree_sitter_python::LANGUAGE.into(),
+                tree_sitter_python::HIGHLIGHTS_QUERY,
+            ),
+            Some("js" | "mjs" | "cjs") => lazy(
+                &mut self.javascript,
+                tree_sitter_javascript::LANGUAGE.into(),
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+            ),
+            Some("jsx") => lazy(
+                &mut self.javascript,
+                tree_sitter_javascript::LANGUAGE.into(),
+                tree_sitter_javascript::HIGHLIGHT_QUERY,
+            ),
+            Some("ts" | "mts" | "cts") => lazy(
+                &mut self.typescript,
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            ),
+            Some("tsx") => {
+                if self.tsx.is_none() {
+                    self.tsx = make_lang(
+                        tree_sitter_typescript::LANGUAGE_TSX.into(),
+                        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    );
+                }
+                if self.tsx.is_some() {
+                    self.tsx.as_mut()
+                } else {
+                    lazy(
+                        &mut self.typescript,
+                        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    )
+                }
+            }
+            Some("c" | "h") | Some("cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx") => lazy(
+                &mut self.c,
+                tree_sitter_c::LANGUAGE.into(),
+                tree_sitter_c::HIGHLIGHT_QUERY,
+            ),
+            Some("go") => lazy(
+                &mut self.go,
+                tree_sitter_go::LANGUAGE.into(),
+                tree_sitter_go::HIGHLIGHTS_QUERY,
+            ),
+            Some("sh" | "bash" | "zsh") => lazy(
+                &mut self.bash,
+                tree_sitter_bash::LANGUAGE.into(),
+                tree_sitter_bash::HIGHLIGHT_QUERY,
+            ),
+            Some("json" | "jsonc") => lazy(
+                &mut self.json,
+                tree_sitter_json::LANGUAGE.into(),
+                tree_sitter_json::HIGHLIGHTS_QUERY,
+            ),
             _ => {
                 self.tokens.clear();
+                self.token_rows = 0..0;
                 self.tree = None;
                 self.last_ext.clear();
                 self.last_len = 0;
@@ -309,6 +456,7 @@ impl SyntaxEngine {
 
         let Some(bundle) = bundle else {
             self.tokens.clear();
+            self.token_rows = 0..0;
             self.active = false;
             return;
         };
@@ -324,44 +472,11 @@ impl SyntaxEngine {
         self.last_len = len;
         self.last_fingerprint = fingerprint;
 
-        let source = text.as_bytes();
-        let lines: Vec<&str> = text.split('\n').collect();
-        let capture_names = bundle.query.capture_names().to_vec();
-
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let Some(tree) = bundle.parser.parse(text, reuse.as_ref()) else {
                 return None;
             };
-            let root = tree.root_node();
-            let mut cursor = QueryCursor::new();
-            if let Some(r) = &rows {
-                // Nodes that merely intersect the window still match, so a block
-                // comment starting above the viewport keeps its colour.
-                cursor.set_point_range(
-                    tree_sitter::Point { row: r.start, column: 0 }
-                        ..tree_sitter::Point { row: r.end, column: 0 },
-                );
-            }
-            let mut tokens: Vec<HlToken> = Vec::new();
-            let mut matches = cursor.matches(&bundle.query, root, source);
-            while let Some(m) = matches.next() {
-                for cap in m.captures {
-                    let name = capture_names
-                        .get(cap.index as usize)
-                        .copied()
-                        .unwrap_or("");
-                    let Some(kind) = highlight::from_capture(name) else {
-                        continue;
-                    };
-                    let node = cap.node;
-                    let end_byte = node.end_byte();
-                    if end_byte > source.len() || node.start_byte() > end_byte {
-                        continue;
-                    }
-                    push_node_tokens(node, &lines, kind, &mut tokens);
-                }
-            }
-            tokens.sort_by_key(|(_, st, ed, row)| (*row, ed.saturating_sub(*st), *st));
+            let tokens = query_tree(bundle, &tree, text, rows.clone());
             Some((tree, tokens))
         }));
 
@@ -407,6 +522,92 @@ impl SyntaxEngine {
         let hi = self.tokens.partition_point(|t| t.3 <= row);
         &self.tokens[lo..hi]
     }
+
+    /// Adopt a frame parsed by the background worker (A1-6). This engine
+    /// instance holds what the renderer consumes; the tree and the
+    /// incremental anchor live on the worker's twin.
+    /// Returns true when the frame changes what gets PAINTED (tokens or
+    /// `active`) — adopting an empty frame over an empty state (untitled
+    /// document, first answer) must not schedule a redraw that draws
+    /// nothing.
+    pub fn apply_frame(
+        &mut self,
+        path: String,
+        window: std::ops::Range<usize>,
+        tokens: Vec<HlToken>,
+        active: bool,
+    ) -> bool {
+        let changed = self.tokens != tokens || self.active != active;
+        self.last_path = path;
+        self.tokens = tokens;
+        self.token_rows = window;
+        self.active = active;
+        self.tree = None;
+        self.last_text.clear();
+        changed
+    }
+
+    /// Drop painted tokens without a replacement — a document switch, where
+    /// another file's colours would lie about this text until the worker's
+    /// first frame lands.
+    pub fn clear_tokens(&mut self) {
+        self.tokens.clear();
+        self.token_rows = 0..0;
+        self.active = false;
+        self.last_path.clear();
+    }
+
+    /// Path the painted tokens belong to ("" once cleared / never painted).
+    pub fn applied_path(&self) -> &str {
+        &self.last_path
+    }
+}
+
+/// Run the highlight query over an already-parsed tree, limited to `rows`.
+///
+/// Nodes that merely intersect the window still match, so a block comment
+/// starting above the viewport keeps its colour. Shared by the parse path
+/// and the scroll re-query (same tree, new window — no reparse).
+fn query_tree(
+    bundle: &LangBundle,
+    tree: &Tree,
+    text: &str,
+    rows: Option<std::ops::Range<usize>>,
+) -> Vec<HlToken> {
+    let source = text.as_bytes();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let capture_names = bundle.query.capture_names().to_vec();
+    let root = tree.root_node();
+    let mut cursor = QueryCursor::new();
+    if let Some(r) = &rows {
+        cursor.set_point_range(
+            tree_sitter::Point {
+                row: r.start,
+                column: 0,
+            }..tree_sitter::Point {
+                row: r.end,
+                column: 0,
+            },
+        );
+    }
+    let mut tokens: Vec<HlToken> = Vec::new();
+    let mut matches = cursor.matches(&bundle.query, root, source);
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let name = capture_names.get(cap.index as usize).copied().unwrap_or("");
+            let Some(kind) = highlight::from_capture(name) else {
+                continue;
+            };
+            let node = cap.node;
+            let end_byte = node.end_byte();
+            if end_byte > source.len() || node.start_byte() > end_byte {
+                continue;
+            }
+            push_node_tokens(node, &lines, kind, &mut tokens);
+        }
+    }
+    tokens.sort_by_key(|(_, st, ed, row)| (*row, ed.saturating_sub(*st), *st));
+    tokens
 }
 
 fn push_node_tokens(
@@ -514,8 +715,15 @@ fn point_at(text: &str, byte: usize) -> tree_sitter::Point {
     let b = byte.min(text.len());
     let upto = &text.as_bytes()[..b];
     let row = upto.iter().filter(|&&c| c == b'\n').count();
-    let line_start = upto.iter().rposition(|&c| c == b'\n').map(|i| i + 1).unwrap_or(0);
-    tree_sitter::Point { row, column: b - line_start }
+    let line_start = upto
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    tree_sitter::Point {
+        row,
+        column: b - line_start,
+    }
 }
 
 fn byte_col_to_char_col(line: &str, byte_col: usize) -> usize {
@@ -646,7 +854,10 @@ mod tests {
         let mut src = String::from("fn main() {\n    let x = 1;\n}\n");
         eng.parse(&src, Some("rs"));
         for i in 0..80 {
-            src.insert(src.len().saturating_sub(2), char::from(b'a' + (i % 26) as u8));
+            src.insert(
+                src.len().saturating_sub(2),
+                char::from(b'a' + (i % 26) as u8),
+            );
             eng.parse(&src, Some("rs"));
             // delete a char near the middle
             if src.len() > 10 {
@@ -666,7 +877,11 @@ mod tests {
         eng.parse("fn foo() {}", Some("rs"));
         eng.parse("def foo():\n  pass\n", Some("py"));
         eng.parse("fn bar() { let y = 2; }", Some("rs"));
-        assert!(eng.tokens.iter().any(|t| t.0 == TokenKind::Keyword || t.0 == TokenKind::Function));
+        assert!(
+            eng.tokens
+                .iter()
+                .any(|t| t.0 == TokenKind::Keyword || t.0 == TokenKind::Function)
+        );
     }
 
     /// A wrong edit descriptor does not panic — it silently produces a WRONG

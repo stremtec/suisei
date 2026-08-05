@@ -111,7 +111,8 @@ fn parse_hooks_toml(text: &str) -> HooksConfig {
         let v = parse_toml_value(v);
         match k {
             "enabled" => {
-                cfg.enabled = matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on");
+                cfg.enabled =
+                    matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on");
             }
             "on_save" => cfg.on_save = v,
             "on_open" => cfg.on_open = v,
@@ -197,11 +198,7 @@ fn expand_commands(
 
 /// Run hook commands, waiting up to [`HOOK_TIMEOUT`] each. Returns the last
 /// status line. Blocking — call from a background thread.
-pub fn run_hooks(
-    cfg: &HooksConfig,
-    event: HookEvent,
-    file: Option<&Path>,
-) -> Option<String> {
+pub fn run_hooks(cfg: &HooksConfig, event: HookEvent, file: Option<&Path>) -> Option<String> {
     let mut last_msg = None;
     for (cmd, cwd) in expand_commands(cfg, event, file) {
         match run_with_timeout(&cmd, &cwd) {
@@ -289,8 +286,12 @@ fn run_with_timeout(cmd: &str, cwd: &Path) -> HookOutcome {
             Err(_) => break None,
         }
     };
-    let out = stdout.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
-    let err = stderr.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+    let out = stdout
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let err = stderr
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
 
     match status {
         None => HookOutcome::TimedOut,

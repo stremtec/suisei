@@ -242,10 +242,7 @@ fn extract_json_str(s: &str, key: &str) -> Option<String> {
 fn extract_json_num(s: &str, key: &str) -> Option<usize> {
     let i = s.find(key)? + key.len();
     let rest = &s[i..];
-    let num: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     num.parse().ok()
 }
 
@@ -284,8 +281,20 @@ fn search_walk(root: &Path, pattern: &str, max: usize) -> Vec<SearchHit> {
                 let e = ext.to_lowercase();
                 if matches!(
                     e.as_str(),
-                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" | "zip" | "o" | "a" | "so"
-                        | "dylib" | "exe" | "wasm" | "bin"
+                    "png"
+                        | "jpg"
+                        | "jpeg"
+                        | "gif"
+                        | "webp"
+                        | "pdf"
+                        | "zip"
+                        | "o"
+                        | "a"
+                        | "so"
+                        | "dylib"
+                        | "exe"
+                        | "wasm"
+                        | "bin"
                 ) {
                     continue;
                 }
@@ -317,7 +326,12 @@ fn search_walk(root: &Path, pattern: &str, max: usize) -> Vec<SearchHit> {
 }
 
 /// Replace first occurrence of `query` on a specific line of a file. Returns true if changed.
-pub fn replace_in_file(path: &Path, row: usize, query: &str, replace: &str) -> Result<bool, String> {
+pub fn replace_in_file(
+    path: &Path,
+    row: usize,
+    query: &str,
+    replace: &str,
+) -> Result<bool, String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
     // preserve trailing newline presence
@@ -414,7 +428,10 @@ mod tests {
         std::fs::write(&f, "one two one three one\n").unwrap();
         let n = replace_all_in_file(&f, "one", "ONE").unwrap();
         assert_eq!(n, 3);
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), "ONE two ONE three ONE\n");
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "ONE two ONE three ONE\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

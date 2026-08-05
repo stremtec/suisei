@@ -19,10 +19,10 @@
 //!   to "none" between updates.
 
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 use std::time::{Duration, Instant};
 
-use suisei_daemon::protocol::{socket_path, Frame, Opcode, Status, PROTOCOL_VERSION};
+use suisei_daemon::protocol::{Frame, Opcode, PROTOCOL_VERSION, Status, socket_path};
 
 /// Re-send an unchanged status this often, so the daemon's TTL never expires a
 /// live editor. Must stay well under `suisei_daemon::state::REPORT_TTL`.
@@ -45,7 +45,10 @@ pub struct ReportGate {
 
 impl ReportGate {
     pub fn new() -> Self {
-        ReportGate { last: None, last_sent_at: None }
+        ReportGate {
+            last: None,
+            last_sent_at: None,
+        }
     }
 
     /// True when `next` differs from the last sent status, or when the
@@ -90,7 +93,10 @@ impl Reporter {
             .name("suisei-daemon-report".to_string())
             .spawn(move || run(rx))
             .ok();
-        Reporter { tx, gate: ReportGate::new() }
+        Reporter {
+            tx,
+            gate: ReportGate::new(),
+        }
     }
 
     /// Offer the current status. Returns true when it was handed to the thread.
@@ -179,7 +185,10 @@ mod tests {
     use super::*;
 
     fn status(project: &str) -> Status {
-        Status { project: project.to_string(), ..Status::default() }
+        Status {
+            project: project.to_string(),
+            ..Status::default()
+        }
     }
 
     #[test]
@@ -225,6 +234,9 @@ mod tests {
     fn offering_with_no_daemon_running_does_not_panic() {
         let mut r = Reporter::spawn();
         assert!(r.offer(status("/tmp/suisei-no-daemon")));
-        assert!(!r.offer(status("/tmp/suisei-no-daemon")), "unchanged is skipped");
+        assert!(
+            !r.offer(status("/tmp/suisei-no-daemon")),
+            "unchanged is skipped"
+        );
     }
 }

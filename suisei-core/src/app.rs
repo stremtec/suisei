@@ -8,19 +8,20 @@ use crate::config;
 use crate::explorer::Explorer;
 use crate::fold::FoldState;
 use crate::git::{GitBlame, GitGutter};
-use crate::multi_cursor::MultiCursor;
-use crate::lsp::LspClient;
 use crate::git_workbench::GitWorkbench;
-use crate::preview::PreviewState;
-use crate::scm::ScmPanel;
-use crate::session::{self, Session, SessionFile};
-use crate::settings::SettingsPanel;
+use crate::lsp::LspClient;
 use crate::nav::{Jump, JumpList};
 use crate::palette::{Palette, PaletteAction};
+use crate::preview::PreviewState;
 use crate::registers::Registers;
+use crate::scm::ScmPanel;
+use crate::selection::Selection;
+use crate::session::{self, Session, SessionFile};
+use crate::settings::SettingsPanel;
 use crate::syntax::SyntaxEngine;
+pub use crate::tabs::{BufferTab, FIRST_TAB_ID, TabStrip};
 use crate::term::Terminal;
-use crate::theme::{self, Theme, OCEAN};
+use crate::theme::{self, OCEAN, Theme};
 use crate::undo::UndoStack;
 
 /// What kind of GUI edit the last keystroke was, for undo coalescing. A run of
@@ -128,23 +129,17 @@ pub struct App {
     /// per keystroke. Reset by any caret move — moving then typing starts a
     /// fresh group, the standard editor contract.
     pub edit_run: crate::app::EditRun,
-    /// Last committed search pattern (used by n/N after leaving search mode).
-    pub search_pattern: Option<String>,
-    /// Live query while in Search mode (does not touch `search_pattern` until commit).
-    pub search_input: String,
-    pub search_matches: Vec<Position>,
-    pub search_current: usize,
-    /// Cursor when `/` was pressed — restored on Esc cancel.
-    pub search_origin: Option<Position>,
-    pub search_scroll_origin: usize,
-    /// Pattern that existed before this search session (restored on cancel).
-    search_pattern_backup: Option<String>,
-    /// `true` = forward `/`, `false` = reverse `?`
-    pub search_forward: bool,
+    /// The find bar — committed pattern, live input, matches, origins.
+    /// State + pure computation live in [`crate::search::SearchState`]; the
+    /// buffer-touching orchestration is the thin wrapper below.
+    pub search: crate::search::SearchState,
     pub completions: Completions,
     pub modified: bool,
     pub mouse: MouseState,
-    pub viewport: EditorViewport,
+    /// The editor stage in pixels — the single source of viewport
+    /// geometry (A6). The cell grid is derived: [`App::grid_cols`] /
+    /// [`App::grid_rows`].
+    pub stage: Stage,
     pub explorer: Explorer,
     /// The **docked** terminal (⌃T). Pane terminals are separate processes,
     /// one per pane, in `pane_terminals`.
@@ -161,6 +156,17 @@ pub struct App {
     /// echoed in the other, and converting a second pane moved the shell
     /// instead of starting one.
     pub pane_terminals: std::collections::HashMap<crate::split::TerminalId, Terminal>,
+    /// Which pane shell's close-confirm dialog is open, if any. Per-shell:
+    /// the old shared dock flag let pane B answer pane A's prompt, blackholed
+    /// B's keys while A's dialog was up, and `y` killed whichever shell was
+    /// focused at confirm time rather than the one that asked.
+    pub(crate) pane_close_confirm: Option<crate::split::TerminalId>,
+    /// For a terminal opened over a split pane (⌃⇧T): the document that pane was
+    /// showing before the shell took it over. Closing the terminal tab restores
+    /// this document into the pane and keeps the split, instead of collapsing
+    /// it. Keyed by the terminal tab's own id. Cleared when either the terminal
+    /// or the remembered document closes.
+    pub(crate) terminal_replaced: std::collections::HashMap<BufferId, BufferId>,
     pub explorer_width: u16,
     pub terminal_width: u16,
     pub resize_target: Option<ResizeTarget>,
@@ -176,8 +182,12 @@ pub struct App {
     pub xlc_height: u16,
     pub xlc_separator_y: u16,
     pub file_mtime: Option<std::time::SystemTime>,
-    pub buffers: Vec<BufferTab>,
-    pub current_buffer: usize,
+    /// The active file was deleted/moved out from under the open buffer. Set by
+    /// `check_active_file_external`, cleared when the path reappears. Drives the
+    /// tab's "deleted on disk" state so editing a vanished file is not silent.
+    pub file_deleted: bool,
+    /// The tab strip — documents in strip order + the id source (A3-2).
+    pub tabs: TabStrip,
     pub syntax: SyntaxEngine,
     pub lsp: LspClient,
     pub debug: bool,
@@ -188,17 +198,13 @@ pub struct App {
     pub metrics: ProcMetrics,
     /// Latest `:bench` results (shown in `Mode::Bench`).
     pub bench_report: Option<crate::bench::BenchReport>,
-    /// VSCode-compatible extension host sidecar (v2, feature = "extensions").
-    /// Lazily spawned on first use; `None` until then / when Node is absent.
-    #[cfg(feature = "extensions")]
-    pub ext: Option<xei_ext_host::ExtHost>,
     /// Pending text-object modifier `i`/`a` after operator
     pub pending_to_mod: Option<char>,
     /// Tab bar hit regions for mouse (filled by UI each frame)
     pub tab_hit_regions: Vec<(u16, u16, usize)>, // x_start, x_end, tab_index
     pub tab_bar_y: u16,
     /// Screen-row → buffer-row map for the current frame (handles soft-wrap).
-    /// Index 0 = `viewport.text_y`. Built in the TUI draw path.
+    /// Index 0 = the first editor content row. Built in the TUI draw path.
     pub screen_row_to_buffer: Vec<usize>,
     /// For each screen row, visual-column base within that buffer line
     /// (0, text_width, 2*text_width, …). Parallel to `screen_row_to_buffer`.
@@ -220,8 +226,6 @@ pub struct App {
     pub gpu_hyperlinks: bool,
     /// Horizontal pan (visual columns) when wrap_lines is off.
     pub hscroll: usize,
-    /// Last buffer version handed to the syntax highlighter (render cache).
-    pub syntax_seen_version: u64,
     /// Last buffer version pushed to the LSP (didChange gate).
     lsp_synced_version: u64,
     /// Git gutter signs for the current file
@@ -231,7 +235,6 @@ pub struct App {
     /// Indent-based folds (`za` / `zc` / `zo` / `zM` / `zR`)
     pub folds: FoldState,
     /// Extra carets (primary = `buffer.cursor`)
-    pub multi: MultiCursor,
     /// Light Source Control side panel (Ctrl+G)
     pub scm: ScmPanel,
     /// Full Git workbench (Ctrl+Shift+G)
@@ -250,9 +253,6 @@ pub struct App {
     pub peek: crate::peek::PeekState,
     /// Workspace find/replace panel
     pub workspace_search: crate::workspace_search::WorkspaceSearch,
-    /// `:screensaver` xeifetch overlay
-    /// Desktop pet GIF overlay
-    pub pet: crate::pet::PetState,
     /// Pane hit regions filled each frame: (x, y, w, h, pane_idx)
     pub pane_hit_regions: Vec<(u16, u16, u16, u16, usize)>,
     /// Split separator for mouse drag-resize (filled by UI each frame).
@@ -307,23 +307,19 @@ pub struct App {
             u64,
             String,
             (bool, std::collections::HashMap<usize, crate::git::GitSign>),
-            Option<(bool, std::collections::HashMap<usize, crate::git::BlameLine>)>,
+            Option<(
+                bool,
+                std::collections::HashMap<usize, crate::git::BlameLine>,
+            )>,
         )>,
     >,
     git_refresh_gen: u64,
     /// Show LSP code lenses in the editor.
     pub code_lens_enabled: bool,
-    /// Detected terminal capabilities (filled by TUI shell at startup).
-    /// Core only stores a simple summary string so headless tests stay free of
-    /// crossterm queries; detailed flags live in the TUI `term_caps` module.
-    pub term_caps_summary: String,
     pub term_sync: bool,
     pub term_undercurl: bool,
     pub term_underline_color: bool,
     pub term_hyperlinks: bool,
-    /// Physical pixels per cell (from the frontend probe; 0 = unknown → 14).
-    pub cell_px: u32,
-    pub cell_px_h: u32,
     pub term_modern: bool,
     /// Terminal speaks Kitty graphics protocol (Ghostty/Kitty/WezTerm).
     pub term_kitty_graphics: bool,
@@ -332,17 +328,32 @@ pub struct App {
     /// Last document state pushed to the LSP via didChange (path + text hash).
     /// `sync_lsp_document` uses these to send post-edit full-text syncs exactly
     /// once per change instead of the old pre-edit push_undo notification.
-    lsp_synced_path: Option<PathBuf>,
-    lsp_synced_hash: u64,
-    /// Source of `BufferTab::id`. Monotonic; ids are never reused. Starts past
-    /// [`FIRST_TAB_ID`] because the tab a fresh `App` opens with is not handed
-    /// out by `take_tab_id`.
-    next_tab_id: u64,
+    pub(crate) lsp_synced_path: Option<PathBuf>,
+    pub(crate) lsp_synced_hash: u64,
+    /// Lines the server last saw — the diff base for incremental didChange
+    /// (None → the next sync sends the full document).
+    lsp_synced_lines: Option<Vec<String>>,
+    /// The document `App`'s live fields hold — `buffer`, `scroll`, `cursor`,
+    /// `undo_stack`, `filename` and friends are this document's working copy.
+    ///
+    /// Outside a switch it equals the focused pane's document (S2: `App` IS
+    /// the focused pane); the two differ for exactly one statement during a
+    /// focus change, which is the only moment [`App::save_state_to_tab`]
+    /// needs to remember where the live copy came from. The active tab's
+    /// POSITION is derived — see [`App::current_buffer`].
+    pub(crate) live_doc: BufferId,
     /// Source of terminal ids for pane terminals. Monotonic; never reused.
-    next_terminal_id: u32,
+    pub(crate) next_terminal_id: u32,
     /// Buffer version at the last dirty-flag re-check, so an idle document is
     /// never re-hashed. See [`App::recheck_modified`].
     dirty_checked_version: u64,
+    /// A dirty latch was raised (edit path) and has not been re-derived from
+    /// the text yet. The version gate alone missed the case where the latch
+    /// fires without moving the version — a no-op edit right after undo/redo
+    /// (where `dirty_checked_version` already equals the live version) stayed
+    /// dirty forever. This forces exactly one re-check after any latch, then
+    /// the version gate takes over so an idle dirty buffer is not re-hashed.
+    dirty_needs_recheck: bool,
     /// Widest line the view has seen in this document, in display columns.
     ///
     /// A high-water mark, not a live maximum, and deliberately so. Rescanning
@@ -350,13 +361,13 @@ pub struct App {
     /// *shrink* as short lines scroll into view would resize the scroller thumb
     /// under the user's hand. So it only grows, and resets when the document
     /// does. See [`App::max_hscroll`].
-    content_width: usize,
+    pub(crate) content_width: usize,
     /// Fingerprint of the text as it stands on disk (at load, and after each
     /// save). `modified` is a one-way latch — set by every edit, cleared only
     /// by a save — so undoing back to the original state left the file marked
     /// dirty forever. This is what lets `undo` put the flag back down; see
     /// [`App::refresh_modified`].
-    saved_hash: u64,
+    pub(crate) saved_hash: u64,
 }
 
 /// Stable handle to an open document, issued by [`App::take_tab_id`].
@@ -371,35 +382,6 @@ pub struct App {
 /// a zero-valued handle is "nothing", not "the first tab".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BufferId(pub u64);
-
-/// The document a fresh `App` starts with. Deliberately not `BufferId(0)` —
-/// that value is the never-issued one, and a default-constructed `Pane` holds
-/// it, so putting a real document there would make every unset pane silently
-/// resolve to the first tab.
-pub const FIRST_TAB_ID: BufferId = BufferId(1);
-
-#[derive(Clone)]
-pub struct BufferTab {
-    /// Stable for this tab's lifetime and never reused.
-    ///
-    /// The face needs a list identity that does not move: with an index as its
-    /// identity, dragging a tab left the identity list unchanged and only the
-    /// titles swapped in place, so there was nothing for it to animate. Split
-    /// panes address their document by this too — see [`BufferId`].
-    pub id: BufferId,
-    pub buffer: Buffer,
-    pub filename: Option<PathBuf>,
-    pub scroll: usize,
-    pub modified: bool,
-    /// Per-tab twin of [`App::saved_hash`], so switching tabs carries each
-    /// document's on-disk fingerprint with it.
-    pub saved_hash: u64,
-    pub undo_stack: UndoStack,
-    pub file_mtime: Option<std::time::SystemTime>,
-    /// This tab is a terminal pane. The shell lives in `App::pane_terminals`
-    /// keyed by this id. `None` for ordinary document tabs.
-    pub terminal: Option<crate::split::TerminalId>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResizeTarget {
@@ -481,22 +463,40 @@ impl EditorCtxItem {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct EditorViewport {
-    pub x: u16,
-    pub y: u16,
-    pub width: u16,
-    pub height: u16,
-    /// X of first text column (after line-number gutter).
-    pub text_x: u16,
-    /// Y of first editor content row (same as `y` when borderless).
-    pub text_y: u16,
+/// The editor stage in PIXELS — the single source of viewport geometry
+/// (A6). The face reports it through [`App::resize_stage`] (the one
+/// production writer); everything cell-shaped is DERIVED through
+/// [`App::grid_cols`] / [`App::grid_rows`]. Nothing stores cells, so
+/// nothing can go stale — the old cell viewport needed a manual re-sync
+/// at a dozen call sites.
+#[derive(Clone, Copy, Debug)]
+pub struct Stage {
+    /// Stage size in points (the face already subtracted chrome).
+    pub w: f32,
+    pub h: f32,
+    /// Painted line height in points (row pitch).
+    pub cell_px: f32,
+    /// Glyph cell width in points (column pitch).
+    pub cell_w: f32,
+    pub dpr: f32,
+}
+
+impl Default for Stage {
+    fn default() -> Self {
+        Self {
+            w: 1200.0,
+            h: 800.0,
+            cell_px: 18.0,
+            cell_w: 9.0,
+            dpr: 2.0,
+        }
+    }
 }
 
 impl Default for App {
     fn default() -> Self {
         let (hook_msg_tx, hook_msg_rx) = std::sync::mpsc::channel();
-        Self {
+        let mut app = Self {
             running: true,
             mode: Mode::Editor,
             buffer: Buffer::new(),
@@ -511,18 +511,11 @@ impl Default for App {
             jumps: JumpList::new(),
             sel: crate::selection::SelectionSet::new(),
             edit_run: EditRun::None,
-            search_pattern: None,
-            search_input: String::new(),
-            search_matches: Vec::new(),
-            search_current: 0,
-            search_origin: None,
-            search_scroll_origin: 0,
-            search_pattern_backup: None,
-            search_forward: true,
+            search: crate::search::SearchState::default(),
             completions: Completions::new(),
             modified: false,
             mouse: MouseState::default(),
-            viewport: EditorViewport::default(),
+            stage: Stage::default(),
             explorer: Explorer::new(),
             terminal: Terminal::new(),
             layouts: Vec::new(),
@@ -541,26 +534,15 @@ impl Default for App {
             xlc_height: 11,
             xlc_separator_y: 0,
             file_mtime: None,
-            buffers: vec![BufferTab {
-                id: FIRST_TAB_ID,
-                buffer: Buffer::new(),
-                filename: None,
-                scroll: 0,
-                modified: false,
-                saved_hash: EMPTY_TEXT_HASH,
-                undo_stack: UndoStack::new(),
-                file_mtime: None,
-                terminal: None,
-            }],
-            current_buffer: 0,
+            file_deleted: false,
+            tabs: TabStrip::new(),
+            live_doc: FIRST_TAB_ID,
             syntax: SyntaxEngine::new(),
             lsp: LspClient::new(),
             debug: false,
             show_metrics: false,
             metrics: ProcMetrics::default(),
             bench_report: None,
-            #[cfg(feature = "extensions")]
-            ext: None,
             pending_to_mod: None,
             tab_hit_regions: Vec::new(),
             tab_bar_y: 0,
@@ -577,12 +559,10 @@ impl Default for App {
             gpu_graphics: true,
             gpu_hyperlinks: true,
             hscroll: 0,
-            syntax_seen_version: 0,
             lsp_synced_version: 0,
             git: GitGutter::new(),
             blame: GitBlame::default(),
             folds: FoldState::new(),
-            multi: MultiCursor::new(),
             scm: ScmPanel::new(),
             git_wb: GitWorkbench::new(),
             settings: SettingsPanel::new(),
@@ -592,7 +572,6 @@ impl Default for App {
             split: crate::split::SplitState::new(),
             peek: crate::peek::PeekState::new(),
             workspace_search: crate::workspace_search::WorkspaceSearch::new(),
-            pet: crate::pet::PetState::new(),
             pane_hit_regions: Vec::new(),
             split_sep_hit: None,
             git_log_hits: Vec::new(),
@@ -619,24 +598,28 @@ impl Default for App {
             git_refresh_rx: None,
             git_refresh_gen: 0,
             code_lens_enabled: true,
-            term_caps_summary: String::new(),
             term_sync: false,
             term_undercurl: false,
             term_underline_color: false,
-            cell_px: 0,
-            cell_px_h: 0,
             term_hyperlinks: false,
             term_modern: false,
             term_kitty_graphics: false,
             rename_pending: false,
             lsp_synced_path: None,
             lsp_synced_hash: 0,
-            next_tab_id: FIRST_TAB_ID.0 + 1,
+            lsp_synced_lines: None,
             next_terminal_id: 1,
+            pane_close_confirm: None,
+            terminal_replaced: std::collections::HashMap::new(),
             saved_hash: EMPTY_TEXT_HASH,
             dirty_checked_version: 0,
+            dirty_needs_recheck: false,
             content_width: 0,
-        }
+        };
+        // The first pane shows the first tab — pane slots name documents
+        // by id, and `BufferId::default()` names nothing.
+        app.split.focused_pane_mut().buffer = FIRST_TAB_ID;
+        app
     }
 }
 
@@ -660,15 +643,53 @@ fn display_width(line: &str, tab_width: usize) -> usize {
 
 /// `text_hash("")` — the clean fingerprint of a brand-new empty buffer. A
 /// literal so `App::default()` stays a plain struct expression.
-const EMPTY_TEXT_HASH: u64 = 0xcbf2_9ce4_8422_2325;
+pub(crate) const EMPTY_TEXT_HASH: u64 = 0xcbf2_9ce4_8422_2325;
 
-fn text_hash(s: &str) -> u64 {
+pub(crate) fn text_hash(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in s.as_bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h
+}
+
+/// Line diff between the synced lines and the current lines → one
+/// incremental LSP content change with UTF-16 positions (the encoding
+/// negotiated in initialize). None when identical.
+fn lsp_changes_since(prev: &[String], cur: &[String]) -> Option<Vec<crate::lsp::LspTextChange>> {
+    let (start, old_lines, new_lines) = crate::undo::diff_lines(prev, cur)?;
+    let change = crate::undo::line_delta_to_change(start, old_lines, new_lines, prev);
+    let end_offset = change.start + change.old.chars().count();
+    let (sl, sc) = offset_to_utf16(prev, change.start);
+    let (el, ec) = offset_to_utf16(prev, end_offset);
+    Some(vec![crate::lsp::LspTextChange {
+        start_line: sl,
+        start_col: sc,
+        end_line: el,
+        end_col: ec,
+        text: change.new,
+    }])
+}
+
+/// Char offset → (line, UTF-16 column) against `lines`. Offsets past the
+/// end clamp to the end of the last line.
+fn offset_to_utf16(lines: &[String], offset: usize) -> (usize, usize) {
+    let mut remaining = offset;
+    for (row, line) in lines.iter().enumerate() {
+        let chars = line.chars().count();
+        if remaining <= chars {
+            let utf16: usize = line.chars().take(remaining).map(|c| c.len_utf16()).sum();
+            return (row, utf16);
+        }
+        remaining -= chars + 1;
+    }
+    let row = lines.len().saturating_sub(1);
+    let utf16 = lines
+        .get(row)
+        .map(|l| l.chars().map(|c| c.len_utf16()).sum())
+        .unwrap_or(0);
+    (row, utf16)
 }
 
 impl App {
@@ -690,58 +711,6 @@ impl App {
             .apply_config(cfg.lsp_enabled, cfg.lsp_servers.clone());
         self.theme_pref = cfg.theme.clone();
         self.theme = theme::resolve(&cfg.theme, self.system_is_dark);
-        self.apply_pet_from_config(&cfg);
-    }
-
-    pub fn apply_pet_from_config(&mut self, cfg: &config::Config) {
-        self.pet.x = cfg.pet_x;
-        self.pet.y = cfg.pet_y;
-        let new_w = cfg.pet_width_cells.max(4);
-        if new_w != self.pet.width_cells {
-            self.pet.width_cells = new_w;
-            self.pet.invalidate_display_cache();
-        } else {
-            self.pet.width_cells = new_w;
-        }
-        self.pet.speed = crate::pet::PetState::clamp_speed(cfg.pet_speed);
-        let path = crate::pet::expand_path(&cfg.pet_path);
-        let path_s = path.display().to_string();
-        if !cfg.pet_path.is_empty()
-            && (self.pet.path != path_s || !self.pet.has_frames())
-        {
-            self.pet.load_path(&path_s);
-        }
-        if cfg.pet_path.is_empty() {
-            self.pet.path.clear();
-        }
-        // Pet only runs with GPU + Kitty graphics — never enable otherwise.
-        // Do **not** clamp x/y here: before the first draw `screen_*` is still
-        // the default 80×24, which would permanently trash a bottom-right save.
-        self.pet.enabled = cfg.pet_enabled && self.pet_graphics_ok() && self.pet.has_frames();
-    }
-
-    /// Pet overlay is allowed only with gpu_acc + Kitty graphics terminal.
-    pub fn pet_graphics_ok(&self) -> bool {
-        self.gpu_acc && self.term_kitty_graphics
-    }
-
-    /// Max cell coords for nudging in Settings (uses live terminal size).
-    pub fn pet_pos_max(&self) -> (u16, u16) {
-        let w = self.screen_width.max(1);
-        let h = self.screen_height.max(1);
-        // Until the first real draw, report a generous max so we don't clamp
-        // config values when the user opens Settings very early.
-        if w <= 80 && h <= 24 && self.screen_width == 80 && self.screen_height == 24 {
-            // Still might be a real 80×24 — use actual size either way.
-        }
-        let max_x = w.saturating_sub(self.pet.width_cells.max(1));
-        let max_y = h.saturating_sub(2); // tab/status
-        (max_x, max_y)
-    }
-
-    /// Paint-time position only (does not mutate saved coords).
-    pub fn pet_screen_xy(&self) -> (u16, u16) {
-        self.pet.screen_xy(self.screen_width, self.screen_height)
     }
 
     /// `:status` — toggle the live CPU/MEM/GPU readout in the status line.
@@ -778,252 +747,21 @@ impl App {
         self.metrics = m;
     }
 
-
-    #[cfg(feature = "extensions")]
     pub fn ext_test(&mut self) {
-        if self.ext.is_none() {
-            let (bootstrap, ext_dir) = xei_ext_host::spike_paths();
-            let host = xei_ext_host::ExtHost::spawn("node", &bootstrap, &ext_dir);
-            if let Some(err) = host.error.clone() {
-                self.message = format!("ext: {err}");
-                return;
-            }
-            self.ext = Some(host);
-            if let Some(ext) = self.ext.as_mut() {
-                ext.activate();
-            }
-        }
-        if let Some(ext) = self.ext.as_mut() {
-            ext.invoke_command("xei.hello");
-            self.message = "ext: invoked xei.hello — awaiting reply…".into();
-        }
+        self.message = "extensions were removed when Suisei split from the xei workspace".into();
     }
 
-    #[cfg(not(feature = "extensions"))]
-    pub fn ext_test(&mut self) {
-        self.message =
-            "extensions not built — rebuild with `--features extensions`".into();
-    }
-
-    /// `:extapi` — dump the running extension's `vscode.*` API-usage histogram
-    /// into the XLC panel. Unimplemented calls (`✗`) are the role worklist.
-    #[cfg(feature = "extensions")]
     pub fn ext_api_report(&mut self) {
-        let lines = match self.ext.as_ref() {
-            Some(ext) => ext.api_report(),
-            None => {
-                self.message = "ext: not started — run :exttest first".into();
-                return;
-            }
-        };
-        self.set_message(&format!("=== vscode.* API usage ({} distinct) ===", lines.len()));
-        for l in &lines {
-            self.set_message(l);
-        }
-        self.message = format!("ext: {} distinct vscode.* calls — see XLC panel", lines.len());
+        self.message = "extensions were removed when Suisei split from the xei workspace".into();
     }
 
-    #[cfg(not(feature = "extensions"))]
-    pub fn ext_api_report(&mut self) {
-        self.message =
-            "extensions not built — rebuild with `--features extensions`".into();
-    }
-
-    /// `:plugins` opens the store UI; `:plugins install <id>` installs directly
-    /// (scriptable). Bare form defers to `open_plugin_store`.
-    #[cfg(feature = "extensions")]
-    pub fn ext_plugins(&mut self, arg: &str) {
-        let arg = arg.trim();
-        if let Some(id) = arg.strip_prefix("install").map(str::trim).filter(|s| !s.is_empty()) {
-            match xei_ext_host::open_vsx_install(id) {
-                Ok(e) => self.message = format!("installed {} v{} ({})", e.id, e.version, e.name),
-                Err(e) => self.message = format!("install failed: {e}"),
-            }
-            return;
-        }
-        self.open_plugin_store();
-    }
-
-    #[cfg(not(feature = "extensions"))]
     pub fn ext_plugins(&mut self, _arg: &str) {
-        self.message =
-            "extensions not built — rebuild with `--features extensions`".into();
+        self.message = "extensions were removed when Suisei split from the xei workspace".into();
     }
 
-    /// Spawn the extension host and load + activate every installed extension.
-    /// Called once at startup. All extensions share one Node process.
-    #[cfg(feature = "extensions")]
-    pub fn load_installed_extensions(&mut self) {
-        let installed = xei_ext_host::list_installed();
-        if installed.is_empty() {
-            return;
-        }
-        let bootstrap = xei_ext_host::bootstrap_path();
-        let mut host = xei_ext_host::ExtHost::spawn("node", &bootstrap, "");
-        if let Some(err) = host.error.clone() {
-            self.message = format!("extensions disabled: {err}");
-            return;
-        }
-        for e in &installed {
-            host.load_extension(&e.id, &e.path.display().to_string());
-        }
-        self.message = format!("loading {} extension(s)…", installed.len());
-        self.ext = Some(host);
-    }
-
-    #[cfg(not(feature = "extensions"))]
     pub fn load_installed_extensions(&mut self) {}
 
-    /// Open the plugin store (`SPC x` / `Ctrl+Shift+X` / `:plugins`).
-    #[cfg(feature = "extensions")]
-
-
-
-    pub fn ext_panel_move(&mut self, delta: isize) {
-        let rows = self.ext_panel_rows();
-        if rows.is_empty() {
-            self.ext_panel_sel = 0;
-            return;
-        }
-        let step = if delta >= 0 { 1isize } else { -1 };
-        let mut cur = (self.ext_panel_sel as isize + delta).clamp(0, rows.len() as isize - 1);
-        // Land on a runnable row, not a header.
-        while cur >= 0 && (cur as usize) < rows.len() && rows[cur as usize].is_header {
-            let next = cur + step;
-            if next < 0 || next >= rows.len() as isize {
-                break;
-            }
-            cur = next;
-        }
-        self.ext_panel_sel = cur.clamp(0, rows.len() as isize - 1) as usize;
-    }
-
-    /// `:webview` / ext-panel `w` — render the most recently opened extension
-    /// webview and show it as a terminal image. The actual headless render
-    /// happens on a frontend thread (it needs cell pixels); core just hands off
-    /// the HTML and switches mode.
-    #[cfg(feature = "extensions")]
-
-    pub fn ext_panel_run(&mut self) {
-        let rows = self.ext_panel_rows();
-        let Some(cmd) = rows.get(self.ext_panel_sel).and_then(|r| r.command.clone()) else {
-            return;
-        };
-        if let Some(ext) = self.ext.as_mut() {
-            ext.invoke_command(&cmd);
-            self.message = format!("ran: {cmd}");
-        }
-    }
-
-    #[cfg(not(feature = "extensions"))]
-    pub fn ext_panel_run(&mut self) {}
-
-    /// Kick off an async Open VSX search for the current query.
-    #[cfg(feature = "extensions")]
-    pub fn plugin_store_search(&mut self) {
-        use crate::plugin_store::{StoreItem, StoreMsg};
-        let query = self.plugin_store.query.trim().to_string();
-        self.plugin_store.mark_searched();
-        if query.is_empty() {
-            self.plugin_store.message = "empty query".into();
-            return;
-        }
-        let installed: std::collections::HashSet<String> =
-            self.plugin_store.installed.iter().map(|i| i.id.clone()).collect();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let msg = match xei_ext_host::open_vsx_search(&query) {
-                Ok(hits) => StoreMsg::Results(
-                    hits.into_iter()
-                        .map(|h| StoreItem {
-                            installed: installed.contains(&h.id),
-                            id: h.id,
-                            name: h.name,
-                            version: h.version,
-                            description: h.description,
-                            fidelity: None,
-                            downloads: h.downloads,
-                        })
-                        .collect(),
-                ),
-                Err(e) => StoreMsg::Error(e),
-            };
-            let _ = tx.send(msg);
-        });
-        self.plugin_store.begin_job(rx, "searching Open VSX…");
-    }
-
-    /// Install the selected browse result (async).
-    #[cfg(feature = "extensions")]
-    pub fn plugin_store_install_selected(&mut self) {
-        use crate::plugin_store::StoreMsg;
-        let Some(item) = self.plugin_store.selected_item() else {
-            return;
-        };
-        if self.plugin_store.tab == crate::plugin_store::StoreTab::Installed {
-            self.plugin_store.message = "already installed — switch to Browse (Tab) to add more".into();
-            return;
-        }
-        let id = item.id.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let msg = match xei_ext_host::open_vsx_install(&id) {
-                Ok(e) => StoreMsg::Installed { id: e.id, version: e.version },
-                Err(e) => StoreMsg::Error(e),
-            };
-            let _ = tx.send(msg);
-        });
-        self.plugin_store.begin_job(rx, &format!("installing {}…", item.id));
-    }
-
-    /// Refresh the installed list (after an install completes).
-    #[cfg(feature = "extensions")]
-    pub fn plugin_store_refresh_installed(&mut self) {
-        use crate::plugin_store::StoreItem;
-        self.plugin_store.installed = xei_ext_host::list_installed()
-            .into_iter()
-            .map(|e| StoreItem {
-                id: e.id,
-                name: e.name,
-                version: e.version,
-                description: String::new(),
-                installed: true,
-                fidelity: None,
-                downloads: 0,
-            })
-            .collect();
-    }
-
-    /// Remove the selected installed extension.
-    #[cfg(feature = "extensions")]
-    pub fn plugin_store_uninstall_selected(&mut self) {
-        if self.plugin_store.tab != crate::plugin_store::StoreTab::Installed {
-            self.plugin_store.message = "switch to Installed (Tab) to remove".into();
-            return;
-        }
-        let Some(item) = self.plugin_store.selected_item() else {
-            return;
-        };
-        let id = item.id.clone();
-        match xei_ext_host::uninstall(&id) {
-            Ok(()) => {
-                self.plugin_store_refresh_installed();
-                self.plugin_store.selected = self.plugin_store.selected.saturating_sub(1);
-                self.plugin_store.message = format!("removed {id}");
-            }
-            Err(e) => self.plugin_store.message = format!("uninstall failed: {e}"),
-        }
-    }
-
-    #[cfg(not(feature = "extensions"))]
-    pub fn plugin_store_search(&mut self) {}
-    #[cfg(not(feature = "extensions"))]
-    pub fn plugin_store_install_selected(&mut self) {}
-    #[cfg(not(feature = "extensions"))]
     pub fn plugin_store_refresh_installed(&mut self) {}
-    #[cfg(not(feature = "extensions"))]
-    pub fn plugin_store_uninstall_selected(&mut self) {}
-
 
     pub fn new() -> Self {
         let mut app = Self::default();
@@ -1037,9 +775,7 @@ impl App {
         let abs_path = if pathbuf.is_absolute() {
             pathbuf
         } else {
-            env::current_dir()
-                .unwrap_or_default()
-                .join(&pathbuf)
+            env::current_dir().unwrap_or_default().join(&pathbuf)
         };
         let content = fs::read_to_string(&abs_path).unwrap_or_default();
         let on_disk_hash = text_hash(&content);
@@ -1047,15 +783,22 @@ impl App {
         let buffer = Buffer::from_string(&content);
         let mut undo = UndoStack::new();
         undo.push(buffer.snapshot());
-        let mtime = std::fs::metadata(&abs_path).ok().and_then(|m| m.modified().ok());
+        let mtime = std::fs::metadata(&abs_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
         let mut app = Self {
             buffer: buffer.clone(),
             filename: Some(abs_path.clone()),
             message,
             modified: false,
+            // The App's own saved-hash, not just the tab's: `refresh_modified`
+            // (undo/redo) compares the live text against THIS. Left at the empty
+            // default, undo back to the on-disk text re-derived dirty against the
+            // wrong hash — the file read modified forever after any edit+undo.
+            saved_hash: on_disk_hash,
             undo_stack: undo.clone(),
             file_mtime: mtime,
-            buffers: vec![BufferTab {
+            tabs: TabStrip::with_first(BufferTab {
                 id: FIRST_TAB_ID,
                 buffer,
                 filename: Some(abs_path.clone()),
@@ -1065,8 +808,8 @@ impl App {
                 undo_stack: undo,
                 file_mtime: mtime,
                 terminal: None,
-            }],
-            current_buffer: 0,
+            }),
+            live_doc: FIRST_TAB_ID,
             ..Self::default()
         };
         app.apply_config();
@@ -1099,11 +842,11 @@ impl App {
                 let line_len = self.buffer.line(self.buffer.cursor.row).chars().count();
                 self.buffer.cursor.col = f.col.min(line_len);
                 self.mark_clean();
-                if !self.buffers.is_empty() {
-                    self.buffers[0].buffer = self.buffer.clone();
-                    self.buffers[0].filename = self.filename.clone();
-                    self.buffers[0].modified = false;
-                    self.buffers[0].saved_hash = self.saved_hash;
+                if !self.tabs.buffers.is_empty() {
+                    self.tabs.buffers[0].buffer = self.buffer.clone();
+                    self.tabs.buffers[0].filename = self.filename.clone();
+                    self.tabs.buffers[0].modified = false;
+                    self.tabs.buffers[0].saved_hash = self.saved_hash;
                 }
             } else {
                 self.open_new_tab(&f.path);
@@ -1112,11 +855,17 @@ impl App {
                 self.buffer.cursor.col = f.col.min(line_len);
             }
         }
-        let active = session.active.min(self.buffers.len().saturating_sub(1));
-        if active != self.current_buffer {
+        let active = session
+            .active
+            .min(self.tabs.buffers.len().saturating_sub(1));
+        if active != self.current_buffer() {
             self.save_state_to_tab();
-            self.current_buffer = active;
+            self.split.focused_pane_mut().buffer = self.tabs.buffers[active].id;
             self.restore_state_from_tab();
+        }
+        // The split, if the session had one — its focus overrides `active`.
+        if let Some(ref split) = session.split {
+            self.restore_split(split);
         }
         if let Some(ref p) = self.filename {
             let text = self.buffer.text();
@@ -1131,12 +880,13 @@ impl App {
     }
 
     pub fn save_session(&self) {
+        let current = self.current_buffer();
         let mut files = Vec::new();
-        for (i, tab) in self.buffers.iter().enumerate() {
+        for (i, tab) in self.tabs.buffers.iter().enumerate() {
             let Some(ref path) = tab.filename else {
                 continue;
             };
-            let (row, col) = if i == self.current_buffer {
+            let (row, col) = if i == current {
                 (self.buffer.cursor.row, self.buffer.cursor.col)
             } else {
                 (tab.buffer.cursor.row, tab.buffer.cursor.col)
@@ -1151,14 +901,237 @@ impl App {
             return;
         }
         let active = self
+            .tabs
             .buffers
             .iter()
             .enumerate()
             .filter(|(_, t)| t.filename.is_some())
-            .position(|(i, _)| i == self.current_buffer)
+            .position(|(i, _)| i == current)
             .unwrap_or(0);
-        session::save(&Session { files, active });
+        let split = self.session_split();
+        session::save(&Session {
+            files,
+            active,
+            split,
+        });
         let _ = self.dap.persist_breakpoints();
+    }
+
+    /// The split layout as session tokens — only when every pane shows a
+    /// SAVED file (an unsaved tab has no identity across restarts, so a
+    /// split referencing one cannot survive).
+    fn session_split(&self) -> Option<session::SessionSplit> {
+        if !self.split.is_split() {
+            return None;
+        }
+        // Index within the saved files, in save order (buffers order minus
+        // the unnamed tabs).
+        let saved: Vec<BufferId> = self
+            .tabs
+            .buffers
+            .iter()
+            .filter(|t| t.filename.is_some())
+            .map(|t| t.id)
+            .collect();
+        let file_idx_of = |pid: crate::split::PaneId| -> Option<usize> {
+            let pane = self.split.panes.iter().find(|p| p.id == pid)?;
+            saved.iter().position(|id| *id == pane.buffer)
+        };
+        let tree = Self::layout_tokens(self.split.root(), &file_idx_of)?;
+        let panes = self
+            .split
+            .panes
+            .iter()
+            .map(|p| session::SessionPane {
+                tab: saved.iter().position(|id| *id == p.buffer).unwrap_or(0),
+                scroll: p.scroll,
+                row: p.cursor.0,
+                col: p.cursor.1,
+            })
+            .collect();
+        Some(session::SessionSplit {
+            tree,
+            focus_pane: self.split.focus_index(),
+            panes,
+        })
+    }
+
+    /// `T<file>` leaves, `S<C|R>:w0,w1,...:child;child` splits. None when any
+    /// leaf has no saved file — then the whole split cannot persist.
+    fn layout_tokens(
+        layout: &crate::split::Layout,
+        file_idx_of: &impl Fn(crate::split::PaneId) -> Option<usize>,
+    ) -> Option<String> {
+        use crate::split::{Axis, Layout};
+        match layout {
+            Layout::Leaf(pid) => Some(format!("T{}", file_idx_of(*pid)?)),
+            Layout::Split {
+                axis,
+                children,
+                weights,
+            } => {
+                let axis_ch = match axis {
+                    Axis::Col => 'C',
+                    Axis::Row => 'R',
+                };
+                let ws = weights
+                    .iter()
+                    .map(|w| format!("{:.3}", w))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let cs = children
+                    .iter()
+                    .map(|c| Self::layout_tokens(c, file_idx_of))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(format!("S{}:{}:{}", axis_ch, ws, cs.join(";")))
+            }
+        }
+    }
+
+    /// Rebuild the split from session tokens. Leaves carry saved-file
+    /// indices; panes get fresh ids in leaf order and their saved viewports.
+    /// The split's focus overrides the plain `active` tab index.
+    fn restore_split(&mut self, s: &session::SessionSplit) {
+        let Some(indexed) = Self::parse_layout_tokens(&s.tree) else {
+            return;
+        };
+        if s.panes.is_empty() {
+            return;
+        }
+        let mut next_id = 1u32;
+        let mut panes = Vec::new();
+        let mut leaf = 0usize;
+        let tree = self.rebuild_tree(&indexed, s, &mut next_id, &mut panes, &mut leaf);
+        if panes.is_empty() {
+            return;
+        }
+        // Park the live document BEFORE the tree replaces the panes: after
+        // the restore the active tab is derived from the new focus, and a
+        // save would land on the wrong document.
+        self.save_state_to_tab();
+        self.split.restore(tree, panes);
+        if s.focus_pane < self.split.panes.len() {
+            self.split.set_focus(s.focus_pane);
+        }
+        self.load_focused_pane();
+    }
+
+    /// Parse `T<n>` / `S<C|R>:w,w:child;child` into a tree whose leaves carry
+    /// the saved-file index as a placeholder `PaneId`.
+    fn parse_layout_tokens(s: &str) -> Option<crate::split::Layout> {
+        use crate::split::{Axis, Layout, PaneId};
+        fn parse_at(b: &[u8], i: &mut usize) -> Option<Layout> {
+            match *b.get(*i)? {
+                b'T' => {
+                    *i += 1;
+                    let start = *i;
+                    while *i < b.len() && b[*i].is_ascii_digit() {
+                        *i += 1;
+                    }
+                    let n: u32 = std::str::from_utf8(&b[start..*i]).ok()?.parse().ok()?;
+                    Some(Layout::Leaf(PaneId(n)))
+                }
+                b'S' => {
+                    *i += 1;
+                    let axis = match b.get(*i)? {
+                        b'C' => Axis::Col,
+                        b'R' => Axis::Row,
+                        _ => return None,
+                    };
+                    *i += 1;
+                    if *b.get(*i)? != b':' {
+                        return None;
+                    }
+                    *i += 1;
+                    let wstart = *i;
+                    while *i < b.len() && b[*i] != b':' {
+                        *i += 1;
+                    }
+                    let wstr = std::str::from_utf8(&b[wstart..*i]).ok()?;
+                    let weights: Vec<f32> = wstr
+                        .split(',')
+                        .map(|w| w.parse().ok())
+                        .collect::<Option<_>>()?;
+                    if *b.get(*i)? != b':' {
+                        return None;
+                    }
+                    *i += 1;
+                    // Exactly weights.len() children — the count is known,
+                    // which is what keeps nested splits unambiguous: a
+                    // greedy "parse until no ;" would swallow the OUTER
+                    // split's later children into the innermost split.
+                    let n = weights.len();
+                    let mut children = Vec::with_capacity(n);
+                    for k in 0..n {
+                        children.push(parse_at(b, i)?);
+                        if k + 1 < n {
+                            if *b.get(*i)? != b';' {
+                                return None;
+                            }
+                            *i += 1;
+                        }
+                    }
+                    if children.is_empty() {
+                        return None;
+                    }
+                    Some(Layout::Split {
+                        axis,
+                        children,
+                        weights,
+                    })
+                }
+                _ => None,
+            }
+        }
+        let mut i = 0;
+        let out = parse_at(s.as_bytes(), &mut i)?;
+        (i == s.len()).then_some(out)
+    }
+
+    /// Assign fresh pane ids in leaf order and attach the saved viewports.
+    fn rebuild_tree(
+        &self,
+        layout: &crate::split::Layout,
+        s: &session::SessionSplit,
+        next_id: &mut u32,
+        panes: &mut Vec<crate::split::Pane>,
+        leaf: &mut usize,
+    ) -> crate::split::Layout {
+        use crate::split::Layout;
+        match layout {
+            Layout::Leaf(crate::split::PaneId(fi)) => {
+                let pid = crate::split::PaneId(*next_id);
+                *next_id += 1;
+                let sp = s.panes.get(*leaf).cloned().unwrap_or_default();
+                *leaf += 1;
+                let buffer = self
+                    .tabs
+                    .buffers
+                    .get(*fi as usize)
+                    .map(|t| t.id)
+                    .unwrap_or_default();
+                panes.push(crate::split::Pane {
+                    id: pid,
+                    buffer,
+                    scroll: sp.scroll,
+                    hscroll: 0,
+                    cursor: (sp.row, sp.col),
+                });
+                Layout::Leaf(pid)
+            }
+            Layout::Split {
+                axis,
+                children,
+                weights,
+            } => Layout::Split {
+                axis: *axis,
+                children: children
+                    .iter()
+                    .map(|c| self.rebuild_tree(c, s, next_id, panes, leaf))
+                    .collect(),
+                weights: weights.clone(),
+            },
+        }
     }
 
     /// Non-blocking: `git diff` (+ `git blame` when the panel is up) run on a
@@ -1288,7 +1261,7 @@ impl App {
             p.strip_prefix(old).ok().map(|rest| new.join(rest))
         };
         let mut n = 0;
-        for tab in &mut self.buffers {
+        for tab in &mut self.tabs.buffers {
             if let Some(cur) = tab.filename.clone() {
                 if let Some(next) = repoint(&cur) {
                     tab.filename = Some(next);
@@ -1302,365 +1275,13 @@ impl App {
                 // The server has the old URI open; re-open under the new one so
                 // diagnostics and definitions keep resolving.
                 let text = self.buffer.text();
-                self.lsp.auto_start_with_text(&next.display().to_string(), Some(&text));
+                self.lsp
+                    .auto_start_with_text(&next.display().to_string(), Some(&text));
                 self.lsp_synced_path = Some(next);
                 self.lsp_synced_hash = 0;
             }
         }
         n
-    }
-
-    pub fn open_blank_tab(&mut self) {
-        self.save_state_to_tab();
-        let buffer = Buffer::new();
-        let mut undo = UndoStack::new();
-        undo.push(buffer.snapshot());
-        let tab_id = self.take_tab_id();
-        self.buffers.push(crate::BufferTab {
-            id: tab_id,
-            buffer,
-            filename: None,
-            scroll: 0,
-            modified: false,
-            saved_hash: EMPTY_TEXT_HASH,
-            undo_stack: undo,
-            file_mtime: None,
-            terminal: None,
-        });
-        self.current_buffer = self.buffers.len() - 1;
-        self.restore_state_from_tab();
-        self.refresh_git();
-        self.mode = Mode::Editor;
-        self.message = "New tab · i insert · Ctrl+P files · :e <file>".into();
-    }
-
-    /// F9 — toggle breakpoint on cursor line.
-    pub fn dap_toggle_breakpoint(&mut self) {
-        let Some(path) = self.filename.as_ref().map(|p| p.display().to_string()) else {
-            self.message = "No file for breakpoint".into();
-            return;
-        };
-        let line = self.buffer.cursor.row;
-        let on = self.dap.toggle_breakpoint(&path, line);
-        self.message = if on {
-            format!("● Breakpoint L{}", line + 1)
-        } else {
-            format!("○ Cleared BP L{}", line + 1)
-        };
-    }
-
-    /// F5 — start or continue.
-    pub fn dap_start_or_continue(&mut self) {
-        use crate::dap::DapState;
-        match self.dap.state {
-            DapState::Stopped => {
-                self.dap.continue_exec();
-                self.message = "→ continue".into();
-            }
-            DapState::Running | DapState::Starting => {
-                self.message = format!("DAP {}", self.dap.state.label());
-            }
-            DapState::Idle | DapState::Ending => {
-                let Some(path) = self.filename.as_ref().map(|p| p.display().to_string()) else {
-                    self.message = "Open a file to debug".into();
-                    return;
-                };
-                let cwd = self
-                    .filename
-                    .as_ref()
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                let ext = self.file_extension();
-                let lang = ext.as_deref().map(|e| match e {
-                    "py" | "pyw" => "python",
-                    "rs" => "rust",
-                    "go" => "go",
-                    "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" => "cpp",
-                    "js" | "mjs" | "cjs" | "ts" | "tsx" => "node",
-                    _ => "unknown",
-                });
-                let was_closed = !self.dap.panel_open;
-                match self.dap.start(&path, cwd.as_deref(), lang, &[]) {
-                    Ok(()) => {
-                        if was_closed {
-                            self.dap.arm_panel_animation();
-                        }
-                        self.mode = Mode::Debug;
-                        self.message = format!(
-                            "▶ DAP {} · {}",
-                            self.dap.adapter_name,
-                            self.dap.last_program.as_deref().unwrap_or(&path)
-                        );
-                    }
-                    Err(e) => {
-                        self.message = e;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Launch a program (XLC `:DapLaunch <path> [args…]`).
-    pub fn dap_launch_program(&mut self, program_line: &str) {
-        let mut parts = program_line.split_whitespace();
-        let Some(program) = parts.next() else {
-            self.message = "DapLaunch: missing program".into();
-            return;
-        };
-        let args: Vec<String> = parts.map(|s| s.to_string()).collect();
-        let cwd = Path::new(program)
-            .parent()
-            .map(|p| p.to_path_buf())
-            .or_else(|| {
-                self.filename
-                    .as_ref()
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            });
-        let was_closed = !self.dap.panel_open;
-        match self.dap.start(program, cwd.as_deref(), None, &args) {
-            Ok(()) => {
-                if was_closed {
-                    self.dap.arm_panel_animation();
-                }
-                self.mode = Mode::Debug;
-                self.message = format!("▶ DAP launch {program_line}");
-            }
-            Err(e) => self.message = e,
-        }
-    }
-
-    /// F6 — suspend a running program.
-    pub fn dap_pause(&mut self) {
-        self.dap.pause();
-        self.message = "⏸ pause requested".into();
-    }
-
-    /// Evaluate expression in the stopped frame (Console REPL).
-    pub fn dap_evaluate(&mut self, expr: &str) {
-        self.dap.evaluate(expr);
-        self.message = format!("eval: {expr}");
-    }
-
-    /// `:bp if <expr>` — conditional breakpoint on cursor line.
-    pub fn dap_set_condition(&mut self, condition: &str) {
-        let Some(path) = self.filename.as_ref().map(|p| p.display().to_string()) else {
-            self.message = "No file for breakpoint".into();
-            return;
-        };
-        let line = self.buffer.cursor.row;
-        let cond = condition.trim();
-        if cond.is_empty() {
-            self.dap.set_breakpoint_condition(&path, line, None);
-            self.message = format!("○ condition cleared L{}", line + 1);
-        } else {
-            self.dap
-                .set_breakpoint_condition(&path, line, Some(cond.to_string()));
-            self.message = format!("● L{} if {cond}", line + 1);
-        }
-    }
-
-    /// `:bp log <msg>` — logpoint on cursor line.
-    pub fn dap_set_logpoint(&mut self, msg: &str) {
-        let Some(path) = self.filename.as_ref().map(|p| p.display().to_string()) else {
-            self.message = "No file for logpoint".into();
-            return;
-        };
-        let line = self.buffer.cursor.row;
-        let m = msg.trim();
-        if m.is_empty() {
-            self.dap.set_breakpoint_log(&path, line, None);
-            self.message = format!("○ logpoint cleared L{}", line + 1);
-        } else {
-            self.dap
-                .set_breakpoint_log(&path, line, Some(m.to_string()));
-            self.message = format!("● L{} log {m}", line + 1);
-        }
-    }
-
-    /// Launch using a named config from `.vscode/launch.json`.
-    pub fn dap_launch_config(&mut self, name: Option<&str>) {
-        let hint = self.filename.as_deref();
-        let configs = crate::dap::load_launch_configs(hint);
-        if configs.is_empty() {
-            self.message = "No .vscode/launch.json configurations found".into();
-            return;
-        }
-        let cfg = if let Some(n) = name {
-            configs.iter().find(|c| c.name == n)
-        } else {
-            configs.first()
-        };
-        let Some(cfg) = cfg else {
-            let names: Vec<_> = configs.iter().map(|c| c.name.as_str()).collect();
-            self.message = format!("Unknown config. Available: {}", names.join(", "));
-            return;
-        };
-        let was_closed = !self.dap.panel_open;
-        let result = if cfg.request == "attach" {
-            // Prefer port from env-less configs: look for numeric in program or name
-            // launch.json attach often has "port" field — re-parse via args empty + name
-            self.dap_attach_from_config(cfg)
-        } else {
-            if cfg.program.is_empty() {
-                self.message = format!("Config '{}' has no program", cfg.name);
-                return;
-            }
-            let cwd = cfg
-                .cwd
-                .as_ref()
-                .map(PathBuf::from)
-                .or_else(|| {
-                    self.filename
-                        .as_ref()
-                        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                });
-            let lang = match cfg.adapter_type.as_str() {
-                "python" | "debugpy" => Some("python"),
-                "go" | "delve" => Some("go"),
-                "lldb" | "cppdbg" | "codelldb" => Some("rust"),
-                "node" | "pwa-node" => Some("node"),
-                _ => None,
-            };
-            self.dap
-                .start(&cfg.program, cwd.as_deref(), lang, &cfg.args)
-        };
-        match result {
-            Ok(()) => {
-                if was_closed {
-                    self.dap.arm_panel_animation();
-                }
-                self.mode = Mode::Debug;
-                self.message = format!("▶ launch.json · {}", cfg.name);
-            }
-            Err(e) => self.message = e,
-        }
-    }
-
-    fn dap_attach_from_config(&mut self, cfg: &crate::dap::LaunchConfig) -> Result<(), String> {
-        let lang = match cfg.adapter_type.as_str() {
-            "python" | "debugpy" => Some("python"),
-            "node" | "pwa-node" => Some("node"),
-            "lldb" | "cppdbg" | "codelldb" => Some("native"),
-            other if !other.is_empty() => Some(other),
-            _ => None,
-        };
-        if let Some(pid) = cfg.pid {
-            return self.dap.attach_pid(pid);
-        }
-        if let Some(port) = cfg.port {
-            return self
-                .dap
-                .attach_port(port, lang, cfg.host.as_deref());
-        }
-        // Heuristic fallback: program field as port or pid
-        if let Some(port) = cfg.program.parse::<u16>().ok().or_else(|| {
-            cfg.program
-                .rsplit(':')
-                .next()
-                .and_then(|s| s.parse().ok())
-        }) {
-            let host = if cfg.program.contains(':') {
-                cfg.program.split(':').next()
-            } else {
-                None
-            };
-            return self.dap.attach_port(port, lang, host);
-        }
-        if let Ok(pid) = cfg.program.parse::<u32>() {
-            return self.dap.attach_pid(pid);
-        }
-        Err(format!(
-            "Attach config '{}' needs port, processId/pid, or program=port|pid",
-            cfg.name
-        ))
-    }
-
-    /// `:DapAttach pid <n>` or `:DapAttach port <n> [lang]`
-    pub fn dap_attach(&mut self, spec: &str) {
-        let parts: Vec<&str> = spec.split_whitespace().collect();
-        if parts.is_empty() {
-            self.message = "Usage: DapAttach pid <n> | DapAttach port <n> [python|node]".into();
-            return;
-        }
-        let was_closed = !self.dap.panel_open;
-        let result = match parts[0] {
-            "pid" => {
-                let Some(pid) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) else {
-                    self.message = "Usage: DapAttach pid <n>".into();
-                    return;
-                };
-                self.dap.attach_pid(pid)
-            }
-            "port" => {
-                let Some(port) = parts.get(1).and_then(|s| s.parse::<u16>().ok()) else {
-                    self.message = "Usage: DapAttach port <n> [python|node]".into();
-                    return;
-                };
-                let lang = parts.get(2).copied();
-                self.dap.attach_port(port, lang, None)
-            }
-            // Bare number: prefer port if ≤65535, else pid
-            n if n.parse::<u32>().is_ok() => {
-                let num: u32 = n.parse().unwrap();
-                if num <= 65535 {
-                    self.dap.attach_port(num as u16, Some("python"), None)
-                } else {
-                    self.dap.attach_pid(num)
-                }
-            }
-            _ => {
-                self.message = "Usage: DapAttach pid <n> | DapAttach port <n> [lang]".into();
-                return;
-            }
-        };
-        match result {
-            Ok(()) => {
-                if was_closed {
-                    self.dap.arm_panel_animation();
-                }
-                self.mode = Mode::Debug;
-                self.message = format!("▶ attach · {spec}");
-            }
-            Err(e) => self.message = e,
-        }
-    }
-
-    /// List launch.json configs into message / XLC.
-    pub fn dap_list_configs(&mut self) {
-        let hint = self.filename.as_deref();
-        let configs = crate::dap::load_launch_configs(hint);
-        if configs.is_empty() {
-            self.message = "No launch.json configs".into();
-            self.set_message("No .vscode/launch.json found");
-            return;
-        }
-        self.set_message("=== launch.json ===");
-        for c in &configs {
-            self.set_message(&format!(
-                "  {}  [{}]  {}",
-                c.name, c.request, c.program
-            ));
-        }
-        self.message = format!("{} launch config(s) — :DapConfig <name>", configs.len());
-    }
-
-    pub fn dap_stop(&mut self) {
-        self.dap.stop();
-        self.message = "■ Debug stopped".into();
-    }
-
-    pub fn dap_step_over(&mut self) {
-        self.dap.step_over();
-        self.message = "→ step over".into();
-    }
-
-    pub fn dap_step_into(&mut self) {
-        self.dap.step_into();
-        self.message = "→ step into".into();
-    }
-
-    pub fn dap_step_out(&mut self) {
-        self.dap.step_out();
-        self.message = "→ step out".into();
     }
 
     /// Open call hierarchy (incoming by default).
@@ -1682,17 +1303,12 @@ impl App {
         // Word under cursor as provisional root name
         let word = {
             let w = self.word_under_cursor();
-            if w.is_empty() {
-                "?".into()
-            } else {
-                w
-            }
+            if w.is_empty() { "?".into() } else { w }
         };
         self.sync_lsp_document();
         self.call_hierarchy.begin(&word, dir);
         self.mode = Mode::CallHierarchy;
-        self.lsp
-            .request_call_hierarchy(&path, c.row, c.col, dir);
+        self.lsp.request_call_hierarchy(&path, c.row, c.col, dir);
         self.message = format!("Call hierarchy ({})…", dir.label());
     }
 
@@ -1707,8 +1323,7 @@ impl App {
         let c = self.buffer.cursor();
         let name = self.call_hierarchy.root_name.clone();
         self.call_hierarchy.begin(&name, dir);
-        self.lsp
-            .request_call_hierarchy(&path, c.row, c.col, dir);
+        self.lsp.request_call_hierarchy(&path, c.row, c.col, dir);
     }
 
     /// Apply finished call hierarchy from LSP poll.
@@ -1730,10 +1345,6 @@ impl App {
         self.message = self.call_hierarchy.message.clone();
     }
 
-
-
-
-
     pub fn toggle_code_lens(&mut self) {
         self.code_lens_enabled = !self.code_lens_enabled;
         self.message = if self.code_lens_enabled {
@@ -1746,15 +1357,12 @@ impl App {
 
     pub fn reload_hooks(&mut self) {
         self.hooks = crate::hooks::HooksConfig::load();
-        self.message = format!(
-            "hooks reloaded · enabled={}",
-            self.hooks.enabled
-        );
+        self.message = format!("hooks reloaded · enabled={}", self.hooks.enabled);
     }
 
     /// Run the hook for `event` on a background thread; results arrive via
     /// poll_hook_messages() so a slow hook never blocks the editor.
-    fn fire_hook(&mut self, event: crate::hooks::HookEvent) {
+    pub(crate) fn fire_hook(&mut self, event: crate::hooks::HookEvent) {
         if !self.hooks.has_hook(event) {
             return;
         }
@@ -1773,39 +1381,6 @@ impl App {
         while let Ok(msg) = self.hook_msg_rx.try_recv() {
             self.message = msg;
         }
-    }
-
-    /// After DAP poll: jump editor to stopped frame if path matches an openable file.
-    pub fn dap_apply_stopped_location(&mut self) {
-        if !self.dap.location_dirty {
-            return;
-        }
-        self.dap.location_dirty = false;
-        let Some(path) = self.dap.current_path.clone() else {
-            return;
-        };
-        let Some(line) = self.dap.current_line else {
-            return;
-        };
-        // Open / switch to file if needed
-        let same = self
-            .filename
-            .as_ref()
-            .map(|p| {
-                let a = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-                let b = std::fs::canonicalize(&path).unwrap_or_else(|_| PathBuf::from(&path));
-                a == b
-            })
-            .unwrap_or(false);
-        if !same && Path::new(&path).is_file() {
-            self.open_new_tab(&path);
-        }
-        if self.buffer.line_count() == 0 {
-            return;
-        }
-        self.buffer.cursor.row = line.min(self.buffer.line_count().saturating_sub(1));
-        self.buffer.move_to_line_start();
-        self.update_scroll();
     }
 
     pub fn fold_toggle(&mut self) {
@@ -1938,11 +1513,9 @@ impl App {
         }
         // Hint = open file, else cwd (same resolution light SCM uses via find_git_root)
         let cwd = env::current_dir().ok();
-        let hint = self
-            .filename
-            .as_deref()
-            .or(cwd.as_deref());
+        let hint = self.filename.as_deref().or(cwd.as_deref());
         self.git_wb.open_at(hint, from_scm);
+        self.sync_scm_snapshot_from_git_workbench();
         self.mode = Mode::GitWorkbench;
         let b = if self.git_wb.branch.is_empty() {
             "git".into()
@@ -1956,10 +1529,26 @@ impl App {
             .and_then(|r| r.file_name())
             .and_then(|n| n.to_str())
             .unwrap_or(".");
-        self.message = format!(
-            "Git · {} @ {}  ·  Status ready  ·  Esc back",
-            b, root_note
-        );
+        self.message = format!("Git · {} @ {}  ·  Status ready  ·  Esc back", b, root_note);
+    }
+
+    /// The compact Source Control navigator and full Workbench are two faces
+    /// of one repository state. Keep the hidden navigator's snapshot aligned
+    /// at the transition boundary so it cannot retain "No repository" or an
+    /// older count while Workbench already shows fresh status.
+    fn sync_scm_snapshot_from_git_workbench(&mut self) {
+        self.scm.root = self.git_wb.root.clone();
+        self.scm.branch = self.git_wb.branch.clone();
+        self.scm.ahead = self.git_wb.ahead;
+        self.scm.behind = self.git_wb.behind;
+        self.scm.staged = self.git_wb.staged.clone();
+        self.scm.changes = self.git_wb.changes.clone();
+        self.scm.selected = self
+            .git_wb
+            .selected
+            .min(self.scm.total_files().saturating_sub(1));
+        self.scm.error = self.git_wb.error.clone();
+        self.scm.last_result = None;
     }
 
     pub fn toggle_git_workbench(&mut self) {
@@ -2045,163 +1634,14 @@ impl App {
             .apply_config(cfg.lsp_enabled, cfg.lsp_servers.clone());
         self.theme_pref = cfg.theme.clone();
         self.theme = theme::resolve(&cfg.theme, self.system_is_dark);
-        self.apply_pet_from_config(&cfg);
         // Restart LSP for current file with new server map
         self.lsp_restart_for_current();
     }
 
-
-
-
-
-
-
-    pub fn toggle_terminal_side(&mut self) {
-        if self.terminal.open {
-            self.terminal.open = false;
-            self.terminal.shutdown();
-            self.mode = Mode::Editor;
-        } else {
-            self.terminal.close_confirm = false;
-            self.terminal.open = true;
-            self.terminal.start(self.filename.as_ref());
-            self.mode = Mode::Terminal;
-        }
-    }
-
-    /// The shell running in the pane at `idx`, if that pane shows a terminal tab.
-    pub fn pane_terminal(&self, idx: usize) -> Option<&Terminal> {
-        let buf_id = self.split.panes.get(idx)?.buffer;
-        let tab = self.buffers.iter().find(|t| t.id == buf_id)?;
-        let tid = tab.terminal?;
-        self.pane_terminals.get(&tid)
-    }
-
-    pub fn pane_terminal_mut(&mut self, idx: usize) -> Option<&mut Terminal> {
-        let buf_id = self.split.panes.get(idx)?.buffer;
-        let tab = self.buffers.iter().find(|t| t.id == buf_id)?;
-        let tid = tab.terminal?;
-        self.pane_terminals.get_mut(&tid)
-    }
-
-    /// The shell the keyboard is pointed at — the focused pane's, if it shows
-    /// a terminal tab.
-    pub fn focused_pane_terminal_mut(&mut self) -> Option<&mut Terminal> {
-        let idx = self.split.focus_index();
-        self.pane_terminal_mut(idx)
-    }
-
-    /// Whether the focused pane currently shows a terminal tab.
-    pub fn terminal_window_focused(&self) -> bool {
-        let buf_id = match self.split.panes.get(self.split.focus_index()) {
-            Some(p) => p.buffer,
-            None => return false,
-        };
-        self.is_terminal_tab(buf_id)
-    }
-
-    /// Whether the tab identified by `id` is a terminal tab.
-    pub fn is_terminal_tab(&self, id: BufferId) -> bool {
-        self.buffers.iter()
-            .find(|t| t.id == id)
-            .is_some_and(|t| t.terminal.is_some())
-    }
-
-    /// Ctrl+Shift+T — open a terminal as a **tab** in the focused pane.
-    ///
-    /// A terminal is just a [`BufferTab`] whose `terminal` field is set; the
-    /// pane shows it like any other document. Pressing ⌃⇧T again while a
-    /// terminal tab is focused closes it (the tab closes, the shell ends).
-    pub fn toggle_terminal_full(&mut self) {
-        // Second press on a terminal tab closes it.
-        if self.terminal_window_focused() {
-            self.close_current_tab();
-            return;
-        }
-        // The focused pane's document BEFORE this open — an active layout has
-        // to swap it out for the terminal tab, exactly like `open_new_tab`.
-        let replacing = self.current_buffer_id();
-        self.park_focused_pane();
-
-        // Spawn a shell of its own.
-        let cols = if self.split.is_split() {
-            (self.viewport.width / 2).max(40)
-        } else {
-            self.viewport.width.max(40)
-        };
-        let rows = self.viewport.height.max(24);
-        let root = self.project_root();
-        let anchor = self.filename.clone().unwrap_or_else(|| root.join("."));
-        let mut term = Terminal::new();
-        term.open = true;
-        term.close_confirm = false;
-        term.resize(cols, rows);
-        term.start(Some(&anchor));
-        let started = term.started;
-
-        let tid = crate::split::TerminalId(self.next_terminal_id);
-        self.next_terminal_id = self.next_terminal_id.wrapping_add(1);
-        self.pane_terminals.insert(tid, term);
-
-        // Create a tab for the terminal and switch to it.
-        let tab_id = self.take_tab_id();
-        self.buffers.push(BufferTab {
-            id: tab_id,
-            buffer: Buffer::new(),
-            filename: None,
-            scroll: 0,
-            modified: false,
-            saved_hash: EMPTY_TEXT_HASH,
-            undo_stack: UndoStack::new(),
-            file_mtime: None,
-            terminal: Some(tid),
-        });
-        self.current_buffer = self.buffers.len() - 1;
-        self.restore_state_from_tab();
-        // Point the focused pane at the new terminal tab.
-        self.split.focused_pane_mut().buffer = tab_id;
-        // An active layout swaps the displaced document out of its membership
-        // for the terminal tab, and re-gathers so the group stays contiguous.
-        self.swap_focused_doc_in_active_layout(replacing, tab_id);
-
-        // Stay in Editor mode — the terminal is a tab, not a mode.
-        if matches!(self.mode, Mode::Terminal | Mode::Editor) {
-            self.mode = Mode::Editor;
-        }
-        self.message = if started {
-            "Terminal tab · keys → shell · ⌃⇧T close · ^W w other pane".into()
-        } else {
-            "Terminal: failed to spawn shell (PTY)".into()
-        };
-    }
-
-    pub fn request_close_pane_terminal(&mut self) {
-        if !self.terminal_window_focused() {
-            return;
-        }
-        if self.terminal.close_confirm {
-            self.terminal.close_confirm = false;
-            self.message = "Close cancelled".into();
-            return;
-        }
-        self.terminal.close_confirm = true;
-        self.message = "Close terminal?  [y]es  /  [n]o  ·  Ctrl+Shift+W cancel".into();
-    }
-
-    pub fn confirm_close_pane_terminal(&mut self, yes: bool) {
-        self.terminal.close_confirm = false;
-        if !yes {
-            self.message = "Close cancelled".into();
-            return;
-        }
-        if !self.terminal_window_focused() {
-            return;
-        }
-        self.close_current_tab();
-        if matches!(self.mode, Mode::Terminal) {
-            self.mode = Mode::Editor;
-        }
-        self.message = "Terminal closed".into();
+    /// Whether a pane terminal's close-confirm dialog is open. Dispatch gates
+    /// y/n/Esc on this — nothing else may read the latch directly.
+    pub fn pane_close_confirm_open(&self) -> bool {
+        self.pane_close_confirm.is_some()
     }
 
     /// Whether progressive GPU-terminal features should run this session.
@@ -2211,26 +1651,6 @@ impl App {
                 || self.term_sync
                 || self.term_underline_color
                 || self.term_undercurl)
-    }
-
-    /// Install terminal caps discovered by the TUI shell.
-    pub fn set_term_caps(
-        &mut self,
-        summary: String,
-        sync: bool,
-        undercurl: bool,
-        underline_color: bool,
-        hyperlinks: bool,
-        modern: bool,
-        kitty_graphics: bool,
-    ) {
-        self.term_caps_summary = summary;
-        self.term_sync = sync;
-        self.term_kitty_graphics = kitty_graphics;
-        self.term_undercurl = undercurl;
-        self.term_underline_color = underline_color;
-        self.term_hyperlinks = hyperlinks;
-        self.term_modern = modern;
     }
 
     pub fn save_settings(&mut self) {
@@ -2317,8 +1737,7 @@ impl App {
                     .filename
                     .as_ref()
                     .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                self.preview.cell_dims =
-                    (self.cell_px_or_default(), self.cell_px_h_or_default());
+                self.preview.cell_dims = (self.cell_px_or_default(), self.cell_px_h_or_default());
                 self.preview.open_for(&text, ext.as_deref());
                 return;
             }
@@ -2348,23 +1767,24 @@ impl App {
         self.clear_media_handles();
         self.preview.open_for(&text, ext.as_deref());
         self.mode = Mode::Preview;
-        let kind = self
-            .preview
-            .kind
-            .map(|k| k.label())
-            .unwrap_or("Preview");
+        let kind = self.preview.kind.map(|k| k.label()).unwrap_or("Preview");
         self.message = format!("Preview · {kind} — Esc close · j/k scroll · r refresh");
     }
 
     /// Open media / data preview from a filesystem path (explorer Enter).
     /// Effective pixels-per-cell for image caches.
+    /// Physical pixels per cell row — derived from the stage (A6). The old
+    /// field had no writer anywhere and silently "defaulted" to 14 forever;
+    /// the media preview scaled against a lie.
     pub fn cell_px_or_default(&self) -> u32 {
-        if self.cell_px >= 4 { self.cell_px } else { 14 }
+        let px = (self.stage.cell_px * self.stage.dpr).round() as u32;
+        if px >= 4 { px } else { 14 }
     }
 
     pub fn cell_px_h_or_default(&self) -> u32 {
-        if self.cell_px_h >= 6 {
-            self.cell_px_h
+        let px = (self.stage.cell_w * self.stage.dpr).round() as u32;
+        if px >= 6 {
+            px
         } else {
             self.cell_px_or_default() * 2
         }
@@ -2386,7 +1806,10 @@ impl App {
                     }
                     Err(e) => {
                         self.preview.lines.push(crate::preview::PreviewLine {
-                            spans: vec![(format!("  load error: {e}"), crate::preview::PreviewStyle::AlertWarning)],
+                            spans: vec![(
+                                format!("  load error: {e}"),
+                                crate::preview::PreviewStyle::AlertWarning,
+                            )],
                             image: None,
                         });
                         self.message = e;
@@ -2427,6 +1850,7 @@ impl App {
         self.clear_media_handles();
         self.preview.close_immediate();
         self.mode = Mode::Editor;
+        self.message.clear();
     }
 
     pub fn refresh_preview_if_open(&mut self) {
@@ -2495,11 +1919,67 @@ impl App {
             .unwrap_or("untitled")
     }
 
+    /// Columns of the cell grid the editor works in — derived from the
+    /// pixel stage (A6). Pure derivation: the sanity clamp lives in
+    /// [`App::resize_stage`], the one production writer, so tests writing
+    /// `stage` directly get exactly the degenerate grid they asked for.
+    pub fn grid_cols(&self) -> u16 {
+        (self.stage.w / self.stage.cell_w.max(1.0)).floor().max(0.0) as u16
+    }
+
+    /// Rows of the cell grid — derived from the pixel stage (A6).
+    pub fn grid_rows(&self) -> u16 {
+        (self.stage.h / self.stage.cell_px.max(1.0))
+            .floor()
+            .max(0.0) as u16
+    }
+
+    /// Cell dimensions `(rows, cols)` of the FOCUSED editor pane.
+    ///
+    /// `grid_rows`/`grid_cols` describe the whole stage; under a split each
+    /// pane is only a fraction of it, so caret-follow that measured against the
+    /// stage let the caret leave a half-size pane long before `update_scroll`
+    /// reacted — the "split scroll does not follow the caret" bug, on both axes.
+    /// With no split the focused rect is FULL, so this is exactly the stage grid.
+    fn focused_pane_grid(&self) -> (usize, usize) {
+        let rect = self
+            .split
+            .rects()
+            .get(self.split.focus_index())
+            .copied()
+            .unwrap_or(crate::split::Rect::FULL);
+        let cols = ((self.stage.w * rect.w) / self.stage.cell_w.max(1.0))
+            .floor()
+            .max(1.0) as usize;
+        let rows = ((self.stage.h * rect.h) / self.stage.cell_px.max(1.0))
+            .floor()
+            .max(1.0) as usize;
+        (rows, cols)
+    }
+
+    /// The face resized the stage — the ONE production write of geometry.
+    /// Clamps here keep the derived grid sane (40..500 columns, 8..200
+    /// rows), matching what the old sync imposed on the cell viewport.
+    pub fn resize_stage(&mut self, w: f32, h: f32, cell_px: f32, cell_w: f32, dpr: f32) {
+        let cell_px = cell_px.max(12.0);
+        let cell_w = cell_w.max(6.0);
+        self.stage.cell_px = cell_px;
+        self.stage.cell_w = cell_w;
+        self.stage.dpr = dpr.max(1.0);
+        self.stage.w = w.max(80.0).max(40.0 * cell_w).min(500.0 * cell_w);
+        self.stage.h = h.max(80.0).max(8.0 * cell_px).min(200.0 * cell_px);
+    }
+
     pub fn push_undo(&mut self) {
         self.undo_stack.push(self.buffer.snapshot());
         self.modified = true;
-        if self.current_buffer < self.buffers.len() {
-            self.buffers[self.current_buffer].modified = true;
+        // Ask for one exact re-derive: the edit may have been a no-op (backspace
+        // at BOF, a paste of what was already there) that latched dirty without
+        // changing the text.
+        self.dirty_needs_recheck = true;
+        let idx = self.current_buffer();
+        if idx < self.tabs.buffers.len() {
+            self.tabs.buffers[idx].modified = true;
         }
         // didChange is sent by sync_lsp_document (post-edit); notifying here
         // would push the *pre-edit* snapshot since push_undo runs first.
@@ -2547,7 +2027,23 @@ impl App {
         let text = self.buffer.text();
         let hash = text_hash(&text);
         if path_changed || self.lsp_synced_hash != hash {
-            self.lsp.notify_change(&path_str, &text);
+            // Incremental when there is a synced baseline to diff against;
+            // full sync on path change / first sync / diff failure.
+            let cur_lines: Vec<String> = text.split('\n').map(String::from).collect();
+            let mut sent = false;
+            if !path_changed {
+                if let Some(prev) = self.lsp_synced_lines.as_deref() {
+                    if let Some(changes) = lsp_changes_since(prev, &cur_lines) {
+                        self.lsp
+                            .notify_change_incremental(&path_str, &text, &changes);
+                        sent = true;
+                    }
+                }
+            }
+            if !sent {
+                self.lsp.notify_change(&path_str, &text);
+            }
+            self.lsp_synced_lines = Some(cur_lines);
             self.lsp_synced_path = Some(path);
             self.lsp_synced_hash = hash;
         }
@@ -2555,9 +2051,16 @@ impl App {
     }
 
     pub fn undo(&mut self) {
-        let current = self.buffer.snapshot();
-        if let Some(snap) = self.undo_stack.undo(current) {
-            self.buffer.restore(&snap);
+        // The stack applies the delta's inverse straight to the buffer and
+        // restores the pre-edit cursor — no snapshot round trip.
+        if self.undo_stack.undo(&mut self.buffer) {
+            // Undo restores Buffer::cursor, but the GUI edit model keeps its
+            // own SelectionSet. Leaving it at the post-edit position makes the
+            // next paste/IME commit jump forward while the status bar reports
+            // the restored cursor. Until history snapshots selections too,
+            // collapse them to the restored primary caret.
+            self.sync_sel_to_cursor();
+            self.edit_run = EditRun::None;
             self.refresh_modified();
             self.message = String::from("UNDO");
         } else {
@@ -2566,9 +2069,9 @@ impl App {
     }
 
     pub fn redo(&mut self) {
-        let current = self.buffer.snapshot();
-        if let Some(snap) = self.undo_stack.redo(current) {
-            self.buffer.restore(&snap);
+        if self.undo_stack.redo(&mut self.buffer) {
+            self.sync_sel_to_cursor();
+            self.edit_run = EditRun::None;
             self.refresh_modified();
             self.message = String::from("REDO");
         } else {
@@ -2585,9 +2088,17 @@ impl App {
         self.content_width = 0;
         self.saved_hash = text_hash(&self.buffer.text());
         self.modified = false;
-        if self.current_buffer < self.buffers.len() {
-            self.buffers[self.current_buffer].modified = false;
-            self.buffers[self.current_buffer].saved_hash = self.saved_hash;
+        self.file_deleted = false;
+        self.dirty_needs_recheck = false;
+        // End the current insert/delete run at the save/load point. Otherwise a
+        // save mid-run left `edit_run` set, so the very next keystroke coalesced
+        // into the pre-save run and skipped `push_undo` — it never re-latched
+        // dirty, and the file looked saved while it was being edited.
+        self.edit_run = crate::app::EditRun::None;
+        let idx = self.current_buffer();
+        if idx < self.tabs.buffers.len() {
+            self.tabs.buffers[idx].modified = false;
+            self.tabs.buffers[idx].saved_hash = self.saved_hash;
         }
     }
 
@@ -2599,9 +2110,11 @@ impl App {
     /// make a document dirtier, so it never needs to ask.
     fn refresh_modified(&mut self) {
         self.dirty_checked_version = self.buffer.version();
+        self.dirty_needs_recheck = false;
         self.modified = text_hash(&self.buffer.text()) != self.saved_hash;
-        if self.current_buffer < self.buffers.len() {
-            self.buffers[self.current_buffer].modified = self.modified;
+        let idx = self.current_buffer();
+        if idx < self.tabs.buffers.len() {
+            self.tabs.buffers[idx].modified = self.modified;
         }
     }
 
@@ -2622,24 +2135,23 @@ impl App {
     /// since the last check, and only on the engine's ~1 s cadence. On a
     /// 60,000-line file that is one 0.24 ms hash per second of active editing.
     pub fn recheck_modified(&mut self) -> bool {
-        if !self.modified || self.buffer.version() == self.dirty_checked_version {
+        if !self.modified {
+            return false;
+        }
+        // Re-derive when a latch is pending (may be a no-op that never moved the
+        // version) OR the text has actually moved since the last check. An idle
+        // dirty buffer trips neither and is never re-hashed.
+        if !self.dirty_needs_recheck && self.buffer.version() == self.dirty_checked_version {
             return false;
         }
         self.refresh_modified();
         !self.modified // the only outcome this call can produce is a clear
     }
 
-
-
-
     pub fn store_yank(&mut self, text: String, linewise: bool) {
         self.registers.store(text.clone(), linewise);
         self.yank_buffer = Some(text);
     }
-
-
-
-
 
     pub fn request_references(&mut self) {
         self.sync_lsp_document();
@@ -2664,7 +2176,8 @@ impl App {
         let mut out = Vec::with_capacity(self.lsp.pending_references.len());
         for loc in &self.lsp.pending_references {
             let preview = if Some(&loc.path) == cur.as_ref() {
-                self.buffer.line(loc.row.min(self.buffer.line_count().saturating_sub(1)))
+                self.buffer
+                    .line(loc.row.min(self.buffer.line_count().saturating_sub(1)))
                     .trim()
                     .to_string()
             } else {
@@ -2673,7 +2186,10 @@ impl App {
                         .map(|s| s.lines().map(|l| l.to_string()).collect())
                         .unwrap_or_default()
                 });
-                lines.get(loc.row).map(|l| l.trim().to_string()).unwrap_or_default()
+                lines
+                    .get(loc.row)
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_default()
             };
             out.push((loc.clone(), preview));
         }
@@ -2740,6 +2256,15 @@ impl App {
         self.push_undo();
         let clean = text.replace('\r', "");
         self.buffer.insert_str(&clean);
+        // Paste moves `buffer.cursor` directly, bypassing the GUI edit model.
+        // Collapse `sel` to a caret there so it cannot stay pinned to the
+        // pre-paste position: a Korean IME commits a syllable-plus-space run
+        // ("요 ") through here between fast single-char inserts, and the next
+        // `gui_insert_text` reads `sel.head`. Left stale, that head sat before
+        // the pasted run, so the following syllable landed inside it —
+        // "안녕하세요 안녕" typed back as "안녕하세안녕…요". Same coherence
+        // contract the legacy dispatch path already enforces after typing.
+        self.sync_sel_to_cursor();
         self.update_scroll();
         self.sync_lsp_document();
         self.message = String::from("Pasted");
@@ -2892,17 +2417,12 @@ impl App {
         self.update_scroll();
     }
 
-
-
-
-
-
-
-
     pub fn goto_line(&mut self, line_1based: usize) {
         self.scroll_intent = ScrollIntent::Navigate;
         self.push_jump();
-        let target = line_1based.saturating_sub(1).min(self.buffer.line_count().saturating_sub(1));
+        let target = line_1based
+            .saturating_sub(1)
+            .min(self.buffer.line_count().saturating_sub(1));
         self.buffer.cursor.row = target;
         self.buffer.move_to_line_start();
         self.update_scroll();
@@ -2916,12 +2436,12 @@ impl App {
             return;
         }
         self.push_jump();
-        self.search_pattern = Some(word.clone());
-        self.search_forward = false;
+        self.search.pattern = Some(word.clone());
+        self.search.forward = false;
         self.recompute_search(&word, true);
-        if self.search_matches.len() > 1 {
+        if self.search.matches.len() > 1 {
             self.search_prev();
-        } else if self.search_matches.is_empty() {
+        } else if self.search.matches.is_empty() {
             self.message = format!("Pattern not found: {}", word);
         } else {
             self.message = format!("?{}/  1/1", word);
@@ -2932,7 +2452,7 @@ impl App {
         // Persist or discard undo history for every open file (undo_caching).
         self.save_state_to_tab();
         let caching = self.undo_caching;
-        for tab in &mut self.buffers {
+        for tab in &mut self.tabs.buffers {
             if tab.filename.is_some() {
                 let text = tab.buffer.text();
                 tab.undo_stack.finish(caching, &text);
@@ -2948,7 +2468,6 @@ impl App {
         self.running = false;
     }
 
-
     /// Return the keyboard to the editor and drop transient overlays.
     /// (Was vim's "leave whatever mode you are in"; there is one editor state
     /// now, so this is just the dismiss.)
@@ -2960,42 +2479,57 @@ impl App {
         self.message = String::new();
     }
 
-    pub fn clear_multi_cursors(&mut self) {
-        if self.multi.is_active() {
-            self.multi.clear();
-            self.message = "Multi-cursor cleared".into();
-        }
-    }
-
-    /// Ctrl+D — add next occurrence of word under primary cursor.
+    /// Ctrl+D — select the next occurrence of the word under the primary
+    /// head. The occurrence becomes a real selection in `sel`, so every
+    /// edit path (gui_insert_text / gui_delete_*) applies to all of them
+    /// at once — the parallel MultiCursor machinery is gone.
     pub fn multi_cursor_add_next(&mut self) {
-        let primary = self.buffer.cursor();
-        let Some((_, end, word)) = crate::multi_cursor::word_at(&self.buffer, primary) else {
+        // Word at the primary selection's START (not head): add() makes the
+        // newest occurrence the primary, and its head sits just PAST the
+        // word — word_at there sees the following space and gives up.
+        let primary = self.sel.primary();
+        let anchor = primary.start();
+        let Some((wstart, wend, word)) = crate::multi_cursor::word_at(&self.buffer, anchor) else {
             self.message = "No word under cursor".into();
             return;
         };
-        // Search after the last multi-cursor (or after primary word)
-        let from = self
-            .multi
-            .extras
-            .last()
-            .copied()
-            .map(|p| Position {
-                row: p.row,
-                col: p.col + word.chars().count(),
-            })
-            .unwrap_or(end);
-        if let Some(pos) = crate::multi_cursor::find_next(&self.buffer, &word, from) {
-            self.multi.add(primary, pos);
-            self.message = format!("cursors: {}", self.multi.count(primary));
-        } else {
-            self.message = "No more matches".into();
+        // A bare caret grows to its word first, so every cursor covers the
+        // same text (VS Code semantics — the first press selects, and the
+        // caret must not stay a zero-width twin).
+        if primary.is_empty() {
+            self.sel.set_primary(Selection::new(wstart, wend));
         }
+        // Search after the last non-empty selection's end.
+        let from = self
+            .sel
+            .all()
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.end())
+            .max()
+            .unwrap_or(wend);
+        let Some(pos) = crate::multi_cursor::find_next(&self.buffer, &word, from) else {
+            self.message = "No more matches".into();
+            return;
+        };
+        let word_len = word.chars().count();
+        let end_pos = Position {
+            row: pos.row,
+            col: pos.col + word_len,
+        };
+        self.sel.add(Selection::new(pos, end_pos));
+        self.message = format!("cursors: {}", self.sel.len());
     }
 
-    /// Ctrl+Alt+Down / `]c` — column cursor below primary.
+    /// Ctrl+Alt+Down — column caret below the lowest caret.
     pub fn multi_cursor_add_below(&mut self) {
-        let p = self.buffer.cursor();
+        let p = self
+            .sel
+            .all()
+            .iter()
+            .map(|s| s.head)
+            .max()
+            .unwrap_or_else(|| self.sel.primary().head);
         if p.row + 1 >= self.buffer.line_count() {
             self.message = "No line below".into();
             return;
@@ -3008,12 +2542,19 @@ impl App {
         if np.col > max {
             np.col = max;
         }
-        self.multi.add(p, np);
-        self.message = format!("cursors: {}", self.multi.count(p));
+        self.sel.add(Selection::caret(np));
+        self.message = format!("cursors: {}", self.sel.len());
     }
 
+    /// Ctrl+Alt+Up — column caret above the highest caret.
     pub fn multi_cursor_add_above(&mut self) {
-        let p = self.buffer.cursor();
+        let p = self
+            .sel
+            .all()
+            .iter()
+            .map(|s| s.head)
+            .min()
+            .unwrap_or_else(|| self.sel.primary().head);
         if p.row == 0 {
             self.message = "No line above".into();
             return;
@@ -3026,140 +2567,18 @@ impl App {
         if np.col > max {
             np.col = max;
         }
-        self.multi.add(p, np);
-        self.message = format!("cursors: {}", self.multi.count(p));
-    }
-
-    /// Apply insert-mode edit at every cursor (bottom→top so offsets stay valid).
-    pub fn multi_insert_char(&mut self, ch: char) {
-        if !self.multi.is_active() {
-            self.buffer.insert_char(ch);
-            return;
-        }
-        let primary = self.buffer.cursor();
-        let mut all = self.multi.all(primary);
-        all.sort_by(|a, b| b.row.cmp(&a.row).then(b.col.cmp(&a.col)));
-        let mut updated = Vec::with_capacity(all.len());
-        for pos in all {
-            self.buffer.cursor = pos;
-            self.buffer.insert_char(ch);
-            updated.push(self.buffer.cursor);
-        }
-        updated.sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
-        updated.dedup();
-        if let Some(first) = updated.first().copied() {
-            self.buffer.cursor = first;
-            self.multi.set_from_all(updated);
-        }
-        self.multi.clamp_all(&self.buffer);
-        self.modified = true;
-    }
-
-    pub fn multi_backspace(&mut self) {
-        if !self.multi.is_active() {
-            self.buffer.backspace();
-            return;
-        }
-        let primary = self.buffer.cursor();
-        let mut all = self.multi.all(primary);
-        all.sort_by(|a, b| b.row.cmp(&a.row).then(b.col.cmp(&a.col)));
-        let mut updated = Vec::with_capacity(all.len());
-        for pos in all {
-            self.buffer.cursor = pos;
-            self.buffer.backspace();
-            updated.push(self.buffer.cursor);
-        }
-        updated.sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
-        updated.dedup();
-        if let Some(first) = updated.first().copied() {
-            self.buffer.cursor = first;
-            self.multi.set_from_all(updated);
-        }
-        self.multi.clamp_all(&self.buffer);
-        self.modified = true;
-    }
-
-    pub fn multi_delete_char(&mut self) {
-        if !self.multi.is_active() {
-            self.buffer.delete_char_at_cursor();
-            return;
-        }
-        let primary = self.buffer.cursor();
-        let mut all = self.multi.all(primary);
-        all.sort_by(|a, b| b.row.cmp(&a.row).then(b.col.cmp(&a.col)));
-        let mut updated = Vec::with_capacity(all.len());
-        for pos in all {
-            self.buffer.cursor = pos;
-            self.buffer.delete_char_at_cursor();
-            updated.push(self.buffer.cursor);
-        }
-        updated.sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
-        updated.dedup();
-        if let Some(first) = updated.first().copied() {
-            self.buffer.cursor = first;
-            self.multi.set_from_all(updated);
-        }
-        self.multi.clamp_all(&self.buffer);
-        self.modified = true;
-    }
-
-    pub fn multi_move_each(&mut self, f: impl Fn(&mut crate::buffer::Buffer)) {
-        if !self.multi.is_active() {
-            f(&mut self.buffer);
-            return;
-        }
-        let primary = self.buffer.cursor();
-        let all = self.multi.all(primary);
-        let mut updated = Vec::with_capacity(all.len());
-        for pos in all {
-            self.buffer.cursor = pos;
-            f(&mut self.buffer);
-            updated.push(self.buffer.cursor);
-        }
-        updated.sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
-        updated.dedup();
-        if let Some(first) = updated.first().copied() {
-            self.buffer.cursor = first;
-            self.multi.set_from_all(updated);
-        }
-        self.multi.clamp_all(&self.buffer);
-    }
-
-    pub fn multi_newline(&mut self) {
-        if !self.multi.is_active() {
-            let row = self.buffer.cursor.row;
-            self.buffer.insert_newline_smart("    ");
-            if let Some(path) = self.filename.as_ref().map(|p| p.display().to_string()) {
-                // Newline splits after `row` → shift BPs on later lines +1
-                self.dap.shift_breakpoints(&path, row, 1);
-            }
-            return;
-        }
-        let primary = self.buffer.cursor();
-        let mut all = self.multi.all(primary);
-        all.sort_by(|a, b| b.row.cmp(&a.row).then(b.col.cmp(&a.col)));
-        let mut updated = Vec::with_capacity(all.len());
-        for pos in all {
-            self.buffer.cursor = pos;
-            self.buffer.insert_newline_smart("    ");
-            updated.push(self.buffer.cursor);
-        }
-        updated.sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
-        updated.dedup();
-        if let Some(first) = updated.first().copied() {
-            self.buffer.cursor = first;
-            self.multi.set_from_all(updated);
-        }
-        self.multi.clamp_all(&self.buffer);
-        self.modified = true;
+        self.sel.add(Selection::caret(np));
+        self.message = format!("cursors: {}", self.sel.len());
     }
 
     pub fn open_file_palette(&mut self) {
-        let root = self
-            .filename
-            .as_ref()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| env::current_dir().unwrap_or_default());
+        let root = if !self.explorer.cwd.as_os_str().is_empty()
+            && self.explorer.cwd != std::path::Path::new("/")
+        {
+            self.explorer.cwd.clone()
+        } else {
+            self.project_root()
+        };
         self.palette.open_files(&root);
         self.mode = Mode::Palette;
         self.message = String::from("Open file — type to filter, Enter open, Esc cancel");
@@ -3250,6 +2669,24 @@ impl App {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     }
 
+    /// Stable cwd policy shared by every terminal surface and every newly
+    /// created shell session. Prefer the folder the user opened, then the
+    /// discovered project root of the active file. A launched `.app` commonly
+    /// inherits `/`; never expose that process accident as a project cwd.
+    pub fn terminal_working_directory(&self) -> std::path::PathBuf {
+        let explorer = self.explorer.cwd.as_path();
+        if !explorer.as_os_str().is_empty() && explorer != std::path::Path::new("/") {
+            return explorer.to_path_buf();
+        }
+        let root = self.project_root();
+        if root != std::path::Path::new("/") {
+            return root;
+        }
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
     pub fn open_workspace_search(&mut self) {
         let root = self.project_root();
         self.workspace_search.open_at(root);
@@ -3328,7 +2765,11 @@ impl App {
     }
 
     pub fn open_peek_at(&mut self, path: &str, row: usize, col: usize) {
-        let fallback = if self.filename.as_ref().map(|p| p.display().to_string()).as_deref()
+        let fallback = if self
+            .filename
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .as_deref()
             == Some(path)
         {
             Some(self.buffer.text())
@@ -3361,220 +2802,6 @@ impl App {
 
     // ── Splits ──────────────────────────────────────────
 
-    pub fn split_vertical(&mut self) {
-        self.open_split_kind(crate::split::Axis::Col, "Vertical");
-    }
-
-    pub fn split_horizontal(&mut self) {
-        self.open_split_kind(crate::split::Axis::Row, "Horizontal");
-    }
-
-    fn open_split_kind(&mut self, axis: crate::split::Axis, label: &str) {
-        use crate::split::SplitAdd;
-        self.save_state_to_tab();
-        // Park first: `split_focused` copies the focused pane's slot into the
-        // new pane, and the focused slot is stale until parked (see S2).
-        self.park_focused_pane();
-        let r = self.split.split_focused(axis);
-        self.message = match r {
-            SplitAdd::Opened => {
-                format!("{label} split · Ctrl+W w cycle · Ctrl+W q close")
-            }
-            SplitAdd::Added => format!(
-                "Pane added ({}) · Ctrl+W w cycle · Ctrl+W q close",
-                self.split.pane_count()
-            ),
-            SplitAdd::Full => format!("Max {} panes", crate::split::MAX_PANES),
-        };
-    }
-
-    /// Vim `C-w q`: close the *focused* pane; neighbors survive (the split
-    /// collapses once one pane remains).
-    pub fn close_split(&mut self) {
-        if !self.split.is_split() {
-            return;
-        }
-        // If the focused pane shows a terminal tab, end the shell.
-        let buf_id = self.split.focused_pane().buffer;
-        if let Some(tab) = self.buffers.iter().find(|t| t.id == buf_id) {
-            if let Some(tid) = tab.terminal {
-                if let Some(mut t) = self.pane_terminals.remove(&tid) {
-                    t.shutdown();
-                }
-            }
-        }
-        let survivor = self.split.remove_focused();
-        if self.split.is_split() {
-            self.load_focused_pane();
-            self.message = format!("Pane closed · {} left", self.split.pane_count());
-            return;
-        }
-        // Collapsed to a single view: adopt the survivor snapshot.
-        if let Some(p) = survivor {
-            if let Some(idx) = self.buffer_index(p.buffer) {
-                if idx != self.current_buffer {
-                    self.save_state_to_tab();
-                    self.current_buffer = idx;
-                    self.restore_state_from_tab();
-                    self.lsp_restart_for_current();
-                    self.refresh_git();
-                }
-            }
-            let max_row = self.buffer.line_count().saturating_sub(1);
-            self.buffer.cursor.row = p.cursor.0.min(max_row);
-            self.buffer.cursor.col = p.cursor.1;
-            self.buffer.clamp_col();
-            self.scroll = p.scroll.min(max_row);
-            // No `update_scroll()` — same reason as `load_focused_pane`: it
-            // re-derives scroll from the caret and would throw away the
-            // survivor's viewport.
-        }
-        self.message = String::from("Pane closed");
-    }
-
-    /// Vim `C-w h/j/k/l`: directional focus along the split axis (steps one
-    /// pane per press; works for any pane count).
-    pub fn focus_dir(&mut self, dir: char) {
-        if !self.split.is_split() {
-            return;
-        }
-        // Genuinely directional now. This used to step +1/-1 along the single
-        // split axis and refuse the other two keys outright, because there was
-        // only ever one axis. With a tree the layout is two-dimensional, so
-        // pick the nearest pane that actually lies that way and overlaps on
-        // the perpendicular axis.
-        let rects = self.split.rects();
-        let here = self.split.focus_index();
-        let Some(from) = rects.get(here).copied() else { return };
-        let (cx, cy) = (from.x + from.w / 2.0, from.y + from.h / 2.0);
-        let mut best: Option<(f32, usize)> = None;
-        for (i, r) in rects.iter().enumerate() {
-            if i == here {
-                continue;
-            }
-            let (rx, ry) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-            let (ok, dist) = match dir {
-                'h' => (rx < cx, cx - rx),
-                'l' => (rx > cx, rx - cx),
-                'k' => (ry < cy, cy - ry),
-                'j' => (ry > cy, ry - cy),
-                _ => return,
-            };
-            // Must share some extent perpendicular to the move, or "left" can
-            // land on a pane that is really diagonally opposite.
-            let overlaps = match dir {
-                'h' | 'l' => r.y < from.y + from.h && from.y < r.y + r.h,
-                _ => r.x < from.x + from.w && from.x < r.x + r.w,
-            };
-            if ok && overlaps && best.map_or(true, |(d, _)| dist < d) {
-                best = Some((dist, i));
-            }
-        }
-        let Some((_, next)) = best else { return };
-        self.focus_pane_to(next);
-        self.message = format!("Pane {}", next + 1);
-    }
-
-    pub fn focus_other_pane(&mut self) {
-        if !self.split.is_split() {
-            return;
-        }
-        let n = self.split.panes.len();
-        let cur = self.split.focus_index();
-        self.focus_pane_to((cur + 1) % n);
-        self.message = format!("Pane {}", self.split.focus_index() + 1);
-    }
-
-    pub fn focus_pane(&mut self, idx: usize) {
-        if !self.split.is_split() {
-            return;
-        }
-        self.focus_pane_to(idx);
-    }
-
-    /// Park the focused pane's viewport into its slot.
-    ///
-    /// **The focused pane's slot is stale by design.** `App` holds the live
-    /// document, scroll, hscroll and cursor for whichever pane has focus; the
-    /// slots hold the *other* panes. Nothing needs syncing while the user
-    /// works, because there is only ever one authority at a time.
-    ///
-    /// This is not how it used to be. Both copies were meant to be live at
-    /// once, kept in step by four functions —`sync_split_from_active`,
-    /// `sync_focused_pane_viewport`, `sync_focused_pane_tab` and the write
-    /// buried in `update_scroll` — called from twenty-odd sites, each of which
-    /// had to remember. Every forgotten call left the two disagreeing, and the
-    /// symptom surfaced later and somewhere else: a pane that scrolled back to
-    /// a stale position, a cursor that jumped on focus change.
-    ///
-    /// The compositor already worked this way for the *document* — it reads
-    /// `current_buffer` for the focused pane and the slot only for the others
-    /// (`scene.rs`). This extends that rule to the rest of the pane state.
-    fn park_focused_pane(&mut self) {
-        // Unconditional, even with a single pane. There is always exactly one
-        // focused pane now, and the first split copies the focused pane's slot
-        // into the new one — so a slot that was never parked would hand the
-        // fresh pane an empty document and a cursor at the origin.
-        let cur = (self.buffer.cursor.row, self.buffer.cursor.col);
-        let id = self.current_buffer_id();
-        let p = self.split.focused_pane_mut();
-        p.buffer = id;
-        p.scroll = self.scroll;
-        p.hscroll = self.hscroll;
-        p.cursor = cur;
-    }
-
-    /// Load the focused pane's slot into `App`, the inverse of
-    /// [`App::park_focused_pane`].
-    fn load_focused_pane(&mut self) {
-        if !self.split.is_split() {
-            return;
-        }
-        let pane = self.split.focused_pane().clone();
-        if let Some(idx) = self.buffer_index(pane.buffer) {
-            if idx != self.current_buffer {
-                self.save_state_to_tab();
-                self.current_buffer = idx;
-                self.restore_state_from_tab();
-                self.lsp_restart_for_current();
-                self.refresh_git();
-            }
-        }
-        // Clamped — the buffer may have changed underneath this pane.
-        let max_row = self.buffer.line_count().saturating_sub(1);
-        self.buffer.cursor.row = pane.cursor.0.min(max_row);
-        self.buffer.cursor.col = pane.cursor.1;
-        self.buffer.clamp_col();
-        self.scroll = pane.scroll.min(max_row);
-        self.hscroll = if self.wrap_lines { 0 } else { pane.hscroll };
-        // NO `update_scroll()`. It re-derives the scroll from the CARET, so a
-        // pane scrolled away from its cursor — scrolled with the wheel, which
-        // does not move the caret — snapped straight back to the top the
-        // moment focus returned to it. That *was* the "pane scrolls back to a
-        // stale position" report. The pane's parked scroll is authoritative;
-        // the caret being off-view is exactly the state the user left.
-        //
-        // `Engine::goto_tab` learned the same lesson for tabs already.
-    }
-
-    /// Move focus to `idx`. **The only way focus changes.**
-    ///
-    /// Park then load, in that order, in one place. The whole point of S2 is
-    /// that this is the single moment where the two copies of a pane's
-    /// viewport have to agree, so it is the only code that has to be right.
-    pub fn focus_pane_to(&mut self, idx: usize) {
-        if !self.split.is_split() {
-            return;
-        }
-        let idx = idx.min(self.split.panes.len() - 1);
-        if idx == self.split.focus_index() {
-            return;
-        }
-        self.park_focused_pane();
-        self.split.set_focus(idx);
-        self.load_focused_pane();
-    }
-
     fn run_palette_command(&mut self, id: &str) {
         match id {
             "noop" => {}
@@ -3587,8 +2814,7 @@ impl App {
             }
             "quit" => {
                 if self.modified {
-                    self.message =
-                        String::from("Unsaved changes. Use Save or Force quit.");
+                    self.message = String::from("Unsaved changes. Use Save or Force quit.");
                 } else {
                     self.quit();
                 }
@@ -3701,13 +2927,21 @@ impl App {
         let cur = self.buffer.cursor.row;
         let mut rows: Vec<usize> = self.git.signs.keys().copied().collect();
         rows.sort_unstable();
-        let next = rows.iter().copied().find(|r| *r > cur).or_else(|| rows.first().copied());
+        let next = rows
+            .iter()
+            .copied()
+            .find(|r| *r > cur)
+            .or_else(|| rows.first().copied());
         if let Some(row) = next {
             self.push_jump();
             self.buffer.cursor.row = row;
             self.buffer.move_to_line_start();
             self.update_scroll();
-            let sign = self.git.sign_at(row).map(|s| format!("{s:?}")).unwrap_or_default();
+            let sign = self
+                .git
+                .sign_at(row)
+                .map(|s| format!("{s:?}"))
+                .unwrap_or_default();
             self.message = format!("Git change · L{} · {sign}", row + 1);
         }
     }
@@ -3733,7 +2967,11 @@ impl App {
             self.buffer.cursor.row = row;
             self.buffer.move_to_line_start();
             self.update_scroll();
-            let sign = self.git.sign_at(row).map(|s| format!("{s:?}")).unwrap_or_default();
+            let sign = self
+                .git
+                .sign_at(row)
+                .map(|s| format!("{s:?}"))
+                .unwrap_or_default();
             self.message = format!("Git change · L{} · {sign}", row + 1);
         }
     }
@@ -3750,8 +2988,7 @@ impl App {
                 let cursor = self.buffer.cursor();
                 let scroll = self.scroll;
                 self.buffer = Buffer::from_string(&content);
-                self.buffer.cursor.row =
-                    cursor.row.min(self.buffer.line_count().saturating_sub(1));
+                self.buffer.cursor.row = cursor.row.min(self.buffer.line_count().saturating_sub(1));
                 self.buffer.cursor.col = cursor.col;
                 self.buffer.clamp_col();
                 self.scroll = scroll.min(self.buffer.line_count().saturating_sub(1));
@@ -3761,8 +2998,7 @@ impl App {
                 self.undo_stack.push(self.buffer.snapshot());
                 if let Some(p) = self.filename.clone() {
                     let text = self.buffer.text();
-                    self.undo_stack
-                        .attach_file(&p, self.undo_caching, &text);
+                    self.undo_stack.attach_file(&p, self.undo_caching, &text);
                 }
                 self.rebuild_folds();
                 self.refresh_git();
@@ -3823,348 +3059,12 @@ impl App {
         };
     }
 
-
-    /// Switch to tab index if it exists (0-based).
-    pub fn goto_tab(&mut self, idx: usize) {
-        if idx < self.buffers.len() {
-            // Park the arrangement BEFORE the active document moves. Parking
-            // afterwards records the document being switched *to*, because
-            // `App` is the focused pane — the pane would come back showing the
-            // wrong file.
-            let leaving = self.active_layout.take();
-            if let Some(id) = leaving {
-                self.park_layout(id);
-            }
-            self.save_state_to_tab();
-            self.current_buffer = idx;
-            self.restore_state_from_tab();
-            // Leaving a folded layout clears the desk: the editor comes down
-            // to this one document and the arrangement waits in its tab. This
-            // is the visible half of folding — the fold itself is silent.
-            if leaving.is_some() {
-                let doc = self.current_buffer_id();
-                self.split.collapse_to(doc);
-            }
-            self.message = format!("Tab {}", idx + 1);
-        } else {
-            self.message = format!("No tab {}", idx + 1);
-        }
-    }
-
-    /// Write the on-screen arrangement back into its layout tab, so switching
-    /// away and back is lossless.
-    fn park_layout(&mut self, id: u64) {
-        self.park_focused_pane();
-        let (tree, panes) = self.split.snapshot();
-        if let Some(l) = self.layouts.iter_mut().find(|l| l.id == id) {
-            l.tree = tree;
-            l.panes = panes;
-        }
-    }
-
     // ---- layout tabs (J7) -----------------------------------------------
 
-    /// Fold the current arrangement into a layout tab.
-    ///
-    /// Deliberately quiet: the new layout tab becomes active, so **nothing on
-    /// screen changes**. The visible effect is the next tab switch, which
-    /// clears the editor down to that one document while the arrangement waits
-    /// in its tab. That is the point of the feature — clearing the desk in one
-    /// gesture without closing anything.
-    ///
-    /// Refuses when there is nothing to fold: a single pane is not an
-    /// arrangement, and folding it would just hide a file behind a name.
-    pub fn fold_layout(&mut self) -> bool {
-        if self.active_layout.is_some() || !self.split.is_split() {
-            return false;
-        }
-        self.park_focused_pane();
-        let (tree, panes) = self.split.snapshot();
-        let mut docs: Vec<BufferId> = Vec::new();
-        for p in &panes {
-            let b = p.buffer;
-            if b != BufferId::default() && !docs.contains(&b) {
-                docs.push(b);
-            }
-        }
-        if docs.is_empty() {
-            return false;
-        }
-        // Strip order: gather the folded documents into one contiguous run, so
-        // the grouped container draws around its members alone and never
-        // swallows an unrelated tab that happens to sit between two of them
-        // (folding panes on 1·2·3·5 while 4 sits in the strip used to pull 4
-        // inside the grey round). Panes address documents by id, so this
-        // changes only the order the strip draws, never what a pane shows.
-        self.gather_folded_docs(&docs);
-        let id = self.take_tab_id().0;
-        let name = crate::layout_tab::next_name(&self.layouts);
-        self.layouts.push(crate::layout_tab::LayoutTab {
-            id,
-            name,
-            tree,
-            panes,
-            docs,
-            style: crate::layout_tab::LayoutStyle::Grouped,
-        });
-        self.active_layout = Some(id);
-        self.message = "Folded into a layout tab · scroll down here to unfold".into();
-        true
-    }
-
-    /// Reorder `buffers` so the folded documents form one contiguous run,
-    /// sitting where the first of them already was. Called by [`App::fold_layout`].
-    ///
-    /// The grouped strip shape draws one rounded container from the first
-    /// member's left edge to the last member's right edge. If an unrelated tab
-    /// sits between two members, that container swallows it visually. Gathering
-    /// the members first makes the container exact. Panes address documents by
-    /// [`BufferId`], so this touches only the order the strip draws, never what
-    /// a pane shows.
-    fn gather_folded_docs(&mut self, docs: &[BufferId]) {
-        let n = self.buffers.len();
-        if docs.len() < 2 || n < 2 {
-            return;
-        }
-        let Some(anchor) = self.buffers.iter().position(|t| docs.contains(&t.id)) else {
-            return;
-        };
-        // Already one contiguous run — nothing to gather.
-        if anchor + docs.len() <= n
-            && self.buffers[anchor..anchor + docs.len()]
-                .iter()
-                .all(|t| docs.contains(&t.id))
-        {
-            return;
-        }
-        let active_id = self.current_buffer_id();
-        // `partition` keeps each side's relative order, so the members keep
-        // their existing strip order among themselves.
-        let (members, mut others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.buffers)
-            .into_iter()
-            .partition(|t| docs.contains(&t.id));
-        let at = anchor.min(others.len());
-        others.splice(at..at, members);
-        self.buffers = others;
-        // `current_buffer` is a position; repoint it at the active document.
-        // The live buffer/scroll/cursor in `App` are the active document and do
-        // not depend on its slot, so no save/restore round-trip is needed.
-        if let Some(i) = self.buffers.iter().position(|t| t.id == active_id) {
-            self.current_buffer = i;
-        }
-    }
-
-    /// Keep the active layout's membership honest after the focused pane's
-    /// document changed from `replacing` to `opened`.
-    ///
-    /// Opening a file replaces what the focused pane shows. If that pane was
-    /// part of a folded layout, the layout's member list has to follow: the
-    /// displaced document leaves, the opened one takes its place. Without this
-    /// the new file appears as a loose chip outside the group while the
-    /// displaced one lingers inside it, shown by no pane.
-    fn swap_focused_doc_in_active_layout(&mut self, replacing: BufferId, opened: BufferId) {
-        let Some(id) = self.active_layout else { return };
-        if replacing == opened {
-            return;
-        }
-        let Some(l) = self.layouts.iter_mut().find(|l| l.id == id) else {
-            return;
-        };
-        // Already a member (opening a document another pane of this layout
-        // shows) — membership is unchanged, only focus moves.
-        if l.docs.contains(&opened) {
-            return;
-        }
-        let Some(i) = l.docs.iter().position(|d| *d == replacing) else {
-            return;
-        };
-        l.docs[i] = opened;
-        // The new document sits at the END of `buffers` (just pushed), while
-        // the displaced one sat inside the group's run — so the members are no
-        // longer contiguous and the grey container would swallow whatever sits
-        // between them. Re-gather, exactly as `fold_layout` does.
-        let docs = l.docs.clone();
-        self.gather_folded_docs(&docs);
-    }
-
-    /// Unfold the **active** layout: its documents return to the strip as
-    /// individual tabs and the arrangement stays exactly as it is on screen.
-    ///
-    /// Bound to the active layout rather than the one under the pointer. A
-    /// layout that detonates because the pointer was passing over it on the
-    /// way to another tab is worse than no unfold at all.
-    pub fn unfold_layout(&mut self) -> bool {
-        let Some(id) = self.active_layout else {
-            return false;
-        };
-        let Some(i) = self.layouts.iter().position(|l| l.id == id) else {
-            self.active_layout = None;
-            return false;
-        };
-        self.layouts.remove(i);
-        self.active_layout = None;
-        self.message = "Layout unfolded".into();
-        true
-    }
-
-    /// Show a layout: install its tree, exactly as it was parked.
-    ///
-    /// `focus_doc` names the document the caller wants focused — a grouped
-    /// chip click carries the document it represents, so the arrangement comes
-    /// back with that pane in front rather than always the first one in the
-    /// tree. `None` keeps the tree's own order (unified chip, programmatic).
-    pub fn activate_layout(&mut self, id: u64, focus_doc: Option<BufferId>) -> bool {
-        let Some(l) = self.layouts.iter().find(|l| l.id == id) else {
-            return false;
-        };
-        let (tree, panes) = (l.tree.clone(), l.panes.clone());
-        self.park_focused_pane();
-        self.save_state_to_tab();
-        // Panes carry their own document and viewport, so restoring the tree
-        // and its panes restores the whole arrangement — including where each
-        // pane was scrolled to.
-        self.split.restore(tree, panes);
-        self.active_layout = Some(id);
-        if let Some(doc) = focus_doc {
-            if let Some(idx) = self.split.panes.iter().position(|p| p.buffer == doc) {
-                self.split.set_focus(idx);
-            }
-        }
-        self.load_focused_pane();
-        true
-    }
-
-    /// Switch a layout between its two strip shapes.
-    pub fn toggle_layout_style(&mut self, id: u64) -> bool {
-        if let Some(l) = self.layouts.iter_mut().find(|l| l.id == id) {
-            l.style = l.style.toggled();
-            return true;
-        }
-        false
-    }
-
-    /// Whether `doc` is folded into some layout — folded documents do not get
-    /// their own chip unless their layout is drawn grouped.
-    pub fn layout_holding(&self, doc: BufferId) -> Option<&crate::layout_tab::LayoutTab> {
-        self.layouts.iter().find(|l| l.holds(doc))
-    }
-
-    /// Remove a closed document from any layout's membership. Called by
-    /// `close_current_tab` / `close_tab_at` so the group never references a
-    /// document that no longer exists.
-    fn remove_doc_from_layouts(&mut self, doc: BufferId) {
-        for l in &mut self.layouts {
-            l.docs.retain(|d| *d != doc);
-        }
-    }
-
-    /// Next unused tab id. Monotonic — a closed tab's id never comes back, so
-    /// a stale reference can be detected rather than silently resolving.
-    fn take_tab_id(&mut self) -> BufferId {
-        let id = self.next_tab_id;
-        self.next_tab_id = self.next_tab_id.wrapping_add(1);
-        BufferId(id)
-    }
-
-    /// Position of `id` in `buffers`, or `None` if that document is closed.
-    pub fn buffer_index(&self, id: BufferId) -> Option<usize> {
-        self.buffers.iter().position(|t| t.id == id)
-    }
-
-    /// Stable handle for the active document.
-    pub fn current_buffer_id(&self) -> BufferId {
-        self.buffers
-            .get(self.current_buffer)
-            .map(|t| t.id)
-            .unwrap_or_default()
-    }
-
-    /// Which tab a pane is showing, falling back to the active one when its
-    /// document has been closed. Panes must always render *something*, so the
-    /// paint path wants this; anything asking "is this pane's document X?"
-    /// wants [`App::buffer_index`] and its honest `None`.
-    pub fn pane_tab(&self, pane: &crate::split::Pane) -> usize {
-        self.buffer_index(pane.buffer).unwrap_or(self.current_buffer)
-    }
-
-    /// Move the tab at `from` to sit at `to`, as a tab-bar drag does.
-    ///
-    /// Panes need no repair here: they hold a [`BufferId`], and reordering the
-    /// vector does not change any document's identity. Only `current_buffer` —
-    /// still a position — has to follow the move.
-    ///
-    /// Returns false when the move is a no-op or out of range, or when it
-    /// would break a folded layout's group — dragging an outside tab into a
-    /// group's run (or a member out of it) is refused, so the grouped strip
-    /// shape always wraps its members alone.
-    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
-        let n = self.buffers.len();
-        if from >= n || to >= n || from == to {
-            return false;
-        }
-        if !self.move_keeps_groups_contiguous(from, to) {
-            return false;
-        }
-        // The active tab's state lives in `App` until it is parked, so park it
-        // before the vector moves underneath it.
-        self.save_state_to_tab();
-        let tab = self.buffers.remove(from);
-        self.buffers.insert(to, tab);
-
-        // A move shifts exactly the slots between `from` and `to`.
-        let remap = |i: usize| -> usize {
-            if i == from {
-                to
-            } else if from < to && i > from && i <= to {
-                i - 1
-            } else if to < from && i >= to && i < from {
-                i + 1
-            } else {
-                i
-            }
-        };
-        self.current_buffer = remap(self.current_buffer);
-        self.restore_state_from_tab();
-        true
-    }
-
-    /// Would moving the tab at `from` to `to` leave every folded layout's
-    /// members as one contiguous run in the strip?
-    ///
-    /// A grouped layout paints one rounded container from its first member's
-    /// left edge to its last member's right edge; a non-member sitting inside
-    /// that span is swallowed visually. So a reorder is only legal when it
-    /// keeps each group's members adjacent — which also refuses dragging an
-    /// outside tab into a group and dragging a member out of one.
-    fn move_keeps_groups_contiguous(&self, from: usize, to: usize) -> bool {
-        if self.layouts.is_empty() {
-            return true;
-        }
-        let group_of = |t: &BufferTab| -> u64 {
-            self.layouts
-                .iter()
-                .find(|l| l.holds(t.id))
-                .map(|l| l.id)
-                .unwrap_or(0)
-        };
-        let mut order: Vec<u64> = self.buffers.iter().map(group_of).collect();
-        let g = order.remove(from);
-        order.insert(to, g);
-        // A group is contiguous iff, once seen, it never reappears after a
-        // different group has intervened.
-        let mut seen = std::collections::HashSet::new();
-        let mut prev: u64 = 0;
-        for &grp in &order {
-            if grp != 0 && grp != prev && seen.contains(&grp) {
-                return false;
-            }
-            if grp != 0 {
-                seen.insert(grp);
-            }
-            prev = grp;
-        }
-        true
-    }
+    // ── Stable-id tab operations ─────────────────────────────────────────
+    // The strip's slot numbers stop being buffer indices the moment a folded
+    // layout hides members (unified style) or gathers them into a run, so the
+    // face addresses tabs by `BufferTab::id` and the translation lives here.
 
     pub fn request_hover(&mut self) {
         self.sync_lsp_document();
@@ -4181,10 +3081,6 @@ impl App {
         let pos = self.buffer.cursor();
         self.select_word_gui(pos);
     }
-
-
-
-
 
     pub fn close_xlc(&mut self) {
         self.mode = Mode::Editor;
@@ -4203,94 +3099,100 @@ impl App {
 
     fn enter_search_dir(&mut self, forward: bool) {
         self.completions.deactivate();
-        self.search_forward = forward;
-        self.search_origin = Some(self.buffer.cursor());
-        self.search_scroll_origin = self.scroll;
-        self.search_pattern_backup = self.search_pattern.clone();
-        self.search_input.clear();
+        let (cursor, scroll) = (self.buffer.cursor(), self.scroll);
+        self.search.begin(forward, cursor, scroll);
         self.mode = Mode::Search;
         self.message = String::from("Find — Enter accept · Esc cancel · ↑↓ cycle");
     }
 
     /// Pattern currently used for highlighting (live input or committed).
     pub fn active_search_pattern(&self) -> Option<&str> {
-        if self.mode == Mode::Search {
-            if self.search_input.is_empty() {
-                None
-            } else {
-                Some(self.search_input.as_str())
-            }
-        } else {
-            self.search_pattern.as_deref()
-        }
+        self.search.active_pattern(self.mode == Mode::Search)
     }
-
 
     /// Commit live search input as the new pattern and leave Search mode.
     pub fn commit_search(&mut self) {
-        let pattern = self.search_input.clone();
+        let pattern = self.search.input.clone();
         if pattern.is_empty() {
             // Empty Enter reuses previous pattern (vim-like).
-            if let Some(prev) = self.search_pattern.clone() {
+            if let Some(prev) = self.search.pattern.clone() {
                 self.push_jump();
                 self.recompute_search(&prev, false);
-                if self.search_matches.is_empty() {
+                if self.search.matches.is_empty() {
                     self.message = format!("Pattern not found: {}", prev);
                 } else {
                     self.search_next();
                     self.message = format!(
                         "/{}/  {}/{}",
                         prev,
-                        self.search_current + 1,
-                        self.search_matches.len()
+                        self.search.current + 1,
+                        self.search.matches.len()
                     );
                 }
             } else {
                 self.message = String::from("No previous search pattern");
             }
         } else {
+            let accepted_cursor = self.buffer.cursor();
+            let accepted_match = self.search.current;
             self.push_jump();
-            self.search_pattern = Some(pattern.clone());
-            self.recompute_search(&pattern, true);
-            if self.search_matches.is_empty() {
+            self.search.pattern = Some(pattern.clone());
+            self.collect_matches(&pattern);
+            if self.search.matches.is_empty() {
                 self.message = format!("Pattern not found: {}", pattern);
             } else {
-                let slash = if self.search_forward { '/' } else { '?' };
+                // Live search already moved to the match the user selected.
+                // Accepting the field must keep that match, not recompute from
+                // the opening cursor and visibly jump back to match #1.
+                self.search.current = self
+                    .search
+                    .matches
+                    .get(accepted_match)
+                    .filter(|position| **position == accepted_cursor)
+                    .map(|_| accepted_match)
+                    .or_else(|| {
+                        self.search
+                            .matches
+                            .iter()
+                            .position(|position| *position == accepted_cursor)
+                    })
+                    .or_else(|| self.search.nearest(accepted_cursor, self.search.forward))
+                    .unwrap_or(0);
+                self.buffer.cursor = self.search.matches[self.search.current];
+                self.scroll_intent = ScrollIntent::Navigate;
+                self.update_scroll();
+                let slash = if self.search.forward { '/' } else { '?' };
                 self.message = format!(
                     "{}{}/  {}/{}",
                     slash,
                     pattern,
-                    self.search_current + 1,
-                    self.search_matches.len()
+                    self.search.current + 1,
+                    self.search.matches.len()
                 );
             }
         }
-        self.search_input.clear();
-        self.search_origin = None;
-        self.search_pattern_backup = None;
+        self.search.finish();
         self.mode = Mode::Editor;
     }
 
     /// Cancel search: restore cursor, restore previous committed pattern.
     pub fn cancel_search(&mut self) {
-        if let Some(origin) = self.search_origin.take() {
+        let (origin, scroll, restored) = self.search.cancel();
+        if let Some(origin) = origin {
             self.buffer.cursor = origin;
-            self.scroll = self.search_scroll_origin;
+            self.scroll = scroll;
         }
-        self.search_input.clear();
-        self.search_pattern = self.search_pattern_backup.take();
-        self.search_matches.clear();
-        self.search_current = 0;
-        if let Some(ref pat) = self.search_pattern.clone() {
+        if let Some(pat) = restored {
             // Rebuild match list for n/N without moving the restored cursor.
-            self.collect_matches(pat);
+            self.collect_matches(&pat);
             let cur = self.buffer.cursor();
             if let Some(idx) = self
-                .search_matches
+                .search
+                .matches
                 .iter()
                 .position(|p| p.row == cur.row && p.col == cur.col)
             {
-                self.search_current = idx;
+                self.search.current = idx;
             }
         }
         self.mode = Mode::Editor;
@@ -4299,35 +3201,76 @@ impl App {
 
     /// Update live query while typing in Search mode.
     pub fn update_search_input(&mut self) {
-        let pattern = self.search_input.clone();
+        let pattern = self.search.input.clone();
         if pattern.is_empty() {
-            self.search_matches.clear();
-            self.search_current = 0;
-            if let Some(origin) = self.search_origin {
+            self.search.matches.clear();
+            self.search.current = 0;
+            if let Some(origin) = self.search.origin {
                 self.buffer.cursor = origin;
-                self.scroll = self.search_scroll_origin;
+                self.scroll = self.search.scroll_origin;
             }
             self.message = String::from("Search — type to filter, Enter accept, Esc cancel");
             return;
         }
         self.recompute_search(&pattern, true);
-        if self.search_matches.is_empty() {
+        if self.search.matches.is_empty() {
             self.message = format!("/{}/  0 matches", pattern);
         } else {
             self.message = format!(
                 "/{}/  {}/{}",
                 pattern,
-                self.search_current + 1,
-                self.search_matches.len()
+                self.search.current + 1,
+                self.search.matches.len()
             );
         }
     }
 
+    /// Replace the GUI find field's full value. Native AppKit text input owns
+    /// IME composition and selection, so the face sends the resulting string
+    /// rather than pretending each physical key is a Unicode character.
+    pub fn set_search_input(&mut self, input: String) {
+        if self.mode != Mode::Search || self.search.input == input {
+            return;
+        }
+        self.search.input = input;
+        self.update_search_input();
+    }
+
+    /// A character typed into the find bar.
+    pub fn search_type(&mut self, c: char) {
+        self.search.input.push(c);
+        self.update_search_input();
+    }
+
+    /// Backspace in the find bar — an empty bar cancels (the gesture that
+    /// dismisses an empty find).
+    pub fn search_backspace(&mut self) {
+        if self.search.input.is_empty() {
+            self.cancel_search();
+        } else {
+            self.search.input.pop();
+            self.update_search_input();
+        }
+    }
+
+    /// ↑↓ in the find bar: cycle the live matches without committing.
+    pub fn search_cycle(&mut self, forward: bool) {
+        let Some(pos) = self.search.cycle(forward) else {
+            return;
+        };
+        self.buffer.cursor = pos;
+        self.scroll_intent = ScrollIntent::Navigate;
+        self.update_scroll();
+        self.message = format!(
+            "/{}/  {}/{}",
+            self.search.input,
+            self.search.current + 1,
+            self.search.matches.len()
+        );
+    }
 
     pub fn search_pattern_len_chars(&self) -> usize {
-        self.active_search_pattern()
-            .map(|p| p.chars().count())
-            .unwrap_or(0)
+        self.search.pattern_len_chars(self.mode == Mode::Search)
     }
 
     /// Matches on `row` plus the global index of the first one. `search_matches`
@@ -4336,16 +3279,11 @@ impl App {
     /// character of every visible line. The base index lets callers keep
     /// comparing against `search_current` (a global index).
     pub fn search_matches_row_slice(&self, row: usize) -> (usize, &[Position]) {
-        let lo = self.search_matches.partition_point(|p| p.row < row);
-        let hi = self.search_matches.partition_point(|p| p.row <= row);
-        (lo, &self.search_matches[lo..hi])
+        self.search.row_slice(row)
     }
 
     pub fn is_current_search_match(&self, row: usize, col: usize) -> bool {
-        self.search_matches
-            .get(self.search_current)
-            .map(|p| p.row == row && p.col == col)
-            .unwrap_or(false)
+        self.search.is_current_match(row, col)
     }
 
     /// Is there a selection to copy/delete — from either source?
@@ -4365,7 +3303,10 @@ impl App {
             (start, Position::new(end.row, col))
         } else if end.row > 0 {
             let prev = end.row - 1;
-            (start, Position::new(prev, self.buffer.line(prev).chars().count()))
+            (
+                start,
+                Position::new(prev, self.buffer.line(prev).chars().count()),
+            )
         } else {
             (start, end)
         }
@@ -4405,99 +3346,38 @@ impl App {
             .collect()
     }
 
-
-
-
     /// Recompute matches for `pattern`. If `jump`, move cursor to nearest match
     /// in the active search direction from origin/cursor.
     pub fn recompute_search(&mut self, pattern: &str, jump: bool) {
         self.collect_matches(pattern);
-        if self.search_matches.is_empty() {
-            self.search_current = 0;
+        let from = self.search.origin.unwrap_or_else(|| self.buffer.cursor());
+        let Some(idx) = self.search.nearest(from, self.search.forward) else {
+            self.search.current = 0;
             return;
-        }
-        let from = self
-            .search_origin
-            .unwrap_or_else(|| self.buffer.cursor());
-        let idx = if self.search_forward {
-            self.search_matches
-                .iter()
-                .position(|p| p.row > from.row || (p.row == from.row && p.col >= from.col))
-                .unwrap_or(0)
-        } else {
-            self.search_matches
-                .iter()
-                .rposition(|p| p.row < from.row || (p.row == from.row && p.col <= from.col))
-                .unwrap_or(self.search_matches.len() - 1)
         };
-        self.search_current = idx;
+        self.search.current = idx;
         if jump {
-            let pos = self.search_matches[idx];
+            let pos = self.search.matches[idx];
             self.buffer.cursor = pos;
+            self.scroll_intent = ScrollIntent::Navigate;
             self.update_scroll();
         }
     }
 
     fn collect_matches(&mut self, pattern: &str) {
-        self.search_matches.clear();
-        if pattern.is_empty() {
-            return;
-        }
-        let smart_case = !pattern.chars().any(|c| c.is_uppercase());
-        let pat_lower = if smart_case {
-            pattern.to_lowercase()
-        } else {
-            String::new()
-        };
-
-        for (row, line) in self.buffer.lines().iter().enumerate() {
-            if smart_case {
-                // Case-insensitive: walk char-by-char comparing lowered windows.
-                let line_chars: Vec<char> = line.chars().collect();
-                let pat_chars: Vec<char> = pat_lower.chars().collect();
-                if pat_chars.is_empty() {
-                    continue;
-                }
-                let plen = pat_chars.len();
-                if line_chars.len() < plen {
-                    continue;
-                }
-                let line_lower: Vec<char> = line_chars.iter().map(|c| c.to_lowercase().next().unwrap_or(*c)).collect();
-                let mut i = 0;
-                while i + plen <= line_lower.len() {
-                    if line_lower[i..i + plen] == pat_chars[..] {
-                        self.search_matches.push(Position::new(row, i));
-                        i += 1; // overlapping allowed (vim default for most)
-                    } else {
-                        i += 1;
-                    }
-                }
-            } else {
-                let mut search_from = 0usize;
-                while search_from <= line.len() {
-                    if let Some(byte_rel) = line[search_from..].find(pattern) {
-                        let byte_abs = search_from + byte_rel;
-                        let col = line[..byte_abs].chars().count();
-                        self.search_matches.push(Position::new(row, col));
-                        search_from = byte_abs + pattern.len().max(1);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
+        self.search.matches = crate::search::SearchState::collect(self.buffer.lines(), pattern);
     }
 
     /// Backward-compatible alias.
     pub fn perform_search(&mut self) {
-        if let Some(pat) = self.search_pattern.clone() {
+        if let Some(pat) = self.search.pattern.clone() {
             self.recompute_search(&pat, true);
         }
     }
 
     pub fn search_next(&mut self) {
         // `n` follows the direction used when the pattern was committed.
-        if self.search_forward {
+        if self.search.forward {
             self.search_step(true);
         } else {
             self.search_step(false);
@@ -4506,7 +3386,7 @@ impl App {
 
     pub fn search_prev(&mut self) {
         // `N` is opposite of search direction.
-        if self.search_forward {
+        if self.search.forward {
             self.search_step(false);
         } else {
             self.search_step(true);
@@ -4514,55 +3394,45 @@ impl App {
     }
 
     fn search_step(&mut self, forward: bool) {
-        if let Some(pat) = self.search_pattern.clone() {
-            let cur = self.buffer.cursor();
-            self.collect_matches(&pat);
-            if self.search_matches.is_empty() {
-                self.message = format!("Pattern not found: {}", pat);
-                return;
-            }
-            let idx = if forward {
-                self.search_matches
-                    .iter()
-                    .position(|p| p.row > cur.row || (p.row == cur.row && p.col > cur.col))
-                    .unwrap_or(0)
-            } else {
-                self.search_matches
-                    .iter()
-                    .rposition(|p| p.row < cur.row || (p.row == cur.row && p.col < cur.col))
-                    .unwrap_or(self.search_matches.len() - 1)
-            };
-            self.search_current = idx;
-            let pos = self.search_matches[idx];
-            let wrapped = if forward {
-                idx == 0 && (pos.row < cur.row || (pos.row == cur.row && pos.col <= cur.col))
-            } else {
-                idx == self.search_matches.len() - 1
-                    && (pos.row > cur.row || (pos.row == cur.row && pos.col >= cur.col))
-            };
-            self.buffer.cursor = pos;
-            self.update_scroll();
-            let slash = if self.search_forward { '/' } else { '?' };
-            self.message = if wrapped {
-                if forward {
-                    format!(
-                        "search hit BOTTOM, continuing at TOP  {}/{}",
-                        idx + 1,
-                        self.search_matches.len()
-                    )
-                } else {
-                    format!(
-                        "search hit TOP, continuing at BOTTOM  {}/{}",
-                        idx + 1,
-                        self.search_matches.len()
-                    )
-                }
-            } else {
-                format!("{}{}/  {}/{}", slash, pat, idx + 1, self.search_matches.len())
-            };
-        } else {
+        let Some(pat) = self.search.pattern.clone() else {
             self.message = String::from("No search pattern — press / or ? first");
-        }
+            return;
+        };
+        let cur = self.buffer.cursor();
+        self.collect_matches(&pat);
+        let Some((idx, wrapped)) = self.search.step(cur, forward) else {
+            self.message = format!("Pattern not found: {}", pat);
+            return;
+        };
+        self.search.current = idx;
+        let pos = self.search.matches[idx];
+        self.buffer.cursor = pos;
+        self.scroll_intent = ScrollIntent::Navigate;
+        self.update_scroll();
+        let slash = if self.search.forward { '/' } else { '?' };
+        self.message = if wrapped {
+            if forward {
+                format!(
+                    "search hit BOTTOM, continuing at TOP  {}/{}",
+                    idx + 1,
+                    self.search.matches.len()
+                )
+            } else {
+                format!(
+                    "search hit TOP, continuing at BOTTOM  {}/{}",
+                    idx + 1,
+                    self.search.matches.len()
+                )
+            }
+        } else {
+            format!(
+                "{}{}/  {}/{}",
+                slash,
+                pat,
+                idx + 1,
+                self.search.matches.len()
+            )
+        };
     }
 
     /// Search for the word under the cursor (`*` in vim).
@@ -4573,13 +3443,13 @@ impl App {
             return;
         }
         self.push_jump();
-        self.search_pattern = Some(word.clone());
-        self.search_forward = true;
+        self.search.pattern = Some(word.clone());
+        self.search.forward = true;
         self.recompute_search(&word, true);
         // Advance to next occurrence after current position
-        if self.search_matches.len() > 1 {
+        if self.search.matches.len() > 1 {
             self.search_next();
-        } else if self.search_matches.is_empty() {
+        } else if self.search.matches.is_empty() {
             self.message = format!("Pattern not found: {}", word);
         } else {
             self.message = format!("/{}/  1/1", word);
@@ -4617,8 +3487,9 @@ impl App {
             match atomic_write_file(&path, self.buffer.text()) {
                 Ok(_) => {
                     self.mark_clean();
-                    if self.current_buffer < self.buffers.len() {
-                        self.buffers[self.current_buffer].filename = Some(path.clone());
+                    let idx = self.current_buffer();
+                    if idx < self.tabs.buffers.len() {
+                        self.tabs.buffers[idx].filename = Some(path.clone());
                     }
                     self.record_mtime();
                     self.refresh_git();
@@ -4660,7 +3531,7 @@ impl App {
         if delta_lines == 0.0 || !delta_lines.is_finite() {
             return;
         }
-        let visible = self.viewport.height.max(1) as usize;
+        let visible = self.grid_rows().max(1) as usize;
         let total = self.buffer.line_count();
         let max_scroll = total.saturating_sub(visible.min(total));
 
@@ -4690,7 +3561,7 @@ impl App {
         if delta == 0 {
             return;
         }
-        let visible = self.viewport.height.max(1) as usize;
+        let visible = self.grid_rows().max(1) as usize;
         let total = self.buffer.line_count();
         let max_scroll = total.saturating_sub(visible.min(total));
         if delta < 0 {
@@ -4703,7 +3574,7 @@ impl App {
 
     /// Absolute first-visible line (native NSScrollView faces). Clears residual.
     pub fn scroll_to_line(&mut self, line: usize) {
-        let visible = self.viewport.height.max(1) as usize;
+        let visible = self.grid_rows().max(1) as usize;
         let total = self.buffer.line_count();
         let max_scroll = total.saturating_sub(visible.min(total));
         self.scroll = line.min(max_scroll);
@@ -4725,7 +3596,7 @@ impl App {
     /// forever — nothing anywhere knew where the content ended. One extra
     /// column of slack so the last glyph is not flush against the edge.
     pub fn max_hscroll(&mut self) -> usize {
-        let width = usize::from(self.viewport.width.max(1));
+        let width = usize::from(self.grid_cols().max(1));
         self.content_cols().saturating_sub(width).saturating_add(1)
     }
 
@@ -4733,7 +3604,7 @@ impl App {
     /// defines it: raised by whatever is on screen now, never lowered.
     pub fn content_cols(&mut self) -> usize {
         let first = self.scroll;
-        let last = (first + usize::from(self.viewport.height.max(1))).min(self.buffer.line_count());
+        let last = (first + usize::from(self.grid_rows().max(1))).min(self.buffer.line_count());
         let tab = self.tab_width.max(1);
         let visible = (first..last)
             .map(|row| display_width(self.buffer.line(row), tab))
@@ -4752,13 +3623,13 @@ impl App {
         // Caret-driven scroll snap drops fractional offset (intentional).
         self.scroll_frac = 0.0;
         let cursor_row = self.buffer.cursor.row;
-        let visible_height = self.viewport.height.max(1) as usize;
+        // Follow the FOCUSED pane, not the whole stage — under a split the pane
+        // is a fraction of the grid, and measuring the stage let the caret
+        // leave a half-size pane before this reacted (split H/V scroll follow).
+        let (pane_rows, pane_cols) = self.focused_pane_grid();
+        let visible_height = pane_rows.max(1);
         // Soft-wrap-aware: viewport width minus gutter (~5 cols).
-        let text_width = self
-            .viewport
-            .width
-            .saturating_sub(5)
-            .max(1) as usize;
+        let text_width = pane_cols.saturating_sub(5).max(1);
 
         let wrap = self.wrap_lines;
         let wrap_rows = |row: usize| -> usize {
@@ -4934,7 +3805,11 @@ impl App {
 
             if start.row == end.row {
                 let line = self.buffer.line(start.row);
-                let deleted: String = line.chars().skip(start.col).take(end.col.saturating_sub(start.col) + 1).collect();
+                let deleted: String = line
+                    .chars()
+                    .skip(start.col)
+                    .take(end.col.saturating_sub(start.col) + 1)
+                    .collect();
                 let prefix: String = line.chars().take(start.col).collect();
                 let suffix: String = line.chars().skip(end.col + 1).collect();
                 self.buffer.set_line(start.row, prefix + &suffix);
@@ -4943,7 +3818,11 @@ impl App {
                 let first_chars: Vec<char> = self.buffer.line(start.row).chars().collect();
                 let last_chars: Vec<char> = self.buffer.line(end.row).chars().collect();
 
-                deleted_text.push_str(&first_chars[start.col.min(first_chars.len())..].iter().collect::<String>());
+                deleted_text.push_str(
+                    &first_chars[start.col.min(first_chars.len())..]
+                        .iter()
+                        .collect::<String>(),
+                );
                 for row in (start.row + 1)..end.row {
                     deleted_text.push('\n');
                     deleted_text.push_str(self.buffer.line(row));
@@ -4981,7 +3860,6 @@ impl App {
     /// Live-refresh: if the open file changed on disk, reload the buffer.
     /// Preserves cursor/scroll as much as possible; rebuilds folds / git / LSP.
     pub fn check_external_change(&mut self) {
-        // Also refresh other open tabs' mtimes lightly — only reload the *active* buffer.
         self.check_active_file_external();
         if self.debug && !self.lsp.diagnostics.is_empty() {
             let rows: Vec<String> = self
@@ -4999,9 +3877,40 @@ impl App {
             return;
         };
         let path_s = path.display().to_string();
-        let Ok(meta) = std::fs::metadata(&path) else {
-            return;
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => {
+                // A clean vanished file closes after two consecutive misses.
+                // A dirty one survives with a Save-to-restore affordance.
+                if self.file_mtime.is_some() {
+                    if !self.file_deleted {
+                        // Atomic saves briefly exchange directory entries; a
+                        // single metadata miss must not eject a healthy tab.
+                        self.file_deleted = true;
+                        self.message = format!("⚠ Missing on disk — {path_s}");
+                        return;
+                    }
+                    if !self.modified {
+                        let id = self.current_buffer_id();
+                        self.close_tab_id(id);
+                        self.message = format!("Closed deleted file — {path_s}");
+                        return;
+                    }
+                    self.dirty_needs_recheck = false;
+                    let idx = self.current_buffer();
+                    if idx < self.tabs.buffers.len() {
+                        self.tabs.buffers[idx].modified = true;
+                    }
+                    self.message = format!("⚠ Deleted on disk · Save to restore — {path_s}");
+                }
+                return;
+            }
         };
+        // The path exists again (re-created, or was never gone) — clear the flag.
+        if self.file_deleted {
+            self.file_deleted = false;
+            self.message = format!("File back on disk — {path_s}");
+        }
         let Ok(mtime) = meta.modified() else {
             return;
         };
@@ -5047,126 +3956,6 @@ impl App {
         };
     }
 
-    pub fn save_state_to_tab(&mut self) {
-        if self.current_buffer < self.buffers.len() {
-            let tab = &mut self.buffers[self.current_buffer];
-            tab.buffer = self.buffer.clone();
-            tab.filename = self.filename.clone();
-            tab.scroll = self.scroll;
-            tab.modified = self.modified;
-            tab.saved_hash = self.saved_hash;
-            tab.undo_stack = self.undo_stack.clone();
-            tab.file_mtime = self.file_mtime;
-        }
-    }
-
-    pub fn restore_state_from_tab(&mut self) {
-        self.scroll_intent = ScrollIntent::Restore;
-        if let Some(tab) = self.buffers.get(self.current_buffer).cloned() {
-            self.buffer = tab.buffer;
-            self.filename = tab.filename;
-            self.scroll = tab.scroll;
-            self.modified = tab.modified;
-            self.saved_hash = tab.saved_hash;
-            self.content_width = 0; // different document, different extent
-            self.undo_stack = tab.undo_stack;
-            self.file_mtime = tab.file_mtime;
-            // GUI selection is ephemeral across tabs (interim): collapse to a
-            // caret at the restored cursor. The cursor itself rides in the
-            // buffer clone, so it is already correct.
-            self.sel = crate::selection::SelectionSet::single(
-                crate::selection::Selection::caret(self.buffer.cursor()),
-            );
-            self.edit_run = EditRun::None;
-        }
-    }
-
-    pub fn open_new_tab(&mut self, path: &str) {
-        // The focused pane's document BEFORE this open. Opening replaces what
-        // the focused pane shows (S2: `App` IS the focused pane), so an active
-        // layout has to swap this document out of its membership for the one
-        // being opened — else the new file lands as a loose chip outside the
-        // group while the displaced one lingers inside it, shown by no pane.
-        let replacing = self.current_buffer_id();
-        self.save_state_to_tab();
-
-        let pathbuf = PathBuf::from(path);
-        let abs_path = if pathbuf.is_absolute() {
-            pathbuf
-        } else {
-            env::current_dir().unwrap_or_default().join(&pathbuf)
-        };
-
-        for (i, tab) in self.buffers.iter().enumerate() {
-            if tab.filename.as_ref() == Some(&abs_path) {
-                self.current_buffer = i;
-                self.restore_state_from_tab();
-                self.swap_focused_doc_in_active_layout(replacing, self.current_buffer_id());
-                self.lsp_restart_for_current();
-                self.refresh_git();
-                self.message = format!("Switched to: {}", abs_path.display());
-                return;
-            }
-        }
-
-        let content = fs::read_to_string(&abs_path).unwrap_or_default();
-        let buffer = Buffer::from_string(&content);
-        let mtime = std::fs::metadata(&abs_path).ok().and_then(|m| m.modified().ok());
-        let mut undo = UndoStack::new();
-        undo.push(buffer.snapshot());
-        undo.attach_file(&abs_path, self.undo_caching, &content);
-
-        let tab_id = self.take_tab_id();
-        self.buffers.push(BufferTab {
-            id: tab_id,
-            buffer,
-            filename: Some(abs_path.clone()),
-            scroll: 0,
-            modified: false,
-            saved_hash: text_hash(&content),
-            undo_stack: undo,
-            file_mtime: mtime,
-            terminal: None,
-        });
-        self.current_buffer = self.buffers.len() - 1;
-        self.restore_state_from_tab();
-        self.swap_focused_doc_in_active_layout(replacing, self.current_buffer_id());
-        let text = self.buffer.text();
-        self.lsp
-            .auto_start_with_text(&abs_path.display().to_string(), Some(&text));
-        self.lsp_synced_path = Some(abs_path.clone());
-        self.lsp_synced_hash = text_hash(&text);
-        self.refresh_git();
-        self.message = format!("Opened: {}", abs_path.display());
-        self.fire_hook(crate::hooks::HookEvent::Open);
-    }
-
-    pub fn next_tab(&mut self) {
-        if self.buffers.len() < 2 {
-            return;
-        }
-        self.save_state_to_tab();
-        self.current_buffer = (self.current_buffer + 1) % self.buffers.len();
-        self.restore_state_from_tab();
-        self.lsp_restart_for_current();
-        self.refresh_git();
-    }
-
-    pub fn prev_tab(&mut self) {
-        if self.buffers.len() < 2 {
-            return;
-        }
-        self.save_state_to_tab();
-        if self.current_buffer == 0 {
-            self.current_buffer = self.buffers.len() - 1;
-        } else {
-            self.current_buffer -= 1;
-        }
-        self.restore_state_from_tab();
-        self.lsp_restart_for_current();
-        self.refresh_git();
-    }
-
     pub fn lsp_restart_for_current(&mut self) {
         if let Some(ref path) = self.filename {
             let p = path.display().to_string();
@@ -5178,7 +3967,7 @@ impl App {
         } else {
             // No file — drop per-document state so stale diagnostics from the
             // previous buffer don't paint the empty one.
-            self.lsp.diagnostics.clear();
+            self.lsp.clear_diagnostics();
             self.lsp.semantic_tokens.clear();
             self.lsp.inlay_hints.clear();
         }
@@ -5300,7 +4089,7 @@ impl App {
                     continue;
                 }
                 // Update open tab if present
-                for tab in &mut self.buffers {
+                for tab in &mut self.tabs.buffers {
                     if tab
                         .filename
                         .as_ref()
@@ -5364,119 +4153,6 @@ impl App {
         }
         self.message = String::from("Code action had no edit/command");
     }
-
-    /// Close the tab at `idx`, leaving the editor showing whatever it was
-    /// showing — unless that is the document being closed.
-    ///
-    /// The tab strip's close button used to route through
-    /// `goto_tab(idx); close_current_tab()`, which had to make the doomed tab
-    /// active first and then put the editor back afterwards. Every attempt at
-    /// "putting it back" was a guess, because by then the information had been
-    /// overwritten. Not moving in the first place is the fix.
-    pub fn close_tab_at(&mut self, idx: usize) {
-        let n = self.buffers.len();
-        if idx >= n {
-            return;
-        }
-        if idx == self.current_buffer || n <= 1 {
-            self.close_current_tab();
-            return;
-        }
-        // Same bookkeeping `close_current_tab` does for the tab it drops.
-        if let Some(tab) = self.buffers.get_mut(idx) {
-            if tab.filename.is_some() {
-                let text = tab.buffer.text();
-                tab.undo_stack.finish(self.undo_caching, &text);
-            }
-        }
-        // If the closing tab is a terminal, end its shell.
-        if let Some(tab) = self.buffers.get(idx) {
-            if let Some(tid) = tab.terminal {
-                if let Some(mut t) = self.pane_terminals.remove(&tid) {
-                    t.shutdown();
-                }
-            }
-        }
-        let closed = self.buffers[idx].id;
-        // Drop the closed document from any layout's membership.
-        self.remove_doc_from_layouts(closed);
-        self.buffers.remove(idx);
-        if self.current_buffer > idx {
-            self.current_buffer -= 1;
-        }
-        // No `restore_state_from_tab`: the active document did not change, so
-        // there is nothing to reload and nothing to disturb.
-        let adopt = self.current_buffer_id();
-        self.split.repoint(closed, adopt);
-        self.message = String::from("Buffer closed");
-    }
-
-    pub fn close_current_tab(&mut self) {
-        // Persist or discard the closing buffer's history (undo_caching).
-        self.save_state_to_tab();
-        if let Some(tab) = self.buffers.get_mut(self.current_buffer) {
-            if tab.filename.is_some() {
-                let text = tab.buffer.text();
-                tab.undo_stack.finish(self.undo_caching, &text);
-            }
-        }
-        let closed = self.current_buffer_id();
-        // If the closing tab is a terminal, end its shell.
-        if let Some(tab) = self.buffers.get(self.current_buffer) {
-            if let Some(tid) = tab.terminal {
-                if let Some(mut t) = self.pane_terminals.remove(&tid) {
-                    t.shutdown();
-                }
-            }
-        }
-        // Drop the closed document from any layout's membership.
-        self.remove_doc_from_layouts(closed);
-        if self.buffers.len() <= 1 {
-            self.lsp.shutdown();
-            self.buffer = Buffer::new();
-            self.filename = None;
-            self.scroll = 0;
-            self.modified = false;
-            self.saved_hash = EMPTY_TEXT_HASH;
-            self.undo_stack = UndoStack::new();
-            self.undo_stack.push(self.buffer.snapshot());
-            self.file_mtime = None;
-            let fresh_id = self.take_tab_id();
-            self.buffers[0] = BufferTab {
-                id: fresh_id,
-                buffer: self.buffer.clone(),
-                filename: None,
-                scroll: 0,
-                modified: false,
-                saved_hash: EMPTY_TEXT_HASH,
-                undo_stack: self.undo_stack.clone(),
-                file_mtime: None,
-                terminal: None,
-            };
-            // The slot survives but the document in it does not, so the id
-            // changed and any pane still naming the old one has to follow.
-            self.split.repoint(closed, fresh_id);
-            return;
-        }
-
-        self.buffers.remove(self.current_buffer);
-        if self.current_buffer >= self.buffers.len() {
-            self.current_buffer = self.buffers.len() - 1;
-        }
-        self.restore_state_from_tab();
-        // Panes showing the closed document adopt the newly active one. Every
-        // other pane is untouched — that is the point of ids. With indices,
-        // closing tab 0 of four shifted all three of the others by one and
-        // nothing here noticed.
-        let adopt = self.current_buffer_id();
-        self.split.repoint(closed, adopt);
-        // Re-point the LSP at the newly current tab (same language → reuse the
-        // running server; different → restart). The old unconditional shutdown
-        // left the surviving tabs with no LSP at all.
-        self.lsp_restart_for_current();
-        self.refresh_git();
-        self.message = String::from("Buffer closed");
-    }
 }
 
 pub use crate::fs_atomic::atomic_write_file;
@@ -5503,21 +4179,18 @@ mod tests {
     fn app_with(text: &str) -> App {
         let mut app = App::new();
         app.buffer = Buffer::from_string(text);
-        app.viewport = EditorViewport {
-            x: 0,
-            y: 0,
-            width: 80,
-            height: 24,
-            text_x: 5,
-            text_y: 0,
-        };
+        app.stage = Stage {
+            w: 720.0,
+            h: 432.0,
+            ..Stage::default()
+        }; // 80×24 cells
         app
     }
 
     #[test]
     fn a_rename_repoints_the_open_tab() {
         let mut app = App::new();
-        app.buffers[0].filename = Some(PathBuf::from("/p/src/a.rs"));
+        app.tabs.buffers[0].filename = Some(PathBuf::from("/p/src/a.rs"));
         app.filename = Some(PathBuf::from("/p/src/a.rs"));
         let n = app.path_moved(Path::new("/p/src/a.rs"), Path::new("/p/src/b.rs"));
         assert_eq!(n, 1);
@@ -5533,23 +4206,29 @@ mod tests {
         // current tab before pushing the new one.
         app.filename = Some(PathBuf::from("/p/old/deep/a.rs"));
         app.open_blank_tab();
-        app.buffers[1].filename = Some(PathBuf::from("/p/old/b.rs"));
+        app.tabs.buffers[1].filename = Some(PathBuf::from("/p/old/b.rs"));
         app.filename = Some(PathBuf::from("/p/old/deep/a.rs"));
         let n = app.path_moved(Path::new("/p/old"), Path::new("/p/new"));
         assert_eq!(n, 2);
         assert_eq!(
-            app.buffers[0].filename.as_deref(),
+            app.tabs.buffers[0].filename.as_deref(),
             Some(Path::new("/p/new/deep/a.rs"))
         );
-        assert_eq!(app.buffers[1].filename.as_deref(), Some(Path::new("/p/new/b.rs")));
+        assert_eq!(
+            app.tabs.buffers[1].filename.as_deref(),
+            Some(Path::new("/p/new/b.rs"))
+        );
     }
 
     #[test]
     fn an_unrelated_path_is_left_alone() {
         let mut app = App::new();
-        app.buffers[0].filename = Some(PathBuf::from("/other/a.rs"));
+        app.tabs.buffers[0].filename = Some(PathBuf::from("/other/a.rs"));
         assert_eq!(app.path_moved(Path::new("/p/old"), Path::new("/p/new")), 0);
-        assert_eq!(app.buffers[0].filename.as_deref(), Some(Path::new("/other/a.rs")));
+        assert_eq!(
+            app.tabs.buffers[0].filename.as_deref(),
+            Some(Path::new("/other/a.rs"))
+        );
     }
 
     #[test]
@@ -5558,8 +4237,16 @@ mod tests {
         app.filename = Some(PathBuf::from("/tmp/refs_test.rs"));
         // Simulate the async LSP answer landing.
         app.lsp.pending_references = vec![
-            crate::lsp::Location { path: "/tmp/refs_test.rs".into(), row: 1, col: 12 },
-            crate::lsp::Location { path: "/tmp/refs_test.rs".into(), row: 2, col: 4 },
+            crate::lsp::Location {
+                path: "/tmp/refs_test.rs".into(),
+                row: 1,
+                col: 12,
+            },
+            crate::lsp::Location {
+                path: "/tmp/refs_test.rs".into(),
+                row: 2,
+                col: 4,
+            },
         ];
         app.lsp.references_ready = true;
 
@@ -5612,13 +4299,42 @@ mod tests {
         let leftovers: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .contains("suisei-tmp")
-            })
+            .filter(|e| e.file_name().to_string_lossy().contains("suisei-tmp"))
             .collect();
         assert!(leftovers.is_empty(), "tmp files leaked: {leftovers:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ime_commit_text_survives_buffer_and_atomic_save() {
+        let dir = std::env::temp_dir().join(format!(
+            "suisei-ime-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("ime.txt");
+
+        // EditorCanvasView resolves a visible IME composition through the
+        // engine paste-text entry point immediately before Save. Exercise the
+        // same Core path with precomposed Hangul, decomposed jamo, Japanese,
+        // and a multi-scalar emoji so a future buffer migration cannot regress
+        // to byte/scalar truncation.
+        let committed = "한글 한글 日本語 👨‍👩‍👧‍👦";
+        let mut app = app_with("prefix ");
+        app.buffer.move_to_line_end();
+        app.paste_text_at_cursor(committed);
+        app.filename = Some(path.clone());
+        app.save_file();
+
+        let expected = format!("prefix {committed}");
+        assert_eq!(app.buffer.text(), expected);
+        assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+        assert!(!app.modified);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -5685,7 +4401,9 @@ mod tests {
         app.lsp.server_running = true;
         app.format_document();
         assert!(
-            app.message.contains("Format") || app.message.contains("…") || app.message.contains("Formatting"),
+            app.message.contains("Format")
+                || app.message.contains("…")
+                || app.message.contains("Formatting"),
             "format should request: {}",
             app.message
         );
@@ -5713,13 +4431,13 @@ mod tests {
 
     /// A tab-bar drag reshuffles `buffers`. Panes hold a `BufferId`, so a
     /// document keeps its pane no matter where it lands in the strip — this
-    /// pins that, and that `current_buffer` (still a position) follows.
+    /// pins that, and that the derived active tab follows the move.
     #[test]
     fn moving_a_tab_carries_the_active_index_and_every_pane() {
         let mut app = app_with("a");
         for name in ["b", "c", "d"] {
             let tab_id = app.take_tab_id();
-            app.buffers.push(BufferTab {
+            app.tabs.buffers.push(BufferTab {
                 id: tab_id,
                 buffer: crate::buffer::Buffer::from_string(name),
                 filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
@@ -5733,7 +4451,8 @@ mod tests {
         }
         app.save_state_to_tab(); // tab 0 mirrors the active buffer
         let names = |app: &App| -> Vec<String> {
-            app.buffers
+            app.tabs
+                .buffers
                 .iter()
                 .map(|t| t.buffer.line(0).to_string())
                 .collect()
@@ -5741,15 +4460,26 @@ mod tests {
         assert_eq!(names(&app), ["a", "b", "c", "d"]);
 
         // Three panes, one on each of the first three tabs.
-        let ids: Vec<BufferId> = app.buffers.iter().take(3).map(|t| t.id).collect();
+        let ids: Vec<BufferId> = app.tabs.buffers.iter().take(3).map(|t| t.id).collect();
         panes_on(&mut app, &ids);
         app.goto_tab(1); // park + restore properly; a bare assignment leaves
-                         // `App.buffer` showing a different tab's text
+        // `App.buffer` showing a different tab's text
         assert!(app.move_tab(0, 2));
         assert_eq!(names(&app), ["b", "c", "a", "d"]);
-        assert_eq!(app.current_buffer, 0, "the active tab followed its document");
+        assert_eq!(
+            app.current_buffer(),
+            0,
+            "the active tab followed its document"
+        );
+        // The focused pane shows the live document — `goto_tab(1)` repointed
+        // it at b the moment b became active — so the panes show [b, b, c].
+        // The move preserves every pane's document; only positions shifted.
         let panes: Vec<usize> = app.split.panes.iter().map(|p| app.pane_tab(p)).collect();
-        assert_eq!(panes, [2, 0, 1], "every pane still shows the file it showed");
+        assert_eq!(
+            panes,
+            [0, 0, 1],
+            "every pane still shows the file it showed"
+        );
     }
 
     /// Closing a tab that is not the active one leaves the editor alone.
@@ -5762,7 +4492,7 @@ mod tests {
         let mut app = app_with("a");
         for name in ["b", "c"] {
             let tab_id = app.take_tab_id();
-            app.buffers.push(BufferTab {
+            app.tabs.buffers.push(BufferTab {
                 id: tab_id,
                 buffer: crate::buffer::Buffer::from_string(name),
                 filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
@@ -5779,14 +4509,73 @@ mod tests {
         assert_eq!(app.buffer.line(0), "c");
 
         app.close_tab_at(0); // drop a
-        assert_eq!(app.buffers.len(), 2);
+        assert_eq!(app.tabs.buffers.len(), 2);
         assert_eq!(app.buffer.line(0), "c", "the editor still shows c");
-        assert_eq!(app.current_buffer, 1, "and the index followed c's move");
+        assert_eq!(app.current_buffer(), 1, "and the index followed c's move");
 
         // Closing the active one still behaves like the old path.
         app.close_tab_at(1);
-        assert_eq!(app.buffers.len(), 1);
+        assert_eq!(app.tabs.buffers.len(), 1);
         assert_eq!(app.buffer.line(0), "b");
+    }
+
+    /// Switching between members of the ACTIVE layout must keep the multi-pane
+    /// desk — not park+collapse. Collapse made ⌃⇥ / chip hops look like
+    /// "leaving", after which a free re-split + tab change re-armed layout save.
+    #[test]
+    fn goto_tab_between_active_layout_members_keeps_the_split() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids[..2]);
+        assert!(app.fold_layout());
+        assert_eq!(app.split.pane_count(), 2);
+        assert_eq!(app.active_layout, Some(app.layouts[0].id));
+
+        // Hop to the other member.
+        app.goto_tab_id(ids[1]);
+        assert_eq!(app.active_layout, Some(app.layouts[0].id), "still on the desk");
+        assert_eq!(app.split.pane_count(), 2, "must not collapse");
+        assert_eq!(app.current_buffer_id(), ids[1]);
+
+        // Outside member still leaves and clears the desk.
+        app.goto_tab_id(ids[2]);
+        assert_eq!(app.active_layout, None);
+        assert_eq!(app.split.pane_count(), 1);
+        assert_eq!(app.current_buffer_id(), ids[2]);
+        assert_eq!(app.layouts.len(), 1, "arrangement parked");
+    }
+
+    /// After leaving a layout (desk cleared), a FREE multi-pane split on a
+    /// single tab must survive switching to a non-member — only an active
+    /// layout may collapse the desk. (Chip clicks that would re-activate a
+    /// parked layout over a free split are face-side; core goto never
+    /// activates.)
+    #[test]
+    fn free_split_after_leaving_a_layout_does_not_collapse_on_goto() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids[..2]);
+        assert!(app.fold_layout());
+        // Leave: park + single c.
+        app.goto_tab_id(ids[2]);
+        assert_eq!(app.split.pane_count(), 1);
+        assert_eq!(app.active_layout, None);
+        assert_eq!(app.layouts.len(), 1);
+
+        // Free work: split on c, open b in the other pane without activating.
+        app.split.split_focused(crate::split::Axis::Col);
+        app.split.panes[1].buffer = ids[1];
+        assert_eq!(app.split.pane_count(), 2);
+        assert_eq!(app.active_layout, None);
+
+        // Switch focused pane to a (still a parked-layout member) via goto —
+        // free split must remain; only the focused pane's document changes.
+        app.split.set_focus(0);
+        app.goto_tab_id(ids[0]);
+        assert_eq!(app.active_layout, None, "goto does not activate layouts");
+        assert_eq!(app.split.pane_count(), 2, "free split survives");
+        assert_eq!(app.split.panes[0].buffer, ids[0]);
+        assert_eq!(app.split.panes[1].buffer, ids[1]);
     }
 
     /// J7's four transitions: fold, switch away, switch back, unfold.
@@ -5795,7 +4584,7 @@ mod tests {
         let mut app = app_with("a");
         for name in ["b", "c"] {
             let tab_id = app.take_tab_id();
-            app.buffers.push(BufferTab {
+            app.tabs.buffers.push(BufferTab {
                 id: tab_id,
                 buffer: crate::buffer::Buffer::from_string(name),
                 filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
@@ -5808,7 +4597,7 @@ mod tests {
             });
         }
         app.save_state_to_tab();
-        let (a_id, b_id) = (app.buffers[0].id, app.buffers[1].id);
+        let (a_id, b_id) = (app.tabs.buffers[0].id, app.tabs.buffers[1].id);
         panes_on(&mut app, &[a_id, b_id]);
         app.goto_tab(0);
         assert_eq!(app.split.pane_count(), 2);
@@ -5816,7 +4605,11 @@ mod tests {
         // 1 · Fold. Deliberately quiet — the arrangement stays on screen.
         assert!(app.fold_layout(), "two panes are an arrangement");
         assert_eq!(app.layouts.len(), 1);
-        assert_eq!(app.split.pane_count(), 2, "the fold changes nothing on screen");
+        assert_eq!(
+            app.split.pane_count(),
+            2,
+            "the fold changes nothing on screen"
+        );
         let layout_id = app.layouts[0].id;
         assert_eq!(app.active_layout, Some(layout_id));
         assert_eq!(app.layouts[0].docs, vec![a_id, b_id]);
@@ -5824,9 +4617,17 @@ mod tests {
         // 2 · Switch away — the desk clears.
         app.goto_tab(2); // c
         assert_eq!(app.active_layout, None);
-        assert_eq!(app.split.pane_count(), 1, "editor comes down to one document");
+        assert_eq!(
+            app.split.pane_count(),
+            1,
+            "editor comes down to one document"
+        );
         assert!(!app.split.is_split());
-        assert_eq!(app.layouts.len(), 1, "the arrangement is not lost, it is parked");
+        assert_eq!(
+            app.layouts.len(),
+            1,
+            "the arrangement is not lost, it is parked"
+        );
 
         // 3 · Switch back — the arrangement returns.
         assert!(app.activate_layout(layout_id, None));
@@ -5838,7 +4639,11 @@ mod tests {
         assert!(app.unfold_layout());
         assert!(app.layouts.is_empty());
         assert_eq!(app.active_layout, None);
-        assert_eq!(app.split.pane_count(), 2, "unfolding is as quiet as folding");
+        assert_eq!(
+            app.split.pane_count(),
+            2,
+            "unfolding is as quiet as folding"
+        );
     }
 
     /// A single pane is not an arrangement — folding it would just hide a file
@@ -5853,10 +4658,26 @@ mod tests {
     }
 
     #[test]
+    fn folding_refuses_two_panes_showing_the_same_document() {
+        let mut app = app_with("a");
+        app.save_state_to_tab();
+        let a_id = app.tabs.buffers[0].id;
+        panes_on(&mut app, &[a_id, a_id]);
+
+        assert!(app.split.is_split());
+        assert!(!app.fold_layout());
+        assert!(app.layouts.is_empty());
+        assert_eq!(
+            app.message,
+            "A layout needs at least two different documents"
+        );
+    }
+
+    #[test]
     fn a_layout_switches_between_its_two_strip_shapes() {
         let mut app = app_with("a");
         let tab_id = app.take_tab_id();
-        app.buffers.push(BufferTab {
+        app.tabs.buffers.push(BufferTab {
             id: tab_id,
             buffer: crate::buffer::Buffer::from_string("b"),
             filename: Some(PathBuf::from("/tmp/b.txt")),
@@ -5868,17 +4689,34 @@ mod tests {
             terminal: None,
         });
         app.save_state_to_tab();
-        let (a_id, b_id) = (app.buffers[0].id, app.buffers[1].id);
+        let (a_id, b_id) = (app.tabs.buffers[0].id, app.tabs.buffers[1].id);
         panes_on(&mut app, &[a_id, b_id]);
         app.goto_tab(0);
         assert!(app.fold_layout());
 
         let id = app.layouts[0].id;
-        assert_eq!(app.layouts[0].style, crate::layout_tab::LayoutStyle::Grouped);
+        assert_eq!(
+            app.layouts[0].style,
+            crate::layout_tab::LayoutStyle::Grouped
+        );
         assert!(app.toggle_layout_style(id));
-        assert_eq!(app.layouts[0].style, crate::layout_tab::LayoutStyle::Unified);
+        assert_eq!(
+            app.layouts[0].style,
+            crate::layout_tab::LayoutStyle::Unified
+        );
+        assert_eq!(
+            app.message,
+            "Layout unified · scroll down to show member tabs"
+        );
         assert!(app.toggle_layout_style(id));
-        assert_eq!(app.layouts[0].style, crate::layout_tab::LayoutStyle::Grouped);
+        assert_eq!(
+            app.layouts[0].style,
+            crate::layout_tab::LayoutStyle::Grouped
+        );
+        assert_eq!(
+            app.message,
+            "Layout group expanded · scroll up to unify · down to unfold"
+        );
     }
 
     /// The other direction, and the no-ops.
@@ -5887,7 +4725,7 @@ mod tests {
         let mut app = app_with("a");
         for name in ["b", "c"] {
             let tab_id = app.take_tab_id();
-            app.buffers.push(BufferTab {
+            app.tabs.buffers.push(BufferTab {
                 id: tab_id,
                 buffer: crate::buffer::Buffer::from_string(name),
                 filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
@@ -5900,15 +4738,20 @@ mod tests {
             });
         }
         app.save_state_to_tab();
-        let c_id = app.buffers[2].id;
+        let c_id = app.tabs.buffers[2].id;
         panes_on(&mut app, &[c_id]);
         app.goto_tab(2);
 
         // c moves to the front: a b c → c a b
         assert!(app.move_tab(2, 0));
-        let names: Vec<String> = app.buffers.iter().map(|t| t.buffer.line(0).to_string()).collect();
+        let names: Vec<String> = app
+            .tabs
+            .buffers
+            .iter()
+            .map(|t| t.buffer.line(0).to_string())
+            .collect();
         assert_eq!(names, ["c", "a", "b"]);
-        assert_eq!(app.current_buffer, 0);
+        assert_eq!(app.current_buffer(), 0);
         assert_eq!(app.pane_tab(&app.split.panes[0]), 0);
 
         assert!(!app.move_tab(1, 1), "a move onto itself is a no-op");
@@ -5920,11 +4763,11 @@ mod tests {
     /// and return their ids in strip order.
     fn tabs_named(app: &mut App, names: &[&str]) -> Vec<BufferId> {
         app.buffer = Buffer::from_string(names[0]);
-        app.buffers[0].buffer = app.buffer.clone();
-        app.buffers[0].filename = Some(PathBuf::from(format!("/tmp/{}.txt", names[0])));
+        app.tabs.buffers[0].buffer = app.buffer.clone();
+        app.tabs.buffers[0].filename = Some(PathBuf::from(format!("/tmp/{}.txt", names[0])));
         for name in &names[1..] {
             let tab_id = app.take_tab_id();
-            app.buffers.push(BufferTab {
+            app.tabs.buffers.push(BufferTab {
                 id: tab_id,
                 buffer: Buffer::from_string(*name),
                 filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
@@ -5937,7 +4780,7 @@ mod tests {
             });
         }
         app.save_state_to_tab();
-        app.buffers.iter().map(|t| t.id).collect()
+        app.tabs.buffers.iter().map(|t| t.id).collect()
     }
 
     /// Folding gathers its members into one contiguous run, so the grouped
@@ -5953,14 +4796,26 @@ mod tests {
         app.goto_tab(0);
         assert!(app.fold_layout());
 
-        let names: Vec<String> =
-            app.buffers.iter().map(|t| t.buffer.line(0).to_string()).collect();
-        assert_eq!(names, ["a", "b", "c", "e", "d"], "members gathered, d pushed after");
-        assert_eq!(app.current_buffer, 0, "the active tab kept its identity");
+        let names: Vec<String> = app
+            .tabs
+            .buffers
+            .iter()
+            .map(|t| t.buffer.line(0).to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["a", "b", "c", "e", "d"],
+            "members gathered, d pushed after"
+        );
+        assert_eq!(app.current_buffer(), 0, "the active tab kept its identity");
         // The panes still show exactly what they showed — gathering only moved
         // the strip order, never a pane's document.
         let shown: Vec<usize> = app.split.panes.iter().map(|p| app.pane_tab(p)).collect();
-        assert_eq!(shown, vec![0, 1, 2, 3], "panes follow their documents by id");
+        assert_eq!(
+            shown,
+            vec![0, 1, 2, 3],
+            "panes follow their documents by id"
+        );
     }
 
     /// A reorder that would break a folded group is refused — both dragging an
@@ -5974,7 +4829,11 @@ mod tests {
         assert!(app.fold_layout());
         // Strip is now a b c e | d, with a·b·c·e grouped.
         let names = |app: &App| -> Vec<String> {
-            app.buffers.iter().map(|t| t.buffer.line(0).to_string()).collect()
+            app.tabs
+                .buffers
+                .iter()
+                .map(|t| t.buffer.line(0).to_string())
+                .collect()
         };
         assert_eq!(names(&app), ["a", "b", "c", "e", "d"]);
 
@@ -6016,11 +4875,14 @@ mod tests {
         std::fs::write(&new_path, "e").unwrap();
         app.open_new_tab(new_path.to_str().unwrap());
 
-        // The focused pane now shows the new document. (The focused pane's
-        // live document IS `current_buffer` — its slot is stale by design until
-        // the next park, and the compositor reads it that way too.)
+        // The focused pane now shows the new document — its slot names the
+        // live document from the moment it becomes active, and the compositor
+        // reads it that way too.
         let new_id = app.current_buffer_id();
-        assert_ne!(new_id, ids[3], "focused pane took the new file, not the old");
+        assert_ne!(
+            new_id, ids[3],
+            "focused pane took the new file, not the old"
+        );
 
         // …and the group's membership followed: d out, e in.
         let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
@@ -6031,11 +4893,13 @@ mod tests {
         // The members must be contiguous in the strip, or the grey container
         // swallows whatever sits between them. e was pushed at the end of
         // buffers; gather pulls it back beside the other members.
-        let strip: Vec<BufferId> = app.buffers.iter().map(|t| t.id).collect();
+        let strip: Vec<BufferId> = app.tabs.buffers.iter().map(|t| t.id).collect();
         let first = strip.iter().position(|id| docs.contains(id)).unwrap();
         let run = &strip[first..first + docs.len()];
-        assert!(run.iter().all(|id| docs.contains(id)),
-            "members form one contiguous run in the strip: {strip:?}");
+        assert!(
+            run.iter().all(|id| docs.contains(id)),
+            "members form one contiguous run in the strip: {strip:?}"
+        );
         let _ = std::fs::remove_file(&new_path);
     }
 
@@ -6045,20 +4909,25 @@ mod tests {
     #[test]
     fn activating_a_layout_focuses_the_named_document() {
         let mut app = app_with("a");
-        let ids = tabs_named(&mut app, &["a", "b", "c", "d"]);
-        panes_on(&mut app, &ids);
+        let ids = tabs_named(&mut app, &["a", "b", "c", "d", "outside"]);
+        panes_on(&mut app, &ids[..4]);
         assert!(app.fold_layout());
         let layout_id = app.layouts[0].id;
 
-        // Leave the layout — the desk clears to one document.
-        app.goto_tab(2);
+        // Leave through a document outside the group. Switching between group
+        // members intentionally keeps the desk alive now.
+        app.goto_tab_id(ids[4]);
         assert_eq!(app.active_layout, None);
         assert!(!app.split.is_split());
 
         // Come back asking for the 3rd document — its pane takes focus.
         assert!(app.activate_layout(layout_id, Some(ids[2])));
         assert_eq!(app.split.pane_count(), 4);
-        assert_eq!(app.current_buffer_id(), ids[2], "the named document is focused");
+        assert_eq!(
+            app.current_buffer_id(),
+            ids[2],
+            "the named document is focused"
+        );
         assert_eq!(app.split.focus_index(), 2);
 
         // And with no preference, the tree's own first pane leads.
@@ -6067,19 +4936,18 @@ mod tests {
         assert_eq!(app.split.focus_index(), 0);
     }
 
-    /// Open four tabs, split, close the *first* one. Every pane still shows
-    /// the document it was showing.
+    /// Closing a tab that a pane is showing **removes that pane** — it does
+    /// not repoint the pane at a neighbour (that produced B|B ghosts).
     ///
-    /// This is the gate for `SUISEI-SPLIT-PLAN.md` §S1. With `tab_index` the
-    /// panes each slid one document to the left and nothing complained,
-    /// because the indices were still in range — `clamp_tabs` only ever caught
-    /// the panes that fell off the end.
+    /// Closing a tab that **no** pane is showing leaves the split alone.
+    /// That half is the original S1 gate (index-addressed panes used to slide
+    /// when an unrelated earlier tab closed).
     #[test]
-    fn closing_a_tab_leaves_the_other_panes_on_their_own_documents() {
+    fn closing_a_tab_removes_its_pane_and_leaves_unrelated_panes() {
         let mut app = app_with("a");
         for name in ["b", "c", "d"] {
             let tab_id = app.take_tab_id();
-            app.buffers.push(BufferTab {
+            app.tabs.buffers.push(BufferTab {
                 id: tab_id,
                 buffer: crate::buffer::Buffer::from_string(name),
                 filename: Some(PathBuf::from(format!("/tmp/{name}.txt"))),
@@ -6096,36 +4964,38 @@ mod tests {
             app.split
                 .panes
                 .iter()
-                .map(|p| app.buffers[app.pane_tab(p)].buffer.line(0).to_string())
+                .map(|p| app.tabs.buffers[app.pane_tab(p)].buffer.line(0).to_string())
                 .collect()
         };
 
-        // Two panes on c and d, then make a the active tab and close it.
-        let (c_id, d_id) = (app.buffers[2].id, app.buffers[3].id);
+        // Two panes on c and d; focus a (repoints the focused pane to a).
+        let (c_id, d_id) = (app.tabs.buffers[2].id, app.tabs.buffers[3].id);
         panes_on(&mut app, &[c_id, d_id]);
         app.goto_tab(0);
-        assert_eq!(shown(&app), ["c", "d"]);
+        assert_eq!(shown(&app), ["a", "d"]);
 
+        // Close a — the pane that showed a is removed; d's pane survives alone.
         app.close_current_tab();
         assert_eq!(
-            app.buffers.iter().map(|t| t.buffer.line(0).to_string()).collect::<Vec<_>>(),
+            app.tabs
+                .buffers
+                .iter()
+                .map(|t| t.buffer.line(0).to_string())
+                .collect::<Vec<_>>(),
             ["b", "c", "d"]
         );
-        assert_eq!(shown(&app), ["c", "d"], "panes followed their documents");
+        assert_eq!(app.split.pane_count(), 1, "a's pane removed, not repointed");
+        assert_eq!(shown(&app), ["d"], "only d remains");
 
-        // A pane whose own document is closed adopts the active one rather
-        // than dangling — and does not keep coordinates from the dead file.
-        // The second pane moves to b so that "adopted the active tab" and
-        // "happened to already show it" are different answers.
-        app.split.panes[1].buffer = app.buffers[0].id; // panes: c, b
-        app.split.panes[0].scroll = 7;
-        app.split.panes[0].cursor = (9, 3);
-        app.goto_tab(1); // c
-        app.close_current_tab(); // d slides into c's slot and becomes active
-        assert_eq!(app.buffers[app.current_buffer].buffer.line(0), "d");
-        assert_eq!(shown(&app), ["d", "b"], "only the orphaned pane moved");
-        assert_eq!(app.split.panes[0].scroll, 0);
-        assert_eq!(app.split.panes[0].cursor, (0, 0));
+        // Unrelated close: split on b|d, close c (shown nowhere) → still b|d.
+        let b_id = app.tabs.buffers.iter().find(|t| t.buffer.line(0) == "b").unwrap().id;
+        let d_id = app.tabs.buffers.iter().find(|t| t.buffer.line(0) == "d").unwrap().id;
+        let c_id = app.tabs.buffers.iter().find(|t| t.buffer.line(0) == "c").unwrap().id;
+        panes_on(&mut app, &[b_id, d_id]);
+        assert_eq!(shown(&app), ["b", "d"]);
+        app.close_tab_id(c_id);
+        assert_eq!(shown(&app), ["b", "d"], "unrelated close leaves the split");
+        assert_eq!(app.split.pane_count(), 2);
     }
 
     /// `modified` was a one-way latch: set by every edit, cleared only by a
@@ -6138,15 +5008,19 @@ mod tests {
     fn horizontal_scroll_stops_at_the_end_of_the_text() {
         let mut app = app_with("short\na much longer line of text here\nmid");
         app.wrap_lines = false;
-        app.viewport.width = 10;
-        app.viewport.height = 3;
+        app.stage.w = 90.0;
+        app.stage.h = 54.0;
 
         let widest = "a much longer line of text here".chars().count();
         assert_eq!(app.content_cols(), widest);
         assert_eq!(app.max_hscroll(), widest - 10 + 1);
 
         app.set_hscroll(100_000);
-        assert_eq!(app.hscroll, widest - 10 + 1, "panning past the text is clamped");
+        assert_eq!(
+            app.hscroll,
+            widest - 10 + 1,
+            "panning past the text is clamped"
+        );
     }
 
     /// Tabs advance to the next stop and CJK takes two cells — the extent has
@@ -6156,14 +5030,14 @@ mod tests {
         let mut app = app_with("\t\tab");
         app.wrap_lines = false;
         app.tab_width = 4;
-        app.viewport.width = 4;
-        app.viewport.height = 1;
+        app.stage.w = 36.0;
+        app.stage.h = 18.0;
         assert_eq!(app.content_cols(), 10, "two tab stops plus two letters");
 
         let mut cjk = app_with("한글이다");
         cjk.wrap_lines = false;
-        cjk.viewport.width = 2;
-        cjk.viewport.height = 1;
+        cjk.stage.w = 18.0;
+        cjk.stage.h = 18.0;
         assert_eq!(cjk.content_cols(), 8, "four wide glyphs, two cells each");
     }
 
@@ -6173,8 +5047,8 @@ mod tests {
     fn the_scroll_extent_never_shrinks_within_a_document() {
         let mut app = app_with("a very long first line indeed\nx\ny\nz");
         app.wrap_lines = false;
-        app.viewport.width = 8;
-        app.viewport.height = 1;
+        app.stage.w = 72.0;
+        app.stage.h = 18.0;
 
         let wide = app.content_cols();
         assert_eq!(wide, "a very long first line indeed".chars().count());
@@ -6187,8 +5061,8 @@ mod tests {
     fn wrapped_lines_have_no_horizontal_scroll_at_all() {
         let mut app = app_with("a very long line that would otherwise pan");
         app.wrap_lines = true;
-        app.viewport.width = 5;
-        app.viewport.height = 1;
+        app.stage.w = 45.0;
+        app.stage.h = 18.0;
         app.set_hscroll(50);
         assert_eq!(app.hscroll, 0);
     }
@@ -6208,7 +5082,7 @@ mod tests {
         assert_eq!(app.buffer.line(0), "hello");
         assert!(!app.modified, "back at the saved text — not dirty any more");
         assert!(
-            !app.buffers[app.current_buffer].modified,
+            !app.tabs.buffers[app.current_buffer()].modified,
             "the tab's own flag has to follow, it is what the tab dot reads"
         );
     }
@@ -6263,7 +5137,10 @@ mod tests {
 
         app.undo();
         assert_eq!(app.buffer.line(0), "a");
-        assert!(app.modified, "the original text is no longer what is on disk");
+        assert!(
+            app.modified,
+            "the original text is no longer what is on disk"
+        );
     }
 
     #[test]
@@ -6340,31 +5217,31 @@ mod tests {
     #[test]
     fn search_finds_all_matches_char_safe() {
         let mut app = app_with("hello\nhello world\nHELLO");
-        app.search_pattern = Some("hello".into());
+        app.search.pattern = Some("hello".into());
         app.collect_matches("hello");
         // smart-case: all lowercase → case-insensitive → 3 matches
-        assert_eq!(app.search_matches.len(), 3);
-        assert_eq!(app.search_matches[0], Position::new(0, 0));
-        assert_eq!(app.search_matches[1], Position::new(1, 0));
-        assert_eq!(app.search_matches[2], Position::new(2, 0));
+        assert_eq!(app.search.matches.len(), 3);
+        assert_eq!(app.search.matches[0], Position::new(0, 0));
+        assert_eq!(app.search.matches[1], Position::new(1, 0));
+        assert_eq!(app.search.matches[2], Position::new(2, 0));
     }
 
     #[test]
     fn search_case_sensitive_when_pattern_has_upper() {
         let mut app = app_with("hello\nHELLO\nHello");
         app.collect_matches("Hello");
-        assert_eq!(app.search_matches.len(), 1);
-        assert_eq!(app.search_matches[0], Position::new(2, 0));
+        assert_eq!(app.search.matches.len(), 1);
+        assert_eq!(app.search.matches[0], Position::new(2, 0));
     }
 
     #[test]
     fn search_utf8_char_indices() {
         let mut app = app_with("안녕 hello 안녕");
         app.collect_matches("안녕");
-        assert_eq!(app.search_matches.len(), 2);
-        assert_eq!(app.search_matches[0].col, 0);
+        assert_eq!(app.search.matches.len(), 2);
+        assert_eq!(app.search.matches[0].col, 0);
         // "안녕 " = 3 chars, then "hello " = 6, second at col 9
-        assert_eq!(app.search_matches[1].col, 9);
+        assert_eq!(app.search.matches[1].col, 9);
     }
 
     #[test]
@@ -6373,28 +5250,134 @@ mod tests {
         app.buffer.cursor = Position::new(1, 1);
         app.scroll = 0;
         app.enter_search();
-        app.search_input = "ghi".into();
+        app.search.input = "ghi".into();
         app.update_search_input();
         assert_eq!(app.buffer.cursor.row, 2);
         app.cancel_search();
         assert_eq!(app.mode, Mode::Editor);
         assert_eq!(app.buffer.cursor, Position::new(1, 1));
-        assert!(app.search_input.is_empty());
+        assert!(app.search.input.is_empty());
     }
 
     #[test]
     fn commit_search_keeps_pattern_for_n() {
         let mut app = app_with("foo bar foo");
         app.enter_search();
-        app.search_input = "foo".into();
+        app.search.input = "foo".into();
         app.update_search_input();
         app.commit_search();
         assert_eq!(app.mode, Mode::Editor);
-        assert_eq!(app.search_pattern.as_deref(), Some("foo"));
-        assert_eq!(app.search_matches.len(), 2);
+        assert_eq!(app.search.pattern.as_deref(), Some("foo"));
+        assert_eq!(app.search.matches.len(), 2);
         let first = app.buffer.cursor;
         app.search_next();
         assert_ne!(app.buffer.cursor, first);
+    }
+
+    #[test]
+    fn commit_search_keeps_the_live_match_the_user_selected() {
+        let mut app = app_with("foo bar foo baz foo");
+        app.enter_search();
+        app.set_search_input("foo".into());
+        assert_eq!(app.buffer.cursor, Position::new(0, 0));
+
+        app.search_cycle(true);
+        assert_eq!(app.buffer.cursor, Position::new(0, 8));
+        app.commit_search();
+
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.search.pattern.as_deref(), Some("foo"));
+        assert_eq!(app.search.current, 1);
+        assert_eq!(app.buffer.cursor, Position::new(0, 8));
+    }
+
+    #[test]
+    fn native_find_value_accepts_composed_unicode() {
+        let mut app = app_with("앞 한글 뒤 한글");
+        app.enter_search();
+        app.set_search_input("한글".into());
+
+        assert_eq!(app.search.input, "한글");
+        assert_eq!(app.search.matches.len(), 2);
+        assert_eq!(app.buffer.cursor, Position::new(0, 2));
+    }
+
+    #[test]
+    fn every_terminal_prefers_the_open_project_root() {
+        let mut app = App::new();
+        let root = std::env::temp_dir().join("suisei_terminal_project_root");
+        let _ = std::fs::create_dir_all(root.join("src"));
+        app.explorer.cwd = root.clone();
+        app.filename = Some(root.join("src/main.rs"));
+
+        assert_eq!(app.terminal_working_directory(), root);
+    }
+
+    #[test]
+    fn file_palette_walks_the_project_root_and_keeps_non_source_files() {
+        let root = std::env::temp_dir().join(format!(
+            "suisei_palette_project_root_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname='fixture'\n").unwrap();
+        std::fs::write(root.join("README.md"), "# fixture\n").unwrap();
+        std::fs::write(root.join("config/settings.json"), "{}\n").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let mut app = App::open_file(root.join("src/main.rs").to_str().unwrap());
+        // A file-opened app has no explicitly selected explorer root. The
+        // palette must still walk up to the manifest instead of stopping in src.
+        app.explorer.cwd = "/".into();
+        app.open_file_palette();
+
+        let labels: Vec<&str> = app
+            .palette
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
+        assert!(labels.contains(&"Cargo.toml"), "{labels:?}");
+        assert!(labels.contains(&"README.md"), "{labels:?}");
+        assert!(labels.contains(&"config/settings.json"), "{labels:?}");
+        assert!(labels.contains(&"src/main.rs"), "{labels:?}");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workbench_transition_replaces_the_compact_scm_snapshot() {
+        use crate::scm::{ScmEntry, ScmStatus};
+
+        let mut app = App::new();
+        app.scm.branch = "stale".into();
+        app.scm.last_result = Some("No local changes".into());
+        app.git_wb.root = Some("/tmp/repo".into());
+        app.git_wb.branch = "main".into();
+        app.git_wb.ahead = 2;
+        app.git_wb.staged = vec![ScmEntry {
+            path: "staged.rs".into(),
+            status: ScmStatus::Added,
+            staged: true,
+        }];
+        app.git_wb.changes = vec![ScmEntry {
+            path: "changed.rs".into(),
+            status: ScmStatus::Modified,
+            staged: false,
+        }];
+
+        app.sync_scm_snapshot_from_git_workbench();
+
+        assert_eq!(
+            app.scm.root.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
+        assert_eq!(app.scm.branch, "main");
+        assert_eq!(app.scm.ahead, 2);
+        assert_eq!(app.scm.total_files(), 2);
+        assert!(app.scm.last_result.is_none());
     }
 
     #[test]
@@ -6402,7 +5385,7 @@ mod tests {
         let mut app = app_with("aa\nbb\naa\ncc\naa");
         app.buffer.cursor = Position::new(1, 0); // on "bb"
         app.enter_search();
-        app.search_input = "aa".into();
+        app.search.input = "aa".into();
         app.update_search_input();
         // nearest at-or-after origin (row 1) is row 2
         assert_eq!(app.buffer.cursor.row, 2);
@@ -6417,9 +5400,9 @@ mod tests {
         let _ = std::fs::write(&f2, "fn b() {}");
         let mut app = App::open_file(f1.to_str().unwrap());
         app.open_new_tab(f2.to_str().unwrap());
-        assert_eq!(app.buffers.len(), 2);
+        assert_eq!(app.tabs.buffers.len(), 2);
         app.close_current_tab();
-        assert_eq!(app.buffers.len(), 1);
+        assert_eq!(app.tabs.buffers.len(), 1);
         assert_eq!(app.filename.as_deref(), Some(f1.as_path()));
         assert_eq!(app.buffer.line(0), "fn a() {}");
         let _ = std::fs::remove_file(&f1);
@@ -6463,10 +5446,13 @@ mod tests {
         assert_eq!(docs.len(), 4, "group size unchanged");
 
         // Strip must be contiguous.
-        let strip: Vec<BufferId> = app.buffers.iter().map(|t| t.id).collect();
+        let strip: Vec<BufferId> = app.tabs.buffers.iter().map(|t| t.id).collect();
         let first = strip.iter().position(|id| docs.contains(id)).unwrap();
         let run = &strip[first..first + docs.len()];
-        assert!(run.iter().all(|id| docs.contains(id)), "members contiguous: {strip:?}");
+        assert!(
+            run.iter().all(|id| docs.contains(id)),
+            "members contiguous: {strip:?}"
+        );
     }
 
     /// 터미널 탭을 닫으면 그룹에서 빠지고, pane은 adopt 탭으로 repoint.
@@ -6488,12 +5474,263 @@ mod tests {
 
         // Close the terminal tab.
         app.close_current_tab();
-        assert!(!app.buffers.iter().any(|t| t.id == term_id), "terminal tab gone");
+        assert!(
+            !app.tabs.buffers.iter().any(|t| t.id == term_id),
+            "terminal tab gone"
+        );
         assert!(app.pane_terminals.is_empty(), "shell ended");
 
         // The group no longer contains the terminal.
         let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
         assert!(!docs.contains(&term_id), "terminal left the group on close");
+    }
+
+    /// Give the two documents terminal tabs without spawning real shells —
+    /// the confirm dialog's state machine is what's under test, not the PTY.
+    fn terminal_tabs_on(app: &mut App, docs: &[BufferId]) -> Vec<crate::split::TerminalId> {
+        docs.iter()
+            .map(|id| {
+                let tid = crate::split::TerminalId(app.next_terminal_id);
+                app.next_terminal_id += 1;
+                app.pane_terminals.insert(tid, crate::term::Terminal::new());
+                app.tabs
+                    .buffers
+                    .iter_mut()
+                    .find(|t| t.id == *id)
+                    .unwrap()
+                    .terminal = Some(tid);
+                tid
+            })
+            .collect()
+    }
+
+    /// The close-confirm dialog belongs to the shell it was raised for. Pane B
+    /// answering pane A's prompt with `y` closes A — not B, not whatever sits
+    /// under the caret. The old shared dock flag did exactly that wrong.
+    #[test]
+    fn close_confirm_belongs_to_the_pane_that_asked() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b"]);
+        panes_on(&mut app, &ids);
+        let tids = terminal_tabs_on(&mut app, &ids);
+
+        // Ask from pane 0, move focus to pane 1, answer yes.
+        app.focus_pane_to(0);
+        app.request_close_pane_terminal();
+        assert!(app.pane_close_confirm_open());
+        app.focus_pane_to(1);
+        app.confirm_close_pane_terminal(true);
+
+        // Pane 0's shell tab is gone; pane 1's is untouched.
+        assert!(!app.tabs.buffers.iter().any(|t| t.terminal == Some(tids[0])));
+        assert!(app.tabs.buffers.iter().any(|t| t.terminal == Some(tids[1])));
+        assert!(app.pane_terminals.contains_key(&tids[1]));
+        assert!(!app.pane_close_confirm_open(), "latch cleared");
+    }
+
+    /// Any close path clears the pending confirm — a shell closed via ⌘W
+    /// while its dialog is up must not leave a latch that kills the NEXT
+    /// terminal on a stale `y`.
+    #[test]
+    fn closing_a_terminal_tab_clears_its_close_confirm() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b"]);
+        panes_on(&mut app, &ids);
+        let tids = terminal_tabs_on(&mut app, &ids[..1]);
+
+        app.focus_pane_to(0);
+        app.request_close_pane_terminal();
+        assert!(app.pane_close_confirm_open());
+
+        // Close via the ⌘W path, not the dialog.
+        let idx = app.buffer_index(ids[0]).unwrap();
+        app.close_tab_at(idx);
+        assert!(!app.pane_close_confirm_open());
+        assert!(!app.pane_terminals.contains_key(&tids[0]));
+
+        // A stray confirm now does nothing.
+        app.confirm_close_pane_terminal(true);
+        assert!(app.tabs.buffers.iter().any(|t| t.id == ids[1]));
+    }
+
+    /// Split layout tokens round-trip through the session format, nesting
+    /// included — the serialization the split's persistence lives and dies by.
+    #[test]
+    fn layout_tokens_roundtrip() {
+        use crate::split::{Axis, Layout, PaneId};
+        let tree = Layout::Split {
+            axis: Axis::Col,
+            children: vec![
+                Layout::Split {
+                    axis: Axis::Row,
+                    children: vec![Layout::Leaf(PaneId(0)), Layout::Leaf(PaneId(1))],
+                    weights: vec![0.5, 0.5],
+                },
+                Layout::Leaf(PaneId(2)),
+            ],
+            weights: vec![0.6, 0.4],
+        };
+        let map = |pid: PaneId| Some(pid.0 as usize);
+        let tokens = App::layout_tokens(&tree, &map).expect("serialize");
+        assert_eq!(tokens, "SC:0.600,0.400:SR:0.500,0.500:T0;T1;T2");
+        let parsed = App::parse_layout_tokens(&tokens).expect("parse");
+        let again = App::layout_tokens(&parsed, &map).expect("re-serialize");
+        assert_eq!(again, tokens, "structural round-trip");
+        assert!(
+            App::parse_layout_tokens("SC:0.5,0.5:T0").is_none(),
+            "weight/child mismatch rejected"
+        );
+        assert!(
+            App::parse_layout_tokens("SX:0.5:T0").is_none(),
+            "bad axis rejected"
+        );
+    }
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn lsp_incremental_change_utf16_columns() {
+        // 🎉 is one char but TWO UTF-16 units: the line is 10 chars but 11
+        // UTF-16 units, so the range end column must be 11, not 10.
+        let prev = lines(&["let 🎉 = 1;", ""]);
+        let cur = lines(&["let 🎉 = 2;", ""]);
+        let changes = lsp_changes_since(&prev, &cur).expect("one change");
+        assert_eq!(changes.len(), 1);
+        let c = &changes[0];
+        assert_eq!((c.start_line, c.start_col), (0, 0));
+        assert_eq!((c.end_line, c.end_col), (0, 11), "UTF-16 units, not chars");
+        assert_eq!(c.text, "let 🎉 = 2;");
+    }
+
+    #[test]
+    fn lsp_incremental_change_multiline_and_delete() {
+        let prev = lines(&["a", "b", "c", "d"]);
+        let cur = lines(&["a", "x", "y", "d"]);
+        let c = &lsp_changes_since(&prev, &cur).unwrap()[0];
+        // Replace lines 1..3 (b,c): range (1,0)..(2,1) (end = just past `c`),
+        // replacement text without a trailing separator.
+        assert_eq!((c.start_line, c.start_col), (1, 0));
+        assert_eq!((c.end_line, c.end_col), (2, 1));
+        assert_eq!(c.text, "x\ny");
+
+        // Pure deletion consumes the trailing separator: (1,0)..(3,0).
+        let cur2 = lines(&["a", "d"]);
+        let c2 = &lsp_changes_since(&prev, &cur2).unwrap()[0];
+        assert_eq!((c2.start_line, c2.start_col), (1, 0));
+        assert_eq!((c2.end_line, c2.end_col), (3, 0));
+        assert_eq!(c2.text, "");
+
+        assert!(
+            lsp_changes_since(&prev, &prev).is_none(),
+            "identical → None"
+        );
+    }
+
+    #[test]
+    fn ctrl_d_selects_next_occurrences_in_sel() {
+        let mut app = app_with("foo bar foo baz foo");
+        app.sel = crate::selection::SelectionSet::single(Selection::caret(Position::new(0, 1)));
+        app.multi_cursor_add_next();
+        assert_eq!(app.sel.len(), 2, "second occurrence selected");
+        app.multi_cursor_add_next();
+        assert_eq!(app.sel.len(), 3, "third occurrence");
+        for s in app.sel.all() {
+            let (s0, e0) = s.range();
+            assert_eq!(e0.col - s0.col, 3, "each selection covers `foo`");
+        }
+        app.multi_cursor_add_next();
+        assert_eq!(app.sel.len(), 3, "no fourth match — no phantom cursor");
+    }
+
+    #[test]
+    fn add_below_stacks_column_carets() {
+        let mut app = app_with("aa\nbb\ncc");
+        app.sel = crate::selection::SelectionSet::single(Selection::caret(Position::new(0, 1)));
+        app.multi_cursor_add_below();
+        app.multi_cursor_add_below();
+        assert_eq!(app.sel.len(), 3);
+        let heads: Vec<Position> = app.sel.all().iter().map(|s| s.head).collect();
+        assert_eq!(
+            heads,
+            vec![
+                Position::new(0, 1),
+                Position::new(1, 1),
+                Position::new(2, 1)
+            ]
+        );
+        app.multi_cursor_add_below();
+        assert_eq!(app.sel.len(), 3, "no line below the last — no new caret");
+        app.multi_cursor_add_above();
+        assert_eq!(app.sel.len(), 3, "no line above the first — no new caret");
+    }
+
+    /// A layout that loses its second document dissolves — the lone member
+    /// returns to the strip as an ordinary tab. Zombies used to linger:
+    /// invisible in grouped style (no run of two to draw a container around),
+    /// unkillable in unified style (the chip's close hit the slot-clamped
+    /// `close_tab` and killed the wrong document).
+    #[test]
+    fn a_layout_dissolves_when_it_drops_below_two_documents() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids[..2]);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        // Close one member via the inactive-tab path.
+        let idx = app.buffer_index(ids[1]).unwrap();
+        app.close_tab_at(idx);
+        assert!(
+            !app.layouts.iter().any(|l| l.id == layout_id),
+            "layout dissolved"
+        );
+        assert!(
+            app.tabs.buffers.iter().any(|t| t.id == ids[0]),
+            "lone member survives as a loose tab"
+        );
+    }
+
+    /// `drop_layout` is "Close Tab" on a layout chip: the entry goes, the
+    /// documents stay, and an active arrangement merely loses its tab.
+    #[test]
+    fn dropping_a_layout_keeps_its_documents() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+        assert_eq!(app.active_layout, Some(layout_id));
+
+        assert!(app.drop_layout(layout_id));
+        assert!(app.layouts.is_empty());
+        assert_eq!(app.active_layout, None);
+        assert_eq!(app.tabs.buffers.len(), 2, "both documents still open");
+        assert!(!app.drop_layout(layout_id), "second drop is a no-op");
+    }
+
+    /// Stable-id tab ops resolve through the buffer list, so a strip whose
+    /// slots no longer match buffer indices (a folded layout gathers members
+    /// into a run; unified style hides them) still names the right tab.
+    #[test]
+    fn id_addressed_tab_ops_hit_the_named_tab() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+
+        app.close_tab_id(ids[1]);
+        assert!(!app.tabs.buffers.iter().any(|t| t.id == ids[1]));
+        assert!(app.tabs.buffers.iter().any(|t| t.id == ids[0]));
+        assert!(app.tabs.buffers.iter().any(|t| t.id == ids[2]));
+
+        // Move c onto a's position.
+        assert!(app.move_tab_ids(ids[2], ids[0]));
+        let strip: Vec<BufferId> = app.tabs.buffers.iter().map(|t| t.id).collect();
+        assert_eq!(strip, vec![ids[2], ids[0]]);
+
+        // goto by id activates the named document.
+        app.goto_tab_id(ids[0]);
+        assert_eq!(app.current_buffer_id(), ids[0]);
     }
 
     /// 이미 그룹 멤버인 문서를 다시 열면 멤버십 불변 (swap 스킵).
@@ -6504,13 +5741,22 @@ mod tests {
         panes_on(&mut app, &ids);
         assert!(app.fold_layout());
         let layout_id = app.layouts[0].id;
-        let docs_before = app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs.clone();
+        let docs_before = app
+            .layouts
+            .iter()
+            .find(|l| l.id == layout_id)
+            .unwrap()
+            .docs
+            .clone();
 
         // Open "b" again — it is already a member.
         app.focus_pane_to(0);
         app.open_new_tab("/tmp/b.txt");
         let docs_after = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
-        assert_eq!(docs_before, *docs_after, "membership unchanged when opening a member");
+        assert_eq!(
+            docs_before, *docs_after,
+            "membership unchanged when opening a member"
+        );
     }
 
     /// 터미널 탭이 있는 상태에서 fold: 터미널도 그룹 멤버로 참여.
@@ -6561,7 +5807,8 @@ mod tests {
         assert!(app.move_tab(2, 0), "moving outside both groups is allowed");
     }
 
-    /// 그룹 멤버 탭을 close_tab_at으로 닫으면 그룹에서 빠짐.
+    /// 그룹 멤버 탭을 close_tab_at으로 닫으면 그룹에서 빠지고, 그 탭을
+    /// 보여 주던 pane도 사라진다 (repoint 유령 pane이 남지 않는다).
     #[test]
     fn closing_a_group_member_by_index_removes_it_from_the_group() {
         let mut app = app_with("a");
@@ -6569,23 +5816,149 @@ mod tests {
         panes_on(&mut app, &ids);
         assert!(app.fold_layout());
         let layout_id = app.layouts[0].id;
+        assert_eq!(app.split.pane_count(), 3);
 
-        // Close "b" (index 1) — not the current tab.
-        app.goto_tab(0);
+        // Close "b" while still *in* the layout. `goto_tab` would leave the
+        // layout and collapse the desk — that is a different path.
+        assert_eq!(app.current_buffer_id(), ids[0], "focused on a");
         app.close_tab_at(1);
-        assert!(!app.buffers.iter().any(|t| t.id == ids[1]), "b is gone");
+        assert!(
+            !app.tabs.buffers.iter().any(|t| t.id == ids[1]),
+            "b is gone"
+        );
+        assert_eq!(app.split.pane_count(), 2, "b's pane left the arrangement");
+        assert!(
+            !app.split.panes.iter().any(|p| p.buffer == ids[1]),
+            "no pane still names b"
+        );
 
         let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
         assert!(!docs.contains(&ids[1]), "b left the group");
         assert_eq!(docs.len(), 2, "a and c remain");
     }
 
+    /// 에디터 헤더 × 로 pane을 닫으면 탭은 남지만 레이아웃 그룹에서는 나간다.
+    #[test]
+    fn closing_a_pane_ejects_its_document_from_the_layout_group() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        // Focus the middle pane (b) and close it via the header path.
+        app.focus_pane_to(1);
+        assert_eq!(app.current_buffer_id(), ids[1]);
+        app.close_split();
+
+        assert!(
+            app.tabs.buffers.iter().any(|t| t.id == ids[1]),
+            "tab b stays open — header × is not a tab close"
+        );
+        assert_eq!(app.split.pane_count(), 2, "one pane closed");
+        assert!(
+            !app.split.panes.iter().any(|p| p.buffer == ids[1]),
+            "no pane shows b"
+        );
+
+        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        assert!(!docs.contains(&ids[1]), "b left the layout group");
+        assert_eq!(docs.len(), 2, "a and c remain in the group");
+        // The strip still has b as a loose tab outside the group.
+        assert_eq!(app.layout_holding(ids[1]).map(|l| l.id), None);
+    }
+
+    /// 2-pane 그룹에서 헤더로 하나를 닫으면 그룹은 해체된다 (멤버 < 2).
+    #[test]
+    fn closing_a_pane_of_a_two_member_layout_dissolves_the_group() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        app.focus_pane_to(1);
+        app.close_split();
+        assert!(
+            !app.layouts.iter().any(|l| l.id == layout_id),
+            "layout dissolved"
+        );
+        assert_eq!(app.active_layout, None);
+        assert_eq!(app.split.pane_count(), 1);
+        assert_eq!(app.tabs.buffers.len(), 2, "both tabs still open");
+    }
+
+
+    /// User scenario: 2-tab split folded into a group; close one pane via header.
+    /// Group must dissolve; both tabs remain open; only one pane left.
+    #[test]
+    fn user_scenario_two_tab_group_header_close_dissolves() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["A", "B"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        assert_eq!(app.split.pane_count(), 2);
+        assert_eq!(app.layouts.len(), 1);
+
+        app.focus_pane_to(0); // left = A
+        app.close_split();
+
+        assert_eq!(app.layouts.len(), 0, "group must dissolve");
+        assert_eq!(app.active_layout, None);
+        assert_eq!(app.split.pane_count(), 1, "one pane left");
+        assert_eq!(app.tabs.buffers.len(), 2, "both tabs stay (header is not tab close)");
+        assert!(!app.split.panes.iter().any(|p| p.buffer == ids[0]) || app.current_buffer_id() == ids[1]
+            || app.split.panes[0].buffer == ids[1],
+            "survivor should be B; panes={:?}",
+            app.split.panes.iter().map(|p| p.buffer).collect::<Vec<_>>());
+        assert_eq!(app.split.panes[0].buffer, ids[1], "remaining pane shows B");
+    }
+
+    /// User scenario: group A|B; close A from the tab bar → A's pane gone, not repointed to B|B.
+    #[test]
+    fn user_scenario_two_tab_group_tabbar_close_removes_pane() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["A", "B"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        assert_eq!(app.split.pane_count(), 2);
+
+        // Close A while focused on A (current-tab path).
+        app.focus_pane_to(0);
+        assert_eq!(app.current_buffer_id(), ids[0]);
+        app.close_tab_id(ids[0]);
+
+        assert!(!app.tabs.buffers.iter().any(|t| t.id == ids[0]), "A tab gone");
+        assert_eq!(app.tabs.buffers.len(), 1);
+        assert_eq!(app.split.pane_count(), 1, "A's pane must be removed, not kept as B|B");
+        assert_eq!(app.split.panes[0].buffer, ids[1], "only B remains");
+        assert_eq!(app.layouts.len(), 0, "group dissolved");
+    }
+
+    /// Same tab-bar close but A is not focused (inactive-tab path).
+    #[test]
+    fn user_scenario_two_tab_group_tabbar_close_inactive_removes_pane() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["A", "B"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+
+        app.focus_pane_to(1); // focus B
+        assert_eq!(app.current_buffer_id(), ids[1]);
+        app.close_tab_id(ids[0]); // close A
+
+        assert!(!app.tabs.buffers.iter().any(|t| t.id == ids[0]));
+        assert_eq!(app.split.pane_count(), 1, "A's pane removed; not B|B");
+        assert_eq!(app.split.panes[0].buffer, ids[1]);
+        assert_eq!(app.layouts.len(), 0);
+    }
+
     /// 레이아웃 활성화 시 터미널 탭을 focus_doc으로 지정하면 그 pane에 포커스.
     #[test]
     fn activating_a_layout_can_focus_a_terminal_tab() {
         let mut app = app_with("a");
-        let ids = tabs_named(&mut app, &["a", "b"]);
-        panes_on(&mut app, &ids);
+        let ids = tabs_named(&mut app, &["a", "b", "outside"]);
+        panes_on(&mut app, &ids[..2]);
         app.focus_pane_to(1);
         app.toggle_terminal_full();
         let term_id = app.current_buffer_id();
@@ -6596,7 +5969,7 @@ mod tests {
         let layout_id = app.layouts[0].id;
 
         // Leave the layout.
-        app.goto_tab(0);
+        app.goto_tab_id(ids[2]);
         assert_eq!(app.active_layout, None);
 
         // Come back asking for the terminal tab.
@@ -6619,15 +5992,26 @@ mod tests {
 
         // After swap + gather: [a, b, c, term] with group run [b, c, term].
         // Swap the terminal with its adjacent group member (not a non-member).
-        let term_slot = app.buffers.iter().position(|t| t.id == term_id).unwrap();
+        let term_slot = app
+            .tabs
+            .buffers
+            .iter()
+            .position(|t| t.id == term_id)
+            .unwrap();
         let docs = &app.layouts[0].docs;
-        let neighbor = if term_slot > 0 && docs.contains(&app.buffers[term_slot - 1].id) {
+        let neighbor = if term_slot > 0 && docs.contains(&app.tabs.buffers[term_slot - 1].id) {
             term_slot - 1
         } else {
             term_slot + 1
         };
-        assert!(docs.contains(&app.buffers[neighbor].id), "neighbor is a group member");
-        assert!(app.move_tab(term_slot, neighbor), "reorder within group is allowed");
+        assert!(
+            docs.contains(&app.tabs.buffers[neighbor].id),
+            "neighbor is a group member"
+        );
+        assert!(
+            app.move_tab(term_slot, neighbor),
+            "reorder within group is allowed"
+        );
     }
 
     /// 5개 탭, 3개만 pane에 (1,3,5), fold → gather 후 strip 연속,
@@ -6642,7 +6026,13 @@ mod tests {
         let layout_id = app.layouts[0].id;
 
         // After gather: [a, c, e, b, d] — members contiguous.
-        let docs = app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs.clone();
+        let docs = app
+            .layouts
+            .iter()
+            .find(|l| l.id == layout_id)
+            .unwrap()
+            .docs
+            .clone();
         assert_eq!(docs.len(), 3);
 
         // Focus pane 1 (document c) and open a new file.
@@ -6659,53 +6049,13 @@ mod tests {
         assert_eq!(docs.len(), 3);
 
         // Strip still contiguous.
-        let strip: Vec<BufferId> = app.buffers.iter().map(|t| t.id).collect();
+        let strip: Vec<BufferId> = app.tabs.buffers.iter().map(|t| t.id).collect();
         let first = strip.iter().position(|id| docs.contains(id)).unwrap();
         let run = &strip[first..first + docs.len()];
-        assert!(run.iter().all(|id| docs.contains(id)), "contiguous: {strip:?}");
+        assert!(
+            run.iter().all(|id| docs.contains(id)),
+            "contiguous: {strip:?}"
+        );
         let _ = std::fs::remove_file(&new_path);
-    }
-}
-
-#[cfg(all(test, feature = "extensions"))]
-mod ext_tests {
-    use super::*;
-
-    #[test]
-    fn webview_html_renders_and_loads_as_kitty_image() {
-        if !xei_ext_host::webview::available() {
-            eprintln!("skipping: no headless browser");
-            return;
-        }
-        let html = "<!doctype html><body style='margin:0;background:#7c3aed;width:100vw;height:100vh'></body>";
-        let png = xei_ext_host::webview::render_html(html, 320, 200).expect("render");
-        // The exact display path the frontend uses: PNG → ImageAsset with a
-        // populated Kitty cache, ready for place_rgba_rect_b64.
-        let img = crate::media::ImageAsset::load(&png, 14).expect("image load");
-        assert!(img.cached_w > 0 && img.cached_h > 0, "no cache built");
-        assert!(!img.cached_b64.is_empty(), "no base64 payload");
-    }
-
-    #[test]
-    fn exttest_command_drives_a_message_from_a_real_extension() {
-        let mut app = App::new();
-        app.ext_test(); // spawn host + activate + invoke xei.hello
-        if app.ext.is_none() {
-            eprintln!("skipping: node unavailable ({})", app.message);
-            return;
-        }
-        let start = std::time::Instant::now();
-        let mut text = None;
-        while start.elapsed().as_millis() < 5000 {
-            if let Some(ext) = app.ext.as_mut() {
-                ext.poll();
-                if let Some(m) = ext.pending_messages.first() {
-                    text = Some(m.text.clone());
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(text.as_deref().unwrap_or("").contains("Hello"), "got: {text:?}");
     }
 }

@@ -22,7 +22,9 @@ fn engine_with(lines: usize) -> Engine {
     let mut text = String::new();
     for i in 0..lines {
         if i % 20 == 0 {
-            text.push_str(&format!("fn function_number_{i}(argument: &str) -> usize {{\n"));
+            text.push_str(&format!(
+                "fn function_number_{i}(argument: &str) -> usize {{\n"
+            ));
         } else if i % 20 == 19 {
             text.push_str("}\n");
         } else {

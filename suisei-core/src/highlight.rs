@@ -1,7 +1,5 @@
 //! Token kinds, theme styling, and line-based fallback tokenizer.
 
-
-
 /// Rich highlight categories (tree-sitter captures + LSP semantic tokens).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
@@ -25,7 +23,6 @@ pub enum TokenKind {
     Attribute,
     Lifetime,
 }
-
 
 /// Map LSP semantic token type name → TokenKind
 pub fn from_semantic_type(name: &str) -> TokenKind {
@@ -147,19 +144,18 @@ fn rust_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "fn", "let", "mut", "struct", "impl", "enum", "trait", "pub", "use", "mod",
-            "const", "static", "type", "where", "unsafe", "async", "await", "move", "ref",
-            "self", "Self", "super", "crate", "extern", "dyn", "as", "in", "box",
+            "fn", "let", "mut", "struct", "impl", "enum", "trait", "pub", "use", "mod", "const",
+            "static", "type", "where", "unsafe", "async", "await", "move", "ref", "self", "Self",
+            "super", "crate", "extern", "dyn", "as", "in", "box",
         ],
         types: &[
-            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
-            "usize", "f32", "f64", "bool", "char", "str", "String", "Vec", "Option", "Result",
-            "Box", "Rc", "Arc", "HashMap", "HashSet", "Ok", "Err", "Some", "None",
+            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+            "f32", "f64", "bool", "char", "str", "String", "Vec", "Option", "Result", "Box", "Rc",
+            "Arc", "HashMap", "HashSet", "Ok", "Err", "Some", "None",
         ],
         imports: &["use", "mod", "extern", "crate"],
         controls: &[
-            "if", "else", "match", "while", "for", "loop", "return", "break", "continue",
-            "yield",
+            "if", "else", "match", "while", "for", "loop", "return", "break", "continue", "yield",
         ],
     }
 }
@@ -168,15 +164,17 @@ fn py_rules() -> LangRules {
     LangRules {
         line_comment: Some("#"),
         keywords: &[
-            "def", "class", "lambda", "with", "as", "pass", "global", "nonlocal", "del",
-            "assert", "yield", "from", "import", "True", "False", "None", "and", "or", "not",
-            "is", "in", "async", "await",
+            "def", "class", "lambda", "with", "as", "pass", "global", "nonlocal", "del", "assert",
+            "yield", "from", "import", "True", "False", "None", "and", "or", "not", "is", "in",
+            "async", "await",
         ],
-        types: &["int", "float", "str", "bool", "list", "dict", "set", "tuple", "object"],
+        types: &[
+            "int", "float", "str", "bool", "list", "dict", "set", "tuple", "object",
+        ],
         imports: &["import", "from", "as"],
         controls: &[
-            "if", "elif", "else", "for", "while", "try", "except", "finally", "raise",
-            "return", "break", "continue", "with",
+            "if", "elif", "else", "for", "while", "try", "except", "finally", "raise", "return",
+            "break", "continue", "with",
         ],
     }
 }
@@ -185,19 +183,45 @@ fn js_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "function", "const", "let", "var", "class", "interface", "type", "enum",
-            "import", "export", "default", "async", "await", "new", "this", "super",
-            "extends", "implements", "typeof", "instanceof", "void", "delete", "of",
-            "from", "as", "in", "true", "false", "null", "undefined",
+            "function",
+            "const",
+            "let",
+            "var",
+            "class",
+            "interface",
+            "type",
+            "enum",
+            "import",
+            "export",
+            "default",
+            "async",
+            "await",
+            "new",
+            "this",
+            "super",
+            "extends",
+            "implements",
+            "typeof",
+            "instanceof",
+            "void",
+            "delete",
+            "of",
+            "from",
+            "as",
+            "in",
+            "true",
+            "false",
+            "null",
+            "undefined",
         ],
         types: &[
-            "string", "number", "boolean", "any", "unknown", "never", "void", "object",
-            "Promise", "Array", "Record", "Map", "Set",
+            "string", "number", "boolean", "any", "unknown", "never", "void", "object", "Promise",
+            "Array", "Record", "Map", "Set",
         ],
         imports: &["import", "export", "from", "require"],
         controls: &[
-            "if", "else", "for", "while", "switch", "case", "try", "catch", "finally",
-            "throw", "return", "break", "continue", "yield",
+            "if", "else", "for", "while", "switch", "case", "try", "catch", "finally", "throw",
+            "return", "break", "continue", "yield",
         ],
     }
 }
@@ -206,17 +230,42 @@ fn go_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "func", "var", "const", "type", "struct", "interface", "map", "chan", "go",
-            "defer", "select", "package", "import", "range", "true", "false", "nil", "iota",
+            "func",
+            "var",
+            "const",
+            "type",
+            "struct",
+            "interface",
+            "map",
+            "chan",
+            "go",
+            "defer",
+            "select",
+            "package",
+            "import",
+            "range",
+            "true",
+            "false",
+            "nil",
+            "iota",
         ],
         types: &[
-            "string", "int", "int8", "int16", "int32", "int64", "uint", "byte", "rune",
-            "float32", "float64", "bool", "error", "any",
+            "string", "int", "int8", "int16", "int32", "int64", "uint", "byte", "rune", "float32",
+            "float64", "bool", "error", "any",
         ],
         imports: &["import", "package"],
         controls: &[
-            "if", "else", "for", "switch", "case", "select", "return", "break", "continue",
-            "fallthrough", "goto",
+            "if",
+            "else",
+            "for",
+            "switch",
+            "case",
+            "select",
+            "return",
+            "break",
+            "continue",
+            "fallthrough",
+            "goto",
         ],
     }
 }
@@ -225,16 +274,19 @@ fn c_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "return", "if", "else", "for", "while", "do", "switch", "case", "break",
-            "continue", "struct", "enum", "typedef", "sizeof", "static", "const", "void",
-            "extern", "goto", "default", "union", "volatile", "register", "restrict",
+            "return", "if", "else", "for", "while", "do", "switch", "case", "break", "continue",
+            "struct", "enum", "typedef", "sizeof", "static", "const", "void", "extern", "goto",
+            "default", "union", "volatile", "register", "restrict",
         ],
         types: &[
-            "int", "char", "float", "double", "long", "short", "unsigned", "signed",
-            "size_t", "bool", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+            "int", "char", "float", "double", "long", "short", "unsigned", "signed", "size_t",
+            "bool", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
         ],
         imports: &["include"],
-        controls: &["if", "else", "for", "while", "do", "switch", "case", "return", "break", "continue", "goto"],
+        controls: &[
+            "if", "else", "for", "while", "do", "switch", "case", "return", "break", "continue",
+            "goto",
+        ],
     }
 }
 
@@ -243,11 +295,43 @@ fn cpp_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "class", "namespace", "template", "typename", "public", "private", "protected",
-            "virtual", "override", "final", "new", "delete", "this", "using", "constexpr",
-            "noexcept", "nullptr", "auto", "concept", "requires", "co_await", "co_yield",
-            "true", "false", "return", "if", "else", "for", "while", "switch", "case",
-            "struct", "enum", "typedef", "static", "const", "void",
+            "class",
+            "namespace",
+            "template",
+            "typename",
+            "public",
+            "private",
+            "protected",
+            "virtual",
+            "override",
+            "final",
+            "new",
+            "delete",
+            "this",
+            "using",
+            "constexpr",
+            "noexcept",
+            "nullptr",
+            "auto",
+            "concept",
+            "requires",
+            "co_await",
+            "co_yield",
+            "true",
+            "false",
+            "return",
+            "if",
+            "else",
+            "for",
+            "while",
+            "switch",
+            "case",
+            "struct",
+            "enum",
+            "typedef",
+            "static",
+            "const",
+            "void",
         ],
         types: c_rules().types,
         imports: &["include", "using", "namespace"],
@@ -259,12 +343,14 @@ fn shell_rules() -> LangRules {
     LangRules {
         line_comment: Some("#"),
         keywords: &[
-            "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case",
-            "esac", "function", "return", "in", "select", "time", "coproc",
+            "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac",
+            "function", "return", "in", "select", "time", "coproc",
         ],
         types: &[],
         imports: &["source"],
-        controls: &["if", "then", "else", "elif", "fi", "for", "while", "do", "done", "return"],
+        controls: &[
+            "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "return",
+        ],
     }
 }
 
@@ -312,10 +398,10 @@ fn sql_rules() -> LangRules {
     LangRules {
         line_comment: Some("--"),
         keywords: &[
-            "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "JOIN", "LEFT",
-            "RIGHT", "INNER", "OUTER", "ON", "AS", "AND", "OR", "NOT", "NULL", "CREATE",
-            "TABLE", "INDEX", "VALUES", "INTO", "SET", "ORDER", "BY", "GROUP", "HAVING",
-            "LIMIT", "OFFSET", "select", "from", "where", "insert", "update", "delete",
+            "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "JOIN", "LEFT", "RIGHT",
+            "INNER", "OUTER", "ON", "AS", "AND", "OR", "NOT", "NULL", "CREATE", "TABLE", "INDEX",
+            "VALUES", "INTO", "SET", "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET", "select",
+            "from", "where", "insert", "update", "delete",
         ],
         types: &["INT", "TEXT", "VARCHAR", "BOOLEAN", "TIMESTAMP", "JSON"],
         imports: &[],
@@ -347,13 +433,35 @@ fn java_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "class", "interface", "enum", "extends", "implements", "public", "private",
-            "protected", "static", "final", "abstract", "void", "new", "this", "super",
-            "import", "package", "true", "false", "null", "var", "record",
+            "class",
+            "interface",
+            "enum",
+            "extends",
+            "implements",
+            "public",
+            "private",
+            "protected",
+            "static",
+            "final",
+            "abstract",
+            "void",
+            "new",
+            "this",
+            "super",
+            "import",
+            "package",
+            "true",
+            "false",
+            "null",
+            "var",
+            "record",
         ],
         types: &["int", "long", "String", "boolean", "Object", "List", "Map"],
         imports: &["import", "package"],
-        controls: &["if", "else", "for", "while", "switch", "case", "try", "catch", "return", "break", "continue", "throw"],
+        controls: &[
+            "if", "else", "for", "while", "switch", "case", "try", "catch", "return", "break",
+            "continue", "throw",
+        ],
     }
 }
 
@@ -361,13 +469,15 @@ fn lua_rules() -> LangRules {
     LangRules {
         line_comment: Some("--"),
         keywords: &[
-            "and", "break", "do", "else", "elseif", "end", "false", "for", "function",
-            "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then",
-            "true", "until", "while",
+            "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto",
+            "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until",
+            "while",
         ],
         types: &[],
         imports: &["require"],
-        controls: &["if", "else", "elseif", "for", "while", "repeat", "return", "break"],
+        controls: &[
+            "if", "else", "elseif", "for", "while", "repeat", "return", "break",
+        ],
     }
 }
 
@@ -375,12 +485,15 @@ fn rb_rules() -> LangRules {
     LangRules {
         line_comment: Some("#"),
         keywords: &[
-            "def", "class", "module", "end", "do", "begin", "rescue", "ensure", "yield",
-            "super", "self", "true", "false", "nil", "and", "or", "not", "require",
+            "def", "class", "module", "end", "do", "begin", "rescue", "ensure", "yield", "super",
+            "self", "true", "false", "nil", "and", "or", "not", "require",
         ],
         types: &[],
         imports: &["require", "include", "extend"],
-        controls: &["if", "elsif", "else", "unless", "case", "when", "while", "until", "for", "return", "break", "next"],
+        controls: &[
+            "if", "elsif", "else", "unless", "case", "when", "while", "until", "for", "return",
+            "break", "next",
+        ],
     }
 }
 
@@ -388,13 +501,42 @@ fn swift_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "func", "var", "let", "class", "struct", "enum", "protocol", "extension",
-            "import", "guard", "defer", "async", "await", "true", "false", "nil", "self",
-            "Self", "public", "private", "static",
+            "func",
+            "var",
+            "let",
+            "class",
+            "struct",
+            "enum",
+            "protocol",
+            "extension",
+            "import",
+            "guard",
+            "defer",
+            "async",
+            "await",
+            "true",
+            "false",
+            "nil",
+            "self",
+            "Self",
+            "public",
+            "private",
+            "static",
         ],
-        types: &["Int", "Double", "String", "Bool", "Array", "Dictionary", "Optional"],
+        types: &[
+            "Int",
+            "Double",
+            "String",
+            "Bool",
+            "Array",
+            "Dictionary",
+            "Optional",
+        ],
         imports: &["import"],
-        controls: &["if", "else", "switch", "case", "for", "while", "return", "guard", "throw", "try", "catch"],
+        controls: &[
+            "if", "else", "switch", "case", "for", "while", "return", "guard", "throw", "try",
+            "catch",
+        ],
     }
 }
 
@@ -402,13 +544,38 @@ fn zig_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "const", "var", "fn", "pub", "struct", "enum", "union", "try", "catch",
-            "defer", "errdefer", "async", "await", "export", "extern", "inline",
-            "comptime", "test", "true", "false", "null", "undefined", "and", "or",
+            "const",
+            "var",
+            "fn",
+            "pub",
+            "struct",
+            "enum",
+            "union",
+            "try",
+            "catch",
+            "defer",
+            "errdefer",
+            "async",
+            "await",
+            "export",
+            "extern",
+            "inline",
+            "comptime",
+            "test",
+            "true",
+            "false",
+            "null",
+            "undefined",
+            "and",
+            "or",
         ],
-        types: &["i8", "i16", "i32", "i64", "u8", "u32", "u64", "f32", "f64", "bool", "void", "usize"],
+        types: &[
+            "i8", "i16", "i32", "i64", "u8", "u32", "u64", "f32", "f64", "bool", "void", "usize",
+        ],
         imports: &["@import"],
-        controls: &["if", "else", "while", "for", "return", "break", "continue", "switch"],
+        controls: &[
+            "if", "else", "while", "for", "return", "break", "continue", "switch",
+        ],
     }
 }
 
@@ -416,13 +583,37 @@ fn dart_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "class", "extends", "implements", "with", "mixin", "import", "export",
-            "void", "var", "final", "const", "async", "await", "true", "false", "null",
-            "this", "super", "static", "abstract", "get", "set",
+            "class",
+            "extends",
+            "implements",
+            "with",
+            "mixin",
+            "import",
+            "export",
+            "void",
+            "var",
+            "final",
+            "const",
+            "async",
+            "await",
+            "true",
+            "false",
+            "null",
+            "this",
+            "super",
+            "static",
+            "abstract",
+            "get",
+            "set",
         ],
-        types: &["int", "double", "num", "String", "bool", "List", "Map", "Set"],
+        types: &[
+            "int", "double", "num", "String", "bool", "List", "Map", "Set",
+        ],
         imports: &["import", "export"],
-        controls: &["if", "else", "for", "while", "switch", "case", "try", "catch", "return", "throw", "yield"],
+        controls: &[
+            "if", "else", "for", "while", "switch", "case", "try", "catch", "return", "throw",
+            "yield",
+        ],
     }
 }
 
@@ -430,13 +621,31 @@ fn php_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "function", "class", "interface", "trait", "extends", "implements", "public",
-            "private", "protected", "static", "namespace", "use", "as", "new", "echo",
-            "true", "false", "null",
+            "function",
+            "class",
+            "interface",
+            "trait",
+            "extends",
+            "implements",
+            "public",
+            "private",
+            "protected",
+            "static",
+            "namespace",
+            "use",
+            "as",
+            "new",
+            "echo",
+            "true",
+            "false",
+            "null",
         ],
         types: &["int", "float", "string", "bool", "array", "object", "void"],
         imports: &["use", "namespace", "require", "include"],
-        controls: &["if", "else", "elseif", "foreach", "for", "while", "switch", "case", "try", "catch", "return", "throw"],
+        controls: &[
+            "if", "else", "elseif", "foreach", "for", "while", "switch", "case", "try", "catch",
+            "return", "throw",
+        ],
     }
 }
 
@@ -444,13 +653,43 @@ fn csharp_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "class", "struct", "interface", "enum", "namespace", "using", "public",
-            "private", "protected", "static", "void", "async", "await", "var", "new",
-            "this", "base", "true", "false", "null", "get", "set",
+            "class",
+            "struct",
+            "interface",
+            "enum",
+            "namespace",
+            "using",
+            "public",
+            "private",
+            "protected",
+            "static",
+            "void",
+            "async",
+            "await",
+            "var",
+            "new",
+            "this",
+            "base",
+            "true",
+            "false",
+            "null",
+            "get",
+            "set",
         ],
-        types: &["int", "string", "bool", "object", "List", "Dictionary", "Task"],
+        types: &[
+            "int",
+            "string",
+            "bool",
+            "object",
+            "List",
+            "Dictionary",
+            "Task",
+        ],
         imports: &["using", "namespace"],
-        controls: &["if", "else", "for", "foreach", "while", "switch", "case", "try", "catch", "return", "break", "continue", "throw", "yield"],
+        controls: &[
+            "if", "else", "for", "foreach", "while", "switch", "case", "try", "catch", "return",
+            "break", "continue", "throw", "yield",
+        ],
     }
 }
 
@@ -459,12 +698,14 @@ fn scala_rules() -> LangRules {
         line_comment: Some("//"),
         keywords: &[
             "def", "val", "var", "class", "object", "trait", "extends", "with", "import",
-            "package", "true", "false", "null", "new", "this", "super", "implicit",
-            "given", "using", "enum", "case",
+            "package", "true", "false", "null", "new", "this", "super", "implicit", "given",
+            "using", "enum", "case",
         ],
         types: &["Int", "String", "Boolean", "Unit", "List", "Map", "Option"],
         imports: &["import", "package"],
-        controls: &["if", "else", "for", "while", "match", "return", "throw", "try", "catch", "yield"],
+        controls: &[
+            "if", "else", "for", "while", "match", "return", "throw", "try", "catch", "yield",
+        ],
     }
 }
 
@@ -472,9 +713,26 @@ fn haskell_rules() -> LangRules {
     LangRules {
         line_comment: Some("--"),
         keywords: &[
-            "module", "import", "where", "let", "in", "if", "then", "else", "case", "of",
-            "data", "type", "newtype", "class", "instance", "deriving", "do", "qualified",
-            "as", "hiding",
+            "module",
+            "import",
+            "where",
+            "let",
+            "in",
+            "if",
+            "then",
+            "else",
+            "case",
+            "of",
+            "data",
+            "type",
+            "newtype",
+            "class",
+            "instance",
+            "deriving",
+            "do",
+            "qualified",
+            "as",
+            "hiding",
         ],
         types: &["Int", "Integer", "String", "Bool", "Maybe", "Either", "IO"],
         imports: &["import", "module"],
@@ -486,13 +744,39 @@ fn elixir_rules() -> LangRules {
     LangRules {
         line_comment: Some("#"),
         keywords: &[
-            "def", "defp", "defmodule", "defstruct", "defprotocol", "defimpl", "do", "end",
-            "fn", "true", "false", "nil", "when", "case", "cond", "with", "for", "if",
-            "unless", "try", "rescue", "catch", "after", "import", "alias", "require", "use",
+            "def",
+            "defp",
+            "defmodule",
+            "defstruct",
+            "defprotocol",
+            "defimpl",
+            "do",
+            "end",
+            "fn",
+            "true",
+            "false",
+            "nil",
+            "when",
+            "case",
+            "cond",
+            "with",
+            "for",
+            "if",
+            "unless",
+            "try",
+            "rescue",
+            "catch",
+            "after",
+            "import",
+            "alias",
+            "require",
+            "use",
         ],
         types: &[],
         imports: &["import", "alias", "require", "use"],
-        controls: &["if", "unless", "case", "cond", "with", "for", "try", "rescue", "catch"],
+        controls: &[
+            "if", "unless", "case", "cond", "with", "for", "try", "rescue", "catch",
+        ],
     }
 }
 
@@ -500,12 +784,15 @@ fn nim_rules() -> LangRules {
     LangRules {
         line_comment: Some("#"),
         keywords: &[
-            "proc", "func", "method", "template", "macro", "var", "let", "const", "type",
-            "object", "enum", "import", "from", "as", "export", "true", "false", "nil",
+            "proc", "func", "method", "template", "macro", "var", "let", "const", "type", "object",
+            "enum", "import", "from", "as", "export", "true", "false", "nil",
         ],
         types: &["int", "string", "bool", "float", "seq", "array"],
         imports: &["import", "from", "include"],
-        controls: &["if", "elif", "else", "for", "while", "case", "of", "return", "break", "continue", "try", "except"],
+        controls: &[
+            "if", "elif", "else", "for", "while", "case", "of", "return", "break", "continue",
+            "try", "except",
+        ],
     }
 }
 
@@ -513,12 +800,14 @@ fn generic_rules() -> LangRules {
     LangRules {
         line_comment: Some("//"),
         keywords: &[
-            "if", "else", "for", "while", "return", "function", "fn", "def", "class",
-            "struct", "const", "let", "var", "true", "false", "null", "nil", "import",
+            "if", "else", "for", "while", "return", "function", "fn", "def", "class", "struct",
+            "const", "let", "var", "true", "false", "null", "nil", "import",
         ],
         types: &[],
         imports: &["import", "include", "use", "from"],
-        controls: &["if", "else", "for", "while", "return", "break", "continue", "switch", "case"],
+        controls: &[
+            "if", "else", "for", "while", "return", "break", "continue", "switch", "case",
+        ],
     }
 }
 
@@ -570,7 +859,11 @@ fn tokenize(line: &str, rules: &LangRules, ext: Option<&str>) -> Vec<(TokenKind,
         }
 
         // raw string-ish rust r#"
-        if matches!(ext, Some("rs")) && chars[i] == 'r' && i + 1 < len && (chars[i + 1] == '"' || chars[i + 1] == '#') {
+        if matches!(ext, Some("rs"))
+            && chars[i] == 'r'
+            && i + 1 < len
+            && (chars[i + 1] == '"' || chars[i + 1] == '#')
+        {
             // fall through to identifier / simple string after r
         }
 
@@ -608,11 +901,17 @@ fn tokenize(line: &str, rules: &LangRules, ext: Option<&str>) -> Vec<(TokenKind,
             } else if rules.keywords.contains(&word) {
                 TokenKind::Keyword
             } else if rules.types.contains(&word)
-                || (word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                || (word
+                    .chars()
+                    .next()
+                    .map(|c| c.is_uppercase())
+                    .unwrap_or(false)
                     && word.chars().all(|c| c.is_alphanumeric() || c == '_'))
             {
                 TokenKind::TypeName
-            } else if word.chars().all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_')
+            } else if word
+                .chars()
+                .all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_')
                 && word.len() > 1
             {
                 TokenKind::Constant
@@ -628,13 +927,16 @@ fn tokenize(line: &str, rules: &LangRules, ext: Option<&str>) -> Vec<(TokenKind,
                 while j < len && chars[j].is_whitespace() {
                     j += 1;
                 }
-                if j < len && chars[j] == '(' && !matches!(
-                    kind,
-                    TokenKind::Keyword
-                        | TokenKind::KeywordControl
-                        | TokenKind::KeywordImport
-                        | TokenKind::TypeName
-                ) {
+                if j < len
+                    && chars[j] == '('
+                    && !matches!(
+                        kind,
+                        TokenKind::Keyword
+                            | TokenKind::KeywordControl
+                            | TokenKind::KeywordImport
+                            | TokenKind::TypeName
+                    )
+                {
                     kind = TokenKind::Function;
                 }
             }
@@ -666,7 +968,10 @@ fn tokenize(line: &str, rules: &LangRules, ext: Option<&str>) -> Vec<(TokenKind,
             continue;
         }
 
-        if matches!(chars[i], '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':' | '.') {
+        if matches!(
+            chars[i],
+            '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':' | '.'
+        ) {
             tokens.push((TokenKind::Punctuation, i, i + 1));
             i += 1;
             continue;
@@ -710,9 +1015,15 @@ mod tests {
     #[test]
     fn fallback_rust_fn_and_string() {
         let t = highlight_line(r#"fn main() { println!("hi"); }"#, Some("rs"));
-        assert!(t.iter().any(|(k, _, _)| matches!(k, TokenKind::Keyword | TokenKind::KeywordControl)));
+        assert!(
+            t.iter()
+                .any(|(k, _, _)| matches!(k, TokenKind::Keyword | TokenKind::KeywordControl))
+        );
         assert!(t.iter().any(|(k, _, _)| matches!(k, TokenKind::String)));
-        assert!(t.iter().any(|(k, _, _)| matches!(k, TokenKind::Macro | TokenKind::Function)));
+        assert!(
+            t.iter()
+                .any(|(k, _, _)| matches!(k, TokenKind::Macro | TokenKind::Function))
+        );
     }
 
     #[test]

@@ -4,6 +4,6 @@
 mod scene;
 
 pub use scene::{
-    build_editor_band, build_outline_public, compose, patch_chrome_editor_scroll, ChromeScene,
-    EditorLineScene, FrameDiff, OutlineItemScene, PaneScene, ShellState, Viewport,
+    ChromeScene, EditorLineScene, FrameDiff, OutlineItemScene, PaneScene, ShellState, Viewport,
+    build_editor_band, build_outline_public, compose, patch_chrome_editor_scroll,
 };

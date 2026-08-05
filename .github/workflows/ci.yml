@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Normal-environment lane: the undo spill/cache and DAP localhost tests
+# cannot run in a restricted sandbox (SUISEI-CURRENT-STATE P0) — a plain
+# macOS runner is that lane.
+jobs:
+  rust:
+    name: Rust workspace tests
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  app:
+    name: App package (engine dylib + Swift face)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Fast (unoptimised) Swift build — CI verifies compilation and
+      # packaging, not input latency (README: never judge latency on -Onone).
+      - run: SUISEI_FAST=1 ./scripts/package-suisei-app.sh
+      - name: Smoke — binary links the engine
+        run: otool -L suisei-app/.build/Suisei.app/Contents/MacOS/Suisei | grep libsuisei_engine

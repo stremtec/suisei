@@ -41,12 +41,20 @@ pub struct Selection {
 impl Selection {
     /// An empty selection (a caret) at `pos`.
     pub fn caret(pos: Position) -> Self {
-        Self { anchor: pos, head: pos, goal_x: None }
+        Self {
+            anchor: pos,
+            head: pos,
+            goal_x: None,
+        }
     }
 
     /// A selection from `anchor` to `head` (either document order).
     pub fn new(anchor: Position, head: Position) -> Self {
-        Self { anchor, head, goal_x: None }
+        Self {
+            anchor,
+            head,
+            goal_x: None,
+        }
     }
 
     /// True when this is a caret (no selected text).
@@ -84,26 +92,42 @@ impl Selection {
 
     /// Collapse to a caret at the head (Arrow with no Shift after a selection).
     pub fn collapsed_to_head(&self) -> Self {
-        Self { anchor: self.head, head: self.head, goal_x: self.goal_x }
+        Self {
+            anchor: self.head,
+            head: self.head,
+            goal_x: self.goal_x,
+        }
     }
 
     /// Collapse to a caret at the document-start edge (Left after a selection —
     /// the caret lands at the near edge, matching macOS text fields).
     pub fn collapsed_to_start(&self) -> Self {
         let s = self.start();
-        Self { anchor: s, head: s, goal_x: None }
+        Self {
+            anchor: s,
+            head: s,
+            goal_x: None,
+        }
     }
 
     /// Collapse to a caret at the document-end edge (Right after a selection).
     pub fn collapsed_to_end(&self) -> Self {
         let e = self.end();
-        Self { anchor: e, head: e, goal_x: None }
+        Self {
+            anchor: e,
+            head: e,
+            goal_x: None,
+        }
     }
 
     /// Move the head to `pos`, keeping the anchor — i.e. extend the selection
     /// (Shift+Arrow, Shift+Click). Clears `goal_x` unless the caller sets it.
     pub fn extended_to(&self, pos: Position) -> Self {
-        Self { anchor: self.anchor, head: pos, goal_x: None }
+        Self {
+            anchor: self.anchor,
+            head: pos,
+            goal_x: None,
+        }
     }
 
     /// True when two selections cover the same anchor/head, ignoring `goal_x`.
@@ -138,12 +162,18 @@ pub struct SelectionSet {
 impl SelectionSet {
     /// A fresh set with a single caret at the origin.
     pub fn new() -> Self {
-        Self { selections: vec![Selection::caret(Position::zero())], primary: 0 }
+        Self {
+            selections: vec![Selection::caret(Position::zero())],
+            primary: 0,
+        }
     }
 
     /// A set with a single selection.
     pub fn single(sel: Selection) -> Self {
-        Self { selections: vec![sel], primary: 0 }
+        Self {
+            selections: vec![sel],
+            primary: 0,
+        }
     }
 
     /// Rebuild from a list of caret positions (one per prior selection), keeping
@@ -232,7 +262,11 @@ impl SelectionSet {
                     // multi-selection reads naturally.
                     let start = prev.start().min(s.start());
                     let end = prev.end().max(s.end());
-                    *prev = Selection { anchor: start, head: end, goal_x: s.goal_x };
+                    *prev = Selection {
+                        anchor: start,
+                        head: end,
+                        goal_x: s.goal_x,
+                    };
                 }
                 _ => merged.push(s),
             }

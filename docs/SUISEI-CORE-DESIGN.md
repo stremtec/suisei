@@ -1,10 +1,16 @@
 # suisei-core — editing engine design
 
+> **Historical rewrite blueprint.** The diagnosis below records the pre-native
+> editing baseline and is not a description of the current tree. First-class
+> plural selections, retained `goal_x`, modeless semantic commands, central
+> `Edit`/`Delta`, delta-based undo application, incremental LSP sync and the
+> asynchronous syntax worker are implemented. The `Document` rope/piece-tree
+> and line-index storage described below is still the next storage phase:
+> current `Buffer` text remains `Vec<String>`.
+
 Blueprint for rewriting the editing core of `suisei-core` (forked from
 `xei-core`, which is TUI-shaped). This remains a target design; the
-implementation was rechecked on 2026-07-23. In particular, grapheme-safe
-movement/deletion and atomic file writes have since landed, while the document,
-selection and async-consumer redesign has not.
+implementation baseline was checked on 2026-07-23.
 
 ## Why a rewrite
 

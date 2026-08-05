@@ -361,9 +361,7 @@ pub fn auth_login_web_start() -> Result<AuthLoginSession, String> {
     let cancel2 = Arc::clone(&cancel);
 
     thread::spawn(move || {
-        let _ = tx.send(AuthLoginEvent::Log(
-            "Starting gh auth login --web …".into(),
-        ));
+        let _ = tx.send(AuthLoginEvent::Log("Starting gh auth login --web …".into()));
 
         let mut child = match Command::new("gh")
             .args([
@@ -539,7 +537,9 @@ fn extract_code_only(line: &str) -> Option<String> {
         if parts.len() == 2
             && parts[0].len() >= 4
             && parts[1].len() >= 4
-            && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_alphanumeric()))
+            && parts
+                .iter()
+                .all(|p| p.chars().all(|c| c.is_ascii_alphanumeric()))
         {
             return Some(w.to_ascii_uppercase());
         }
@@ -689,11 +689,7 @@ impl PrListState {
 }
 
 /// List PRs for the current repo (requires auth).
-pub fn list_prs(
-    root: &Path,
-    limit: usize,
-    state: PrListState,
-) -> Result<Vec<PrSummary>, String> {
+pub fn list_prs(root: &Path, limit: usize, state: PrListState) -> Result<Vec<PrSummary>, String> {
     if !gh_installed() {
         return Err("gh not installed".into());
     }
@@ -717,7 +713,11 @@ pub fn list_prs(
 
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.lines().next().unwrap_or("gh pr list failed").to_string());
+        return Err(err
+            .lines()
+            .next()
+            .unwrap_or("gh pr list failed")
+            .to_string());
     }
     Ok(parse_pr_list_json(&String::from_utf8_lossy(&out.stdout)))
 }
@@ -810,7 +810,11 @@ pub fn list_issues(
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.lines().next().unwrap_or("gh issue list failed").to_string());
+        return Err(err
+            .lines()
+            .next()
+            .unwrap_or("gh issue list failed")
+            .to_string());
     }
     Ok(parse_issue_list_json(&String::from_utf8_lossy(&out.stdout)))
 }
@@ -896,7 +900,13 @@ pub fn pr_merge(root: &Path, number: u64, method: &str) -> Result<String, String
     // method: merge | squash | rebase
     let n = number.to_string();
     let out = Command::new("gh")
-        .args(["pr", "merge", &n, &format!("--{method}"), "--delete-branch=false"])
+        .args([
+            "pr",
+            "merge",
+            &n,
+            &format!("--{method}"),
+            "--delete-branch=false",
+        ])
         .current_dir(root)
         .output()
         .map_err(|e| e.to_string())?;
@@ -955,7 +965,11 @@ pub fn pr_checkout(root: &Path, number: u64) -> Result<String, String> {
         Ok(format!("Checked out PR #{number}"))
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
-        Err(err.lines().next().unwrap_or("pr checkout failed").to_string())
+        Err(err
+            .lines()
+            .next()
+            .unwrap_or("pr checkout failed")
+            .to_string())
     }
 }
 
@@ -1047,10 +1061,8 @@ mod auth_tests {
 
     #[test]
     fn extract_device_code_line() {
-        let (c, u) = extract_device_code(
-            "! First copy your one-time code: ABCD-1234",
-        )
-        .expect("code");
+        let (c, u) =
+            extract_device_code("! First copy your one-time code: ABCD-1234").expect("code");
         assert_eq!(c, "ABCD-1234");
         assert!(u.contains("github.com"));
     }

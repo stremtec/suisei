@@ -1,4 +1,4 @@
-//! Unified Settings panel (Ctrl+,) — About · Setting · Pet · Help.
+//! Unified Settings panel (Ctrl+,) — About · Setting · Extensions · Help.
 
 use crate::config::{self, Config};
 use crate::theme;
@@ -9,8 +9,6 @@ pub enum SettingsPage {
     About,
     /// Appearance + editor config (theme, tab width, …).
     Setting,
-    /// Desktop pet GIF overlay.
-    Pet,
     /// VSCode extensions — status, installed list, store entry point.
     Extensions,
     /// Keyboard shortcut reference.
@@ -22,7 +20,6 @@ impl SettingsPage {
         match self {
             SettingsPage::About => "About",
             SettingsPage::Setting => "Setting",
-            SettingsPage::Pet => "Pet",
             SettingsPage::Extensions => "Extensions",
             SettingsPage::Help => "Help",
         }
@@ -32,7 +29,6 @@ impl SettingsPage {
         &[
             SettingsPage::About,
             SettingsPage::Setting,
-            SettingsPage::Pet,
             SettingsPage::Extensions,
             SettingsPage::Help,
         ]
@@ -41,8 +37,7 @@ impl SettingsPage {
     pub fn next(self) -> Self {
         match self {
             SettingsPage::About => SettingsPage::Setting,
-            SettingsPage::Setting => SettingsPage::Pet,
-            SettingsPage::Pet => SettingsPage::Extensions,
+            SettingsPage::Setting => SettingsPage::Extensions,
             SettingsPage::Extensions => SettingsPage::Help,
             SettingsPage::Help => SettingsPage::About,
         }
@@ -52,8 +47,7 @@ impl SettingsPage {
         match self {
             SettingsPage::About => SettingsPage::Help,
             SettingsPage::Setting => SettingsPage::About,
-            SettingsPage::Pet => SettingsPage::Setting,
-            SettingsPage::Extensions => SettingsPage::Pet,
+            SettingsPage::Extensions => SettingsPage::Setting,
             SettingsPage::Help => SettingsPage::Extensions,
         }
     }
@@ -78,17 +72,12 @@ pub fn help_entries() -> &'static [HelpEntry] {
         },
         HelpEntry {
             keys: "Ctrl+,",
-            desc: "Settings (About / Setting / Pet / Help)",
+            desc: "Settings (About / Setting / Extensions / Help)",
             is_header: false,
         },
         HelpEntry {
             keys: ":screensaver / :ss",
             desc: "xeifetch splash (clock · weather · Esc exit)",
-            is_header: false,
-        },
-        HelpEntry {
-            keys: ":pet path.gif",
-            desc: "Load desktop pet GIF (Kitty graphics)",
             is_header: false,
         },
         HelpEntry {
@@ -648,7 +637,7 @@ pub fn help_entries() -> &'static [HelpEntry] {
         },
         HelpEntry {
             keys: "1 2 3 4",
-            desc: "Jump About / Setting / Pet / Help",
+            desc: "Jump About / Setting / Extensions / Help",
             is_header: false,
         },
         HelpEntry {
@@ -691,15 +680,6 @@ pub enum SettingRow {
     GitHeader,
     OpenWorkbench,
     OpenScm,
-    /// Pet tab rows
-    PetEnabled,
-    PetPath,
-    PetX,
-    PetY,
-    PetWidth,
-    /// Playback speed (slider; h/l or Enter)
-    PetSpeed,
-    PetReload,
 }
 
 fn setting_rows() -> Vec<SettingRow> {
@@ -727,21 +707,6 @@ fn setting_rows() -> Vec<SettingRow> {
     rows.push(SettingRow::OpenScm);
     rows
 }
-
-fn pet_rows() -> Vec<SettingRow> {
-    vec![
-        SettingRow::PetEnabled,
-        SettingRow::PetPath,
-        SettingRow::PetX,
-        SettingRow::PetY,
-        SettingRow::PetWidth,
-        SettingRow::PetSpeed,
-        SettingRow::PetReload,
-    ]
-}
-
-/// Discrete speed stops for Enter-cycle (percent).
-const PET_SPEED_STOPS: &[u16] = &[25, 50, 75, 100, 125, 150, 200, 300, 400];
 
 #[derive(Debug, Clone)]
 pub struct SettingsPanel {
@@ -799,14 +764,9 @@ impl SettingsPanel {
         match self.page {
             SettingsPage::About => 0,
             SettingsPage::Setting => setting_rows().len(),
-            SettingsPage::Pet => pet_rows().len(),
             SettingsPage::Extensions => 0,
             SettingsPage::Help => help_entries().len(),
         }
-    }
-
-    pub fn pet_rows(&self) -> Vec<SettingRow> {
-        pet_rows()
     }
 
     /// Skip non-selectable header rows when moving selection on Setting page.
@@ -897,7 +857,6 @@ impl SettingsPanel {
     fn default_selected_for_page(&self) -> usize {
         match self.page {
             SettingsPage::Setting => 1, // first theme row
-            SettingsPage::Pet => 0,
             SettingsPage::Help => {
                 // First real shortcut (skip "General" header)
                 help_entries()
@@ -916,69 +875,6 @@ impl SettingsPanel {
             // The plugin store was a TUI full-screen surface; the GUI has no
             // equivalent yet, so this page is informational.
             SettingsPage::Extensions => SettingsAction::None,
-            SettingsPage::Pet => {
-                let rows = pet_rows();
-                let Some(row) = rows.get(self.selected).copied() else {
-                    return SettingsAction::None;
-                };
-                match row {
-                    SettingRow::PetEnabled => {
-                        self.draft.pet_enabled = !self.draft.pet_enabled;
-                        self.dirty = true;
-                        self.status = Some(if self.draft.pet_enabled {
-                            "pet = on  (requires gpu_acc + Kitty/Ghostty)".into()
-                        } else {
-                            "pet = off".into()
-                        });
-                        SettingsAction::ApplyPet
-                    }
-                    SettingRow::PetPath => {
-                        self.status = Some(
-                            "Set path: :pet ~/path/to/pet.gif  then s to save".into(),
-                        );
-                        SettingsAction::None
-                    }
-                    SettingRow::PetX => {
-                        // Bounds applied at event layer from terminal size.
-                        self.draft.pet_x = self.draft.pet_x.saturating_add(2);
-                        self.dirty = true;
-                        self.status = Some(format!("pet_x = {}", self.draft.pet_x));
-                        SettingsAction::ApplyPet
-                    }
-                    SettingRow::PetY => {
-                        self.draft.pet_y = self.draft.pet_y.saturating_add(1);
-                        self.dirty = true;
-                        self.status = Some(format!("pet_y = {}", self.draft.pet_y));
-                        SettingsAction::ApplyPet
-                    }
-                    SettingRow::PetWidth => {
-                        self.draft.pet_width_cells = match self.draft.pet_width_cells {
-                            4..=7 => 12,
-                            8..=15 => 20,
-                            _ => 8,
-                        };
-                        self.dirty = true;
-                        self.status =
-                            Some(format!("pet_width_cells = {}", self.draft.pet_width_cells));
-                        SettingsAction::ApplyPet
-                    }
-                    SettingRow::PetSpeed => {
-                        self.draft.pet_speed = next_pet_speed(self.draft.pet_speed);
-                        self.dirty = true;
-                        self.status = Some(format!(
-                            "pet_speed = {} ({})",
-                            self.draft.pet_speed,
-                            crate::pet::PetState::speed_label(self.draft.pet_speed)
-                        ));
-                        SettingsAction::ApplyPet
-                    }
-                    SettingRow::PetReload => {
-                        self.status = Some("Reloading pet…".into());
-                        SettingsAction::ApplyPet
-                    }
-                    _ => SettingsAction::None,
-                }
-            }
             SettingsPage::Setting => {
                 let rows = setting_rows();
                 let Some(row) = rows.get(self.selected).copied() else {
@@ -1006,10 +902,8 @@ impl SettingsPanel {
                     SettingRow::RelativeNumber => {
                         self.draft.relative_number = !self.draft.relative_number;
                         self.dirty = true;
-                        self.status = Some(format!(
-                            "relative_number = {}",
-                            self.draft.relative_number
-                        ));
+                        self.status =
+                            Some(format!("relative_number = {}", self.draft.relative_number));
                     }
                     SettingRow::UndoCaching => {
                         self.draft.undo_caching = !self.draft.undo_caching;
@@ -1032,10 +926,8 @@ impl SettingsPanel {
                     SettingRow::ClipboardSync => {
                         self.draft.clipboard_sync = !self.draft.clipboard_sync;
                         self.dirty = true;
-                        self.status = Some(format!(
-                            "clipboard_sync = {}",
-                            self.draft.clipboard_sync
-                        ));
+                        self.status =
+                            Some(format!("clipboard_sync = {}", self.draft.clipboard_sync));
                     }
                     SettingRow::GpuAcc => {
                         self.draft.gpu_acc = !self.draft.gpu_acc;
@@ -1063,16 +955,17 @@ impl SettingsPanel {
                         self.dirty = true;
                         self.status = Some(format!(
                             "key_hints = {}",
-                            if self.draft.key_hints { "true" } else { "false" }
+                            if self.draft.key_hints {
+                                "true"
+                            } else {
+                                "false"
+                            }
                         ));
                     }
                     SettingRow::LspEnabled => {
                         self.draft.lsp_enabled = !self.draft.lsp_enabled;
                         self.dirty = true;
-                        self.status = Some(format!(
-                            "lsp_enabled = {}",
-                            self.draft.lsp_enabled
-                        ));
+                        self.status = Some(format!("lsp_enabled = {}", self.draft.lsp_enabled));
                         return SettingsAction::ApplyLsp;
                     }
                     SettingRow::LspLang(i) => {
@@ -1115,14 +1008,7 @@ impl SettingsPanel {
                     SettingRow::ThemeHeader
                     | SettingRow::EditorHeader
                     | SettingRow::LspHeader
-                    | SettingRow::GitHeader
-                    | SettingRow::PetEnabled
-                    | SettingRow::PetPath
-                    | SettingRow::PetX
-                    | SettingRow::PetY
-                    | SettingRow::PetWidth
-                    | SettingRow::PetSpeed
-                    | SettingRow::PetReload => {}
+                    | SettingRow::GitHeader => {}
                 }
                 SettingsAction::None
             }
@@ -1147,96 +1033,6 @@ pub enum SettingsAction {
     ApplyTheme,
     ApplyGpuAcc,
     ApplyLsp,
-    ApplyPet,
     OpenWorkbench,
     OpenScm,
-}
-
-fn next_pet_speed(cur: u16) -> u16 {
-    for (i, &s) in PET_SPEED_STOPS.iter().enumerate() {
-        if cur < s {
-            return s;
-        }
-        if cur == s {
-            return PET_SPEED_STOPS
-                .get(i + 1)
-                .copied()
-                .unwrap_or(PET_SPEED_STOPS[0]);
-        }
-    }
-    100
-}
-
-fn prev_pet_speed(cur: u16) -> u16 {
-    let mut prev = *PET_SPEED_STOPS.last().unwrap_or(&100);
-    for &s in PET_SPEED_STOPS {
-        if cur <= s {
-            return prev;
-        }
-        prev = s;
-    }
-    prev
-}
-
-impl SettingsPanel {
-    /// Nudge pet position / speed with h/l or ←/→.
-    /// `max_x` / `max_y` should be terminal size (so pet can reach the edges).
-    pub fn nudge_pet(&mut self, dir: i16, max_x: u16, max_y: u16) -> SettingsAction {
-        if self.page != SettingsPage::Pet {
-            return SettingsAction::None;
-        }
-        let rows = pet_rows();
-        let Some(row) = rows.get(self.selected).copied() else {
-            return SettingsAction::None;
-        };
-        match row {
-            SettingRow::PetX => {
-                if dir < 0 {
-                    self.draft.pet_x = self.draft.pet_x.saturating_sub(1);
-                } else {
-                    self.draft.pet_x = self.draft.pet_x.saturating_add(1).min(max_x);
-                }
-                self.dirty = true;
-                self.status = Some(format!("pet_x = {}  (0..{max_x})", self.draft.pet_x));
-                SettingsAction::ApplyPet
-            }
-            SettingRow::PetY => {
-                if dir < 0 {
-                    self.draft.pet_y = self.draft.pet_y.saturating_sub(1);
-                } else {
-                    self.draft.pet_y = self.draft.pet_y.saturating_add(1).min(max_y);
-                }
-                self.dirty = true;
-                self.status = Some(format!("pet_y = {}  (0..{max_y})", self.draft.pet_y));
-                SettingsAction::ApplyPet
-            }
-            SettingRow::PetWidth => {
-                if dir < 0 {
-                    self.draft.pet_width_cells =
-                        self.draft.pet_width_cells.saturating_sub(1).max(4);
-                } else {
-                    self.draft.pet_width_cells =
-                        self.draft.pet_width_cells.saturating_add(1).min(40);
-                }
-                self.dirty = true;
-                self.status = Some(format!("pet_width_cells = {}", self.draft.pet_width_cells));
-                SettingsAction::ApplyPet
-            }
-            SettingRow::PetSpeed => {
-                self.draft.pet_speed = if dir < 0 {
-                    prev_pet_speed(self.draft.pet_speed)
-                } else {
-                    next_pet_speed(self.draft.pet_speed)
-                };
-                self.dirty = true;
-                self.status = Some(format!(
-                    "pet_speed = {} ({})",
-                    self.draft.pet_speed,
-                    crate::pet::PetState::speed_label(self.draft.pet_speed)
-                ));
-                SettingsAction::ApplyPet
-            }
-            _ => SettingsAction::None,
-        }
-    }
 }

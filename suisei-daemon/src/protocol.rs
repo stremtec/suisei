@@ -95,7 +95,11 @@ pub struct Frame {
 impl Frame {
     /// A frame at the current protocol version with the given payload.
     pub fn new(opcode: Opcode, payload: Vec<u8>) -> Self {
-        Frame { opcode, version: PROTOCOL_VERSION, payload }
+        Frame {
+            opcode,
+            version: PROTOCOL_VERSION,
+            payload,
+        }
     }
 
     /// An empty-payload control frame (Hello/Ping/Pong/…).
@@ -196,8 +200,14 @@ impl Status {
             return None;
         }
         let uptime_secs = u64::from_le_bytes([
-            payload[8], payload[9], payload[10], payload[11], payload[12], payload[13],
-            payload[14], payload[15],
+            payload[8],
+            payload[9],
+            payload[10],
+            payload[11],
+            payload[12],
+            payload[13],
+            payload[14],
+            payload[15],
         ]);
         let raw = &payload[16..16 + STATUS_PROJECT_CAP];
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
@@ -249,7 +259,10 @@ mod tests {
         let f = Frame::new(Opcode::Hello, vec![1, 2, 3, 4, 5]);
         let bytes = f.encode();
         // len prefix counts opcode+version+payload = 4 + 5 = 9.
-        assert_eq!(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]), 9);
+        assert_eq!(
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            9
+        );
         let mut cursor = std::io::Cursor::new(bytes);
         let back = Frame::read_from(&mut cursor).unwrap();
         assert_eq!(back, f);
@@ -259,7 +272,10 @@ mod tests {
     fn control_frame_has_empty_payload_and_len_four() {
         let f = Frame::control(Opcode::Ping);
         let bytes = f.encode();
-        assert_eq!(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]), 4);
+        assert_eq!(
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            4
+        );
         let mut cursor = std::io::Cursor::new(bytes);
         let back = Frame::read_from(&mut cursor).unwrap();
         assert_eq!(back.opcode, Opcode::Ping);
@@ -320,7 +336,10 @@ mod tests {
         // Non-destructive: only asserts the shape given a set var.
         let prev = std::env::var_os("XDG_RUNTIME_DIR");
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/tmp/xdg-test") };
-        assert_eq!(socket_path(), PathBuf::from("/tmp/xdg-test/suisei/daemon.sock"));
+        assert_eq!(
+            socket_path(),
+            PathBuf::from("/tmp/xdg-test/suisei/daemon.sock")
+        );
         match prev {
             Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
             None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },

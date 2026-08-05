@@ -4,7 +4,7 @@ use suisei_core::app::{App, Mode};
 use suisei_core::buffer::Position;
 use suisei_core::key::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::compositor::{compose, FrameDiff, ShellState};
+use crate::compositor::{FrameDiff, ShellState, compose};
 
 /// Ticks between post-edit `textDocument/didChange` syncs. The tick is 50 ms,
 /// so this coalesces a typing run into one full-text notification every 150 ms
@@ -17,6 +17,11 @@ const LSP_SYNC_TICKS: u32 = 3;
 /// back to its on-disk text stayed marked dirty; this re-derives it. Costs one
 /// hash, and only while dirty and only when the text moved.
 const DIRTY_RECHECK_TICKS: u32 = 20;
+
+/// Ticks between external-file checks (~1 s). Metadata polling is intentionally
+/// low-frequency, and only a transition (changed/recreated/deleted) advances a
+/// frame, so an idle editor still does no paint work.
+const EXTERNAL_FILE_CHECK_TICKS: u32 = 20;
 
 /// Ticks between daemon status reports. At the 50 ms tick this is ~1 s, which
 /// bounds the cost of building the status (`project_root` walks the filesystem)
@@ -77,6 +82,11 @@ pub struct Engine {
     outline_cache_path: Option<std::path::PathBuf>,
     /// Tick counter for low-frequency idle work (outline refresh).
     tick_count: u32,
+    /// Missing paths across all open document tabs. The active document owns
+    /// the close/preserve policy in `App::check_external_change`; this cache is
+    /// what lets inactive tabs acquire/clear their warning glyph without
+    /// forcing a full recompose every second while a file remains absent.
+    missing_tab_ids: std::collections::HashSet<suisei_core::app::BufferId>,
     /// Parked terminal sessions (VS Code-style multi-shell). The ACTIVE session
     /// always lives in `app.terminal` so all core routing (keys/paste/resize)
     /// keeps working untouched; switching swaps sessions in and out.
@@ -90,10 +100,26 @@ pub struct Engine {
     /// knows the panel's real size; the editor viewport is only a stand-in for
     /// before it has reported one.
     face_terminal_grid: Option<(u16, u16)>,
+    /// Per-shell content generation: bumped whenever a pane terminal's screen
+    /// changes. Shipped as a u16 in `SuiseiPaneC.term_gen` so the face skips
+    /// re-pulling a ~300 KiB grid it already has — pulling one per keystroke
+    /// per idle terminal was pure churn.
+    pane_term_gens: std::collections::HashMap<suisei_core::split::TerminalId, u64>,
     /// Pushes LSP/DAP/project state to the daemon for the menu-bar agent.
     /// `None` outside the real app — tests must not report into the developer's
     /// running daemon, so only the FFI constructor turns it on.
     reporter: Option<crate::daemon_report::Reporter>,
+    /// Background syntax parser (A1-6): the keystroke path ships a text
+    /// snapshot per buffer version and never waits; frames come back and are
+    /// adopted at the next recompose or tick.
+    syntax_worker: suisei_core::syntax_worker::SyntaxWorker,
+    /// `(version, path, window)` of the outstanding parse request — one
+    /// request per change, so a typing run coalesces on the worker.
+    syntax_requested: Option<(u64, String, std::ops::Range<usize>)>,
+    /// Buffer version of the tokens `app.syntax` currently paints.
+    syntax_applied: u64,
+    /// Mirror of the worker's pre-parse cache size (FFI diagnostic).
+    syntax_cached: usize,
 }
 
 impl Engine {
@@ -109,17 +135,34 @@ impl Engine {
     /// Pre-parse a file for the project index. Background work — never touches
     /// the document the user is editing.
     pub fn prewarm_file(&mut self, path: &str) -> bool {
-        let Ok(text) = std::fs::read_to_string(path) else { return false };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return false;
+        };
         let ext = std::path::Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_string());
-        self.app.syntax.prewarm(path, &text, ext.as_deref());
+        // Parsed on the syntax worker — the cache lives there with the trees.
+        self.syntax_worker
+            .request(suisei_core::syntax_worker::SyntaxRequest::Prewarm {
+                path: path.to_string(),
+                ext,
+                text,
+            });
         true
     }
 
     pub fn cached_parses(&self) -> usize {
-        self.app.syntax.cached_count()
+        self.syntax_cached
+    }
+
+    /// Boot pipeline: build every language grammar on the syntax worker now, so
+    /// the first file opened — of any language — highlights without a cold
+    /// parser+query build mid-view. Non-blocking; the worker warms in the
+    /// background while the launch splash is up.
+    pub fn warm_grammars(&self) {
+        self.syntax_worker
+            .request(suisei_core::syntax_worker::SyntaxRequest::WarmGrammars);
     }
 
     pub fn clear_scroll_intent(&mut self) {
@@ -138,9 +181,8 @@ impl Engine {
         // Same as TUI main: load ~/.xei.toml theme + editor opts.
         app.apply_config();
         app.message = "Suisei · same keys as xei · Ctrl+, settings".into();
-        app.viewport.width = 100;
-        app.viewport.height = 40;
-        app.viewport.text_x = 5;
+        app.stage.w = 900.0; // 100 columns
+        app.stage.h = 720.0; // 40 rows
         Self {
             app,
             shell: ShellState::default(),
@@ -152,11 +194,17 @@ impl Engine {
             outline_cache_ver: u64::MAX,
             outline_cache_path: None,
             tick_count: 0,
+            missing_tab_ids: std::collections::HashSet::new(),
             parked_terminals: Vec::new(),
             active_terminal: 0,
             journal: crate::journal::Journal::new(),
             face_terminal_grid: None,
+            pane_term_gens: std::collections::HashMap::new(),
             reporter: None,
+            syntax_worker: suisei_core::syntax_worker::SyntaxWorker::start(),
+            syntax_requested: None,
+            syntax_applied: 0,
+            syntax_cached: 0,
         }
     }
 
@@ -235,11 +283,18 @@ impl Engine {
             return;
         }
         // Parked slot for `idx`: indices skip the active position.
-        let parked_idx = if idx < self.active_terminal { idx } else { idx - 1 };
+        let parked_idx = if idx < self.active_terminal {
+            idx
+        } else {
+            idx - 1
+        };
         if parked_idx >= self.parked_terminals.len() {
             return;
         }
-        std::mem::swap(&mut self.app.terminal, &mut self.parked_terminals[parked_idx]);
+        std::mem::swap(
+            &mut self.app.terminal,
+            &mut self.parked_terminals[parked_idx],
+        );
         self.active_terminal = idx;
         self.app.terminal.open = true;
         self.app.mode = suisei_core::app::Mode::Terminal;
@@ -269,7 +324,11 @@ impl Engine {
                 self.active_terminal = 0;
             }
         } else {
-            let parked_idx = if idx < self.active_terminal { idx } else { idx - 1 };
+            let parked_idx = if idx < self.active_terminal {
+                idx
+            } else {
+                idx - 1
+            };
             if parked_idx < self.parked_terminals.len() {
                 let mut t = self.parked_terminals.remove(parked_idx);
                 t.shutdown();
@@ -303,6 +362,7 @@ impl Engine {
             return;
         }
         self.app.gui_insert_text(&ch.to_string());
+        self.app.completion_after_typing();
         self.app.update_scroll();
         self.recompose_scroll();
     }
@@ -477,8 +537,7 @@ impl Engine {
     /// every project/file open, without taking focus. Gating on it once sent
     /// every keystroke to the vim command machine for a whole session.
     fn editor_owns_keys(&self) -> bool {
-        matches!(self.app.mode, Mode::Editor)
-            && !self.app.terminal_window_focused()
+        matches!(self.app.mode, Mode::Editor) && !self.app.terminal_window_focused()
     }
 
     /// Keys that still belong to `App::dispatch` while the editor has focus:
@@ -528,7 +587,6 @@ impl Engine {
         let scm_before = self.app.scm.visible();
         let git_wb_before = self.app.git_wb.open;
         let palette_before = self.app.palette.open;
-        self.sync_viewport_to_app();
         self.app.dispatch(ev);
         // GUI contract: no core-side close animations. `preview.close()` only
         // sets `closing` and keeps `open` until the TUI's per-frame
@@ -540,9 +598,8 @@ impl Engine {
         let caret_after = self.app.buffer.cursor();
         let ver_after = self.app.buffer.version();
         let file_after = self.app.filename.clone();
-        let buffer_or_caret_changed = caret_before != caret_after
-            || ver_before != ver_after
-            || file_before != file_after;
+        let buffer_or_caret_changed =
+            caret_before != caret_after || ver_before != ver_after || file_before != file_after;
         if buffer_or_caret_changed {
             self.app.update_scroll();
             // Coherence: a non-navigation key (typing, edit) moved the cursor
@@ -563,12 +620,7 @@ impl Engine {
         // Chrome-owned modes (XLC / search / palette / explorer / settings / SCM / git …)
         // mutate scene data the scroll-patch never rebuilds — always full compose there,
         // else typed input (`:help`, palette filter, explorer j/k) paints stale.
-        let chrome_mode = |m: Mode| {
-            !matches!(
-                m,
-                Mode::Editor | Mode::Terminal | Mode::Preview
-            )
-        };
+        let chrome_mode = |m: Mode| !matches!(m, Mode::Editor | Mode::Terminal | Mode::Preview);
         let shell_surface_changed = mode_before != self.app.mode
             || chrome_mode(self.app.mode)
             || file_before != file_after
@@ -596,12 +648,52 @@ impl Engine {
             self.shell.dirty = true;
             need_full = true;
         }
+        if self.tick_count % EXTERNAL_FILE_CHECK_TICKS == 0 {
+            let before = (
+                self.app.current_buffer_id(),
+                self.app.buffer.version(),
+                self.app.file_deleted,
+                self.app.modified,
+                self.app.filename.clone(),
+                self.app.message.clone(),
+                self.app.tabs.buffers.len(),
+            );
+            self.app.check_external_change();
+            let after = (
+                self.app.current_buffer_id(),
+                self.app.buffer.version(),
+                self.app.file_deleted,
+                self.app.modified,
+                self.app.filename.clone(),
+                self.app.message.clone(),
+                self.app.tabs.buffers.len(),
+            );
+            let missing_now: std::collections::HashSet<_> = self
+                .app
+                .tabs
+                .buffers
+                .iter()
+                .filter(|tab| tab.file_mtime.is_some())
+                .filter_map(|tab| {
+                    tab.filename
+                        .as_ref()
+                        .filter(|path| std::fs::metadata(path).is_err())
+                        .map(|_| tab.id)
+                })
+                .collect();
+            if before != after || missing_now != self.missing_tab_ids {
+                self.missing_tab_ids = missing_now;
+                self.shell.dirty = true;
+                need_full = true;
+            }
+        }
         // Every pane shell flows, not just the focused one — a build running in
         // one terminal pane must keep going while you type in another.
-        for t in self.app.pane_terminals.values_mut() {
+        for (tid, t) in self.app.pane_terminals.iter_mut() {
             t.poll();
             if t.take_damage() {
                 self.shell.dirty = true;
+                *self.pane_term_gens.entry(*tid).or_insert(0) += 1;
             }
         }
         if self.app.terminal.open || matches!(self.app.mode, Mode::Terminal) {
@@ -662,11 +754,12 @@ impl Engine {
                 r.offer(status);
             }
         }
+        // A background parse landed — paint the fresh tokens (paint-only).
+        if self.adopt_syntax_frames().is_some() {
+            self.shell.dirty = true;
+        }
         // completions / palette need live paint while open
-        if self.shell.dirty
-            || self.app.completions.active
-            || self.app.palette.open
-        {
+        if self.shell.dirty || self.app.completions.active || self.app.palette.open {
             if need_full || self.app.git_wb.open || self.app.scm.visible() {
                 self.recompose();
             } else {
@@ -705,33 +798,34 @@ impl Engine {
 
     /// `css_w/h` = editor stage size (not whole window).  
     /// `line_h` = painted line height; `cell_w` = monospaced cell width.
+    ///
+    /// A6: the ONE production write of viewport geometry. The core stores
+    /// pixels (`app.stage`) and derives the cell grid; `shell.viewport`
+    /// keeps the face's last report for the `sync_viewport_public` test
+    /// seam. Nothing else writes geometry, so nothing re-syncs.
     pub fn resize(&mut self, css_w: f32, css_h: f32, line_h: f32, cell_w: f32, dpr: f32) {
         let scroll_before = self.app.scroll;
-        let caret = self.app.buffer.cursor();
         self.shell.viewport.css_w = css_w.max(80.0);
         self.shell.viewport.css_h = css_h.max(80.0);
         self.shell.viewport.cell_px = line_h.max(12.0);
         self.shell.viewport.cell_w = cell_w.max(6.0);
         self.shell.viewport.dpr = dpr.max(1.0);
-        // Full editor height is usable — face already subtracted chrome.
-        let rows = (self.shell.viewport.css_h / self.shell.viewport.cell_px)
-            .floor() as u32;
-        // Up to 200 face rows; split packing uses SUISEI_MAX_LINES (256).
-        self.shell.viewport.editor_rows = rows.clamp(8, 200);
-        self.sync_viewport_to_app();
+        self.app.resize_stage(css_w, css_h, line_h, cell_w, dpr);
         let total = self.app.buffer.line_count();
-        let vis = self.app.viewport.height.max(1) as usize;
+        let vis = self.app.grid_rows().max(1) as usize;
         let max_scroll = total.saturating_sub(vis.min(total));
         // GUI contract: panel/window resize NEVER re-anchors the viewport to the
         // caret — the user's scroll position is sacred (re-anchoring made hiding
         // the outline yank a far-scrolled view back to the caret line).
-        let _ = caret;
         self.app.scroll = scroll_before.min(max_scroll);
         self.shell.dirty = true;
         // Resize is viewport-only — keep outline/SCM caches (face debounces full shell).
         self.recompose_scroll();
     }
 
+    /// Tests only: re-apply the face's last resize report after swapping
+    /// `app` wholesale (production resizes through [`Engine::resize`]).
+    #[cfg(test)]
     pub(crate) fn sync_viewport_public(&mut self) {
         self.sync_viewport_to_app();
     }
@@ -740,49 +834,149 @@ impl Engine {
         self.app.update_scroll();
     }
 
+    /// Re-apply the face's last resize report to the core. Test seam —
+    /// production goes through `resize`, the only writer. Pixels in,
+    /// derived cells out (A6).
+    #[cfg(test)]
     fn sync_viewport_to_app(&mut self) {
-        let rows = self.shell.viewport.editor_rows.max(8) as u16;
-        let cell_w = self.shell.viewport.cell_w.max(6.0);
-        let cols = (self.shell.viewport.css_w / cell_w)
-            .floor()
-            .clamp(40.0, 500.0) as u16;
-        self.app.viewport.height = rows;
-        self.app.viewport.width = cols;
-        self.app.viewport.text_x = 5;
-        self.app.viewport.text_y = self.app.viewport.y;
+        let v = self.shell.viewport;
+        self.app
+            .resize_stage(v.css_w, v.css_h, v.cell_px, v.cell_w, v.dpr);
     }
-
 
     /// Highlight window: what the viewport shows plus generous overscan, so a
     /// scroll usually stays a cache hit. Tokens are only ever consumed per row
-    /// (`tokens_for_row`), so nothing needs whole-file highlighting — and
-    /// rebuilding every token was the entire typing cost once parsing became
-    /// incremental.
+    /// (`tokens_for_row`), so nothing needs whole-file highlighting.
+    ///
+    /// A1-6: the parse itself runs on the syntax worker — this does no
+    /// tree-sitter work at all. Adopt finished frames, drop colours that
+    /// belong to another document, and request a snapshot when the buffer or
+    /// the window moved. While a parse is in flight the stale tokens keep
+    /// painting: a column may shift for a frame or two, the same contract
+    /// every async highlighter ships.
     fn refresh_syntax(&mut self) {
-        const OVERSCAN: usize = 400;
-        let first = self.app.scroll;
-        let height = self.app.viewport.height as usize;
-        let window = first.saturating_sub(OVERSCAN)..(first + height + OVERSCAN);
+        self.adopt_syntax_frames();
 
-        let stale = self.app.syntax_seen_version != self.app.buffer.version();
-        if !stale && self.app.syntax.covers_rows(&window) {
-            return;
-        }
-        let text = self.app.buffer.text();
-        let ext = self.app.file_extension();
         let path = self
             .app
             .filename
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        // Path-aware: adopts the indexer's pre-parsed tree when switching files.
-        self.app.syntax.parse_path(&path, &text, ext.as_deref(), Some(window));
-        self.app.syntax_seen_version = self.app.buffer.version();
+        if self.app.syntax.applied_path() != path {
+            // Document switch: the old file's colours belong to other text.
+            self.app.syntax.clear_tokens();
+            self.syntax_applied = 0;
+            self.syntax_requested = None;
+        }
+
+        const OVERSCAN: usize = 400;
+        let first = self.app.scroll;
+        let height = self.app.grid_rows() as usize;
+        let window = first.saturating_sub(OVERSCAN)..(first + height + OVERSCAN);
+
+        let version = self.app.buffer.version();
+        let needs = self.syntax_applied != version || !self.app.syntax.covers_rows(&window);
+        let pending = self
+            .syntax_requested
+            .as_ref()
+            .map(|(v, p, w)| *v == version && *p == path && *w == window)
+            .unwrap_or(false);
+        if needs && !pending {
+            let text = self.app.buffer.text();
+            let ext = self.app.file_extension();
+            // A full channel means the worker already holds a request; the
+            // next recompose retries once it drains. `try_send` never blocks.
+            if self
+                .syntax_worker
+                .request(suisei_core::syntax_worker::SyntaxRequest::Parse {
+                    path: path.clone(),
+                    ext,
+                    text,
+                    version,
+                    window: window.clone(),
+                })
+            {
+                self.syntax_requested = Some((version, path, window));
+            }
+        }
+    }
+
+    /// Drain finished parses and apply the ones that still match the live
+    /// document. Returns the newest adopted version so callers (the tick)
+    /// can mark the frame dirty and paint the fresh tokens.
+    fn adopt_syntax_frames(&mut self) -> Option<u64> {
+        let mut adopted = None;
+        while let Ok(frame) = self.syntax_worker.frames().try_recv() {
+            adopted = self.adopt_syntax_frame(frame).or(adopted);
+        }
+        adopted
+    }
+
+    fn adopt_syntax_frame(
+        &mut self,
+        frame: suisei_core::syntax_worker::SyntaxFrame,
+    ) -> Option<u64> {
+        use suisei_core::syntax_worker::SyntaxFrame;
+        match frame {
+            SyntaxFrame::Cached { count } => {
+                self.syntax_cached = count;
+                None
+            }
+            SyntaxFrame::Tokens {
+                path,
+                version,
+                window,
+                tokens,
+                active,
+            } => {
+                let current = self
+                    .app
+                    .filename
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                if path == current && version == self.app.buffer.version() {
+                    let changed = self.app.syntax.apply_frame(path, window, tokens, active);
+                    self.syntax_applied = version;
+                    // Mark the frame dirty only when the tokens actually
+                    // changed — an empty answer for an untitled document
+                    // paints nothing and must not bump an idle tick.
+                    changed.then_some(version)
+                } else {
+                    // Stale — the buffer moved on or the file changed; a
+                    // fresher snapshot is already requested.
+                    None
+                }
+            }
+        }
+    }
+
+    /// Block until the worker's parse of the live document lands. Tests only
+    /// — the app never waits; it paints stale and moves on.
+    #[cfg(test)]
+    fn flush_syntax(&mut self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            self.refresh_syntax();
+            if self.syntax_applied == self.app.buffer.version() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "syntax worker did not catch up to the live document"
+            );
+            if let Ok(frame) = self
+                .syntax_worker
+                .frames()
+                .recv_timeout(std::time::Duration::from_millis(20))
+            {
+                self.adopt_syntax_frame(frame);
+            }
+        }
     }
 
     pub(crate) fn recompose(&mut self) {
-        self.sync_viewport_to_app();
         // Same as TUI: re-parse syntax only when buffer text version changes.
         self.refresh_syntax();
         // Lazy SCM graph + git workbench tab data (may shell out once).
@@ -802,12 +996,7 @@ impl Engine {
             self.outline_cache_path = path;
         }
         self.frame_gen = self.frame_gen.saturating_add(1);
-        self.last_diff = compose(
-            &self.app,
-            &self.shell,
-            self.frame_gen,
-            &self.outline_cache,
-        );
+        self.last_diff = compose(&self.app, self.frame_gen, &self.outline_cache);
         self.shell.dirty = false;
     }
 
@@ -823,7 +1012,6 @@ impl Engine {
         if delta_lines == 0 {
             return;
         }
-        self.sync_viewport_to_app();
         self.app.scroll_by_lines(delta_lines);
         // Keep split pane mirrors in sync so inactive panes paint correctly.
         // Scroll never moves the caret — only the window.
@@ -835,7 +1023,6 @@ impl Engine {
         if !self.app.terminal.open || self.app.terminal.started {
             return;
         }
-        self.sync_viewport_to_app();
         // Spawn at the size the PANEL will actually be. This used to size the
         // PTY from the editor viewport and then let the face's own measurement
         // shrink it a moment later — and shrinking a grid pushes its top rows
@@ -845,23 +1032,22 @@ impl Engine {
         let (cols, rows) = match self.face_terminal_grid {
             Some(grid) => grid,
             None => {
-                let cols = self.app.viewport.width.max(40);
+                let cols = self.app.grid_cols().max(40);
                 let rows = if !self.app.pane_terminals.is_empty() {
-                    self.app.viewport.height.max(24)
+                    self.app.grid_rows().max(24)
                 } else {
-                    self.app.viewport.height.max(8).min(24).max(8)
+                    self.app.grid_rows().max(8).min(24).max(8)
                 };
                 (cols, rows)
             }
         };
         self.app.terminal.resize(cols, rows);
-        // start() uses parent(path) as cwd — prefer open file, else project root.
-        let root = self.app.project_root();
+        // `Terminal::start` consumes an anchor and starts in its parent.
+        // Every shell uses the same explicit project-root policy.
         let anchor_owned = self
             .app
-            .filename
-            .clone()
-            .unwrap_or_else(|| root.join("."));
+            .terminal_working_directory()
+            .join(".suisei-terminal");
         self.app.terminal.start(Some(&anchor_owned));
         if !self.app.terminal.started {
             self.app.message = "Terminal: failed to spawn shell (PTY)".into();
@@ -882,7 +1068,8 @@ impl Engine {
                     .hscroll
                     .saturating_sub((-delta_cols) as usize);
             } else {
-                self.app.preview.hscroll = self.app.preview.hscroll.saturating_add(delta_cols as usize);
+                self.app.preview.hscroll =
+                    self.app.preview.hscroll.saturating_add(delta_cols as usize);
             }
             self.recompose_scroll();
             return;
@@ -905,7 +1092,6 @@ impl Engine {
         if self.pointer_down && self.pointer_moved {
             return;
         }
-        self.sync_viewport_to_app();
         self.app.scroll_to_line(line as usize);
         if !self.app.wrap_lines {
             self.app.set_hscroll(hscroll_cols as usize);
@@ -920,7 +1106,6 @@ impl Engine {
         if self.pointer_down && self.pointer_moved {
             return;
         }
-        self.sync_viewport_to_app();
         let before = (self.app.scroll, self.app.hscroll);
         self.app.scroll_to_line(line as usize);
         if !self.app.wrap_lines {
@@ -955,7 +1140,6 @@ impl Engine {
             self.recompose_scroll();
             return;
         }
-        self.sync_viewport_to_app();
         let before = (self.app.scroll, self.app.scroll_frac.to_bits());
         self.app.scroll_by_frac(delta_lines);
         let after = (self.app.scroll, self.app.scroll_frac.to_bits());
@@ -968,27 +1152,17 @@ impl Engine {
     /// Scroll / paint-only recompose: editor surfaces only (no explorer/SCM rebuild).
     /// Used for wheel, light keys (face), and pointer when only the viewport moves.
     pub(crate) fn recompose_scroll(&mut self) {
-        self.sync_viewport_to_app();
         // Syntax only if buffer changed (usually no-op while scrolling).
         self.refresh_syntax();
         self.frame_gen = self.frame_gen.saturating_add(1);
         // Patch in place when we already have chrome — full compose is too heavy
         // for 5k–10k line files during trackpad momentum.
         if let Some(chrome) = self.last_diff.chrome.as_mut() {
-            crate::compositor::patch_chrome_editor_scroll(
-                &self.app,
-                &self.shell,
-                self.frame_gen,
-                chrome,
-            );
+            crate::compositor::patch_chrome_editor_scroll(&self.app, self.frame_gen, chrome);
             self.last_diff.frame_gen = self.frame_gen;
         } else {
-            self.last_diff = crate::compositor::compose(
-                &self.app,
-                &self.shell,
-                self.frame_gen,
-                &self.outline_cache,
-            );
+            self.last_diff =
+                crate::compositor::compose(&self.app, self.frame_gen, &self.outline_cache);
         }
         self.shell.dirty = false;
     }
@@ -1000,7 +1174,6 @@ impl Engine {
 
     /// Mouse **down**: place caret + arm drag. Does **not** enter Visual yet.
     pub fn click_at(&mut self, buffer_row: u32, visual_col: u32, select_word: bool) {
-        self.sync_viewport_to_app();
         if self.app.buffer.line_count() == 0 {
             return;
         }
@@ -1035,7 +1208,6 @@ impl Engine {
 
     /// Mouse **move** while down: once off the down cell, enter Visual and extend.
     pub fn drag_to(&mut self, buffer_row: u32, visual_col: u32) {
-        self.sync_viewport_to_app();
         if !self.pointer_down {
             // Face skipped down — treat as down then move.
             self.click_at(buffer_row, visual_col, false);
@@ -1114,13 +1286,30 @@ impl Engine {
 
     /// Step matches while (or after) find: true = next, false = previous.
     pub fn find_step(&mut self, forward: bool) {
-        if forward {
+        if matches!(self.app.mode, Mode::Search) {
+            self.app.search_cycle(forward);
+        } else if forward {
             self.app.search_next();
         } else {
             self.app.search_prev();
         }
         self.app.update_scroll();
-        self.recompose_scroll();
+        // The match index is chrome state, not only editor scroll. A light
+        // scroll patch leaves the Find counter stale even when the caret moved.
+        self.recompose();
+    }
+
+    pub fn find_set_input(&mut self, input: &str) {
+        self.app.set_search_input(input.to_string());
+        self.recompose();
+    }
+
+    pub fn palette_set_query(&mut self, query: &str) {
+        if !self.app.palette.open {
+            return;
+        }
+        self.app.palette.set_query(query.to_string());
+        self.recompose();
     }
 
     /// Insert text at the caret (file drop / IME commit). Routes to the PTY
@@ -1129,22 +1318,61 @@ impl Engine {
         if text.is_empty() {
             return;
         }
-        if self.app.terminal.open
-            && (matches!(self.app.mode, Mode::Terminal) || self.app.terminal_window_focused())
-        {
+        // The docked shell owns the paste only while it has the keyboard…
+        if matches!(self.app.mode, Mode::Terminal) && self.app.terminal.open {
             self.app.terminal.paste_input(text);
             self.shell.dirty = true;
             self.recompose_scroll();
             return;
         }
-        if matches!(
-            self.app.mode,
-            Mode::Editor
-        ) {
-            self.app.delete_selection();
+        // …otherwise a focused pane shell takes it. This used to fall through
+        // to the editor (or the dock) — IME commits and drops landed in the
+        // terminal tab's hidden buffer while the shell had the keyboard.
+        if self.app.terminal_window_focused() {
+            if let Some(t) = self.app.focused_pane_terminal_mut() {
+                t.paste_input(text);
+                self.shell.dirty = true;
+                self.recompose_scroll();
+                return;
+            }
+        }
+        if matches!(self.app.mode, Mode::Editor) {
+            // IME commits and programmatic paste must use the same exclusive
+            // Selection model as clicks, drags and ordinary typing. The old
+            // cursor-only paste path inserted at `buffer.cursor`, then tried to
+            // repair `sel` afterwards; mid-line Korean input could therefore
+            // land at a stale position or fail to replace the active range.
+            self.app.gui_insert_text(&text.replace('\r', ""));
+            self.app.update_scroll();
+            self.recompose_scroll();
+            return;
         }
         self.app.paste_text_at_cursor(text);
         self.recompose();
+    }
+
+    /// Raw keyboard text into the FOCUSED terminal's PTY as UTF-8 bytes — the
+    /// path the terminal input view uses for IME-committed Hangul/CJK and for
+    /// ordinary typed characters. Unlike `paste_text` this is NOT wrapped in a
+    /// bracketed-paste envelope: it is keystrokes, not a paste, so the shell and
+    /// its TUIs must see it as typed input. No-op when no terminal has focus.
+    pub fn terminal_input(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if matches!(self.app.mode, Mode::Terminal) && self.app.terminal.open {
+            self.app.terminal.write_input(text.as_bytes());
+            self.shell.dirty = true;
+            self.recompose_scroll();
+            return;
+        }
+        if self.app.terminal_window_focused() {
+            if let Some(t) = self.app.focused_pane_terminal_mut() {
+                t.write_input(text.as_bytes());
+                self.shell.dirty = true;
+                self.recompose_scroll();
+            }
+        }
     }
 
     /// GUI focus contract: clicking the terminal panel routes keys to the PTY,
@@ -1188,6 +1416,11 @@ impl Engine {
             self.recompose();
         }
         ok
+    }
+
+    /// Layout that currently owns the desk, or 0 when the desk is free.
+    pub fn active_layout_id(&self) -> u64 {
+        self.app.active_layout.unwrap_or(0)
     }
 
     /// Toggle the **docked** terminal (⌃T), directly.
@@ -1252,6 +1485,62 @@ impl Engine {
         }
         self.shell.dirty = true;
         self.recompose();
+    }
+
+    /// Size a PANE terminal's PTY to the face's measured grid (cells). Pane
+    /// shells used to get no resize after spawn — they started at a viewport
+    /// guess, so output wrapped at the wrong column forever, divider drags and
+    /// window resizes never reflowed them, and vim/htop drew garbled.
+    pub fn terminal_resize_pane(&mut self, pane: u32, cols: u32, rows: u32) {
+        if cols < 10 || rows < 3 {
+            return;
+        }
+        let cols = cols.min(500) as u16;
+        let rows = rows.min(200) as u16;
+        let Some(t) = self.app.pane_terminal_mut(pane as usize) else {
+            return;
+        };
+        t.resize(cols, rows);
+        self.shell.dirty = true;
+        self.recompose_scroll();
+    }
+
+    /// Scroll a pane terminal through its scrollback — the pane twin of
+    /// `terminal_scroll`. Positive reveals older output.
+    pub fn terminal_scroll_pane(&mut self, pane: u32, delta_rows: i32) {
+        if delta_rows == 0 {
+            return;
+        }
+        let Some(t) = self.app.pane_terminal_mut(pane as usize) else {
+            return;
+        };
+        if delta_rows > 0 {
+            t.scroll_up(delta_rows as usize);
+        } else {
+            t.scroll_down((-delta_rows) as usize);
+        }
+        self.shell.dirty = true;
+        self.recompose();
+    }
+
+    /// Wrapping u16 generation of a pane shell's content, for the face to skip
+    /// re-pulling a grid it already has. 0 while the shell has produced
+    /// nothing.
+    pub fn pane_term_gen(&self, pane: usize) -> u16 {
+        let Some(buf_id) = self.app.split.panes.get(pane).map(|p| p.buffer) else {
+            return 0;
+        };
+        let Some(tid) = self
+            .app
+            .tabs
+            .buffers
+            .iter()
+            .find(|t| t.id == buf_id)
+            .and_then(|t| t.terminal)
+        else {
+            return 0;
+        };
+        self.pane_term_gens.get(&tid).copied().unwrap_or(0) as u16
     }
 
     pub fn save_as(&mut self, path: &str) {
@@ -1324,7 +1613,7 @@ impl Engine {
     /// (Xcode behavior) instead of pinning the target to the top edge.
     pub fn goto_line(&mut self, line_1based: u32) {
         self.app.goto_line(line_1based as usize);
-        let vis = self.app.viewport.height.max(1) as usize;
+        let vis = self.app.grid_rows().max(1) as usize;
         let target = (line_1based as usize).saturating_sub(1);
         self.app.scroll_to_line(target.saturating_sub(vis / 2));
         self.recompose();
@@ -1352,9 +1641,58 @@ impl Engine {
             return;
         }
         if self.app.split.resize_between(a as usize, b as usize, delta) {
-            // Full recompose: the pane rects are part of the chrome snapshot.
-            self.recompose();
+            // The pane rects live in the chrome snapshot, but the scroll
+            // patch path rebuilds the editor surfaces (rects included) far
+            // more cheaply than a full recompose — a divider drag fires this
+            // on every pointer move, so the full rebuild re-tokenized every
+            // pane per pixel.
+            self.recompose_scroll();
         }
+    }
+
+    /// Forward a face mouse event to a terminal's inner app when it
+    /// requested tracking (vim/htop/tmux). `pane == 0xFFFF` targets the
+    /// dock. Returns true when the shell consumed the event — the face
+    /// should not also act on it (e.g. wheel → scrollback).
+    pub fn terminal_mouse(
+        &mut self,
+        pane: u32,
+        button: u8,
+        x: u16,
+        y: u16,
+        pressed: bool,
+        motion: bool,
+    ) -> bool {
+        let term = if pane == 0xFFFF {
+            if !self.app.terminal.open {
+                return false;
+            }
+            &mut self.app.terminal
+        } else {
+            match self.app.pane_terminal_mut(pane as usize) {
+                Some(t) => t,
+                None => return false,
+            }
+        };
+        if !term.wants_mouse() {
+            return false;
+        }
+        term.mouse_report(button, x, y, pressed, motion);
+        true
+    }
+
+    /// Restore the previous session's files + cursors, if a session was
+    /// saved. Landing named buffers flips the welcome rule, so Welcome
+    /// yields to the restored editor.
+    pub fn restore_session(&mut self) {
+        self.app.restore_session();
+        self.recompose();
+    }
+
+    /// Persist open files + cursors for the next launch (core writes
+    /// `~/.suisei/session` atomically).
+    pub fn save_session(&self) {
+        self.app.save_session();
     }
 
     /// Toggle a breakpoint on a specific 1-based line of the current file
@@ -1402,11 +1740,7 @@ impl Engine {
                     flags = 1;
                 }
             }
-            out.push((
-                best_indent.min(200) as u8,
-                best_len.min(255) as u8,
-                flags,
-            ));
+            out.push((best_indent.min(200) as u8, best_len.min(255) as u8, flags));
             i = end;
         }
         (out, total as u32)
@@ -1452,14 +1786,14 @@ impl Engine {
             .map(|p| p.to_string_lossy() != path)
             .unwrap_or(true);
         if need_open {
-            let same_tab = self.app.buffers.iter().any(|t| {
+            let same_tab = self.app.tabs.buffers.iter().any(|t| {
                 t.filename
                     .as_ref()
                     .is_some_and(|p| p.to_string_lossy() == path)
             });
             if same_tab {
                 // Switch to existing tab if present.
-                if let Some(idx) = self.app.buffers.iter().position(|t| {
+                if let Some(idx) = self.app.tabs.buffers.iter().position(|t| {
                     t.filename
                         .as_ref()
                         .is_some_and(|p| p.to_string_lossy() == path)
@@ -1519,7 +1853,7 @@ impl Engine {
     }
 
     pub fn close_tab(&mut self, index: u32) {
-        let n = self.app.buffers.len();
+        let n = self.app.tabs.buffers.len();
         if n == 0 {
             return;
         }
@@ -1547,6 +1881,49 @@ impl Engine {
         self.recompose();
     }
 
+    // ---- Stable-id tab operations ---------------------------------------
+    // Strip slots stop being buffer indices the moment a folded layout
+    // gathers its members into a run (grouped) or hides them behind one chip
+    // (unified): every slot after the group names a different document than
+    // the same buffer index. The face therefore addresses chips by
+    // `BufferTab::id` (and layout chips by their layout id), and these
+    // entries translate at the boundary.
+
+    pub fn goto_tab_id(&mut self, id: u64) {
+        self.app.goto_tab_id(suisei_core::BufferId(id));
+        // NO `update_scroll()` — same as `goto_tab`: the tab's saved scroll
+        // is authoritative; the caret-derived one snaps long scrolls to top.
+        self.recompose();
+    }
+
+    pub fn close_tab_id(&mut self, id: u64) {
+        self.app.close_tab_id(suisei_core::BufferId(id));
+        self.app.update_scroll();
+        self.recompose();
+    }
+
+    pub fn move_tab_ids(&mut self, from: u64, to: u64) -> bool {
+        let ok = self
+            .app
+            .move_tab_ids(suisei_core::BufferId(from), suisei_core::BufferId(to));
+        if ok {
+            self.recompose();
+        }
+        ok
+    }
+
+    /// "Close Tab" on a layout chip: the entry goes, its documents stay open
+    /// as loose tabs. Names its target (unlike `unfold_layout`, which is
+    /// bound to the active layout), so a chip can be closed while another
+    /// arrangement owns the screen.
+    pub fn drop_layout(&mut self, id: u64) -> bool {
+        let ok = self.app.drop_layout(id);
+        if ok {
+            self.recompose();
+        }
+        ok
+    }
+
     pub fn split_vertical(&mut self) {
         self.app.split_vertical();
         self.recompose();
@@ -1554,6 +1931,16 @@ impl Engine {
 
     pub fn split_horizontal(&mut self) {
         self.app.split_horizontal();
+        self.recompose();
+    }
+
+    pub fn split_above(&mut self) {
+        self.app.split_above();
+        self.recompose();
+    }
+
+    pub fn split_left(&mut self) {
+        self.app.split_left();
         self.recompose();
     }
 
@@ -1605,10 +1992,7 @@ impl Engine {
         }
         self.settings_select(row);
         match self.app.settings.activate() {
-            SettingsAction::ApplyTheme
-            | SettingsAction::ApplyGpuAcc
-            | SettingsAction::ApplyLsp
-            | SettingsAction::ApplyPet => {
+            SettingsAction::ApplyTheme | SettingsAction::ApplyGpuAcc | SettingsAction::ApplyLsp => {
                 self.app.apply_settings_draft();
             }
             SettingsAction::OpenWorkbench => {
@@ -1696,6 +2080,50 @@ impl Engine {
         self.recompose();
     }
 
+    pub fn git_wb_select_change(&mut self, row: u32) {
+        match self.app.git_wb.select_change_preview(row as usize) {
+            Ok(()) => {
+                let path = self.app.git_wb.diff_path.clone().unwrap_or_default();
+                self.app.message = format!("Diff · {path}");
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_select_history(&mut self, row: u32) {
+        match self.app.git_wb.select_history_preview(row as usize) {
+            Ok(()) => {
+                let short = self
+                    .app
+                    .git_wb
+                    .commit_detail
+                    .as_ref()
+                    .map(|detail| detail.short.clone())
+                    .unwrap_or_default();
+                self.app.message = format!("Commit · {short}");
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_select_commit_file(&mut self, row: u32) {
+        match self.app.git_wb.select_commit_file_preview(row as usize) {
+            Ok(()) => {
+                let path = self.app.git_wb.diff_path.clone().unwrap_or_default();
+                self.app.message = format!("Diff · {path}");
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_select_special(&mut self, row: u32) {
+        self.app.git_wb.select_special_row(row as usize);
+        self.recompose();
+    }
+
     pub fn settings_goto_page(&mut self, page: u32) {
         use suisei_core::settings::SettingsPage;
         if !self.app.settings.visible() {
@@ -1711,6 +2139,28 @@ impl Engine {
             }
             self.recompose();
         }
+    }
+
+    pub fn scm_select(&mut self, row: u32) {
+        let count = self.app.scm.total_files();
+        if count == 0 {
+            return;
+        }
+        self.app.scm.selected = (row as usize).min(count - 1);
+        self.app.scm.focus = suisei_core::scm::ScmFocus::Changes;
+        self.recompose();
+    }
+
+    pub fn scm_activate(&mut self, row: u32) {
+        self.scm_select(row);
+        self.app.scm_open_selected_file();
+        self.recompose();
+    }
+
+    pub fn scm_toggle_stage(&mut self, row: u32) {
+        self.scm_select(row);
+        self.app.scm_stage_selected();
+        self.recompose();
     }
 
     pub fn pos_from_click(&self, buffer_row: u32, visual_col: u32) -> Position {
@@ -1739,11 +2189,7 @@ impl Engine {
         let y_adj = (local_y / lh) + self.app.scroll_frac as f32;
         let row_in_view = y_adj.floor().max(0.0) as usize;
         let last = self.app.buffer.line_count().saturating_sub(1);
-        let buffer_row = self
-            .app
-            .scroll
-            .saturating_add(row_in_view)
-            .min(last);
+        let buffer_row = self.app.scroll.saturating_add(row_in_view).min(last);
         let text_x = (local_x - gutter_px).max(0.0);
         let visual_col = (text_x / cell).floor().max(0.0) as u32
             + if self.app.wrap_lines {
@@ -1792,6 +2238,51 @@ mod tests {
     }
 
     #[test]
+    fn ime_space_commit_between_typed_syllables_keeps_order() {
+        // A Korean 2-set IME does not commit the composing syllable and the
+        // following space as two events. Pressing space turns the marked text
+        // into "요 " and commits both scalars at once — which the face routes
+        // through `paste_text`, while every other syllable arrives as a fast
+        // single-scalar `dispatch_key`. Paste advanced `buffer.cursor` without
+        // collapsing `sel`, so the next `gui_insert_text` read the stale
+        // pre-paste head and inserted the syllable *inside* the pasted run:
+        // "안녕하세요 안녕하세요 " came back as "안녕하세안녕하세요 요". Interleave
+        // the two paths exactly as the IME drives them.
+        let mut eng = Engine::new();
+        eng.recompose();
+        for ch in "안녕하세".chars() {
+            eng.dispatch_key(KeyEvent::char(ch));
+        }
+        eng.paste_text("요 ");
+        for ch in "안녕하세".chars() {
+            eng.dispatch_key(KeyEvent::char(ch));
+        }
+        eng.paste_text("요 ");
+        assert_eq!(eng.app.buffer.text(), "안녕하세요 안녕하세요 ");
+        // `sel` must track the real caret, or the next keystroke desyncs again.
+        assert_eq!(eng.app.sel.primary().head, eng.app.buffer.cursor());
+    }
+
+    #[test]
+    fn ime_commit_in_the_middle_uses_gui_selection_position() {
+        let mut eng = Engine::new();
+        eng.app.buffer = suisei_core::buffer::Buffer::from_string("앞뒤");
+        eng.app.caret_place(Position::new(0, 1));
+        eng.paste_text("한글");
+        assert_eq!(eng.app.buffer.text(), "앞한글뒤");
+        assert_eq!(eng.app.sel.primary().head, Position::new(0, 3));
+    }
+
+    #[test]
+    fn gui_fast_character_path_keeps_bracket_and_quote_pairs() {
+        let mut eng = Engine::new();
+        eng.gui_type_char('(');
+        eng.gui_type_char('"');
+        assert_eq!(eng.app.buffer.text(), "(\"\")");
+        assert_eq!(eng.app.sel.primary().head, Position::new(0, 2));
+    }
+
+    #[test]
     fn enter_keeps_both_lines_visible() {
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
@@ -1799,6 +2290,9 @@ mod tests {
         eng.dispatch_key(KeyEvent::char('a'));
         eng.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         eng.dispatch_key(KeyEvent::char('b'));
+        // The per-keystroke hot path no longer packs the line stream (the GUI
+        // pulls its own rows); force a full compose to assert on the built lines.
+        eng.recompose();
         let c = eng.last_diff.chrome.as_ref().unwrap();
         assert!(c.line_count >= 2);
         assert!(c.lines.len() >= 2);
@@ -1847,7 +2341,11 @@ mod tests {
             .filter(|s| s.kind == 250)
             .map(|s| s.start)
             .collect();
-        assert_eq!(carets, vec![2], "secondary caret at UTF-16 col 2 of 'world'");
+        assert_eq!(
+            carets,
+            vec![2],
+            "secondary caret at UTF-16 col 2 of 'world'"
+        );
 
         // The primary (line 1) must not be duplicated as a kind-250 span.
         let line1 = lines.iter().find(|l| l.line_no == 1).expect("row 1");
@@ -1891,20 +2389,32 @@ mod tests {
 
         let (s, e) = eng.app.selected_range().expect("selection");
         assert_eq!((s.row, s.col), (0, 1), "anchor at first click");
-        assert_eq!((e.row, e.col), (0, 3), "inclusive end = one before excl head");
+        assert_eq!(
+            (e.row, e.col),
+            (0, 3),
+            "inclusive end = one before excl head"
+        );
 
+        eng.recompose(); // lines are built on full compose, not the hot path
         let line = &eng.last_diff.chrome.as_ref().unwrap().lines[0];
         let v0 = line.sel_v0.expect("sel_v0");
         let v1 = line.sel_v1.expect("sel_v1");
-        let painted: String =
-            line.text.chars().skip(v0 as usize).take((v1 - v0) as usize).collect();
+        let painted: String = line
+            .text
+            .chars()
+            .skip(v0 as usize)
+            .take((v1 - v0) as usize)
+            .collect();
         let chars: Vec<char> = eng.app.buffer.line(0).chars().collect();
         let yanked: String = chars[s.col..=e.col].iter().collect();
         assert_eq!(painted, yanked, "paint span must equal yank slice");
         assert_eq!(yanked, "bcd");
 
         eng.mouse_up();
-        assert!(eng.app.selected_range().is_some(), "selection survives mouse up");
+        assert!(
+            eng.app.selected_range().is_some(),
+            "selection survives mouse up"
+        );
     }
 
     #[test]
@@ -1915,11 +2425,16 @@ mod tests {
         assert!(eng.app.sel.primary().is_empty());
         eng.drag_to(0, 4); // exclusive [2,4) → chars 2,3
         let (s, e) = eng.app.selected_range().unwrap();
+        eng.recompose(); // lines are built on full compose, not the hot path
         let line = &eng.last_diff.chrome.as_ref().unwrap().lines[0];
         let v0 = line.sel_v0.unwrap();
         let v1 = line.sel_v1.unwrap();
-        let painted: String =
-            line.text.chars().skip(v0 as usize).take((v1 - v0) as usize).collect();
+        let painted: String = line
+            .text
+            .chars()
+            .skip(v0 as usize)
+            .take((v1 - v0) as usize)
+            .collect();
         let chars: Vec<char> = eng.app.buffer.line(0).chars().collect();
         let yanked: String = chars[s.col..=e.col].iter().collect();
         assert_eq!(painted, yanked);
@@ -1960,7 +2475,10 @@ mod tests {
         eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
         eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT));
         assert!(!eng.app.sel.primary().is_empty());
-        assert!(matches!(eng.app.mode, Mode::Editor), "selection never changes focus");
+        assert!(
+            matches!(eng.app.mode, Mode::Editor),
+            "selection never changes focus"
+        );
         let (s, e) = eng.app.selected_range().unwrap();
         assert_eq!((s.row, s.col), (0, 0));
         assert_eq!((e.row, e.col), (0, 1)); // exclusive head at 2 → inclusive 1 ("he")
@@ -2059,8 +2577,8 @@ mod tests {
         let _ = std::fs::write(&path, "");
         let mut eng = Engine::new();
         eng.app = App::open_file(path.to_str().unwrap());
-        eng.app.viewport.height = 40;
-        eng.app.viewport.width = 100;
+        eng.app.stage.h = 720.0; // 40 rows
+        eng.app.stage.w = 900.0; // 100 cols
         eng.dispatch_key(KeyEvent::char('i'));
         eng.dispatch_key(KeyEvent::char('z'));
         eng.dispatch_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -2075,7 +2593,10 @@ mod tests {
         let mut eng = eng_with_text("foo bar baz");
         // place on 'b' of bar — visual col depends on expand; "foo " = 4
         eng.click_at(0, 4, true);
-        assert!(!eng.app.sel.primary().is_empty(), "word selected into GUI model");
+        assert!(
+            !eng.app.sel.primary().is_empty(),
+            "word selected into GUI model"
+        );
         let (s, e) = eng.app.selected_range().expect("selection");
         let chars: Vec<char> = eng.app.buffer.line(0).chars().collect();
         let word: String = chars[s.col..=e.col].iter().collect();
@@ -2086,10 +2607,7 @@ mod tests {
     fn ctrl_f_opens_explorer_in_frame() {
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.dispatch_key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
-        ));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         let c = eng.last_diff.chrome.as_ref().unwrap();
         assert!(c.explorer.open, "Ctrl+F must open explorer via Core");
         assert!(
@@ -2099,7 +2617,7 @@ mod tests {
         assert!(matches!(eng.app.mode, Mode::Explorer));
     }
 
-            #[test]
+    #[test]
     fn insert_triggers_completions_scene() {
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
@@ -2111,9 +2629,7 @@ mod tests {
         eng.recompose();
         // Completions may or may not activate depending on buffer/ext; call activate path
         if !eng.app.completions.active {
-            eng.app
-                .completions
-                .activate("fn", Some("rs"));
+            eng.app.completions.activate("fn", Some("rs"));
             eng.recompose();
         }
         let c = eng.last_diff.chrome.as_ref().unwrap();
@@ -2148,28 +2664,27 @@ mod tests {
         assert!(matches!(eng.app.mode, Mode::Palette));
     }
 
-        #[test]
+    #[test]
     fn goto_tab_switches_buffer() {
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
         eng.app.open_blank_tab();
         eng.recompose();
-        assert!(eng.app.buffers.len() >= 2);
+        assert!(eng.app.tabs.buffers.len() >= 2);
         eng.goto_tab(0);
-        assert_eq!(eng.app.current_buffer, 0);
+        assert_eq!(eng.app.current_buffer(), 0);
         eng.goto_tab(1);
-        assert_eq!(eng.app.current_buffer, 1);
+        assert_eq!(eng.app.current_buffer(), 1);
     }
 
     #[test]
     fn vertical_split_paints_full_height_rows_not_half() {
         let mut eng = eng_with_text(&"line\n".repeat(80));
         eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
-        let rows_full = eng.shell.viewport.editor_rows as usize;
+        let rows_full = eng.app.grid_rows() as usize;
         eng.split_vertical();
         let c = eng.last_diff.chrome.as_ref().unwrap();
-        assert_eq!(c.split_kind, 1, "vertical split");
-        assert!(c.panes.len() >= 2);
+        assert!(c.panes.len() >= 2, "vertical split paints two panes");
         // Each side-by-side pane must keep ~full height (minus path bar), not rows/2.
         let per = c.panes[0].lines.len();
         assert!(
@@ -2215,10 +2730,14 @@ mod tests {
             .iter()
             .any(|l| l.text.contains("RIGHT_ONLY_BBB"));
         assert!(left_has, "left pane must still paint file A");
-        assert!(right_has, "right pane must paint file B without waiting for click");
+        assert!(
+            right_has,
+            "right pane must paint file B without waiting for click"
+        );
         // Scroll left — right content must not become A.
         eng.focus_pane(0);
         eng.scroll_by(12);
+        eng.recompose(); // lines are built on full compose, not the scroll hot path
         let c2 = eng.last_diff.chrome.as_ref().unwrap();
         assert!(
             c2.panes[1]
@@ -2228,7 +2747,10 @@ mod tests {
             "scrolling left must not clobber right pane content"
         );
         // Left advanced; right keeps its own scroll mirror.
-        assert_eq!(c2.panes[1].scroll, 0, "right pane scroll must stay independent");
+        assert_eq!(
+            c2.panes[1].scroll, 0,
+            "right pane scroll must stay independent"
+        );
         assert!(c2.panes[0].scroll > 0, "left pane should advance scroll");
         assert!(
             c2.panes[0]
@@ -2274,13 +2796,13 @@ mod tests {
                 .iter()
                 .any(|l| l.text.contains(mark))
         };
-        assert_eq!(eng.app.buffers.len(), 3);
+        assert_eq!(eng.app.tabs.buffers.len(), 3);
         assert!(paints(&eng, 0, "DOC_BBB"), "left pane starts on B");
         assert!(paints(&eng, 1, "DOC_CCC"), "right pane starts on C");
 
         // Close tab A — the one file no pane is showing.
         eng.close_tab(0);
-        assert_eq!(eng.app.buffers.len(), 2);
+        assert_eq!(eng.app.tabs.buffers.len(), 2);
         assert!(paints(&eng, 0, "DOC_BBB"), "left pane must still paint B");
         assert!(paints(&eng, 1, "DOC_CCC"), "right pane must still paint C");
     }
@@ -2313,7 +2835,11 @@ mod tests {
         eng.scroll_by(40);
         let parked = eng.app.scroll;
         assert!(parked > 0, "pane 0 should have scrolled, got {parked}");
-        assert_eq!(eng.app.buffer.cursor().row, 0, "the wheel must not move the caret");
+        assert_eq!(
+            eng.app.buffer.cursor().row,
+            0,
+            "the wheel must not move the caret"
+        );
 
         eng.focus_pane(1);
         assert_eq!(eng.app.scroll, 0, "pane 1 has its own viewport");
@@ -2324,7 +2850,10 @@ mod tests {
         // And again, to catch a park that only works the first time.
         eng.focus_pane(1);
         eng.focus_pane(0);
-        assert_eq!(eng.app.scroll, parked, "still there after a second round trip");
+        assert_eq!(
+            eng.app.scroll, parked,
+            "still there after a second round trip"
+        );
     }
 
     /// J6 as specified: ⌃⇧T turns the **focused pane** into a terminal and
@@ -2352,7 +2881,7 @@ mod tests {
         eng.recompose();
 
         let panes_before = eng.app.split.pane_count();
-        let tabs_before = eng.app.buffers.len();
+        let tabs_before = eng.app.tabs.buffers.len();
 
         eng.app.toggle_terminal_full();
         assert_eq!(
@@ -2360,15 +2889,67 @@ mod tests {
             panes_before,
             "no split is created — the terminal is a tab in the focused pane"
         );
-        assert_eq!(eng.app.buffers.len(), tabs_before + 1, "a terminal tab was added");
+        assert_eq!(
+            eng.app.tabs.buffers.len(),
+            tabs_before + 1,
+            "a terminal tab was added"
+        );
         assert_eq!(eng.app.pane_terminals.len(), 1, "one shell, for that tab");
-        assert!(eng.app.terminal_window_focused(), "focused pane shows the terminal tab");
+        assert!(
+            eng.app.terminal_window_focused(),
+            "focused pane shows the terminal tab"
+        );
 
         // Toggling again closes the terminal tab.
         eng.app.toggle_terminal_full();
-        assert_eq!(eng.app.buffers.len(), tabs_before, "terminal tab removed");
-        assert_eq!(eng.app.split.pane_count(), panes_before, "still no split churn");
+        assert_eq!(
+            eng.app.tabs.buffers.len(),
+            tabs_before,
+            "terminal tab removed"
+        );
+        assert_eq!(
+            eng.app.split.pane_count(),
+            panes_before,
+            "still no split churn"
+        );
         assert!(eng.app.pane_terminals.is_empty(), "its shell ended with it");
+    }
+
+    /// Closing a pane terminal restores the exact document the pane showed
+    /// before ⌃⇧T, and keeps the split — not just "a" document, and not a
+    /// collapsed view.
+    #[test]
+    fn closing_a_pane_terminal_restores_the_previous_tab_and_keeps_the_split() {
+        let dir = std::env::temp_dir().join("suisei_term_restore");
+        let _ = std::fs::create_dir_all(&dir);
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&a, "DOC_AAA\n").unwrap();
+        std::fs::write(&b, "DOC_BBB\n").unwrap();
+
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.app = App::open_file(a.to_str().unwrap());
+        eng.recompose();
+        eng.split_vertical();
+        eng.focus_pane(1);
+        eng.app.open_new_tab(b.to_str().unwrap());
+        eng.recompose();
+        let panes_before = eng.app.split.pane_count();
+        assert!(eng.app.buffer.text().contains("DOC_BBB"), "pane 1 shows b.txt");
+
+        // ⌃⇧T over pane 1 → terminal tab takes the pane.
+        eng.app.toggle_terminal_full();
+        assert!(eng.app.terminal_window_focused(), "pane 1 is now a terminal");
+        assert!(!eng.app.buffer.text().contains("DOC_BBB"), "b.txt displaced");
+
+        // Close the terminal tab → split kept, b.txt restored into the pane.
+        eng.app.toggle_terminal_full();
+        assert_eq!(eng.app.split.pane_count(), panes_before, "split is kept");
+        assert!(!eng.app.terminal_window_focused(), "pane is a document again");
+        assert!(
+            eng.app.buffer.text().contains("DOC_BBB"),
+            "the pane's pre-terminal document (b.txt) is restored, not collapsed away"
+        );
     }
 
     /// Each terminal pane is its OWN process.
@@ -2397,7 +2978,309 @@ mod tests {
         eng.focus_pane(1);
         eng.app.toggle_terminal_full();
         assert_eq!(eng.app.pane_terminals.len(), 1, "one shell ended");
-        assert!(eng.app.is_terminal_tab(eng.app.split.panes[0].buffer), "pane 0 kept its shell");
+        assert!(
+            eng.app.is_terminal_tab(eng.app.split.panes[0].buffer),
+            "pane 0 kept its shell"
+        );
+    }
+
+    /// A pane terminal's PTY must take its size from the face's measurement —
+    /// before `terminal_resize_pane` existed, pane shells kept their spawn
+    /// guess forever and vim/htop drew garbled.
+    #[test]
+    fn pane_terminal_resize_reaches_the_pane_pty() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.recompose();
+        eng.split_vertical();
+        eng.focus_pane(0);
+        eng.app.toggle_terminal_full();
+        eng.focus_pane(1);
+        eng.app.toggle_terminal_full();
+
+        // Resize pane 1's shell; pane 0's must not move.
+        let before = eng.app.pane_terminal(0).map(|t| (t.cols(), t.rows_count()));
+        eng.terminal_resize_pane(1, 111, 33);
+        let p1 = eng.app.pane_terminal(1).expect("pane 1 runs a shell");
+        assert_eq!(
+            (p1.cols(), p1.rows_count()),
+            (111, 33),
+            "pane 1 PTY resized"
+        );
+        let p0 = eng.app.pane_terminal(0).expect("pane 0 runs a shell");
+        assert_eq!(
+            Some((p0.cols(), p0.rows_count())),
+            before,
+            "pane 0 untouched"
+        );
+
+        // Out-of-range pane is a no-op, not a panic.
+        eng.terminal_resize_pane(7, 80, 24);
+    }
+
+    /// Dock controls must not touch pane shells. They are separate processes,
+    /// and before the per-pane entries existed, a resize or scroll aimed at
+    /// the dock was the only resize a pane ever saw — by accident, through
+    /// the face misreporting pane geometry into the dock.
+    #[test]
+    fn dock_resize_and_scroll_leave_pane_terminals_alone() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.split_vertical();
+        eng.focus_pane(0);
+        eng.app.toggle_terminal_full();
+        let (cols0, rows0) = eng
+            .app
+            .pane_terminal(0)
+            .map(|t| (t.cols(), t.rows_count()))
+            .expect("pane shell running");
+
+        // Open the dock and work its controls.
+        eng.app.toggle_terminal_side();
+        eng.terminal_resize(133, 44);
+        eng.terminal_scroll(7);
+
+        assert_eq!(eng.app.terminal.cols(), 133, "dock did resize");
+        let p = eng.app.pane_terminal(0).expect("pane shell still there");
+        assert_eq!(
+            (p.cols(), p.rows_count()),
+            (cols0, rows0),
+            "pane grid untouched"
+        );
+        assert_eq!(p.scroll(), 0, "pane scroll untouched");
+    }
+
+    /// The chip of a terminal tab carries the shell's own OSC title once the
+    /// shell reports one — every tab used to read "Terminal".
+    #[test]
+    fn terminal_tab_title_comes_from_the_shell() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.recompose();
+        eng.app.toggle_terminal_full();
+        {
+            let term = eng
+                .app
+                .pane_terminals
+                .values_mut()
+                .next()
+                .expect("pane shell");
+            term.title = Some("make [42]".into());
+        }
+        eng.recompose();
+        let c = eng.last_diff.chrome.as_ref().unwrap();
+        let titles: Vec<&str> = c.tabs.iter().map(|t| t.title.as_str()).collect();
+        assert!(
+            titles.contains(&"make [42]"),
+            "shell title on the chip: {titles:?}"
+        );
+    }
+
+    /// build_tabs chip tagging: folded docs share a group id (grouped), the
+    /// unified style collapses them to one is_layout chip whose id IS the
+    /// layout id, and that chip sits at the run's anchor — not the strip end.
+    #[test]
+    fn build_tags_grouped_and_unified_chips() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.recompose();
+        eng.app.open_blank_tab();
+        eng.split_vertical();
+        // A split copies the focused pane — point the two panes at two
+        // different tabs so the fold has two documents to group.
+        let (id0, id1) = (eng.app.tabs.buffers[0].id, eng.app.tabs.buffers[1].id);
+        eng.app.tabs.buffers[0].filename = Some("/tmp/Alpha.rs".into());
+        eng.app.tabs.buffers[1].filename = Some("/tmp/Beta.rs".into());
+        eng.app.filename = eng.app.tabs.buffers[eng.app.current_buffer()]
+            .filename
+            .clone();
+        eng.app.split.panes[0].buffer = id0;
+        eng.app.split.panes[1].buffer = id1;
+        assert!(eng.app.fold_layout());
+        eng.recompose();
+        let c = eng.last_diff.chrome.as_ref().unwrap();
+        assert_eq!(c.tabs.len(), 2, "two folded docs, two chips");
+        let g = c.tabs[0].group;
+        assert_ne!(g, 0, "folded chips carry a group");
+        assert_eq!(c.tabs[1].group, g, "both chips share it");
+        assert!(
+            c.tabs.iter().all(|t| !t.is_layout),
+            "grouped: no layout chip"
+        );
+
+        eng.app.toggle_layout_style(g);
+        eng.recompose();
+        let c = eng.last_diff.chrome.as_ref().unwrap();
+        assert_eq!(c.tabs.len(), 1, "unified collapses to one chip");
+        assert!(c.tabs[0].is_layout);
+        assert_eq!(c.tabs[0].id, g, "unified chip id is the layout id");
+        let pane_titles: Vec<&str> = c.panes.iter().map(|pane| pane.title.as_str()).collect();
+        assert_eq!(
+            pane_titles,
+            vec!["Alpha.rs", "Beta.rs"],
+            "pane headers keep document identity behind the unified layout chip"
+        );
+
+        // A new loose doc lands AFTER the unified chip, because the chip
+        // holds the run's anchor position (the first member's slot).
+        eng.app.open_blank_tab();
+        eng.recompose();
+        let c = eng.last_diff.chrome.as_ref().unwrap();
+        assert_eq!(c.tabs.len(), 2);
+        assert!(c.tabs[0].is_layout, "unified chip keeps the anchor slot");
+        assert!(!c.tabs[1].is_layout);
+    }
+
+    /// Pane scrollback is per pane — scrolling one shell must not move the
+    /// other's view.
+    #[test]
+    fn pane_terminal_scroll_moves_only_that_pane() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.recompose();
+        eng.split_vertical();
+        eng.focus_pane(0);
+        eng.app.toggle_terminal_full();
+        eng.focus_pane(1);
+        eng.app.toggle_terminal_full();
+
+        // Give pane 0 some scrollback: feed output through the emulator.
+        // (No PTY round-trip needed — scroll_up bounds at the scrollback len,
+        // so push rows by writing lines through a resize-induced reflow is
+        // overkill; scroll math is what's under test.)
+        eng.terminal_scroll_pane(0, 5);
+        // No scrollback yet → offset stays 0, but the call must not panic and
+        // must leave pane 1 alone either way.
+        assert_eq!(eng.app.pane_terminal(1).map(|t| t.scroll()), Some(0));
+        eng.terminal_scroll_pane(0, -3);
+        assert_eq!(eng.app.pane_terminal(0).map(|t| t.scroll()), Some(0));
+    }
+
+    /// The unified chip sits at its first member's strip position — the merge
+    /// animation morphs container ⇄ chip in place, so the chip may not jump
+    /// to the strip's end (where the loose documents' slots would also stop
+    /// being buffer indices).
+    #[test]
+    fn unified_chip_sits_at_its_first_members_position() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.app.open_blank_tab();
+        eng.app.open_blank_tab();
+        eng.app.open_blank_tab();
+        let ids: Vec<u64> = eng.app.tabs.buffers.iter().map(|t| t.id.0).collect();
+        // Split shows docs 0 and 1; docs 2 and 3 stay loose after the run.
+        eng.split_vertical();
+        eng.focus_pane(0);
+        eng.goto_tab_id(ids[0]);
+        eng.focus_pane(1);
+        eng.goto_tab_id(ids[1]);
+        assert!(eng.fold_layout());
+        let layout_id = eng.app.layouts[0].id;
+        assert!(eng.toggle_layout_style(layout_id), "grouped → unified");
+
+        eng.recompose();
+        let chrome = eng.last_diff.chrome.as_ref().expect("composed");
+        let chips: Vec<(u64, bool, u64)> = chrome
+            .tabs
+            .iter()
+            .map(|t| (t.id, t.is_layout, t.group))
+            .collect();
+        assert_eq!(chips.len(), 3, "chip + two loose docs: {chips:?}");
+        assert_eq!(
+            chips[0],
+            (layout_id, true, layout_id),
+            "chip at the run's anchor"
+        );
+        assert_eq!(chips[1].0, ids[2], "loose doc keeps its order");
+        assert_eq!(chips[2].0, ids[3]);
+    }
+
+    /// Face path: 2-tab split folded; close left pane via header (engine API).
+    /// Group dissolves; both tabs stay; one pane remains on B.
+    #[test]
+    fn face_path_header_close_dissolves_two_tab_group() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.app.open_blank_tab(); // second tab
+        let ids: Vec<u64> = eng.app.tabs.buffers.iter().map(|t| t.id.0).collect();
+        assert_eq!(ids.len(), 2);
+        eng.split_vertical();
+        eng.focus_pane(0);
+        eng.goto_tab_id(ids[0]);
+        eng.focus_pane(1);
+        eng.goto_tab_id(ids[1]);
+        assert!(eng.fold_layout());
+        assert_eq!(eng.app.split.pane_count(), 2);
+        assert_eq!(eng.app.layouts.len(), 1);
+
+        eng.focus_pane(0);
+        eng.close_focused_pane(); // == face closeFocusedPane
+
+        assert!(eng.app.layouts.is_empty(), "group dissolved");
+        assert_eq!(eng.app.active_layout, None);
+        assert_eq!(eng.app.split.pane_count(), 1, "not still split");
+        assert_eq!(eng.app.tabs.buffers.len(), 2, "tabs stay open");
+        assert_eq!(
+            eng.app.split.panes[0].buffer.0, ids[1],
+            "survivor is B, not a repointed ghost"
+        );
+    }
+
+    /// Face path: group A|B; close A from tab bar by stable id.
+    /// A's pane must vanish — not leave B|B.
+    #[test]
+    fn face_path_tabbar_close_removes_member_pane() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.app.open_blank_tab();
+        let ids: Vec<u64> = eng.app.tabs.buffers.iter().map(|t| t.id.0).collect();
+        eng.split_vertical();
+        eng.focus_pane(0);
+        eng.goto_tab_id(ids[0]);
+        eng.focus_pane(1);
+        eng.goto_tab_id(ids[1]);
+        assert!(eng.fold_layout());
+
+        eng.focus_pane(0);
+        eng.close_tab_id(ids[0]); // == face closeTabId
+
+        assert!(!eng.app.tabs.buffers.iter().any(|t| t.id.0 == ids[0]));
+        assert_eq!(eng.app.split.pane_count(), 1, "must not stay B|B split");
+        assert_eq!(eng.app.split.panes[0].buffer.0, ids[1]);
+        assert!(eng.app.layouts.is_empty());
+    }
+
+    /// Id-addressed tab ops hit the named tab even while a folded group makes
+    /// strip slots diverge from buffer indices — the slot-clamped close they
+    /// replace killed the wrong document here.
+    #[test]
+    fn id_addressed_tab_ops_survive_a_folded_group() {
+        let mut eng = Engine::new();
+        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
+        eng.app.open_blank_tab();
+        eng.app.open_blank_tab();
+        let ids: Vec<u64> = eng.app.tabs.buffers.iter().map(|t| t.id.0).collect();
+        eng.split_vertical();
+        eng.focus_pane(0);
+        eng.goto_tab_id(ids[0]);
+        eng.focus_pane(1);
+        eng.goto_tab_id(ids[1]);
+        assert!(eng.fold_layout());
+
+        // Close the trailing loose tab by id.
+        eng.close_tab_id(ids[2]);
+        assert!(!eng.app.tabs.buffers.iter().any(|t| t.id.0 == ids[2]));
+        assert!(eng.app.tabs.buffers.iter().any(|t| t.id.0 == ids[0]));
+
+        // Drop the layout by id; both documents survive as loose tabs.
+        let layout_id = eng.app.layouts[0].id;
+        assert!(eng.drop_layout(layout_id));
+        assert!(eng.app.layouts.is_empty());
+        assert_eq!(
+            eng.app.tabs.buffers.len(),
+            2,
+            "documents outlive their layout"
+        );
     }
 
     /// Esc closes the file palette, all the way through `gui_escape`.
@@ -2436,15 +3319,15 @@ mod tests {
             !c.welcome,
             "new blank tab must stay in editor shell, not Welcome"
         );
-        assert!(eng.app.buffers.len() >= 2);
-        assert_eq!(c.tabs.len(), eng.app.buffers.len());
+        assert!(eng.app.tabs.buffers.len() >= 2);
+        assert_eq!(c.tabs.len(), eng.app.tabs.buffers.len());
         // Active tab should be the new blank
         assert!(c.tabs.last().map(|t| t.active).unwrap_or(false));
 
         eng.goto_tab(0);
         let c2 = eng.last_diff.chrome.as_ref().unwrap();
         assert!(!c2.welcome);
-        assert_eq!(eng.app.current_buffer, 0);
+        assert_eq!(eng.app.current_buffer(), 0);
         // Original file content still painted
         assert!(
             c2.lines.iter().any(|l| l.text.contains("hello")),
@@ -2464,13 +3347,13 @@ mod tests {
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
         eng.app = App::open_file(a.to_str().unwrap());
         eng.recompose();
-        let n0 = eng.app.buffers.len();
+        let n0 = eng.app.tabs.buffers.len();
 
         // Simulate suisei_engine_open_path session path via App API used by FFI.
         eng.app.open_new_tab(b.to_str().unwrap());
         eng.recompose();
-        assert_eq!(eng.app.buffers.len(), n0 + 1);
-        assert_eq!(eng.app.current_buffer, eng.app.buffers.len() - 1);
+        assert_eq!(eng.app.tabs.buffers.len(), n0 + 1);
+        assert_eq!(eng.app.current_buffer(), eng.app.tabs.buffers.len() - 1);
         let c = eng.last_diff.chrome.as_ref().unwrap();
         assert!(c.tabs.len() >= 2);
         assert!(!c.welcome);
@@ -2561,10 +3444,7 @@ mod tests {
     fn ctrl_comma_opens_settings_scene() {
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.dispatch_key(KeyEvent::new(
-            KeyCode::Char(','),
-            KeyModifiers::CONTROL,
-        ));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::CONTROL));
         let c = eng.last_diff.chrome.as_ref().unwrap();
         assert!(c.settings.open, "Ctrl+, must open settings");
         assert!(matches!(eng.app.mode, Mode::Settings));
@@ -2735,7 +3615,10 @@ mod tests {
         }
         assert!(eng.app.completions.active);
         eng.dispatch_key(KeyEvent::char('('));
-        assert!(!eng.app.completions.active, "a non-identifier char must close it");
+        assert!(
+            !eng.app.completions.active,
+            "a non-identifier char must close it"
+        );
     }
 
     /// And it must be acceptable — the popup used to be un-confirmable.
@@ -2774,15 +3657,24 @@ mod tests {
         let dir = std::env::temp_dir().join("suisei_kind_test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("kinds.rs");
-        std::fs::write(&path, "#[derive(Clone)]\nstruct S { field: u32 }\nfn f() { println!(\"x\"); }\n").unwrap();
+        std::fs::write(
+            &path,
+            "#[derive(Clone)]\nstruct S { field: u32 }\nfn f() { println!(\"x\"); }\n",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
         eng.app = App::open_file(path.to_str().unwrap());
         eng.sync_viewport_public();
         eng.recompose();
+        eng.flush_syntax();
+        eng.recompose();
         let c = eng.last_diff.chrome.as_ref().unwrap();
-        let kinds: std::collections::HashSet<u8> =
-            c.lines.iter().flat_map(|l| l.spans.iter().map(|s| s.kind)).collect();
+        let kinds: std::collections::HashSet<u8> = c
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.kind))
+            .collect();
         assert!(
             kinds.iter().any(|k| (7..=14).contains(k)),
             "no span kind past `function` reached the scene: {kinds:?}"
@@ -2809,12 +3701,248 @@ mod tests {
         eng.app.push_undo();
         eng.app.buffer.insert_char('!');
         eng.app.buffer.backspace();
-        assert!(eng.app.modified, "the latch is up and nothing has corrected it");
+        assert!(
+            eng.app.modified,
+            "the latch is up and nothing has corrected it"
+        );
 
         for _ in 0..DIRTY_RECHECK_TICKS {
             eng.tick(50);
         }
-        assert!(!eng.app.modified, "the tick must re-derive it from the text");
+        assert!(
+            !eng.app.modified,
+            "the tick must re-derive it from the text"
+        );
+    }
+
+    // ── DIRTY FLAG regressions ─────────────────────────────────────────
+    /// Moving the caret changes nothing on disk, so it must never dirty.
+    #[test]
+    fn caret_move_does_not_dirty() {
+        let mut eng = eng_with_text("hello world");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_dirty_caret.rs"));
+        eng.app.mark_clean();
+        eng.dispatch_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(!eng.app.modified, "caret move must NOT dirty");
+    }
+
+    /// Undo back to the saved text clears dirty. Also exercises the
+    /// `mark_clean` edit-run reset: no caret move is needed to make the first
+    /// keystroke latch.
+    #[test]
+    fn undo_back_to_saved_clears_dirty() {
+        let mut eng = eng_with_text("hello");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_dirty_undo.rs"));
+        eng.app.mark_clean();
+        eng.dispatch_key(KeyEvent::char('x'));
+        eng.dispatch_key(KeyEvent::char('y'));
+        assert!(eng.app.modified, "typing dirties");
+        eng.app.undo();
+        assert_eq!(eng.app.buffer.text(), "hello", "undo restores saved text");
+        assert!(!eng.app.modified, "undo back to saved must be CLEAN");
+    }
+
+    /// A file loaded with "alpha" as its undo baseline: typing then undoing all
+    /// the way returns to the on-disk text and clears dirty.
+    #[test]
+    fn undo_all_to_load_baseline_clears_dirty() {
+        let mut eng = eng_with_text("alpha");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_dirty_undo2.rs"));
+        eng.app.undo_stack = suisei_core::undo::UndoStack::new();
+        eng.app.undo_stack.push(eng.app.buffer.snapshot());
+        eng.app.mark_clean();
+        for ch in " beta".chars() {
+            eng.dispatch_key(KeyEvent::char(ch));
+        }
+        assert!(eng.app.modified);
+        for _ in 0..10 {
+            eng.app.undo();
+        }
+        assert_eq!(eng.app.buffer.text(), "alpha", "undo-all restores saved text");
+        assert!(!eng.app.modified, "undo-all back to saved must be CLEAN");
+    }
+
+    /// `mark_clean` (a save) ends the insert run, so the next keystroke — with
+    /// no caret move between — re-latches dirty instead of coalescing into the
+    /// pre-save run and looking saved while it is edited.
+    #[test]
+    fn typing_immediately_after_save_redirties() {
+        let mut eng = eng_with_text("hello");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_dirty_postsave.rs"));
+        eng.app.mark_clean();
+        eng.dispatch_key(KeyEvent::char('z'));
+        assert!(eng.app.modified, "typing after save must mark dirty");
+    }
+
+    /// A no-op edit (backspace at the start of the file) may latch dirty
+    /// without moving the buffer version — right after undo/redo the version
+    /// gate would then skip forever. The pending-recheck flag must still clear.
+    #[test]
+    fn no_op_edit_does_not_leave_file_dirty() {
+        let mut eng = eng_with_text("hello");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_dirty_noop.rs"));
+        eng.app.mark_clean();
+        for _ in 0..8 {
+            eng.dispatch_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        // Backspace at column 0 of row 0 deletes nothing.
+        eng.dispatch_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        for _ in 0..DIRTY_RECHECK_TICKS {
+            eng.tick(50);
+        }
+        assert_eq!(eng.app.buffer.text(), "hello");
+        assert!(!eng.app.modified, "a no-op edit must not leave the file dirty");
+    }
+
+    /// A clean file deleted on disk closes after a confirming second poll:
+    /// there are no private edits to preserve, but an atomic-save swap can
+    /// cause one transient metadata miss.
+    #[test]
+    fn deleting_a_clean_open_file_closes_it() {
+        let dir = std::env::temp_dir().join(format!("suisei_del_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("gone.txt");
+        std::fs::write(&f, "hello\n").unwrap();
+        let mut app = suisei_core::app::App::open_file(f.to_str().unwrap());
+        app.check_external_change();
+        assert!(!app.file_deleted, "present file is not flagged");
+        std::fs::remove_file(&f).unwrap();
+        app.check_external_change();
+        assert!(
+            app.file_deleted,
+            "first miss marks but does not race an atomic save"
+        );
+        app.check_external_change();
+        assert!(app.filename.is_none(), "deleted clean document was closed");
+        assert_eq!(app.buffer.text(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unsaved text is the only surviving copy, so a dirty vanished file stays
+    /// open with a deleted marker and Save can recreate it.
+    #[test]
+    fn deleting_a_dirty_open_file_marks_it_for_restore() {
+        let dir = std::env::temp_dir().join(format!("suisei_dirty_del_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("gone.txt");
+        std::fs::write(&f, "hello\n").unwrap();
+        let mut app = suisei_core::app::App::open_file(f.to_str().unwrap());
+        app.gui_insert_text("!");
+        std::fs::remove_file(&f).unwrap();
+        app.check_external_change();
+        assert!(app.file_deleted, "dirty deletion is visibly flagged");
+        assert!(app.modified, "unsaved text remains dirty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_tick_surfaces_a_dirty_file_deleted_on_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "suisei_tick_dirty_del_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("gone.txt");
+        std::fs::write(&f, "hello\n").unwrap();
+        let mut eng = Engine::new();
+        eng.app = App::open_file(f.to_str().unwrap());
+        eng.recompose();
+        eng.app.gui_insert_text("!");
+        std::fs::remove_file(&f).unwrap();
+        let before = eng.frame_gen;
+
+        for _ in 0..EXTERNAL_FILE_CHECK_TICKS {
+            eng.tick(50);
+        }
+
+        assert!(eng.app.file_deleted);
+        assert!(eng.app.modified);
+        assert!(eng.frame_gen > before, "warning must reach the face");
+        assert!(eng.last_diff.chrome.as_ref().unwrap().tabs[0].deleted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_tick_closes_a_clean_file_after_two_missing_polls() {
+        let dir = std::env::temp_dir().join(format!(
+            "suisei_tick_clean_del_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("gone.txt");
+        std::fs::write(&f, "hello\n").unwrap();
+        let mut eng = Engine::new();
+        eng.app = App::open_file(f.to_str().unwrap());
+        eng.recompose();
+        std::fs::remove_file(&f).unwrap();
+
+        for _ in 0..(EXTERNAL_FILE_CHECK_TICKS * 2) {
+            eng.tick(50);
+        }
+
+        assert!(eng.app.filename.is_none());
+        assert_eq!(eng.app.buffer.text(), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The REAL path: `App::open_file` (not a hand-set baseline). Edit, undo
+    /// all — must clear dirty. Regression for `open_file` leaving the App's
+    /// `saved_hash` at the empty-hash default while only the tab got the real
+    /// one, so undo re-derived dirty against the wrong hash forever.
+    #[test]
+    fn open_file_edit_undo_all_clears_dirty() {
+        let dir = std::env::temp_dir().join("suisei_openfile_dirty");
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("doc.txt");
+        std::fs::write(&f, "line1\nline2\nline3\n").unwrap();
+        let mut eng = Engine::new();
+        eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
+        eng.app = App::open_file(f.to_str().unwrap());
+        eng.recompose();
+        assert!(!eng.app.modified, "opens clean");
+        eng.app.buffer.cursor = suisei_core::buffer::Position::new(1, 2);
+        eng.app.sync_sel_to_cursor();
+        for ch in "XYZ".chars() {
+            eng.dispatch_key(KeyEvent::char(ch));
+        }
+        eng.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(eng.app.modified, "edit dirties");
+        for _ in 0..10 {
+            eng.app.undo();
+        }
+        assert_eq!(eng.app.buffer.text(), "line1\nline2\nline3\n");
+        assert!(!eng.app.modified, "undo-all clears dirty via the real open path");
+    }
+
+    /// The exact live repro: click mid-line, type a run, press Enter (splitting
+    /// the line), then undo everything. Must restore the byte-identical file and
+    /// clear dirty — the earlier tests never inserted a newline.
+    #[test]
+    fn undo_all_after_midline_insert_and_newline_clears_dirty() {
+        let mut eng = eng_with_text("line1\nline2\nline3");
+        eng.app.filename = Some(std::path::PathBuf::from("/tmp/suisei_dirty_nl.rs"));
+        eng.app.undo_stack = suisei_core::undo::UndoStack::new();
+        eng.app.undo_stack.push(eng.app.buffer.snapshot());
+        eng.app.mark_clean();
+        eng.app.buffer.cursor = suisei_core::buffer::Position::new(1, 2);
+        eng.app.sync_sel_to_cursor();
+        for ch in "XYZ".chars() {
+            eng.dispatch_key(KeyEvent::char(ch));
+        }
+        eng.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(eng.app.modified, "edit dirties");
+        assert_ne!(eng.app.buffer.text(), "line1\nline2\nline3");
+        for _ in 0..10 {
+            eng.app.undo();
+        }
+        assert_eq!(
+            eng.app.buffer.text(),
+            "line1\nline2\nline3",
+            "undo-all must restore the byte-identical file"
+        );
+        assert!(!eng.app.modified, "and clear dirty");
     }
 
     /// The correction must not undo itself: a genuinely edited buffer stays
@@ -2859,10 +3987,14 @@ mod tests {
         eng.app.lsp.server_running = true;
         assert_eq!(eng.daemon_status().lsp_state, 3);
 
-        eng.app.lsp.set_progress_open_for_test("rustAnalyzer/Indexing", true);
+        eng.app
+            .lsp
+            .set_progress_open_for_test("rustAnalyzer/Indexing", true);
         assert_eq!(eng.daemon_status().lsp_state, 2, "open progress → indexing");
 
-        eng.app.lsp.set_progress_open_for_test("rustAnalyzer/Indexing", false);
+        eng.app
+            .lsp
+            .set_progress_open_for_test("rustAnalyzer/Indexing", false);
         assert_eq!(eng.daemon_status().lsp_state, 3, "closed progress → ready");
     }
 
@@ -2874,7 +4006,11 @@ mod tests {
         eng.app.dap.state = DapState::Running;
         assert_eq!(eng.daemon_status().dap_state, 1);
         eng.app.dap.state = DapState::Stopped;
-        assert_eq!(eng.daemon_status().dap_state, 2, "stopped at a breakpoint → paused");
+        assert_eq!(
+            eng.daemon_status().dap_state,
+            2,
+            "stopped at a breakpoint → paused"
+        );
     }
 
     /// The navigator root is what the user opened; the walked-up root of the
@@ -2891,11 +4027,14 @@ mod tests {
         let dir = std::env::temp_dir().join("suisei_daemon_root");
         let _ = std::fs::create_dir_all(&dir);
         eng.app.explorer.cwd = dir.clone();
-        eng.app.explorer.entries.push(suisei_core::explorer::ExplorerEntry {
-            name: "a.txt".into(),
-            path: dir.join("a.txt"),
-            is_dir: false,
-        });
+        eng.app
+            .explorer
+            .entries
+            .push(suisei_core::explorer::ExplorerEntry {
+                name: "a.txt".into(),
+                path: dir.join("a.txt"),
+                is_dir: false,
+            });
         assert_eq!(eng.daemon_status().project, dir.display().to_string());
     }
 
@@ -2964,6 +4103,8 @@ mod tests {
         eng.app = App::open_file(path.to_str().unwrap());
         eng.sync_viewport_public();
         eng.recompose();
+        eng.flush_syntax();
+        eng.recompose();
         let c = eng.last_diff.chrome.as_ref().unwrap();
         assert!(!c.welcome);
         assert!(!c.lines.is_empty());
@@ -2986,16 +4127,37 @@ mod tests {
     fn ctrl_g_opens_scm_scene() {
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
-        eng.dispatch_key(KeyEvent::new(
-            KeyCode::Char('g'),
-            KeyModifiers::CONTROL,
-        ));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         let c = eng.last_diff.chrome.as_ref().unwrap();
         // May open empty if not in a git repo, but mode should be SourceControl
         assert!(
             matches!(eng.app.mode, Mode::SourceControl) || c.scm.open,
             "Ctrl+G should enter SCM"
         );
+    }
+
+    #[test]
+    fn scm_mouse_selection_uses_flattened_row_and_clamps() {
+        use suisei_core::scm::{ScmEntry, ScmFocus, ScmStatus};
+
+        let mut eng = Engine::new();
+        eng.app.scm.staged = vec![ScmEntry {
+            path: "staged.rs".into(),
+            status: ScmStatus::Modified,
+            staged: true,
+        }];
+        eng.app.scm.changes = vec![ScmEntry {
+            path: "changed.rs".into(),
+            status: ScmStatus::Modified,
+            staged: false,
+        }];
+
+        eng.scm_select(1);
+        assert_eq!(eng.app.scm.selected, 1);
+        assert_eq!(eng.app.scm.focus, ScmFocus::Changes);
+
+        eng.scm_select(999);
+        assert_eq!(eng.app.scm.selected, 1, "face row must clamp safely");
     }
 
     #[test]
@@ -3031,15 +4193,16 @@ mod tests {
         eng.app.buffer.cursor = Position::new(40, 2);
         eng.app.scroll = 30;
         eng.recompose();
-        eng.dispatch_key(KeyEvent::new(
-            KeyCode::Char('f'),
-            KeyModifiers::CONTROL,
-        ));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         assert!(eng.app.explorer.open);
-        assert_eq!(eng.app.buffer.cursor().row, 40, "cursor must not jump to line 1");
+        assert_eq!(
+            eng.app.buffer.cursor().row,
+            40,
+            "cursor must not jump to line 1"
+        );
         assert_eq!(eng.app.buffer.cursor().col, 2);
         // Scroll should still show the caret row
-        let vis = eng.app.viewport.height.max(1) as usize;
+        let vis = eng.app.grid_rows().max(1) as usize;
         let row = eng.app.buffer.cursor().row;
         assert!(
             row >= eng.app.scroll && row < eng.app.scroll + vis,
@@ -3055,12 +4218,17 @@ mod tests {
         let dir = std::env::temp_dir().join("suisei_md_syntax");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("note.md");
-        std::fs::write(&path, "# Title\n\n```rust\nfn x() {}\n```\n\n// not a comment in md\n")
-            .unwrap();
+        std::fs::write(
+            &path,
+            "# Title\n\n```rust\nfn x() {}\n```\n\n// not a comment in md\n",
+        )
+        .unwrap();
         let mut eng = Engine::new();
         eng.resize(1000.0, 700.0, 18.0, 9.0, 2.0);
         eng.app = App::open_file(path.to_str().unwrap());
         eng.sync_viewport_public();
+        eng.recompose();
+        eng.flush_syntax();
         eng.recompose();
         let c = eng.last_diff.chrome.as_ref().unwrap();
         let has_spans = c.lines.iter().any(|l| !l.spans.is_empty());
@@ -3092,7 +4260,10 @@ mod tests {
         eng.app.wrap_lines = false;
         eng.scroll_to(10, 15);
         assert_eq!(eng.app.scroll, 10);
-        assert_eq!(eng.app.hscroll, 1, "no content to the right of a 3-column row");
+        assert_eq!(
+            eng.app.hscroll, 1,
+            "no content to the right of a 3-column row"
+        );
 
         // Give it a line worth panning across and the request goes through.
         eng.app.buffer = suisei_core::buffer::Buffer::from_string(&format!(
@@ -3134,7 +4305,24 @@ mod tests {
         }
         let c = eng.last_diff.chrome.as_ref().unwrap();
         assert!(c.search.open);
-        assert_eq!(c.search.input, "bet", "search bar must repaint while typing");
+        assert_eq!(
+            c.search.input, "bet",
+            "search bar must repaint while typing"
+        );
+    }
+
+    #[test]
+    fn find_step_cycles_the_live_native_query() {
+        let mut eng = eng_with_text("한글 alpha 한글");
+        eng.find_open();
+        eng.find_set_input("한글");
+        assert_eq!(eng.app.buffer.cursor(), Position::new(0, 0));
+
+        eng.find_step(true);
+        assert_eq!(eng.app.buffer.cursor(), Position::new(0, 9));
+        let search = &eng.last_diff.chrome.as_ref().unwrap().search;
+        assert_eq!(search.input, "한글");
+        assert_eq!(search.match_index, 1);
     }
 
     #[test]
@@ -3182,6 +4370,7 @@ mod tests {
         eng.resize(800.0, 400.0, 18.0, 9.0, 2.0);
         eng.scroll_to(200, 0);
         assert_eq!(eng.app.scroll, 200, "core scroll must stay the visible top");
+        eng.recompose(); // lines are built on full compose, not the scroll hot path
         let c = eng.last_diff.chrome.as_ref().unwrap();
         assert_eq!(c.scroll, 200);
         let first = c.lines.first().map(|l| l.line_no).unwrap_or(0);
@@ -3191,7 +4380,7 @@ mod tests {
             "band must include overscan above scroll (first={first})"
         );
         assert!(
-            last >= 200 + eng.app.viewport.height as u32,
+            last >= 200 + eng.app.grid_rows() as u32,
             "band must still cover the viewport below (last={last})"
         );
         // Caret move after absolute scroll must not re-anchor the window upward.
@@ -3263,6 +4452,10 @@ mod tests {
             !eng.app.preview.open,
             "second toggle must close (closing={})",
             eng.app.preview.closing
+        );
+        assert!(
+            !eng.app.message.contains("Preview"),
+            "closed preview must not leave stale status text"
         );
     }
 }

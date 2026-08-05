@@ -23,6 +23,7 @@ struct ProjectTreeView: View {
     @State private var nodes: [TreeNode] = []
     @State private var gitMarks: [String: String] = [:] // rel path → M/?/A/D
     @State private var rootName: String = ""
+    @FocusState private var filterFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -94,53 +95,46 @@ struct ProjectTreeView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Filter bar, Xcode Project-navigator footer layout:
-                // [+] outside on the left, then the ROUNDED filter field.
-                HStack(spacing: 8) {
-                    Button {
-                        NotificationCenter.default.post(
-                            name: .suiseiNewUntitledTab, object: nil
-                        )
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(dim)
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("New Untitled Tab")
-
-                    HStack(spacing: 5) {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
-                            .font(.system(size: 11))
-                            .foregroundStyle(dim)
-                        TextField("Filter", text: $filter)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 11))
-                            .foregroundStyle(fg)
-                        if !filter.isEmpty {
-                            Button {
-                                filter = ""
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(dim)
+                // Filter bar: the rounded capsule alone. The bare [+] that
+                // used to sit here posted New Untitled Tab — a TUI vestige;
+                // that action lives in the tab strip's + menu, and two
+                // pluses stacked would read as one feature.
+                HStack(spacing: 5) {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(dim)
+                    TextField("Filter", text: $filter)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundStyle(fg)
+                        .focused($filterFocused)
+                    if !filter.isEmpty {
+                        Button {
+                            // End any active marked-text session before clearing
+                            // the binding, then return focus on the next runloop.
+                            filterFocused = false
+                            filter = ""
+                            DispatchQueue.main.async {
+                                filterFocused = true
                             }
-                            .buttonStyle(.plain)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(dim)
                         }
+                        .buttonStyle(.plain)
                     }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(fg.opacity(0.06))
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(fg.opacity(0.10), lineWidth: 1)
-                    )
                 }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(fg.opacity(0.06))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(fg.opacity(0.10), lineWidth: 1)
+                )
                 .padding(.horizontal, 8)
                 .padding(.top, 6)
                 // Clear the card's 12pt bottom corner radius — at 6pt the
@@ -154,6 +148,19 @@ struct ProjectTreeView: View {
                 expanded = [rootPath]
             }
             rebuild()
+        }
+        // Title-row commands (the header buttons live in ContentView's
+        // dockedNavigator — the state they need, `expanded` / inline rename,
+        // lives here, so they arrive as notifications, the app's existing
+        // cross-component command idiom).
+        .onReceive(NotificationCenter.default.publisher(for: .suiseiNavNewFile)) { _ in
+            newEntry(in: targetFolder, folder: false)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .suiseiNavNewFolder)) { _ in
+            newEntry(in: targetFolder, folder: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .suiseiNavCollapseAll)) { _ in
+            withAnimation(.smooth(duration: 0.26)) { expanded = [rootPath] }
         }
         .onChange(of: rootPath) { _, newRoot in
             expanded = newRoot.isEmpty ? [] : [newRoot]
@@ -188,7 +195,9 @@ struct ProjectTreeView: View {
             selectedPath = path
             if isDir {
                 if expanded.contains(path) {
-                    withAnimation(.smooth(duration: 0.26)) { expanded.remove(path) }
+                    withAnimation(.smooth(duration: 0.26)) {
+                        _ = expanded.remove(path)
+                    }
                 } else {
                     // Read the directory BEFORE the animation starts. This was
                     // inside the `withAnimation` block, so the first frame had
@@ -196,13 +205,15 @@ struct ProjectTreeView: View {
                     // real folder that ate the whole 0.26s and the rows just
                     // appeared, which is why the expand looked instant.
                     _ = children(of: path)
-                    withAnimation(.smooth(duration: 0.26)) { expanded.insert(path) }
+                    withAnimation(.smooth(duration: 0.26)) {
+                        _ = expanded.insert(path)
+                    }
                 }
             } else {
                 onOpenFile(path)
             }
         } label: {
-            HoverRow(corner: 6) {
+            HoverRow(corner: 4) {
                 HStack(spacing: 3) {
                     // Disclosure
                     if isDir {
@@ -269,9 +280,10 @@ struct ProjectTreeView: View {
                 .padding(.trailing, 8)
                 .padding(.vertical, 3)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                // Xcode-style selection: soft continuous pill, not a flat slab
+                // Swiss-grid list selection: restrained 4pt corners. Capsules
+                // are reserved for segmented controls and filters.
                 .background(
-                    RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .fill(
                             dropTarget == path
                                 ? accent.opacity(0.25)
@@ -279,12 +291,12 @@ struct ProjectTreeView: View {
                         )
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .strokeBorder(
                             dropTarget == path ? accent : .clear, lineWidth: 1
                         )
                 )
-                .contentShape(RoundedRectangle(cornerRadius: Radius.row, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
         }
         .buttonStyle(.plain)
@@ -396,7 +408,9 @@ struct ProjectTreeView: View {
                     ) else { return }
                     if engine.movePath(url.path, into: folder, copy: copy) != nil {
                         Self.invalidateCache()
-                        withAnimation(.smooth(duration: 0.26)) { expanded.insert(folder) }
+                        withAnimation(.smooth(duration: 0.26)) {
+                            _ = expanded.insert(folder)
+                        }
                         onRefresh()
                     }
                 }
@@ -417,11 +431,32 @@ struct ProjectTreeView: View {
             : engine.createFile(in: directory)
         guard let made else { return }
         Self.invalidateCache()
-        withAnimation(.smooth(duration: 0.26)) { expanded.insert(directory) }
+        withAnimation(.smooth(duration: 0.26)) {
+            _ = expanded.insert(directory)
+        }
         onRefresh()
         selectedPath = made
         draftName = (made as NSString).lastPathComponent
         renamingPath = made
+    }
+
+    /// Where New File / New Folder land: the selected row wins (a folder
+    /// itself, a file's parent); then the active document's folder when it
+    /// lives under this project; then the project root.
+    private var targetFolder: String {
+        if !selectedPath.isEmpty {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: selectedPath, isDirectory: &isDir) {
+                return isDir.boolValue
+                    ? selectedPath
+                    : (selectedPath as NSString).deletingLastPathComponent
+            }
+        }
+        let active = engine.chrome.filename
+        if !active.isEmpty, active.hasPrefix(rootPath + "/") {
+            return (active as NSString).deletingLastPathComponent
+        }
+        return rootPath
     }
 
     private func commitRename(_ path: String) {
@@ -459,7 +494,9 @@ struct ProjectTreeView: View {
         Self.invalidateCache()
         // Reveal the destination if it is inside the tree, so the moved item is
         // visible where it landed rather than seeming to vanish.
-        withAnimation(.smooth(duration: 0.26)) { expanded.insert(destination.path) }
+        withAnimation(.smooth(duration: 0.26)) {
+            _ = expanded.insert(destination.path)
+        }
         onRefresh()
         if selectedPath == path { selectedPath = "" }
     }

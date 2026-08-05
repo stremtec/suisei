@@ -90,7 +90,12 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub const FULL: Rect = Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+    pub const FULL: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
 }
 
 /// Outcome of a split request (drives the status message).
@@ -194,7 +199,11 @@ impl SplitState {
     fn rects_into(node: &Layout, r: Rect, out: &mut Vec<(PaneId, Rect)>) {
         match node {
             Layout::Leaf(id) => out.push((*id, r)),
-            Layout::Split { axis, children, weights } => {
+            Layout::Split {
+                axis,
+                children,
+                weights,
+            } => {
                 let total: f32 = weights.iter().sum();
                 let mut off = 0.0f32;
                 for (i, child) in children.iter().enumerate() {
@@ -204,8 +213,18 @@ impl SplitState {
                         1.0 / children.len() as f32
                     };
                     let sub = match axis {
-                        Axis::Col => Rect { x: r.x + off * r.w, y: r.y, w: f * r.w, h: r.h },
-                        Axis::Row => Rect { x: r.x, y: r.y + off * r.h, w: r.w, h: f * r.h },
+                        Axis::Col => Rect {
+                            x: r.x + off * r.w,
+                            y: r.y,
+                            w: f * r.w,
+                            h: r.h,
+                        },
+                        Axis::Row => Rect {
+                            x: r.x,
+                            y: r.y + off * r.h,
+                            w: r.w,
+                            h: f * r.h,
+                        },
                     };
                     Self::rects_into(child, sub, out);
                     off += f;
@@ -224,6 +243,18 @@ impl SplitState {
     /// a column. Splitting the *other* way nests, which is what makes the
     /// four-pane `+` reachable.
     pub fn split_focused(&mut self, axis: Axis) -> SplitAdd {
+        self.split_focused_at(axis, false)
+    }
+
+    /// Split the focused pane and place the new pane before it in visual
+    /// order. The editor header uses this for “Split Above” and “Split Left”;
+    /// keyboard-era split commands keep the traditional after/right/below
+    /// placement.
+    pub fn split_focused_before(&mut self, axis: Axis) -> SplitAdd {
+        self.split_focused_at(axis, true)
+    }
+
+    fn split_focused_at(&mut self, axis: Axis, before: bool) -> SplitAdd {
         self.pending_chord = false;
         if self.panes.len() >= MAX_PANES {
             return SplitAdd::Full;
@@ -231,7 +262,7 @@ impl SplitState {
         let was_split = self.is_split();
         let id = self.take_id();
         let target = self.focus;
-        Self::insert_beside(&mut self.root, target, id, axis);
+        Self::insert_beside(&mut self.root, target, id, axis, before);
 
         let mut pane = Pane::new(id);
         if let Some(src) = self.panes.iter().find(|p| p.id == target) {
@@ -245,23 +276,42 @@ impl SplitState {
         self.panes.push(pane);
         self.focus = id;
         self.resync_order();
-        if was_split { SplitAdd::Added } else { SplitAdd::Opened }
+        if was_split {
+            SplitAdd::Added
+        } else {
+            SplitAdd::Opened
+        }
     }
 
     /// Returns true if it found `target` and inserted next to it.
-    fn insert_beside(node: &mut Layout, target: PaneId, fresh: PaneId, axis: Axis) -> bool {
+    fn insert_beside(
+        node: &mut Layout,
+        target: PaneId,
+        fresh: PaneId,
+        axis: Axis,
+        before: bool,
+    ) -> bool {
         match node {
             Layout::Leaf(id) if *id == target => {
                 // A bare leaf (or one whose parent runs the other way): wrap it.
+                let children = if before {
+                    vec![Layout::Leaf(fresh), Layout::Leaf(target)]
+                } else {
+                    vec![Layout::Leaf(target), Layout::Leaf(fresh)]
+                };
                 *node = Layout::Split {
                     axis,
-                    children: vec![Layout::Leaf(target), Layout::Leaf(fresh)],
+                    children,
                     weights: vec![0.5, 0.5],
                 };
                 true
             }
             Layout::Leaf(_) => false,
-            Layout::Split { axis: node_axis, children, weights } => {
+            Layout::Split {
+                axis: node_axis,
+                children,
+                weights,
+            } => {
                 // Same axis and the target is a direct child → join as sibling,
                 // taking half of the target's share.
                 if *node_axis == axis {
@@ -269,7 +319,8 @@ impl SplitState {
                         .iter()
                         .position(|c| matches!(c, Layout::Leaf(id) if *id == target))
                     {
-                        children.insert(i + 1, Layout::Leaf(fresh));
+                        let insertion = if before { i } else { i + 1 };
+                        children.insert(insertion, Layout::Leaf(fresh));
                         // Equal shares among the siblings, vim-style. Halving
                         // only the focused pane instead gives 1/2, 1/4, 1/8,
                         // 1/8 for four "split right"s, which is not what
@@ -283,7 +334,7 @@ impl SplitState {
                     }
                 }
                 for child in children.iter_mut() {
-                    if Self::insert_beside(child, target, fresh, axis) {
+                    if Self::insert_beside(child, target, fresh, axis, before) {
                         return true;
                     }
                 }
@@ -317,7 +368,9 @@ impl SplitState {
     fn remove_leaf(node: &mut Layout, gone: PaneId) -> bool {
         let left = match node {
             Layout::Leaf(id) => return *id == gone,
-            Layout::Split { children, weights, .. } => {
+            Layout::Split {
+                children, weights, ..
+            } => {
                 let mut hit = None;
                 for (i, child) in children.iter_mut().enumerate() {
                     if Self::remove_leaf(child, gone) {
@@ -403,7 +456,12 @@ impl SplitState {
         delta: f32,
         extent: &dyn Fn(PaneId, Axis) -> f32,
     ) -> bool {
-        let Layout::Split { axis, children, weights } = node else {
+        let Layout::Split {
+            axis,
+            children,
+            weights,
+        } = node
+        else {
             return false;
         };
         let axis = *axis;
@@ -451,7 +509,10 @@ impl SplitState {
     }
 
     fn equalize_in(node: &mut Layout) {
-        if let Layout::Split { children, weights, .. } = node {
+        if let Layout::Split {
+            children, weights, ..
+        } = node
+        {
             let n = children.len().max(1) as f32;
             for w in weights.iter_mut() {
                 *w = 1.0 / n;
@@ -490,6 +551,52 @@ impl SplitState {
         }
     }
 
+    /// Remove every pane that shows `doc`, for when that document is closed
+    /// from the tab strip and its views should leave the arrangement rather
+    /// than silently adopting another buffer (which left "ghost" panes in a
+    /// layout group).
+    ///
+    /// Never removes the last pane — a single view must always show something;
+    /// the caller repoints that survivor. Returns the focused survivor when the
+    /// split collapses to one pane (same contract as [`Self::remove_focused`]).
+    pub fn remove_panes_showing(&mut self, doc: BufferId) -> Option<Pane> {
+        let targets: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|p| p.buffer == doc)
+            .map(|p| p.id)
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
+        for id in targets {
+            // Keep at least one pane alive.
+            if self.panes.len() < 2 {
+                break;
+            }
+            let at = self
+                .panes
+                .iter()
+                .position(|p| p.id == id)
+                .unwrap_or(0);
+            let was_focus = self.focus == id;
+            Self::remove_leaf(&mut self.root, id);
+            if let Some(i) = self.panes.iter().position(|p| p.id == id) {
+                self.panes.remove(i);
+            }
+            self.resync_order();
+            if was_focus || !self.panes.iter().any(|p| p.id == self.focus) {
+                let next = at.min(self.panes.len().saturating_sub(1));
+                self.set_focus(next);
+            }
+        }
+        if self.panes.len() == 1 {
+            self.panes.first().cloned()
+        } else {
+            None
+        }
+    }
+
     // ---- folding ---------------------------------------------------------
 
     /// The whole arrangement, ready to be parked in a layout tab.
@@ -522,7 +629,10 @@ impl SplitState {
     /// switches away from a folded layout and the desk is cleared.
     pub fn collapse_to(&mut self, doc: BufferId) {
         let id = PaneId(self.next_id);
-        self.next_id = self.next_id.wrapping_add(1);
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("pane id space exhausted");
         let mut pane = Pane::new(id);
         pane.buffer = doc;
         self.root = Layout::Leaf(id);
@@ -534,7 +644,13 @@ impl SplitState {
 
     fn take_id(&mut self) -> PaneId {
         let id = PaneId(self.next_id);
-        self.next_id = self.next_id.wrapping_add(1);
+        // checked, not wrapping: "never reused" is the contract that lets a
+        // stale pane reference be DETECTED; wrapping would silently resolve
+        // it against a recycled id.
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("pane id space exhausted");
         id
     }
 
@@ -544,7 +660,10 @@ impl SplitState {
         let mut order = Vec::with_capacity(self.panes.len());
         Self::walk(&self.root, &mut order);
         self.panes.sort_by_key(|p| {
-            order.iter().position(|id| *id == p.id).unwrap_or(usize::MAX)
+            order
+                .iter()
+                .position(|id| *id == p.id)
+                .unwrap_or(usize::MAX)
         });
         self.panes.retain(|p| order.contains(&p.id));
         if !self.panes.iter().any(|p| p.id == self.focus) {
@@ -597,6 +716,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn split_before_places_the_new_focused_pane_above_the_target() {
+        let mut s = SplitState::new();
+        let original = s.panes[0].id;
+
+        assert_eq!(s.split_focused_before(Axis::Row), SplitAdd::Opened);
+        assert_eq!(s.pane_count(), 2);
+        assert_ne!(s.panes[0].id, original);
+        assert_eq!(s.panes[1].id, original);
+        assert_eq!(s.focus_index(), 0, "new pane is focused in the upper slot");
+
+        let rects = s.rects();
+        assert!((rects[0].y - 0.0).abs() < 1e-4);
+        assert!((rects[1].y - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn split_before_places_the_new_focused_pane_left_of_the_target() {
+        let mut s = SplitState::new();
+        let original = s.panes[0].id;
+
+        assert_eq!(s.split_focused_before(Axis::Col), SplitAdd::Opened);
+        assert_eq!(s.pane_count(), 2);
+        assert_ne!(s.panes[0].id, original);
+        assert_eq!(s.panes[1].id, original);
+        assert_eq!(s.focus_index(), 0, "new pane is focused in the left slot");
+
+        let rects = s.rects();
+        assert!((rects[0].x - 0.0).abs() < 1e-4);
+        assert!((rects[1].x - 0.5).abs() < 1e-4);
+    }
+
     /// The whole point of the tree: a 2x2 `+`, which one `kind` could not
     /// express at all.
     #[test]
@@ -617,8 +768,9 @@ mod tests {
         let corners: Vec<(f32, f32)> = r.iter().map(|x| (x.x, x.y)).collect();
         for want in [(0.0, 0.0), (0.0, 0.5), (0.5, 0.0), (0.5, 0.5)] {
             assert!(
-                corners.iter().any(|c| (c.0 - want.0).abs() < 1e-4
-                    && (c.1 - want.1).abs() < 1e-4),
+                corners
+                    .iter()
+                    .any(|c| (c.0 - want.0).abs() < 1e-4 && (c.1 - want.1).abs() < 1e-4),
                 "missing quadrant {want:?} in {corners:?}"
             );
         }
@@ -652,7 +804,11 @@ mod tests {
         s.split_focused(Axis::Col);
         s.resize_between(0, 1, -5.0);
         let r = s.rects();
-        assert!(r[0].w >= MIN_WEIGHT - 1e-4, "pane 0 kept a floor: {}", r[0].w);
+        assert!(
+            r[0].w >= MIN_WEIGHT - 1e-4,
+            "pane 0 kept a floor: {}",
+            r[0].w
+        );
         assert!(r[1].w <= 1.0 - MIN_WEIGHT + 1e-4);
     }
 
@@ -682,7 +838,11 @@ mod tests {
         // wrapping a single child.
         let r = s.rects();
         for rect in &r {
-            assert!((rect.h - 1.0).abs() < 1e-4, "expected full height, got {}", rect.h);
+            assert!(
+                (rect.h - 1.0).abs() < 1e-4,
+                "expected full height, got {}",
+                rect.h
+            );
         }
     }
 

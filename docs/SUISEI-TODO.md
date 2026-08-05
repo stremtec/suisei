@@ -1,28 +1,28 @@
 # Suisei — outstanding work
 
-> **Priority assessment (code-reviewed 2026-07-23).** Ordered by what stops
-> Suisei being a trustworthy independent GUI editor first, an IDE second, and
-> a polished product third. The full ordered roadmap is now
-> `SUISEI-CURRENT-STATE.md`; this file retains detailed implementation traps.
+> **Current implementation snapshot (code-verified 2026-07-30).** The dated
+> investigation notes farther down are retained for their failure analysis,
+> but their “currently/no/never” wording describes the state at the date of
+> that section. This snapshot and the tests are authoritative for current
+> implementation status.
 >
 > | | Theme | Why it ranks here |
 > |---|---|---|
-> | **P0** | Release gates · Swift 6 concurrency · ABI contract | The current app builds, but build/test reliability and the three-way ABI contract need a macOS CI gate. |
-> | **P0** | First-class selections and native editing commands | Grapheme movement is now implemented, but selections still piggyback on Vim Visual state and Swift synthesises `i`/`Esc`. |
-> | **P0** | WAL recovery → daemon | Atomic file writes are done; unsaved GUI-process state still disappears on crash. |
-> | **P1** | Edit/Delta + async document consumers | `Vec<String>`, whole-text reconstruction and synchronous parser/highlight work remain the large-file latency risk. |
+> | **P0** | Release gates · ABI contract | Rust tests, ABI layout tests, rustfmt, optimised app packaging, codesign and a non-interactive launch smoke pass. A human open/edit/save/reopen pass remains; the monolithic Swift `-O` compile is also unusually slow. |
+> | **P0** | Crash durability | Atomic saves and the shadow WAL recover dirty named buffers. Untitled buffers are not journalled, and authoritative editor state has not moved into the daemon. |
+> | **P1** | Document storage phase 2 | Central `Edit`/`Delta`, versioned snapshots, delta undo application, incremental LSP sync and the async syntax worker are done. `Buffer` text storage is still `Vec<String>`; a rope/piece tree plus line index remains. |
 > | **P1** | Native IDE workflows | Search, diagnostics, format/rename/actions and partial UI exist; definition/hover/DAP need end-to-end workflows. |
-> | **P2** | Terminal, extensions, docking/multiwindow | Important product depth, but only after editing, recovery and latency are dependable. |
+> | **P2** | Terminal IME · extensions · multiwindow | Terminal protocol depth is substantially improved. Terminal-pane IME, an extension host and daemon-owned multiwindow document state remain. |
 > | **P3** | Canvas, Metal glyph renderer, elaborate transitions | Optional visual/interaction bets, not independence blockers. |
 >
-> **If only one product patch gets done next: the selection/command model (P0).**
-> Run the release/ABI gate in parallel; then it unblocks shift-selection,
-> multi-cursor, correct native text input and removal of render-layer workarounds.
+> **Next architecture patch:** replace only the document storage/index behind
+> the tested `Edit`/`Delta` boundary. Do not combine that migration with another
+> selection, daemon or ABI rewrite.
 
 
-State as of 2026-07-23. Companion to `SUISEI-CORE-DESIGN.md` (the rewrite
-blueprint). Everything here is either reported-and-unfixed or deliberately
-deferred; finished work is not listed.
+Current snapshot as of 2026-07-30. Companion to `SUISEI-CORE-DESIGN.md` (the
+original rewrite blueprint). Completed work is kept where it explains an
+important implementation trap; open status is explicitly labelled.
 
 > **Architecture plan (2026-07-21):** daemon separation, panel docking /
 > stand-alone windows, resize stabilisation, Settings rework, dark-theme colour
@@ -32,7 +32,103 @@ deferred; finished work is not listed.
 >
 > **Resolved:** `suisei-core::fs_atomic::atomic_write_file` now implements
 > sibling tmp → write → fsync → rename, and `App::save_file()` uses it. The
-> remaining durability gap is recovery of unsaved GUI-process state.
+> shadow WAL recovers dirty named buffers. The remaining durability gaps are
+> untitled buffers and daemon ownership of the live editor state.
+>
+> **Resolved 2026-07-29 (technical-debt pass, "Section A"):**
+> - Terminal: DECSTBM scroll regions + IND/NEL/RI index escapes; OSC 0/2
+>   titles on terminal tabs; xterm mouse reporting (?1000/1002/1003, SGR
+>   1006) end-to-end (face → FFI → PTY); UTF-8-safe ABI string truncation;
+>   span cap now marker-priority (caret/diagnostics survive dense syntax);
+>   tab overflow surfaces as "+N" instead of silent loss; `Terminal: Drop`
+>   reaps PTYs.
+> - FFI/bridge: header declarations moved inside the include guard /
+>   `extern "C"`; duplicate prototypes removed; retired `split_kind` /
+>   `split_ratio` (pads, geometry lives in per-pane rects); the triplicated
+>   Swift tab decode is one `decodeTabs`; id counter `wrapping_add` →
+>   `checked_add` (the never-reused contract can no longer silently wrap).
+> - Session: files + cursors restore on launch, save on quit; the split
+>   layout (tree tokens + per-pane viewports + focus) persists too.
+> - CI: `.github/workflows/ci.yml` (Rust workspace tests + app packaging on
+>   a normal macOS lane — the undo-spill/DAP-localhost tests the restricted
+>   sandbox cannot run).
+> - Glass: regular/clear mixing removed (Welcome), `interactive(false)` on
+>   static panes, `GlassEffectContainer` fuses the Welcome panes, the
+>   glassPanel double shadow is gone, find bar migrated off `regularMaterial`.
+> - xei residue: the dead `extensions` cfg (9 build warnings) and the
+>   desktop pet + `term_caps_summary` removed.
+> - Traffic lights: window-top-anchored placement (independent of the async
+>   titlebar growth) + a 20 Hz self-healing guard + didBecomeKey re-assert.
+> - A1 (first four units): central `Edit`/`Delta` + versioned snapshots
+>   (`edit.rs`, `Buffer::apply_edit`, versioned `BufferSnapshot`); undo is
+>   delta-recorded and applies through `apply_edit` (no snapshot restore;
+>   spill format is deltas); LSP didChange is incremental (line-diffed
+>   ranges, UTF-16 positions, full-sync fallback); the selection model is
+>   unified — `MultiCursor` is gone, Ctrl+D / Ctrl+Alt+↑↓ add real
+>   selections to `sel`, so every edit path applies to all of them.
+> - A1 (fifth unit): `current_buffer` — the positional index into
+>   `buffers` — is gone. The active tab is DERIVED: `current_buffer()`
+>   computes it from the focused pane's document id (S2: `App`'s live
+>   fields ARE that document); a private `live_doc: BufferId` records
+>   which document `App` holds across the one statement of a focus change
+>   where the two differ. Every index bookkeeping died with the field:
+>   the `-= 1` after closes, the remap after moves, the repoint-after-
+>   regather. The focused pane's slot names the live document from the
+>   moment it becomes active (it used to stay stale by design until the
+>   next park — an invisible state the compositor papered over). Also
+>   fixes a latent bug: `toggle_terminal_full` never saved the displaced
+>   document's tab slot, so switching away from the terminal tab could
+>   restore a stale copy.
+> - A1 (sixth unit): parsing is off the keystroke path. A syntax worker
+>   thread (`syntax_worker.rs`) owns the tree-sitter parsers; the engine
+>   ships a text snapshot per buffer version (`try_send`, never blocks)
+>   and adopts finished frames at the next recompose or tick. A typing
+>   burst coalesces to its newest snapshot on the worker; while a parse
+>   is in flight the stale tokens keep painting (shifted a column for a
+>   frame or two — the standard async-highlight contract). The prewarm
+>   cache moved to the worker with the trees; grammar bundles compile
+>   lazily on first use (the main-thread engine never parses, so startup
+>   pays for nothing); a same-text scroll re-runs the highlight query
+>   alone instead of forcing a full reparse (`edit_between` is None for
+>   equal texts).
+> - A3: the god object is decomposed. `app.rs` went 6897 → 5442 lines;
+>   five domain modules now carry the clusters: `search.rs` (SearchState
+>   + smart-case collect / nearest / step / cycle — the key handler
+>   stopped poking fields and re-implementing match cycling inline),
+>   `tabs.rs` (a `TabStrip` owning `buffers` + the id source, plus the
+>   whole open/close/move/goto + save/restore orchestration),
+>   `layouts.rs` (fold/unfold/activate/membership), `panes.rs` (splits,
+>   focus park-then-load, pane-terminal lifecycle), `dap_cmds.rs`
+>   (breakpoints, launch/attach, stepping, stopped-location). State
+>   structs where they were clean (SearchState, TabStrip), `impl App`
+>   domain files where the orchestration dominates — cross-module
+>   collaboration is `pub(crate)`, nothing wider.
+> - A4: the daemon owns per-editor state. One entry per connected
+>   client (keyed by connection, wire format unchanged); the snapshot
+>   AGGREGATES live editors — LSP sessions sum, states take the best,
+>   the project follows the latest report — and a disconnect drops its
+>   editor from the very next query instead of ghosting for the whole
+>   TTL. The TTL stays as a stall guard for wedged-but-connected
+>   editors. Two open windows no longer play last-writer-wins over one
+>   slot. (Full D1 — the daemon owning the language servers themselves
+>   — remains future work; the bookkeeping it needs is now in place.)
+> - A6: the viewport is pixel-based. The core owns the stage in POINTS
+>   (`App.stage` — w/h/cell_px/cell_w/dpr); `resize_stage` is the one
+>   production writer and the cell grid is DERIVED (`grid_cols` /
+>   `grid_rows`, pure — the sanity clamp lives at the writer). The old
+>   cell `EditorViewport` is gone along with its dozen defensive
+>   re-syncs (`sync_viewport_to_app` survives only as a `#[cfg(test)]`
+>   seam), and the dead `cell_px`/`cell_px_h` fields — which had no
+>   writer anywhere and silently "defaulted" to 14/28 — now derive from
+>   the stage × dpr, so the media preview scales against the real grid
+>   instead of a lie. `compose` / `patch_chrome_editor_scroll` lost
+>   their dead `shell` parameters.
+>
+> **Still open from that pass (the epics):** the phase-2 rope/piece-tree +
+> line-index storage migration; daemon D1 language/debug/document ownership;
+> true native soft-wrap layout; and further domain extraction from `App`.
+> `current_buffer` index removal, parse-off-the-keystroke-path, the first
+> `App` extraction pass and the pixel-based core viewport are complete.
 
 ## Open bugs (user-reported)
 
@@ -56,6 +152,44 @@ deferred; finished work is not listed.
    behaviour). Data, filter, git marks and index marks can stay as they are.
 3. **Tab close → content switch is abrupt.** The chip animation is done; the
    editor body still swaps instantly. Needs a crossfade in the canvas.
+
+## 기능 추가 속히 요망
+
+1. **편집기 경로 헤더에 상시 pane 분할/닫기 컨트롤 — IMPLEMENTED,
+   runtime verification pending (2026-07-30).**
+   - 대상은 전역 문서 탭 바가 아니라, 현재 파일 경로가 보이는 각 editor
+     pane의 breadcrumb/jump-bar 헤더다.
+   - 오른쪽 끝에 `split ▾`와 `×`를 둔다. hover 전용으로 숨기지 않는다.
+   - `split ▾`는 항상 표시하고, 클릭 시 `위로 분할` / `아래로 분할`
+     menu 또는 popover를 연다.
+   - `×`는 pane이 2개 이상일 때만 항상 표시한다. 단일 pane에서는
+     disabled 상태나 빈 공간도 남기지 않고 완전히 숨긴다.
+   - 두 동작 모두 클릭한 헤더의 stable pane ID를 대상으로 해야 한다.
+     `×`는 pane만 닫고 문서 tab/buffer는 닫지 않는다.
+   - 최대 4-pane에서는 split 명령을 미리 disabled하고 이유를 표시한다.
+   - 상세 인터랙션, 상태 보존 규칙, 접근성, DoD는
+     [`SUISEI-PLAN.md`](SUISEI-PLAN.md) §6.1.1을 단일 명세로 따른다.
+2. **Full Git Workbench master–detail 재설계 — PHASE 2 IMPLEMENTED,
+   runtime/layout-scoped persistence verification pending (2026-07-30).**
+   - `Status / Log / Branches / Files / Diff / PRs / Issues / Auth / Stash`
+     9개 동급 탭을 작업 위계에 맞게 재편한다.
+   - 1차 mode는 `Changes / History / Branches / Stashes`, GitHub 기능은
+     `PRs / Issues` 그룹으로 분리하며 `Auth`는 settings/overflow로 옮긴다.
+   - `Files / Diff`는 전역 mode가 아니라 선택된 file/commit의 detail이다.
+   - 고정 `28% / 48% / rest`를 제거하고 draggable
+     `master 320–360 / detail flex / context optional 260–320` 구조를 쓴다.
+   - 행의 primary click은 선택+detail 열기다. 문자열 복사는 context
+     menu로 이동한다.
+   - Full Workbench 동안 Project Navigator는 임시로 접고 종료 시 이전
+     visibility를 복구한다. 전용 26pt footer는 제거한다.
+   - `<800pt`는 master→files/diff push navigation, `800–1199pt`는
+     master+detail와 trailing context drawer, `≥1200pt`는
+     master+detail+context를 사용한다.
+   - master/context divider는 7pt hit target으로 drag 가능하고 전역
+     preference에는 저장된다. layout tab별 폭 복원은 아직 남아 있다.
+   - 반응형 계약과 mode별 화면 구성은
+     [`SUISEI-SWISS-GRID-AUDIT.md`](SUISEI-SWISS-GRID-AUDIT.md) §12,
+     발견 이슈는 [`../Report.md`](../Report.md) SUI-035를 따른다.
 
 ## Sidebars — the Xcode split (direction settled 2026-07-20)
 
@@ -267,34 +401,35 @@ stopped mid-surface in a vertical cut.
 
 ## Editing model (Phase 3 of the design doc)
 
-The core keeps vim semantics; the GUI needs its own. Currently patched at the
-render layer only (`drawn_caret_col` in `scene.rs`).
+The GUI editing path is now modeless. `Mode` identifies the keyboard-focus
+surface, while `SelectionSet` is the selection authority and semantic commands
+perform text edits.
 
-4. **No first-class selection model.** `Buffer` has one `cursor`; selection exists only as
-   `App.visual_anchor` gated by `Mode::Visual`, and it is **inclusive** while a
-   GUI needs **exclusive**. Consequences: shift+arrow does nothing (AppKit sends
-   `moveLeftAndModifySelection:`, nothing can receive it), and moving the cursor
-   to fix the caret would widen the selection by one character.
-   Target: `Selection { anchor, head, goal_x }`, `selections: Vec<Selection>`,
-   every edit applied to all of them (multi-cursor becomes inherent).
-5. **Grapheme movement and deletion are implemented.** `Buffer` now uses
+4. **First-class plural selections are implemented.** `Selection {
+   anchor, head, goal_x }` is exclusive, edits apply to every selection, and
+   Shift movement, ⌘-click and add-next-occurrence use the same model. The
+   remaining paint gap is the fill for non-primary non-empty selections.
+5. **Grapheme movement and deletion are implemented.** `Buffer` uses
    `unicode-segmentation` for left/right/backspace/delete, including Hangul and
-   emoji. This is not a reason to defer the selection model: its range and
-   vertical-motion semantics are still separate work.
-6. **No goal column** — `move_up/down` still call `clamp_col()`, so the column is lost
-   permanently when passing a short line.
+   emoji.
+6. **Retained vertical goal columns are implemented** in the GUI selection
+   movement path.
 7. **Word boundaries are an ASCII heuristic** (`char_class`), not UAX #29.
-8. GUI selection gestures beyond drag: ⌥-drag block select, ⌘-click multi-cursor.
+8. **Still open:** ⌥-drag block selection. ⌘-click multi-cursor is implemented.
 
 ## Performance / architecture
 
-9. **Phase 2 — Document rewrite.** `buffer.text()` (`lines.join`) and
-   `fingerprint_text()` are still O(file) on every keystroke. Rope + line index
-   + `Edit`/`Delta` removes both and unlocks incremental LSP sync.
-10. **Undo still snapshots.** `push_undo()` → `buffer.snapshot()` clones every
-    line. Should record edit deltas instead.
-11. **Viewport is a terminal cell grid.** Blocks real soft-wrap and variable line
-    heights; replace with a pixel viewport.
+9. **Document storage phase 2 remains.** `Edit`/`Delta` and incremental LSP are
+   implemented, but `buffer.text()` still joins `Vec<String>` and offset
+   conversion scans lines. Replace the storage with a rope/piece tree and an
+   incremental line index behind the existing edit boundary.
+10. **Undo stores and replays deltas, but checkpoints still snapshot.**
+    History entries and spill files no longer retain full buffers; the current
+    checkpoint-diff producer still calls `buffer.snapshot()` and clones lines.
+    Native edit paths should eventually feed their produced deltas directly.
+11. **The core viewport is pixel-based.** The AppKit canvas still maps one
+    document line to one absolute row, so true stacked soft-wrap and variable
+    line heights remain open.
 
 ## LSP / DAP — capability exists, surface does not
 
@@ -324,16 +459,45 @@ render layer only (`drawn_caret_col` in `scene.rs`).
 
 ## Indexing (partly done)
 
-15. Parse-tree prewarming discovers supported files asynchronously and warms
-    one at a time, largest first. `total` / `done` / `isRunning` are published
-    but not yet surfaced as progress UI; parsing still crosses the main actor
-    and needs an off-main snapshot pipeline plus on-disk warm cache.
+15. Parse-tree prewarming and normal parse/highlight work run in the syntax
+    worker, coalescing bursts and rejecting stale versions. `total` / `done` /
+    `isRunning` are not yet surfaced as progress UI; persistent warm-cache and
+    incremental token patching remain.
 16. Tree filter now searches **only already-expanded directories** — a deliberate
     trade to kill the freeze (a cold recursive scan from `/` walked System and
     Library). Project-wide search belongs in ⌘P / workspace symbols instead.
 
 ## Traps that cost hours — do not relearn
 
+- **Traffic lights drop 16pt below their design point after certain titlebar
+  relayouts.** Two-layer disease, fixed 2026-07-29. Layer 1 (the original):
+  `applyTrafficLightInset` computed y from the button superview's height, but
+  the titlebar accessory that grows the titlebar lands asynchronously — the
+  inset fired while the titlebar was still its default 16pt and parked the
+  buttons 16pt low until the next resize. Fixed: the inset anchors to the
+  WINDOW top (superview origin converted to window space), correct before and
+  after the growth, and runs immediately when the accessory is added. Layer 2
+  (the residual): AppKit re-tiles the standard buttons on titlebar relayouts
+  we neither control nor can enumerate — measured on macOS 26: focus return
+  and hide/unhide do NOT move them and the accessory growth never even fires,
+  yet specific flows still dropped them, healed only by a manual resize (its
+  didResize re-assert). Fixed with a self-healing guard instead of trigger
+  whack-a-mole: the 20 Hz tick compares the close button's real position
+  against the design point (`panelGap + lightsCornerGap` off the top-left on
+  both axes) and re-asserts on >0.5 pt drift (`TrafficLightGuard`), plus an
+  immediate frame-only re-assert on `didBecomeKey`. The re-assert is frames
+  only — the didBecomeActive RESTYLING freeze below is a different mechanism
+  and must not be "fixed" by re-styling on reactivation.
+- **A sheet squares the corners of a plain (borderless) window.** macOS 26's
+  sheet machinery inserts an `NSSheetEffectDimmingView` as a SIBLING of the
+  content view — both hang off the frame view (`NSNextStepFrame`) — so a
+  corner mask on the content view alone never clips the dim, and the square
+  dim paints over the transparent corner arcs while the sheet is up
+  (recovery sheet on Welcome, fixed 2026-07-29). Mask the FRAME view
+  (`contentView.superview`) as well; the Welcome probe re-applies on layout,
+  which heals an AppKit reset. Verified by dumping the hierarchy with the
+  sheet attached — `screencapture` is not an option (no screen-recording
+  permission in this environment).
 - **Key routing must be gated on `Mode`, never on a panel's `open` flag.**
   `explorer.open` means the docked Project navigator *has entries*
   (`suisei_engine_open_path` sets it on every open, deliberately without taking

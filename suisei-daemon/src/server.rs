@@ -7,9 +7,10 @@ use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
-use crate::protocol::{Frame, Opcode, Status, PROTOCOL_VERSION};
+use crate::protocol::{Frame, Opcode, PROTOCOL_VERSION, Status};
 use crate::state::DaemonState;
 
 /// Bind the daemon socket, clearing a stale socket file from a prior run first
@@ -30,12 +31,14 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 /// handler shares the one [`DaemonState`], so a status query reflects the
 /// managers' live view.
 pub fn serve(listener: UnixListener, state: Arc<DaemonState>) {
+    let next_client = AtomicU64::new(1);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let state = Arc::clone(&state);
+                let client = next_client.fetch_add(1, Ordering::Relaxed);
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, state) {
+                    if let Err(e) = handle_client(stream, state, client) {
                         if e.kind() != io::ErrorKind::UnexpectedEof {
                             eprintln!("suisei-daemon: client error: {e}");
                         }
@@ -50,23 +53,35 @@ pub fn serve(listener: UnixListener, state: Arc<DaemonState>) {
 /// One connection: require a compatible `Hello`, then loop over frames until
 /// EOF. A version mismatch gets a `HelloNak` (carrying the daemon's version)
 /// and the connection closes — never a silent mis-decode.
-pub fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> io::Result<()> {
-    let hello = Frame::read_from(&mut stream)?;
+pub fn handle_client(
+    mut stream: UnixStream,
+    state: Arc<DaemonState>,
+    client: u64,
+) -> io::Result<()> {
+    let result = serve_client(&mut stream, &state, client);
+    // However the connection ends — EOF, error, refused handshake — the
+    // editor's state leaves the aggregate at once. No TTL wait: a dead
+    // window is known the moment its socket closes.
+    state.remove_client(client);
+    result
+}
+
+fn serve_client(stream: &mut UnixStream, state: &DaemonState, client: u64) -> io::Result<()> {
+    let hello = Frame::read_from(stream)?;
     if hello.opcode != Opcode::Hello || hello.version != PROTOCOL_VERSION {
-        Frame::new(Opcode::HelloNak, PROTOCOL_VERSION.to_le_bytes().to_vec())
-            .write_to(&mut stream)?;
+        Frame::new(Opcode::HelloNak, PROTOCOL_VERSION.to_le_bytes().to_vec()).write_to(stream)?;
         return Ok(());
     }
-    Frame::control(Opcode::HelloAck).write_to(&mut stream)?;
+    Frame::control(Opcode::HelloAck).write_to(stream)?;
 
     loop {
-        let frame = match Frame::read_from(&mut stream) {
+        let frame = match Frame::read_from(stream) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e),
         };
-        if let Some(reply) = handle_frame(&frame, &state) {
-            reply.write_to(&mut stream)?;
+        if let Some(reply) = handle_frame(&frame, state, client) {
+            reply.write_to(stream)?;
         }
     }
 }
@@ -74,15 +89,17 @@ pub fn handle_client(mut stream: UnixStream, state: Arc<DaemonState>) -> io::Res
 /// Map a request frame to an optional reply. LSP/DAP request opcodes plug in
 /// here as the managers land; for now it answers the heartbeat and the status
 /// poll, adopts the editor's status push, and ignores anything unrecognised.
-fn handle_frame(frame: &Frame, state: &DaemonState) -> Option<Frame> {
+fn handle_frame(frame: &Frame, state: &DaemonState, client: u64) -> Option<Frame> {
     match frame.opcode {
         Opcode::Ping => Some(Frame::control(Opcode::Pong)),
         Opcode::StatusRequest => Some(state.status().to_frame()),
         Opcode::ReportStatus => {
             // Fire-and-forget: the editor must not block its tick on us. A
             // payload we cannot decode is dropped rather than half-applied.
+            // Keyed by connection, so two windows aggregate and a closed
+            // window takes its state with it.
             if let Some(reported) = Status::decode(&frame.payload) {
-                state.apply_report(&reported);
+                state.apply_report(client, &reported);
             }
             None
         }
@@ -110,7 +127,7 @@ mod tests {
         let state = DaemonState::new();
         thread::spawn(move || {
             if let Ok((stream, _)) = listener.accept() {
-                let _ = handle_client(stream, state);
+                let _ = handle_client(stream, state, 1);
             }
         })
     }
@@ -121,9 +138,58 @@ mod tests {
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             if let Ok((stream, _)) = listener.accept() {
-                let _ = handle_client(stream, state);
+                let _ = handle_client(stream, state, 1);
             }
         })
+    }
+
+    /// Accept `n` connections, each under its own client id, on one thread.
+    fn accept_n(
+        listener: UnixListener,
+        state: std::sync::Arc<DaemonState>,
+        n: usize,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            for client in 1..=n as u64 {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let state = std::sync::Arc::clone(&state);
+                        thread::spawn(move || {
+                            let _ = handle_client(stream, state, client);
+                        });
+                    }
+                    Err(_) => return,
+                }
+            }
+        })
+    }
+
+    fn handshake(client: &mut UnixStream) {
+        Frame::control(Opcode::Hello).write_to(client).unwrap();
+        assert_eq!(Frame::read_from(client).unwrap().opcode, Opcode::HelloAck);
+    }
+
+    /// Poll the status until `want` holds — per-connection handler threads
+    /// make cross-socket ordering asynchronous, so a busy-wait beats a
+    /// guessed sleep.
+    fn wait_for_status(client: &mut UnixStream, want: impl Fn(&Status) -> bool) -> Status {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            Frame::control(Opcode::StatusRequest)
+                .write_to(client)
+                .unwrap();
+            let reply = Frame::read_from(client).unwrap();
+            assert_eq!(reply.opcode, Opcode::StatusReport);
+            let snap = Status::decode(&reply.payload).unwrap();
+            if want(&snap) {
+                return snap;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "status never settled: {snap:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     #[test]
@@ -134,7 +200,10 @@ mod tests {
 
         let mut client = UnixStream::connect(&path).unwrap();
         Frame::control(Opcode::Hello).write_to(&mut client).unwrap();
-        assert_eq!(Frame::read_from(&mut client).unwrap().opcode, Opcode::HelloAck);
+        assert_eq!(
+            Frame::read_from(&mut client).unwrap().opcode,
+            Opcode::HelloAck
+        );
 
         Frame::control(Opcode::Ping).write_to(&mut client).unwrap();
         assert_eq!(Frame::read_from(&mut client).unwrap().opcode, Opcode::Pong);
@@ -177,9 +246,14 @@ mod tests {
 
         let mut client = UnixStream::connect(&path).unwrap();
         Frame::control(Opcode::Hello).write_to(&mut client).unwrap();
-        assert_eq!(Frame::read_from(&mut client).unwrap().opcode, Opcode::HelloAck);
+        assert_eq!(
+            Frame::read_from(&mut client).unwrap().opcode,
+            Opcode::HelloAck
+        );
 
-        Frame::control(Opcode::StatusRequest).write_to(&mut client).unwrap();
+        Frame::control(Opcode::StatusRequest)
+            .write_to(&mut client)
+            .unwrap();
         let reply = Frame::read_from(&mut client).unwrap();
         assert_eq!(reply.opcode, Opcode::StatusReport);
         let snap = Status::decode(&reply.payload).unwrap();
@@ -203,10 +277,15 @@ mod tests {
 
         let mut client = UnixStream::connect(&path).unwrap();
         Frame::control(Opcode::Hello).write_to(&mut client).unwrap();
-        assert_eq!(Frame::read_from(&mut client).unwrap().opcode, Opcode::HelloAck);
+        assert_eq!(
+            Frame::read_from(&mut client).unwrap().opcode,
+            Opcode::HelloAck
+        );
 
         // Before: the placeholder zeros the menu bar renders as "none".
-        Frame::control(Opcode::StatusRequest).write_to(&mut client).unwrap();
+        Frame::control(Opcode::StatusRequest)
+            .write_to(&mut client)
+            .unwrap();
         let before = Status::decode(&Frame::read_from(&mut client).unwrap().payload).unwrap();
         assert_eq!(before.lsp_state, 0);
         assert!(before.project.is_empty());
@@ -224,7 +303,9 @@ mod tests {
 
         // A report draws no reply, so the next read must be the status we ask
         // for — if the daemon answered the push, this read would desync.
-        Frame::control(Opcode::StatusRequest).write_to(&mut client).unwrap();
+        Frame::control(Opcode::StatusRequest)
+            .write_to(&mut client)
+            .unwrap();
         let after = Frame::read_from(&mut client).unwrap();
         assert_eq!(after.opcode, Opcode::StatusReport);
         let snap = Status::decode(&after.payload).unwrap();
@@ -250,15 +331,80 @@ mod tests {
 
         let mut client = UnixStream::connect(&path).unwrap();
         Frame::control(Opcode::Hello).write_to(&mut client).unwrap();
-        assert_eq!(Frame::read_from(&mut client).unwrap().opcode, Opcode::HelloAck);
+        assert_eq!(
+            Frame::read_from(&mut client).unwrap().opcode,
+            Opcode::HelloAck
+        );
 
-        Frame::new(Opcode::ReportStatus, vec![0u8; 8]).write_to(&mut client).unwrap();
+        Frame::new(Opcode::ReportStatus, vec![0u8; 8])
+            .write_to(&mut client)
+            .unwrap();
 
-        Frame::control(Opcode::StatusRequest).write_to(&mut client).unwrap();
+        Frame::control(Opcode::StatusRequest)
+            .write_to(&mut client)
+            .unwrap();
         let snap = Status::decode(&Frame::read_from(&mut client).unwrap().payload).unwrap();
-        assert_eq!(snap.project, "/Users/asill/suisei", "state must survive garbage");
+        assert_eq!(
+            snap.project, "/Users/asill/suisei",
+            "state must survive garbage"
+        );
 
         drop(client);
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two windows, one menu bar: the snapshot aggregates both, and closing
+    /// one window strips its state out of the very next query — no ghost.
+    #[test]
+    fn two_windows_aggregate_and_a_close_takes_its_state_with_it() {
+        let path = tmp_sock("multi");
+        let listener = bind(&path).unwrap();
+        let state = DaemonState::new();
+        let server = accept_n(listener, std::sync::Arc::clone(&state), 2);
+
+        let mut w1 = UnixStream::connect(&path).unwrap();
+        let mut w2 = UnixStream::connect(&path).unwrap();
+        handshake(&mut w1);
+        handshake(&mut w2);
+
+        Status {
+            lsp_sessions: 1,
+            lsp_state: 2,
+            dap_state: 0,
+            project: "/tmp/alpha".to_string(),
+            ..Status::default()
+        }
+        .to_report_frame()
+        .write_to(&mut w1)
+        .unwrap();
+        Status {
+            lsp_sessions: 2,
+            lsp_state: 3,
+            dap_state: 1,
+            project: "/tmp/beta".to_string(),
+            ..Status::default()
+        }
+        .to_report_frame()
+        .write_to(&mut w2)
+        .unwrap();
+
+        let snap = wait_for_status(&mut w1, |s| s.lsp_sessions == 3);
+        assert_eq!(snap.lsp_state, 3, "best state wins");
+        assert_eq!(snap.dap_state, 1);
+        assert_eq!(
+            snap.project, "/tmp/beta",
+            "project follows the latest report"
+        );
+
+        // Window 2 dies. Its state must be gone from the next snapshot —
+        // immediately, not after the TTL.
+        drop(w2);
+        let snap = wait_for_status(&mut w1, |s| s.lsp_sessions == 1);
+        assert_eq!(snap.project, "/tmp/alpha");
+        assert_eq!(snap.dap_state, 0);
+
+        drop(w1);
         server.join().unwrap();
         let _ = std::fs::remove_file(&path);
     }

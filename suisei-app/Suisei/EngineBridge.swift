@@ -62,6 +62,9 @@ struct EditorPaneSnap: Equatable, Identifiable {
     var id: Int
     var focused: Bool
     var tabIndex: Int
+    /// Actual document title supplied per pane. A visible unified layout chip
+    /// is not a reliable lookup key for the buffers inside that layout.
+    var title: String = "[No Name]"
     var scroll: UInt32
     var hscroll: UInt32
     /// Total lines in this pane's buffer (scrollbar / clamp).
@@ -74,6 +77,9 @@ struct EditorPaneSnap: Equatable, Identifiable {
     var rect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
     /// This pane runs its own shell.
     var isTerminal: Bool = false
+    /// That shell's content generation — bumped when its grid changes, so the
+    /// face skips re-pulling a ~300 KiB snapshot it already has.
+    var termGen: UInt16 = 0
     /// That shell's rows and caret. Pulled per pane: terminal panes are
     /// separate processes, and one shared snapshot made them all show the same
     /// session.
@@ -82,14 +88,15 @@ struct EditorPaneSnap: Equatable, Identifiable {
     var termCursorCol: Int = 0
 }
 
-/// 0 = none, 1 = vertical (side-by-side), 2 = horizontal (stacked).
+/// Split state for the editor island. The shape lives entirely in the
+/// per-pane rects; `isSplit` is just "more than one pane". (The old
+/// `kind`/`ratio` pair could only describe two panes and was retired with
+/// the layout tree — the ABI bytes survive as pads.)
 struct SplitSnap: Equatable {
-    var kind: UInt8
-    var ratio: Float
     var focus: Int
     var panes: [EditorPaneSnap]
-    var isSplit: Bool { kind != 0 && panes.count >= 2 }
-    static let empty = SplitSnap(kind: 0, ratio: 0.5, focus: 0, panes: [])
+    var isSplit: Bool { panes.count >= 2 }
+    static let empty = SplitSnap(focus: 0, panes: [])
 }
 
 struct TabItem: Equatable, Identifiable {
@@ -113,6 +120,9 @@ struct TabItem: Equatable, Identifiable {
     var isLayout: Bool = false
     /// This tab is a terminal — a shell runs in it.
     var isTerminal: Bool = false
+    /// The document's file was deleted on disk — the chip flags it (a Save
+    /// re-creates the file) so editing a vanished path is never silent.
+    var deleted: Bool = false
 }
 
 struct ExplorerEntry: Equatable, Identifiable {
@@ -282,24 +292,19 @@ struct CompletionsSnap: Equatable {
     static let empty = CompletionsSnap(open: false, prefix: "", selected: 0, items: [])
 }
 
+/// The DOCKED terminal (⌃T). Pane terminals are separate processes pulled
+/// per pane by `attachPaneTerminals` — the old `fullPanel`/`paneBound` flags
+/// were the single-shared-terminal model and never carried truth for panes
+/// (the dock snapshot hardcodes them off), so every branch reading them was
+/// dead. Removed 2026-07-29.
 struct TerminalSnap: Equatable {
     var open: Bool
-    var fullPanel: Bool
-    /// Split pane showing full terminal (`nil` = whole main or side panel).
-    var paneBound: Int?
     var lines: [String]
     /// Shell cursor within `lines`. Never crossed the bridge before, which is
     /// why the terminal had no caret at all.
     var cursorRow: Int = 0
     var cursorCol: Int = 0
-    static let empty = TerminalSnap(open: false, fullPanel: false, paneBound: nil, lines: [])
-
-    /// Whether this editor split pane should paint the full-panel terminal.
-    func isBoundToPane(_ paneId: Int) -> Bool {
-        guard open, fullPanel else { return false }
-        if let b = paneBound { return b == paneId }
-        return true // whole-main fallback
-    }
+    static let empty = TerminalSnap(open: false, lines: [])
 }
 
 struct ScmEntryItem: Equatable, Identifiable {
@@ -441,6 +446,9 @@ struct ChromeSnapshot: Equatable {
     var bufferVersion: UInt64
     var branch: String
     var tabs: [TabItem]
+    /// Tabs past the ABI cap (SUISEI_MAX_TABS) that couldn't be shipped —
+    /// the strip shows "+N" instead of them silently vanishing.
+    var tabsOverflow: Int = 0
     /// Focused-pane lines (compat). Prefer `split` / `editorLines` for paint.
     var lines: [EditorLine]
     var split: SplitSnap
@@ -497,29 +505,45 @@ enum EditorMetrics {
         return min(44, max(32, max(total, scaled)))
     }
 
-    /// The monospaced system font, cached, and never nil.
+    /// The editor's monospaced font, cached, and never nil.
+    ///
+    /// **JetBrains Mono**, bundled in `Resources/Fonts` (OFL). It falls back to
+    /// the system monospaced face (SF Mono) whenever the bundled font has not
+    /// registered yet — `ATSApplicationFontsPath` covers packaged launches and
+    /// `WelcomeFonts.registerIfNeeded()` covers direct-binary dev runs, but the
+    /// first paint can still beat either, so the fallback keeps the grid honest
+    /// until it lands.
     ///
     /// `NSFont.monospacedSystemFont(ofSize:weight:)` is imported into Swift as
-    /// **non-optional**, but the AppKit call behind it can return nil when the
-    /// font cannot be created — under font-server pressure, or across a font
-    /// cache flush. Swift carries that nil along as an ordinary reference and
-    /// it only detonates much later, when CoreText copies it into an attributes
-    /// dictionary: `NSInvalidArgumentException … attempt to insert nil object
-    /// from objects[0]`, with a stack pointing at whoever happened to be
-    /// drawing rather than at the font. That is one of the intermittent
-    /// crashes (caught 2026-07-26 with the app under a typing load).
-    ///
-    /// Caching also removes the reason it was ever likely: this used to run on
-    /// every access, and `cellWidth`/`gutter` are read several times per draw.
+    /// **non-optional**, but the AppKit call behind it can return nil under
+    /// font-server pressure. Swift carries that nil along and it only detonates
+    /// much later, when CoreText copies it into an attributes dictionary —
+    /// `NSInvalidArgumentException … attempt to insert nil object from
+    /// objects[0]`, the stack pointing at whoever was drawing rather than at
+    /// the font. Caching also removes the reason it was ever likely: this used
+    /// to run on every access, and `cellWidth`/`gutter` read it several times
+    /// per draw.
     static func monospaced(_ size: CGFloat, weight: NSFont.Weight) -> NSFont {
         let key = FontKey(size: size, weight: weight.rawValue)
         if let hit = fontCache[key] { return hit }
-        var font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+        WelcomeFonts.registerIfNeeded()
+        var font = NSFont(name: jetBrainsMonoName(weight), size: size)
+            ?? NSFont.monospacedSystemFont(ofSize: size, weight: weight)
         if unsafeBitCast(font, to: UnsafeRawPointer?.self) == nil {
             font = NSFont.userFixedPitchFont(ofSize: size) ?? NSFont.systemFont(ofSize: size)
         }
         fontCache[key] = font
         return font
+    }
+
+    /// PostScript name of the nearest bundled JetBrains Mono weight. Only three
+    /// weights ship (Regular/Medium/Bold); anything semibold-or-heavier maps to
+    /// Bold, medium maps to Medium, the rest to Regular. All weights share one
+    /// advance width, so `cellWidth` is stable across them.
+    private static func jetBrainsMonoName(_ weight: NSFont.Weight) -> String {
+        if weight.rawValue >= NSFont.Weight.semibold.rawValue { return "JetBrainsMono-Bold" }
+        if weight.rawValue >= NSFont.Weight.medium.rawValue { return "JetBrainsMono-Medium" }
+        return "JetBrainsMono-Regular"
     }
 
     private struct FontKey: Hashable {
@@ -560,6 +584,11 @@ enum EditorMetrics {
 
 final class EngineBridge: ObservableObject {
     @Published private(set) var chrome: ChromeSnapshot = .empty
+    /// Per-keystroke caret/scroll, on a SEPARATE object so publishing it does
+    /// not re-evaluate the whole ContentView tree (the split container reads
+    /// only structural `editorSplit`; each pane's canvas observes THIS). See
+    /// `EditorTickStore`.
+    let editorTick = EditorTickStore()
     /// Editor paint surface — updated on scroll without re-emitting full chrome shell.
     @Published private(set) var editorLines: [EditorLine] = []
     @Published private(set) var editorSplit: SplitSnap = .empty
@@ -596,6 +625,22 @@ final class EngineBridge: ObservableObject {
     @Published var uiNavVisible: Bool = true
     @Published var uiDebugVisible: Bool = false
     @Published var uiInspectorVisible: Bool = true
+    /// True while the tab strip is changing its structure (close/reorder or a
+    /// layout presentation step). The strip uses this to suppress its normal
+    /// active-tab auto-centering: scrolling the viewport while chips are also
+    /// being inserted, removed, or reordered creates a second coordinate
+    /// system and is the source of the visible two-stage lurch.
+    @Published private(set) var tabStructuralMotionActive: Bool = false
+    /// Current structural curve consumed by the tab row. Layout chrome has a
+    /// persistent group-keyed shape and therefore no longer relies on this
+    /// transaction to keep a removed matched-geometry source alive.
+    private(set) var tabStructuralAnimation: Animation = .smooth(
+        duration: 0.30 * AnimationTraceRecorder.slowMotionMultiplier
+    )
+    /// Current structural verb, read by the strip to keep layout labels out of
+    /// the parent HStack transaction during grouped ⇄ unified replacement.
+    private(set) var tabStructuralKind: String = ""
+    private var tabStructuralMotionToken: UInt64 = 0
 
     // ── Shadow WAL crash recovery (D0) ──────────────────────────────────
     /// Pending recovery entries found on startup. Polled once after engine
@@ -764,6 +809,9 @@ final class EngineBridge: ObservableObject {
 
     init() {
         engine = suisei_engine_new()
+        // Previous session's files + cursors, if any — landing named buffers
+        // flips the welcome rule, so Welcome yields to the restored editor.
+        suisei_engine_restore_session(engine)
         pushSystemAppearance()
         observeSystemAppearance()
         refreshChrome()
@@ -775,7 +823,11 @@ final class EngineBridge: ObservableObject {
         appearanceObserver?.invalidate()
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         if let scrollMonitor { NSEvent.removeMonitor(scrollMonitor) }
-        if let engine { suisei_engine_free(engine) }
+        if let engine {
+            // Last write wins: persist open files + cursors for next launch.
+            suisei_engine_save_session(engine)
+            suisei_engine_free(engine)
+        }
     }
 
     /// Follow macOS light/dark. Unless the user has pinned a theme, the engine
@@ -841,6 +893,8 @@ final class EngineBridge: ObservableObject {
         reindexRecoveryEntries()
         recoverySheetShown = !recoveryEntries.isEmpty
         refreshChrome()
+        setProjectRoot(Self.workspaceRoot(containing: item.path))
+        NotificationCenter.default.post(name: .suiseiRecoveryAccepted, object: nil)
     }
 
     /// Discard recovery entry: delete the WAL file, user chose not to recover.
@@ -893,6 +947,17 @@ final class EngineBridge: ObservableObject {
             // already merges paint windows itself; publishing re-enters
             // updateNSView while AppKit scrolls and shows as jitter.
             if self.isLiveScrolling { return }
+            // Same reason, different gesture. A structural tab animation —
+            // fold, unfold, reorder, close — runs 0.20–0.30 s, and this timer
+            // fires 4 to 6 times inside it. Every one of those publishes
+            // re-enters ContentView's body WHILE the chips are interpolating,
+            // and the strip visibly hitches. `tabStructuralMotionActive` was
+            // already tracked for the auto-scroll guard; it belongs here too.
+            //
+            // The engine keeps ticking throughout (the PTY still drains, the
+            // LSP still answers) — only the SwiftUI publish waits, and the
+            // catch-up refresh when motion ends picks up whatever landed.
+            if self.tabStructuralMotionActive { return }
             if gen != self.lastFrameGen {
                 // Terminal / LSP noise: prefer light paint; full shell every ~0.5s max via gen.
                 if self.chrome.terminal.open || self.chrome.gitWb.open {
@@ -911,6 +976,13 @@ final class EngineBridge: ObservableObject {
     /// Mode::Terminal (side/full focus), or the full-panel terminal bound to the
     /// focused split pane (core `terminal_window_focused` routes those too).
     var terminalOwnsKeys: Bool {
+        // Docked shell (⌃T) first: opening the dock forces Core's
+        // `Mode::Terminal` and takes the keyboard even while a terminal pane
+        // is focused — checking the pane first made the face insist the pane
+        // owned keys the engine was already routing to the dock.
+        if chrome.terminal.open, focus == .terminal {
+            return true
+        }
         // A focused terminal PANE owns typing even though the engine stays in
         // `Mode::Editor` — that mode belongs to the docked shell. Without this
         // the face took printable keys down the editor's insert path, so a
@@ -922,15 +994,17 @@ final class EngineBridge: ObservableObject {
         {
             return true
         }
-        // Docked terminal (⌃T) — its own mode.
-        guard chrome.terminal.open else { return false }
-        return focus == .terminal
+        return false
     }
 
     func dispatch(code: SuiseiKey, ch: UInt32 = 0, fNum: UInt8 = 0, mods: SuiseiMod = []) {
         // Debug-strip terminal promises "Esc to leave" — release focus instead
-        // of feeding Esc to the shell. (Pane terminals keep Esc for TUIs.)
-        if code == .esc, terminalOwnsKeys, !chrome.terminal.fullPanel {
+        // of feeding Esc to the shell. Pane terminals keep Esc for their TUIs
+        // (vim insert, less, nano): the dock's Mode::Terminal is the only case
+        // where "leave" means anything. The old gate read `fullPanel` off the
+        // DOCK snapshot — always false for panes — and swallowed Esc into a
+        // no-op, so vim was unusable in terminal panes.
+        if code == .esc, chrome.terminal.open, focus == .terminal {
             focusTerminal(false)
             // Engine mode is now Normal (focus release) — enter Insert.
             if let engine { suisei_engine_gui_ensure_insert(engine) }
@@ -973,7 +1047,11 @@ final class EngineBridge: ObservableObject {
         // and the underlying insert REPLACES any selection, so a live drag
         // selection no longer needs the slow path — it is overwritten correctly.
         guard suisei_engine_editor_accepts_text(engine) != 0 else { return false }
-        _ = suisei_engine_dispatch_key(engine, SuiseiKey.char_.rawValue, ch, 0, 0)
+        // Stay on the semantic GUI path. Raw key dispatch happens to type most
+        // characters too, but it also carries shortcut/modifier policy and was
+        // able to diverge from IME commits and programmatic insertion. One edit
+        // primitive now owns selection replacement, auto-pairs and Unicode.
+        suisei_engine_gui_type_char(engine, ch)
         // Autocomplete has to keep up WITH typing, not 120ms after it stops.
         // Probe cheaply and pull the popup only while there is one — this is
         // the single piece of chrome the fast path may not defer.
@@ -983,6 +1061,12 @@ final class EngineBridge: ObservableObject {
         }
         scheduleChromeSettle()
         return true
+    }
+
+    /// Absolute UTF-16 caret offset for AppKit's text-input coordinate space.
+    func caretUTF16Offset() -> Int {
+        guard let engine else { return 0 }
+        return Int(clamping: suisei_engine_caret_utf16_offset(engine))
     }
 
     /// Coalesced catch-up for everything typing deliberately skipped.
@@ -1307,7 +1391,16 @@ final class EngineBridge: ObservableObject {
     }
 
     private func refreshPreviewIfNeeded(_ engine: OpaquePointer, bufferVersion: UInt64) {
-        // Cheap single-chunk probe for open flag + pan state.
+        // Ask the four-byte panel mask before touching the snapshot. What is
+        // called a "cheap single-chunk probe" below is a 64 KiB struct: Swift
+        // zero-fills it, the FFI memsets it again, and all we wanted was three
+        // fields. On the light path that ran every tick.
+        guard suisei_engine_open_panels(engine) & SUISEI_PANEL_PREVIEW != 0 else {
+            if preview != .empty { preview = .empty }
+            lastPreviewKey = ""
+            return
+        }
+        // Open: now the pan/extent probe is worth its bytes.
         var probe = SuiseiPreviewSnapshot()
         let ok = suisei_engine_preview(engine, 0, &probe)
         guard ok != 0, probe.open != 0 else {
@@ -1337,17 +1430,6 @@ final class EngineBridge: ObservableObject {
         m.insert(.shift)
         dispatchRaw(code: .char_, ch: UInt32(UnicodeScalar("t").value), mods: m)
         refreshChrome()
-        // Keep Core split focus on the terminal pane so keys hit the PTY.
-        if chrome.terminal.open, chrome.terminal.fullPanel,
-           let bound = chrome.terminal.paneBound, let engine
-        {
-            suisei_engine_focus_pane(engine, UInt32(bound))
-            refreshChrome()
-        }
-        // Never leave the bottom Debug side-terminal open alongside full panel.
-        if chrome.terminal.fullPanel {
-            uiDebugVisible = false
-        }
     }
 
     /// Core scroll + immediate paint snap (same call stack — no dual clock).
@@ -1384,31 +1466,7 @@ final class EngineBridge: ObservableObject {
 
     private func applyEditorPaintSnap(_ paint: EditorPaintSnap, tabsFrom snap: SuiseiChromeSnapshot) {
         lastFrameGen = paint.frameGen
-        var tabs: [TabItem] = []
-        let tabCount = Int(snap.tab_count)
-        withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
-            withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
-                let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
-                let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
-                let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
-                let isTerminal = withUnsafeBytes(of: snap.tab_is_terminal) { Array($0.bindMemory(to: UInt8.self)) }
-                let titleCap = Int(SUISEI_TITLE_CAP)
-                for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
-                    let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
-                    let title = String(cString: base.assumingMemoryBound(to: CChar.self))
-                    tabs.append(TabItem(
-                        id: i,
-                        stableId: ids[i],
-                        title: title.isEmpty ? "[No Name]" : title,
-                        dirty: dirtyRaw[i] != 0,
-                        active: i == Int(snap.tab_active),
-                        group: groups[i],
-                        isLayout: isLayout[i] != 0,
-                        isTerminal: isTerminal[i] != 0
-                    ))
-                }
-            }
-        }
+        let tabs = decodeTabs(from: snap)
 
         var txn = Transaction()
         txn.disablesAnimations = true
@@ -1429,6 +1487,7 @@ final class EngineBridge: ObservableObject {
         next.lines = paint.lines
         next.split = paint.split
         next.tabs = tabs
+        next.tabsOverflow = max(0, Int(snap.tab_count) - tabs.count)
         next.modeLabel = cStringField(snap.mode_label)
         next.message = cStringField(snap.message)
         next.filename = cStringField(snap.filename)
@@ -1508,14 +1567,50 @@ final class EngineBridge: ObservableObject {
         let tabs = chrome.tabs
         guard !tabs.isEmpty else { return }
         let cur = tabs.firstIndex(where: \.active) ?? 0
-        gotoTab((cur + 1) % tabs.count)
+        stepTab(tabs[(cur + 1) % tabs.count])
     }
 
     func prevTab() {
         let tabs = chrome.tabs
         guard !tabs.isEmpty else { return }
         let cur = tabs.firstIndex(where: \.active) ?? 0
-        gotoTab((cur - 1 + tabs.count) % tabs.count)
+        stepTab(tabs[(cur - 1 + tabs.count) % tabs.count])
+    }
+
+    /// ⌃⇥ target: unified layout chip activates the layout; a parked layout
+    /// member on a single-pane desk restores the arrangement; everything else
+    /// goes through `gotoTabId` (which keeps an active layout's multi-pane
+    /// desk when the target is a member, and keeps a free multi-pane split
+    /// when there is no active layout).
+    private func stepTab(_ target: TabItem) {
+        if target.isLayout {
+            activateLayout(target.group)
+        } else if target.group != 0, !isLayoutDeskActive, !editorSplit.isSplit {
+            activateLayout(target.group, focusDoc: target.stableId)
+        } else {
+            gotoTabId(target.stableId)
+        }
+    }
+
+    /// Chip click routing shared by the SwiftUI action (a11y) and the AppKit
+    /// titlebar overlay (real mouse). See `documentTabStrip`.
+    func selectTabChip(_ tab: TabItem) {
+        if tab.isLayout {
+            activateLayout(tab.group)
+        } else if tab.group != 0, !tab.active {
+            // Parked-layout member:
+            // * desk already owns this layout → focus member in-place (goto)
+            // * free multi-pane split → do NOT activate (would clobber it with
+            //   the parked tree and re-arm layout-leave collapse)
+            // * single pane → restore the parked arrangement
+            if isLayoutDeskActive || editorSplit.isSplit {
+                gotoTabId(tab.stableId)
+            } else {
+                activateLayout(tab.group, focusDoc: tab.stableId)
+            }
+        } else {
+            gotoTabId(tab.stableId)
+        }
     }
 
     func focusNextPane() {
@@ -1539,16 +1634,32 @@ final class EngineBridge: ObservableObject {
         refreshChrome()
     }
 
-    func openPath(_ path: String) {
-        guard let engine else { return }
+    @discardableResult
+    func openPath(_ path: String) -> Bool {
+        guard let engine else { return false }
         var isDir: ObjCBool = false
         FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
         if isDir.boolValue {
+            let result = path.withCString {
+                suisei_engine_switch_project(engine, $0)
+            }
+            if result == 2 {
+                presentFileError(
+                    "This project has unsaved tabs. Save or close them before switching projects."
+                )
+                return false
+            }
+            guard result == 1 else {
+                presentFileError("Could not open project: \(path)")
+                return false
+            }
             setProjectRoot(path)
-        } else if projectRoot.isEmpty {
-            setProjectRoot((path as NSString).deletingLastPathComponent)
+        } else if projectRoot.isEmpty || !Self.path(path, belongsTo: projectRoot) {
+            setProjectRoot(Self.workspaceRoot(containing: path))
+            path.withCString { _ = suisei_engine_open_path(engine, $0) }
+        } else {
+            path.withCString { _ = suisei_engine_open_path(engine, $0) }
         }
-        path.withCString { _ = suisei_engine_open_path(engine, $0) }
         // Seed docked Project tree (does not steal Mode::Explorer).
         suisei_engine_ensure_project_tree(engine)
         RecentStore.push(path: path)
@@ -1556,6 +1667,34 @@ final class EngineBridge: ObservableObject {
         resolveProjectRoot()
         // Hybrid: open file → ready to type (Mac contract).
         ensureEditorFocus()
+        return true
+    }
+
+    /// Recover the workspace identity when a recent item is a child file.
+    /// Stopping at its immediate `src` directory shrank the Project navigator;
+    /// walk upward to the nearest project marker first.
+    private static func workspaceRoot(containing file: String) -> String {
+        let manager = FileManager.default
+        var directory = (file as NSString).deletingLastPathComponent
+        let markers = [".git", "Cargo.toml", "package.json", "go.mod", "pyproject.toml"]
+        while !directory.isEmpty, directory != "/" {
+            if markers.contains(where: {
+                manager.fileExists(atPath: (directory as NSString).appendingPathComponent($0))
+            }) {
+                return directory
+            }
+            let parent = (directory as NSString).deletingLastPathComponent
+            if parent == directory { break }
+            directory = parent
+        }
+        return (file as NSString).deletingLastPathComponent
+    }
+
+    private static func path(_ path: String, belongsTo root: String) -> Bool {
+        let normalizedPath = (path as NSString).standardizingPath
+        let normalizedRoot = (root as NSString).standardizingPath
+        return normalizedPath == normalizedRoot
+            || normalizedPath.hasPrefix(normalizedRoot + "/")
     }
 
     /// Workspace root for hierarchical Project navigator (folder open / git root).
@@ -1783,7 +1922,7 @@ final class EngineBridge: ObservableObject {
         panel.begin { [weak self] result in
             guard result == .OK, let url = panel.url else { return }
             DispatchQueue.main.async {
-                self?.openPath(url.path)
+                guard self?.openPath(url.path) == true else { return }
                 // If directory, also open explorer at that cwd via Core explorer after open
                 if url.hasDirectoryPath {
                     self?.cancelPointerSession()
@@ -1868,6 +2007,14 @@ final class EngineBridge: ObservableObject {
     func prewarmFile(_ path: String) -> Bool {
         guard let engine else { return false }
         return path.withCString { suisei_engine_prewarm_file(engine, $0) != 0 }
+    }
+
+    /// Boot pipeline: warm every language grammar on the syntax worker so the
+    /// first file opened highlights with no cold parser/query build.
+    /// Non-blocking — the worker warms while the launch splash is up.
+    func warmGrammars() {
+        guard let engine else { return }
+        suisei_engine_warm_grammars(engine)
     }
 
     func pointerDownUTF16(row: UInt32, utf16: UInt32) {
@@ -1975,6 +2122,24 @@ final class EngineBridge: ObservableObject {
         dispatch(code: .char_, ch: UInt32(UnicodeScalar("g").value), mods: .control)
     }
 
+    func scmSelect(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_scm_select(engine, UInt32(row))
+        refreshChrome()
+    }
+
+    func scmActivate(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_scm_activate(engine, UInt32(row))
+        refreshChrome()
+    }
+
+    func scmToggleStage(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_scm_toggle_stage(engine, UInt32(row))
+        refreshChrome()
+    }
+
     func toggleGitWorkbench() {
         cancelPointerSession()
         var m = SuiseiMod.control
@@ -1985,6 +2150,30 @@ final class EngineBridge: ObservableObject {
     func gitWbSetTab(_ index: Int) {
         guard let engine else { return }
         suisei_engine_git_wb_set_tab(engine, UInt32(index))
+        refreshChrome()
+    }
+
+    func gitWbSelectChange(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_git_wb_select_change(engine, UInt32(row))
+        refreshChrome()
+    }
+
+    func gitWbSelectHistory(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_git_wb_select_history(engine, UInt32(row))
+        refreshChrome()
+    }
+
+    func gitWbSelectCommitFile(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_git_wb_select_commit_file(engine, UInt32(row))
+        refreshChrome()
+    }
+
+    func gitWbSelectSpecial(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_git_wb_select_special(engine, UInt32(row))
         refreshChrome()
     }
 
@@ -2025,6 +2214,7 @@ final class EngineBridge: ObservableObject {
 
     func save() {
         guard let engine else { return }
+        commitPendingEditorComposition()
         // A buffer that has never been written has no location yet, so ask.
         // (It must not be given a fabricated one: a relative name saves against
         // the process cwd, and the project root can itself be unwritable.)
@@ -2044,6 +2234,7 @@ final class EngineBridge: ObservableObject {
     }
 
     func saveAsPanel() {
+        commitPendingEditorComposition()
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
         // Open where the user is working rather than wherever the panel was
@@ -2063,6 +2254,17 @@ final class EngineBridge: ObservableObject {
                 self.refreshChrome()
             }
         }
+    }
+
+    /// Save is initiated by the menu/local key monitor, before AppKit naturally
+    /// ends the current IME composition. Commit what the focused canvas is
+    /// visibly showing so Core and the file snapshot cannot lose the last
+    /// marked syllable.
+    private func commitPendingEditorComposition() {
+        guard let canvas = NSApp.keyWindow?.firstResponder as? EditorCanvasView else {
+            return
+        }
+        _ = canvas.commitMarkedTextForDocumentAction()
     }
 
     func openFilePanel() {
@@ -2118,6 +2320,65 @@ final class EngineBridge: ObservableObject {
         refreshEditorPaintOnly()
     }
 
+    /// App menu commands still fire while a SwiftUI/AppKit text field owns the
+    /// first responder. Routing those actions unconditionally to Core made
+    /// ⌘A select the document behind the Project Filter and made Cut/Copy/
+    /// Paste/Undo equally unsafe. Preserve the native responder chain whenever
+    /// a real text control is focused; use Core only for the editor canvas.
+    func cutCommand() {
+        if sendNativeTextAction(#selector(NSText.cut(_:))) { return }
+        dispatch(
+            code: .char_,
+            ch: UInt32(UnicodeScalar("x").value),
+            mods: .superKey
+        )
+    }
+
+    func copyCommand() {
+        if sendNativeTextAction(#selector(NSText.copy(_:))) { return }
+        dispatch(
+            code: .char_,
+            ch: UInt32(UnicodeScalar("c").value),
+            mods: .superKey
+        )
+    }
+
+    func pasteCommand() {
+        if sendNativeTextAction(#selector(NSText.paste(_:))) { return }
+        dispatch(
+            code: .char_,
+            ch: UInt32(UnicodeScalar("v").value),
+            mods: .superKey
+        )
+    }
+
+    func selectAllCommand() {
+        if sendNativeTextAction(#selector(NSText.selectAll(_:))) { return }
+        selectAll()
+    }
+
+    func undoCommand() {
+        if nativeTextControlHasFocus {
+            NSApp.keyWindow?.undoManager?.undo()
+            return
+        }
+        undo()
+    }
+
+    func redoCommand() {
+        if nativeTextControlHasFocus {
+            NSApp.keyWindow?.undoManager?.redo()
+            return
+        }
+        redo()
+    }
+
+    @discardableResult
+    private func sendNativeTextAction(_ action: Selector) -> Bool {
+        guard nativeTextControlHasFocus else { return false }
+        return NSApp.sendAction(action, to: nil, from: nil)
+    }
+
     /// ⌘F — open the incremental find bar (typing goes to the pattern).
     func openFind() {
         guard let engine else { return }
@@ -2130,6 +2391,18 @@ final class EngineBridge: ObservableObject {
     func findStep(forward: Bool) {
         guard let engine else { return }
         suisei_engine_find_step(engine, forward ? 1 : 0)
+        refreshEditorPaintOnly()
+    }
+
+    func setFindInput(_ input: String) {
+        guard let engine, input != chrome.search.input else { return }
+        input.withCString { suisei_engine_find_set_input(engine, $0) }
+        refreshEditorPaintOnly()
+    }
+
+    func setPaletteQuery(_ query: String) {
+        guard let engine, query != chrome.palette.query else { return }
+        query.withCString { suisei_engine_palette_set_query(engine, $0) }
         refreshEditorPaintOnly()
     }
 
@@ -2306,7 +2579,76 @@ final class EngineBridge: ObservableObject {
     /// the dock instead of the pane the user clicked. A pane terminal stays in
     /// `Mode::Editor` — core sees the focused pane is a terminal and hands it
     /// the keys.
-    // MARK: - Layout tabs (J7)
+    // MARK: - Layout tabs (J7) — sequential presentation animation
+
+    /// Layout-strip presentation curves. One transaction per step — staged
+    /// delays were documented but never implemented; a single curve per
+    /// verb keeps grouped ⇄ unified from double-driving against the strip's
+    /// implicit presentation-key animation.
+    private static let animationSlowmo = AnimationTraceRecorder.slowMotionMultiplier
+    private static let tabReorderDuration = 0.24 * animationSlowmo
+    private static let tabCloseDuration = 0.20 * animationSlowmo
+    private static let layoutGatherDuration = 0.30 * animationSlowmo
+    private static let layoutContainerDuration = 0.28 * animationSlowmo
+    private static let layoutMergeDuration = 0.30 * animationSlowmo
+    private static let tabReorderAnimation: Animation = .smooth(duration: tabReorderDuration)
+    private static let tabCloseAnimation: Animation = .easeInOut(duration: tabCloseDuration)
+    private static let layoutGatherAnimation: Animation = .smooth(duration: layoutGatherDuration)
+    private static let layoutContainerAnimation: Animation = .smooth(duration: layoutContainerDuration)
+    /// Slightly longer, almost no bounce — merge is a collapse of many chips
+    /// into one, and spring overshoot made the unified chip lurch past its
+    /// resting size while members were still fading.
+    private static let layoutMergeAnimation: Animation = .smooth(duration: layoutMergeDuration)
+
+    /// Run one structural tab-strip transaction and keep the viewport pinned
+    /// until it has settled. Rapid input retargets the same motion window: an
+    /// older completion may never clear a newer transition's lock.
+    private func refreshChromeWithTabMotion(
+        kind: String,
+        duration: TimeInterval,
+        animation: Animation
+    ) {
+        tabStructuralMotionToken &+= 1
+        let token = tabStructuralMotionToken
+        tabStructuralAnimation = animation
+        tabStructuralKind = kind
+        tabStructuralMotionActive = true
+        AnimationTraceRecorder.shared.begin(kind: kind, expectedDuration: duration)
+        // The row owns insertion/removal timing. The persistent layout shape
+        // has its own group-keyed bounds animation, so member-label transitions
+        // can use a short curve without replacing the shape's transaction.
+        //
+        // Wrap the snapshot swap in an EXPLICIT transaction. Without it the
+        // tab ForEach diffs (N grouped members → 1 unified chip) collapse
+        // their layout footprint on the same frame the data changes: the tabs
+        // to the right of the group have no animated layout step to ride and
+        // TELEPORT into the freed space. A value-scoped `.animation` on the
+        // strip is not enough — it does not reach the ScrollView's internal
+        // HStack relayout. withAnimation makes the whole relayout (footprint
+        // collapse + neighbour slide) one coordinated step. The band keeps its
+        // own `.animation(value: run)`, so this does not double-drive it.
+        withAnimation(animation) {
+            refreshChrome()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.06) { [weak self] in
+            guard let self, self.tabStructuralMotionToken == token else { return }
+            self.tabStructuralMotionActive = false
+            self.tabStructuralKind = ""
+            // NO catch-up refresh here, deliberately.
+            //
+            // An earlier revision called `refreshChrome()` at this point to
+            // flush whatever the engine changed while publishes were
+            // suppressed. That was wrong three ways: it is **redundant**
+            // (`lastFrameGen` is not advanced during suppression, so the very
+            // next 50 ms tick sees the gap and refreshes through the normal
+            // path); it is **expensive** (measured 6.1 ms mean, 20.2 ms worst
+            // on a layout switch — not the ~0.3 ms the comment claimed); and
+            // worst of all it is **unanimated**, so every change that accrued
+            // during the motion snapped into place the instant the curve
+            // ended. That is the "sometimes it just jumps with no animation"
+            // the user reported.
+        }
+    }
 
     /// Fold the editor's arrangement into a layout tab. Returns false when
     /// there is nothing to fold (a single pane is not an arrangement).
@@ -2314,7 +2656,13 @@ final class EngineBridge: ObservableObject {
     func foldLayout() -> Bool {
         guard let engine else { return false }
         let ok = suisei_engine_fold_layout(engine) != 0
-        if ok { refreshChrome() }
+        if ok {
+            refreshChromeWithTabMotion(
+                kind: "layout-loose-to-grouped",
+                duration: Self.layoutGatherDuration,
+                animation: Self.layoutGatherAnimation
+            )
+        }
         return ok
     }
 
@@ -2325,24 +2673,102 @@ final class EngineBridge: ObservableObject {
     func unfoldLayout() -> Bool {
         guard let engine else { return false }
         let ok = suisei_engine_unfold_layout(engine) != 0
-        if ok { refreshChrome() }
+        if ok {
+            refreshChromeWithTabMotion(
+                kind: "layout-grouped-to-loose",
+                duration: Self.layoutContainerDuration,
+                animation: Self.layoutContainerAnimation
+            )
+        }
         return ok
     }
 
     func activateLayout(_ id: UInt64, focusDoc: UInt64 = 0) {
         guard let engine else { return }
-        if suisei_engine_activate_layout(engine, id, focusDoc) != 0 { refreshChrome() }
+        if suisei_engine_activate_layout(engine, id, focusDoc) != 0 {
+            refreshChromeWithTabMotion(
+                kind: "layout-activate",
+                duration: Self.layoutGatherDuration,
+                animation: Self.layoutGatherAnimation
+            )
+        }
     }
 
     /// Switch a layout between the grouped and unified strip shapes.
     func toggleLayoutStyle(_ id: UInt64) {
         guard let engine else { return }
-        if suisei_engine_toggle_layout_style(engine, id) != 0 { refreshChrome() }
+        if suisei_engine_toggle_layout_style(engine, id) != 0 {
+            let wasUnified = chrome.tabs.contains { $0.group == id && $0.isLayout }
+            refreshChromeWithTabMotion(
+                kind: wasUnified
+                    ? "layout-unified-to-grouped"
+                    : "layout-grouped-to-unified",
+                duration: Self.layoutMergeDuration,
+                animation: Self.layoutMergeAnimation
+            )
+        }
     }
 
-    /// Whether a folded layout is currently on screen.
+    /// One deliberate upward tab-strip flick advances exactly one stage:
+    /// loose split → grouped layout → unified layout.
+    ///
+    /// 순차적 에니메이션: 각 단계가 0.1s 간격으로 겹치며 시작된다.
+    /// 일반→그룹: ① 칩들이 연속 run으로 슬라이드(gather) → 0.1s → ② 컨테이너 fade-in
+    /// 그룹→통합: ③ 멤버 칩들이 수렴하며 사라짐(merge) → 0.1s → ④ 빈 공간 reclaim
+    @discardableResult
+    func advanceLayoutPresentation() -> Bool {
+        // 그룹→통합: merge 애니메이션으로 칩들이 수렴. 0.1s 후 뒤 탭들이
+        // 빈 공간을 채우며 슬라이드하는 것은 SwiftUI가 unified 칩 하나만
+        // 남은 상태에서 자연스럽게 처리한다.
+        if let grouped = chrome.tabs.first(where: {
+            $0.active && $0.group != 0 && !$0.isLayout
+        }) {
+            toggleLayoutStyle(grouped.group)
+            return true
+        }
+        // A unified layout is already the most compact stage.
+        if chrome.tabs.contains(where: { $0.active && $0.isLayout }) {
+            return false
+        }
+        // 일반→그룹: fold_layout이 buffers 순서를 재정렬(gather)하고
+        // LayoutTab을 생성(style=Grouped). 칩들이 연속 run으로 슬라이드하고,
+        // 0.1s 후 tabFrames가 갱신되면 컨테이너가 자연스럽게 등장한다.
+        return foldLayout()
+    }
+
+    /// One deliberate downward tab-strip flick reverses exactly one stage:
+    /// unified layout → grouped layout → loose split.
+    ///
+    /// 통합→그룹: ④⁻¹ 통합 칩이 벌어지며 멤버 칩들이 펼쳐짐 → 0.1s → ③⁻¹ 정착
+    /// 그룹→일반: ②⁻¹ 컨테이너 fade-out → 0.1s → ①⁻¹ 칩들이 원래 위치로
+    @discardableResult
+    func retreatLayoutPresentation() -> Bool {
+        if let unified = chrome.tabs.first(where: { $0.active && $0.isLayout }) {
+            toggleLayoutStyle(unified.group)
+            return true
+        }
+        if chrome.tabs.contains(where: {
+            $0.active && $0.group != 0 && !$0.isLayout
+        }) {
+            return unfoldLayout()
+        }
+        return false
+    }
+
+    /// Whether a folded layout currently **owns the desk** (`App::active_layout`).
+    ///
+    /// Distinct from "some chip has a non-zero group": a parked layout still
+    /// tags its members, but the desk is free until the layout is activated.
+    var isLayoutDeskActive: Bool {
+        guard let engine else { return false }
+        return suisei_engine_active_layout_id(engine) != 0
+    }
+
+    /// Whether a folded layout is currently on screen (desk-active or a
+    /// group-member chip is focused). Prefer `isLayoutDeskActive` when the
+    /// question is park/collapse behaviour.
     var hasActiveLayout: Bool {
-        chrome.tabs.contains { $0.group != 0 && $0.active }
+        isLayoutDeskActive || chrome.tabs.contains { $0.group != 0 && $0.active }
     }
 
     /// Open or close the docked terminal (⌃T).
@@ -2402,6 +2828,16 @@ final class EngineBridge: ObservableObject {
         refreshChrome()
     }
 
+    /// Raw keyboard text into the focused terminal's PTY (IME-committed
+    /// Hangul/CJK, typed characters). The terminal input view routes
+    /// `insertText` here — NOT `pasteText`, which the shell would treat as a
+    /// bracketed paste. Repaints the shell at once.
+    func terminalInput(_ text: String) {
+        guard let engine, !text.isEmpty else { return }
+        text.withCString { suisei_engine_terminal_input(engine, $0) }
+        refreshChrome()
+    }
+
     /// Scroll the terminal panel through its scrollback; positive = older.
     func terminalScroll(_ rows: Int32) {
         guard let engine, rows != 0 else { return }
@@ -2410,9 +2846,70 @@ final class EngineBridge: ObservableObject {
     }
 
     /// Size the PTY grid to the terminal panel (cells).
+    ///
+    /// The resize is DEBOUNCED to the drag's settle, not applied per step. A
+    /// live drag crosses many cell boundaries; resizing the PTY on each one
+    /// sent a burst of `SIGWINCH`es, and — crucially — a drag that dips to the
+    /// minimum width made the shell reflow (wrap) its output at that tiny width.
+    /// Widening back cannot un-wrap it, so the grid came back "clipped and
+    /// stuck". Applying exactly one resize at the FINAL size skips every
+    /// intermediate width, so the shell only ever reflows to where the panel
+    /// actually settles.
     func terminalResize(cols: Int, rows: Int) {
-        guard let engine, cols > 0, rows > 0 else { return }
-        suisei_engine_terminal_resize(engine, UInt32(cols), UInt32(rows))
+        guard cols > 0, rows > 0 else { return }
+        pendingTerminalResize = (cols, rows, nil)
+        scheduleTerminalResize()
+    }
+
+    /// Size a docked/pane PTY once the resize drag settles. `pane == nil` is the
+    /// docked shell (`chrome.terminal`); a pane index routes to that pane's PTY
+    /// and repaints through the split path instead.
+    private var pendingTerminalResize: (cols: Int, rows: Int, pane: Int?)?
+    private var terminalResizeWork: DispatchWorkItem?
+    private func scheduleTerminalResize() {
+        terminalResizeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let engine = self.engine,
+                  let (cols, rows, pane) = self.pendingTerminalResize else { return }
+            if let pane {
+                suisei_engine_terminal_resize_pane(engine, UInt32(pane), UInt32(cols), UInt32(rows))
+                self.refreshEditorPaintOnly()
+            } else {
+                suisei_engine_terminal_resize(engine, UInt32(cols), UInt32(rows))
+                self.refreshChrome()
+            }
+        }
+        terminalResizeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+    }
+
+    /// Size a PANE terminal's own PTY (cells). Pane shells are separate
+    /// processes — the docked `terminalResize` never touched them, so they
+    /// kept their spawn-time guess and output wrapped at the wrong column.
+    func terminalResizePane(_ pane: Int, cols: Int, rows: Int) {
+        guard cols > 0, rows > 0 else { return }
+        // Debounced to settle, same as the docked shell (see `terminalResize`).
+        pendingTerminalResize = (cols, rows, pane)
+        scheduleTerminalResize()
+    }
+
+    /// Scroll a pane terminal through its scrollback; positive = older.
+    func terminalScrollPane(_ pane: Int, _ rows: Int32) {
+        guard let engine, rows != 0 else { return }
+        suisei_engine_terminal_scroll_pane(engine, UInt32(pane), rows)
+        refreshChrome()
+    }
+
+    /// Forward a mouse event to a terminal's inner app (xterm tracking).
+    /// pane = -1 targets the dock. True when the shell consumed the event
+    /// (the caller should not also act on it — e.g. wheel → scrollback).
+    func terminalMouse(pane: Int32, button: UInt8, x: Int32, y: Int32, pressed: Bool, motion: Bool) -> Bool {
+        guard let engine else { return false }
+        let p: UInt32 = pane < 0 ? 0xFFFF : UInt32(pane)
+        return suisei_engine_terminal_mouse(
+            engine, p, button, UInt16(x), UInt16(y),
+            pressed ? 1 : 0, motion ? 1 : 0
+        ) != 0
     }
 
     /// Tell Core the face has acted on its scroll intent.
@@ -2424,15 +2921,73 @@ final class EngineBridge: ObservableObject {
     func gotoTab(_ index: Int) {
         guard let engine else { return }
         suisei_engine_goto_tab(engine, UInt32(index))
-        refreshChrome()
+        withAnimation(.snappy(duration: 0.22 * Self.animationSlowmo)) {
+            refreshChrome()
+        }
     }
 
     func closeTab(_ index: Int) {
         guard let engine else { return }
         cancelPointerSession()
         suisei_engine_close_tab(engine, UInt32(index))
-        refreshChrome()
+        refreshChromeWithTabMotion(
+            kind: "tab-close-index",
+            duration: Self.tabCloseDuration,
+            animation: Self.tabCloseAnimation
+        )
         ensureEditorFocus()
+    }
+
+    // Stable-id tab addressing. Strip slots diverge from buffer indices the
+    // moment a folded layout gathers its members into a run (grouped) or
+    // hides them behind one chip (unified) — every slot after the group then
+    // names a different document than the same buffer index, so chips are
+    // addressed by `stableId` and the engine translates.
+
+    func gotoTabId(_ stableId: UInt64) {
+        guard let engine else { return }
+        suisei_engine_goto_tab_id(engine, stableId)
+        withAnimation(.snappy(duration: 0.22 * Self.animationSlowmo)) {
+            refreshChrome()
+        }
+    }
+
+    func closeTabId(_ stableId: UInt64) {
+        guard let engine else { return }
+        cancelPointerSession()
+        suisei_engine_close_tab_id(engine, stableId)
+        refreshChromeWithTabMotion(
+            kind: "tab-close-\(stableId)",
+            duration: Self.tabCloseDuration,
+            animation: Self.tabCloseAnimation
+        )
+        ensureEditorFocus()
+    }
+
+    func moveTabIds(from: UInt64, to: UInt64) -> Bool {
+        guard let engine, from != to else { return false }
+        let moved = suisei_engine_move_tab_ids(engine, from, to) != 0
+        if moved {
+            refreshChromeWithTabMotion(
+                kind: "tab-reorder-\(from)-to-\(to)",
+                duration: Self.tabReorderDuration,
+                animation: Self.tabReorderAnimation
+            )
+        }
+        return moved
+    }
+
+    /// "Close Tab" on a layout chip: the layout entry goes, its documents
+    /// stay open as loose tabs.
+    func dropLayout(_ id: UInt64) {
+        guard let engine else { return }
+        if suisei_engine_drop_layout(engine, id) != 0 {
+            refreshChromeWithTabMotion(
+                kind: "layout-drop-\(id)",
+                duration: Self.layoutContainerDuration,
+                animation: Self.layoutContainerAnimation
+            )
+        }
     }
 
     /// Xcode “+ → New Untitled Tab” — always stays in editor shell (never Welcome).
@@ -2457,11 +3012,27 @@ final class EngineBridge: ObservableObject {
         refreshChrome()
     }
 
+    /// Pane header menu → place a sibling directly left of the chosen pane.
+    func splitEditorLeft() {
+        guard let engine else { return }
+        cancelPointerSession()
+        suisei_engine_split_left(engine)
+        refreshChrome()
+    }
+
     /// Xcode “+ → Editor Pane Below”
     func splitEditorBelow() {
         guard let engine else { return }
         cancelPointerSession()
         suisei_engine_split_horizontal(engine)
+        refreshChrome()
+    }
+
+    /// Pane header menu → place a sibling directly above the chosen pane.
+    func splitEditorAbove() {
+        guard let engine else { return }
+        cancelPointerSession()
+        suisei_engine_split_above(engine)
         refreshChrome()
     }
 
@@ -2503,14 +3074,32 @@ final class EngineBridge: ObservableObject {
 
     // MARK: - Issue navigator
 
+    /// Fingerprint of the diagnostic set behind `diagnostics`, so an unchanged
+    /// set costs one `u64` instead of a 48.6 KiB copy and a `String` per entry.
+    private var lastDiagnosticsFingerprint: UInt64 = 0
+
     func refreshDiagnostics() {
         guard let engine else {
+            diagnostics = []
+            lastDiagnosticsFingerprint = 0
+            return
+        }
+        // The snapshot is 48.6 KiB and this runs on every full refresh — but
+        // diagnostics only move when a language server answers. Ask the cheap
+        // question first.
+        // The fingerprint is the single source of truth for "did it change".
+        // It starts at 0 and so does `diagnostics`, so the two cannot drift.
+        let fingerprint = suisei_engine_diagnostics_fingerprint(engine)
+        if fingerprint == lastDiagnosticsFingerprint { return }
+        lastDiagnosticsFingerprint = fingerprint
+        if fingerprint == 0 {
             diagnostics = []
             return
         }
         var snap = SuiseiDiagnosticsSnapshot()
         guard suisei_engine_diagnostics(engine, &snap) != 0 else {
             diagnostics = []
+            lastDiagnosticsFingerprint = 0
             return
         }
         let n = Int(snap.count)
@@ -2552,6 +3141,11 @@ final class EngineBridge: ObservableObject {
     /// pointer precisely so this is safe; the background indexer already
     /// showed what a long main-thread job does to interaction.
     func searchProject(_ pattern: String) {
+        // Every request, including Clear, invalidates an older async result.
+        // Otherwise a grep already in flight can repopulate the list after
+        // the field was emptied.
+        searchGeneration &+= 1
+        let generation = searchGeneration
         let root = projectRoot.isEmpty ? chrome.explorer.cwd : projectRoot
         guard !pattern.isEmpty, !root.isEmpty else {
             searchHits = []
@@ -2572,8 +3166,6 @@ final class EngineBridge: ObservableObject {
             return
         }
         searchMessage = ""
-        searchGeneration &+= 1
-        let generation = searchGeneration
         searchRunning = true
         DispatchQueue.global(qos: .userInitiated).async {
             // HEAP, not stack. This snapshot is ~228KB (300 × (512 + 240)) and
@@ -2852,6 +3444,10 @@ final class EngineBridge: ObservableObject {
            // "editor-owned" so the ⌘-chords below still reach the engine.
            // Plain typing is handed back to it at the tail of the monitor.
            !(responder is EditorCanvasView),
+           // The terminal grid is likewise an NSTextInputClient: keep it
+           // editor-owned so ⌘W/⌘S still work, and plain keys are handed to its
+           // keyDown at the monitor tail (terminalCanvasHasFocus).
+           !(responder is TermCanvas),
            responder is NSTextView || responder is NSTextField
                || responder is NSTextInputClient
         {
@@ -2861,6 +3457,14 @@ final class EngineBridge: ObservableObject {
         return true
     }
 
+    private var nativeTextControlHasFocus: Bool {
+        guard let responder = NSApp.keyWindow?.firstResponder,
+              !(responder is EditorCanvasView)
+        else { return false }
+        return responder is NSTextView || responder is NSTextField
+            || responder is NSTextInputClient
+    }
+
     /// The editor canvas has focus, so plain keys must flow through its
     /// `NSTextInputClient` path (input method, standard key bindings) instead
     /// of being swallowed here.
@@ -2868,9 +3472,84 @@ final class EngineBridge: ObservableObject {
         NSApp.keyWindow?.firstResponder is EditorCanvasView
     }
 
+    /// The terminal grid holds the keyboard. Like the editor canvas it is now an
+    /// `NSTextInputClient`, so the monitor hands plain keys back to its `keyDown`
+    /// (which runs the input method for Hangul/CJK) instead of routing them raw.
+    var terminalCanvasHasFocus: Bool {
+        NSApp.keyWindow?.firstResponder is TermCanvas
+    }
+
     private func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let plainPanelKey = !flags.contains(.command)
+                && !flags.contains(.control)
+                && !flags.contains(.option)
+
+            // Find and Palette use native text fields so IME, selection and
+            // editing shortcuts are AppKit-owned. Their navigation keys still
+            // belong to the surrounding transient surface.
+            if self.nativeTextControlHasFocus, plainPanelKey,
+               self.chrome.palette.open
+            {
+                switch event.keyCode {
+                case 53:
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    self.dispatch(code: .esc)
+                    self.ensureEditorFocus()
+                    return nil
+                case 36, 76:
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    self.dispatch(code: .enter)
+                    self.ensureEditorFocus()
+                    return nil
+                case 125:
+                    self.dispatch(code: .down)
+                    return nil
+                case 126:
+                    self.dispatch(code: .up)
+                    return nil
+                default:
+                    break
+                }
+            }
+            if self.nativeTextControlHasFocus, plainPanelKey,
+               self.chrome.search.open
+            {
+                switch event.keyCode {
+                case 53:
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    self.dispatch(code: .esc)
+                    self.ensureEditorFocus()
+                    return nil
+                case 36, 76:
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    self.dispatch(code: .enter)
+                    self.ensureEditorFocus()
+                    return nil
+                case 125:
+                    self.findStep(forward: true)
+                    return nil
+                case 126:
+                    self.findStep(forward: false)
+                    return nil
+                default:
+                    break
+                }
+            }
+            // The Workbench advertises "Esc back" globally. If the persistent
+            // Project Filter happens to own first responder, the normal editor
+            // monitor stands down and AppKit otherwise consumes Esc inside the
+            // field. Close the visible surface first, irrespective of that
+            // unrelated field focus.
+            if event.keyCode == 53, self.chrome.gitWb.open,
+               self.nativeTextControlHasFocus
+            {
+                NSApp.keyWindow?.makeFirstResponder(nil)
+                self.dispatch(code: .esc)
+                return nil
+            }
             // Swallowing keys during a modal (clone-URL alert, save panel) made
             // those text fields untypable — pass through anything non-editor.
             guard self.editorOwnsKeyEvents else { return event }
@@ -2881,10 +3560,16 @@ final class EngineBridge: ObservableObject {
                 // System/menu chords route natively (⌘N = New, ⌘0/⌥⌘0 = panels).
                 if c == "q" || c == "h" || c == "m" || c == "n" { return event }
                 // ⌘W closes the TAB (GUI-editor standard) — ⇧⌘W closes the window.
+                // By stableId: under a layout group slot indices diverge from
+                // buffer indices, and `closeTab(slot)` closes the wrong document.
                 if c == "w" {
                     if hasShift { return event }
                     if let active = self.chrome.tabs.first(where: \.active) {
-                        self.closeTab(active.id)
+                        if active.isLayout {
+                            self.dropLayout(active.group)
+                        } else {
+                            self.closeTabId(active.stableId)
+                        }
                     }
                     return nil
                 }
@@ -2940,8 +3625,13 @@ final class EngineBridge: ObservableObject {
                     return event
                 }
             }
-            // ⌃⇥ / ⌃⇧⇥ — cycle document tabs (standard macOS).
+            // ⌃⇥ / ⌃⇧⇥ — cycle document tabs (standard macOS). A focused pane
+            // shell gets the key instead: stealing it there is the surprising
+            // direction (the dock, which owns ⌃⇥ by convention, keeps it).
             if event.keyCode == 48, event.modifierFlags.contains(.control) {
+                if self.terminalOwnsKeys, self.focus != .terminal {
+                    return event
+                }
                 if event.modifierFlags.contains(.shift) {
                     self.prevTab()
                 } else {
@@ -2953,6 +3643,10 @@ final class EngineBridge: ObservableObject {
             // runs the input method (Hangul et al.) and resolves the standard
             // key bindings. Swallowing it here is what made IME impossible.
             if self.editorCanvasHasFocus { return event }
+            // Same for the terminal grid: it is an NSTextInputClient too now, so
+            // hand plain keys to its keyDown (which composes Hangul and routes
+            // control/non-text keys to the PTY) rather than feeding the PTY raw.
+            if self.terminalCanvasHasFocus { return event }
             self.handleNSEvent(event)
             return nil
         }
@@ -3116,31 +3810,7 @@ final class EngineBridge: ObservableObject {
         else { return }
         if snap.frame_gen == lastFrameGen { return }
 
-        var tabs: [TabItem] = []
-        let tabCount = Int(snap.tab_count)
-        withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
-            withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
-                let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
-                let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
-                let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
-                let isTerminal = withUnsafeBytes(of: snap.tab_is_terminal) { Array($0.bindMemory(to: UInt8.self)) }
-                let titleCap = Int(SUISEI_TITLE_CAP)
-                for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
-                    let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
-                    let title = String(cString: base.assumingMemoryBound(to: CChar.self))
-                    tabs.append(TabItem(
-                        id: i,
-                        stableId: ids[i],
-                        title: title.isEmpty ? "[No Name]" : title,
-                        dirty: dirtyRaw[i] != 0,
-                        active: i == Int(snap.tab_active),
-                        group: groups[i],
-                        isLayout: isLayout[i] != 0,
-                        isTerminal: isTerminal[i] != 0
-                    ))
-                }
-            }
-        }
+        let tabs = decodeTabs(from: snap)
 
         let (lines, split) = PerfProbe.measure("  decodeEditorLinesAndSplit") {
             decodeEditorLinesAndSplit(from: snap, engine: engine)
@@ -3182,6 +3852,7 @@ final class EngineBridge: ObservableObject {
         next.pct = snap.pct
         next.bufferVersion = snap.buffer_version
         next.tabs = tabs
+        next.tabsOverflow = max(0, Int(snap.tab_count) - tabs.count)
         next.lines = lines
         next.split = split
         // Cheap open-flag probes only (empty payload when closed).
@@ -3197,9 +3868,17 @@ final class EngineBridge: ObservableObject {
             let completions = loadCompletions(engine)
             next.completions = completions.open ? completions : .empty
         }
-        PerfProbe.measure("  loadTerminal (300KiB)") {
-            let terminal = loadTerminal(engine)
-            next.terminal = terminal.open ? terminal : .empty
+        // The docked terminal snapshot is 300 KiB, and pulling it cost ~3.7ms
+        // EVERY keystroke — even with no terminal open. Skip it unless the dock
+        // is actually open. The light path is only entered when the shell
+        // surface did NOT change, and opening/closing the dock IS a shell
+        // change (full path), so last frame's flag is accurate here. Pane
+        // terminals are pulled separately by `attachPaneTerminals`.
+        if chrome.terminal.open {
+            PerfProbe.measure("  loadTerminal (300KiB)") {
+                let terminal = loadTerminal(engine)
+                next.terminal = terminal.open ? terminal : .empty
+            }
         }
         // Outline is cheap to copy and the engine refreshes it on idle ticks —
         // keep it live on the light path too (typing never does a full pull).
@@ -3210,64 +3889,128 @@ final class EngineBridge: ObservableObject {
 
         let differs = PerfProbe.measure("  chrome deep compare") { next != chrome }
         if differs {
+            // Splitting the publish, because "chrome publish" measured up to
+            // 12.7 ms on a tab switch and that number has two very different
+            // possible owners with two very different fixes:
+            //
+            //   - the VALUE: copying `next` in and releasing the old
+            //     `ChromeSnapshot`'s heap references (every array and String it
+            //     owns). Fix would be to shrink or box the payload.
+            //   - the INVALIDATION: `objectWillChange` reaching every observer
+            //     of `EngineBridge`, i.e. ContentView's whole 5,616-line body.
+            //     Fix would be to subdivide the body into comparable children.
+            //
+            // Assigning the same value to a plain local first isolates the
+            // former: it does the identical retain/release traffic with no
+            // publisher attached. Whatever is left in `chrome publish` is
+            // SwiftUI.
+            if PerfProbe.enabled {
+                var scratch = chrome
+                PerfProbe.measure("  chrome value copy (no publish)") { scratch = next }
+                _ = scratch
+            }
             PerfProbe.measure("  chrome publish") { chrome = next }
         }
+        // Per-keystroke caret/scroll goes to the isolated tick store LAST, so
+        // `chrome` is already current when a pane's `updateNSView` fires from it.
+        PerfProbe.measure("  editorTick publish") {
+            publishEditorTick(from: snap, split: split)
+        }
+    }
+
+    /// Fill the isolated per-keystroke store. Kept off `chrome`/`editorSplit` so
+    /// its publish reaches only the pane canvases, not the whole view tree.
+    private func publishEditorTick(from snap: SuiseiChromeSnapshot, split: SplitSnap) {
+        let t = editorTick
+        if t.gen != snap.frame_gen { t.gen = snap.frame_gen }
+        if t.scrollIntent != snap.scroll_intent { t.scrollIntent = snap.scroll_intent }
+        let frac = CGFloat(snap.scroll_frac)
+        if abs(t.scrollFrac - frac) > 0.0001 { t.scrollFrac = frac }
+        let panes: [EditorTickStore.PaneTick] = split.isSplit
+            ? split.panes.map {
+                .init(scroll: $0.scroll, hscroll: $0.hscroll, docLineCount: $0.docLineCount)
+            }
+            : [.init(scroll: snap.scroll, hscroll: snap.hscroll, docLineCount: snap.line_count)]
+        if panes != t.panes { t.panes = panes }
+    }
+
+    /// Tab-block decode of the chrome snapshot — the single source of truth
+    /// for the raw-array walk. Three verbatim copies used to exist (paint
+    /// path, light refresh, full refresh); a new tab field had to land in
+    /// all three, and missing one desynced the strip on exactly that path.
+    private func decodeTabs(from snap: SuiseiChromeSnapshot) -> [TabItem] {
+        var tabs: [TabItem] = []
+        let tabCount = Int(snap.tab_count)
+        withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
+            withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
+                let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
+                let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
+                let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
+                let isTerminal = withUnsafeBytes(of: snap.tab_is_terminal) { Array($0.bindMemory(to: UInt8.self)) }
+                let titleCap = Int(SUISEI_TITLE_CAP)
+                for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
+                    let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
+                    let title = String(cString: base.assumingMemoryBound(to: CChar.self))
+                    // bit 0 = dirty, bit 1 = deleted-on-disk (packed in one byte).
+                    let flags = dirtyRaw[i]
+                    tabs.append(TabItem(
+                        id: i,
+                        stableId: ids[i],
+                        title: title.isEmpty ? "[No Name]" : title,
+                        dirty: flags & 1 != 0,
+                        active: i == Int(snap.tab_active),
+                        group: groups[i],
+                        isLayout: isLayout[i] != 0,
+                        isTerminal: isTerminal[i] != 0,
+                        deleted: flags & 2 != 0
+                    ))
+                }
+            }
+        }
+        return tabs
     }
 
     private func decodeEditorLinesAndSplit(
         from snap: SuiseiChromeSnapshot,
         engine: OpaquePointer
     ) -> ([EditorLine], SplitSnap) {
-        var allLines: [EditorLine] = []
-        let vis = Int(snap.visible_line_count)
-        let stride = MemoryLayout<SuiseiEditorLineC>.stride
-        let spanStride = MemoryLayout<SuiseiSpanC>.stride
-        let textCap = Int(SUISEI_LINE_CAP)
-        let spanBaseOff = 32 + textCap
-        withUnsafeBytes(of: snap.lines) { raw in
-            for i in 0..<min(vis, Int(SUISEI_MAX_LINES)) {
-                let base = raw.baseAddress!.advanced(by: i * stride)
-                let lineNo = base.load(as: UInt32.self)
-                let isCursor = base.load(fromByteOffset: 4, as: UInt8.self) != 0
-                let gitSign = base.load(fromByteOffset: 5, as: UInt8.self)
-                let spanCount = Int(base.load(fromByteOffset: 6, as: UInt8.self))
-                let caret = base.load(fromByteOffset: 8, as: UInt32.self)
-                let caretU16 = base.load(fromByteOffset: 12, as: UInt32.self)
-                let sel0 = base.load(fromByteOffset: 16, as: UInt32.self)
-                let sel1 = base.load(fromByteOffset: 20, as: UInt32.self)
-                let selU0 = base.load(fromByteOffset: 24, as: UInt32.self)
-                let selU1 = base.load(fromByteOffset: 28, as: UInt32.self)
-                let text = readCString(at: base, offset: 32, cap: textCap)
-                var spans: [SyntaxSpan] = []
-                let nSpan = min(spanCount, Int(SUISEI_MAX_SPANS))
-                let spanBase = base.advanced(by: spanBaseOff)
-                for j in 0..<nSpan {
-                    let sp = spanBase.advanced(by: j * spanStride)
-                    let start = sp.load(as: UInt16.self)
-                    let end = sp.load(fromByteOffset: 2, as: UInt16.self)
-                    let kind = sp.load(fromByteOffset: 4, as: UInt8.self)
-                    if end > start {
-                        spans.append(SyntaxSpan(start: start, end: end, kind: kind))
-                    }
-                }
-                allLines.append(EditorLine(
-                    paneId: 0, lineNo: lineNo, text: text, isCursor: isCursor,
-                    caretVCol: caret, caretUTF16: caretU16, selV0: sel0, selV1: sel1,
-                    selU0: selU0, selU1: selU1,
-                    gitSign: gitSign, spans: spans
-                ))
+        func paneTitle(_ pane: Int) -> String {
+            withUnsafeBytes(of: snap.pane_titles) { raw in
+                let base = raw.baseAddress!.advanced(
+                    by: pane * Int(SUISEI_TITLE_CAP)
+                )
+                let value = String(cString: base.assumingMemoryBound(to: CChar.self))
+                return value.isEmpty ? "[No Name]" : value
             }
         }
 
+        // The packed line stream is DELIBERATELY not decoded.
+        //
+        // The editor is a *pull* renderer: each `EditorHost` canvas pulls its
+        // own rows from the engine (`build_editor_band`) on draw — see the
+        // `let _ = lines` in `editorSurface`. The snapshot's packed lines, the
+        // per-pane `lines`, and `editorLines` are never read for rendering
+        // (minimap and preview pull separately too).
+        //
+        // Decoding them anyway cost: up to `SUISEI_MAX_LINES` `EditorLine`
+        // allocations — a decoded `text` String and a spans array each — EVERY
+        // keystroke, times the pane count. Worse, carrying them inside
+        // `editorSplit`/`chrome.split` made those values differ on every
+        // keystroke, so publishing `chrome` re-diffed and churned the whole
+        // split each time (`chrome publish` measured 0.04ms unsplit → ~8ms the
+        // instant you split). Leaving the arrays empty makes `editorSplit`
+        // change only on a *structural* edit, so typing no longer re-lays the
+        // split. Redraw is driven by `contentGen`, not by these lines.
+        let allLines: [EditorLine] = []
+
         // Split metadata (ABI fields added after tab titles — default 0 when old engine).
-        let kind = snap.split_kind
         let paneCount = Int(snap.pane_count)
         let focus = Int(snap.pane_focus)
-        let ratio = snap.split_ratio
 
-        if kind == 0 || paneCount < 2 {
+        if paneCount < 2 {
             var single = EditorPaneSnap(
                 id: 0, focused: true, tabIndex: Int(snap.tab_active),
+                title: paneTitle(0),
                 scroll: snap.scroll, hscroll: snap.hscroll,
                 docLineCount: snap.line_count, lines: allLines
             )
@@ -3279,7 +4022,7 @@ final class EngineBridge: ObservableObject {
             // Stamp paneId 0 on all lines.
             return (
                 allLines,
-                SplitSnap(kind: 0, ratio: 0.5, focus: 0,
+                SplitSnap(focus: 0,
                           panes: attachPaneTerminals(engine, [single]))
             )
         }
@@ -3287,7 +4030,6 @@ final class EngineBridge: ObservableObject {
         // C fixed arrays import as tuples in Swift — walk via raw memory.
         // Layout must match SuiseiPaneC (tab, scroll, start, count, focused+pad, doc_line_count, hscroll).
         var panes: [EditorPaneSnap] = []
-        var focusedLines: [EditorLine] = []
         let paneStride = MemoryLayout<SuiseiPaneC>.stride
         let nPanes = min(paneCount, Int(SUISEI_MAX_PANES))
         withUnsafeBytes(of: snap.panes) { raw in
@@ -3300,6 +4042,8 @@ final class EngineBridge: ObservableObject {
                 let focusedFlag = base.load(fromByteOffset: 16, as: UInt8.self)
                 // offset 17: is_terminal (a former pad byte).
                 let isTerm = base.load(fromByteOffset: 17, as: UInt8.self) != 0
+                // offset 18: term_gen (u16) — pane shell content generation.
+                let termGen = base.load(fromByteOffset: 18, as: UInt16.self)
                 // offset 20: doc_line_count, 24: hscroll (after 4 pad bytes at 16..19)
                 let docLineCount = base.load(fromByteOffset: 20, as: UInt32.self)
                 let hscroll = base.load(fromByteOffset: 24, as: UInt32.self)
@@ -3308,24 +4052,16 @@ final class EngineBridge: ObservableObject {
                 let ry = base.load(fromByteOffset: 32, as: Float.self)
                 let rw = base.load(fromByteOffset: 36, as: Float.self)
                 let rh = base.load(fromByteOffset: 40, as: Float.self)
-                let start = Int(lineStart)
-                let count = Int(lineCount)
-                var paneLines: [EditorLine] = []
-                for j in 0..<count {
-                    let idx = start + j
-                    guard idx < allLines.count else { break }
-                    var line = allLines[idx]
-                    line.paneId = UInt8(pi)
-                    paneLines.append(line)
-                }
+                _ = lineStart
+                _ = lineCount
+                // Per-pane lines intentionally empty — pull renderer, see above.
+                let paneLines: [EditorLine] = []
                 let isFocused = focusedFlag != 0 || pi == focus
-                if isFocused {
-                    focusedLines = paneLines
-                }
                 panes.append(EditorPaneSnap(
                     id: pi,
                     focused: isFocused,
                     tabIndex: Int(tabIndex),
+                    title: paneTitle(pi),
                     scroll: scroll,
                     hscroll: hscroll,
                     docLineCount: max(1, docLineCount),
@@ -3334,15 +4070,16 @@ final class EngineBridge: ObservableObject {
                         x: CGFloat(rx), y: CGFloat(ry),
                         width: CGFloat(rw), height: CGFloat(rh)
                     ),
-                    isTerminal: isTerm
+                    isTerminal: isTerm,
+                    termGen: termGen
                 ))
             }
         }
-        // `lines` = focused pane only (never the packed multi-pane stream).
+        // `lines` stays empty — the panes pull their own rows on draw.
         return (
-            focusedLines.isEmpty ? allLines : focusedLines,
+            allLines,
             SplitSnap(
-                kind: kind, ratio: ratio == 0 ? 0.5 : ratio, focus: focus,
+                focus: focus,
                 panes: attachPaneTerminals(engine, panes)
             )
         )
@@ -3360,65 +4097,85 @@ final class EngineBridge: ObservableObject {
         var snap = SuiseiChromeSnapshot()
         guard suisei_engine_chrome(engine, &snap) != 0 else { return }
 
-        var tabs: [TabItem] = []
-        let tabCount = Int(snap.tab_count)
-        withUnsafeBytes(of: snap.tab_titles) { titlesRaw in
-            withUnsafeBytes(of: snap.tab_dirty) { dirtyRaw in
-                let ids = withUnsafeBytes(of: snap.tab_ids) { Array($0.bindMemory(to: UInt64.self)) }
-                let groups = withUnsafeBytes(of: snap.tab_groups) { Array($0.bindMemory(to: UInt64.self)) }
-                let isLayout = withUnsafeBytes(of: snap.tab_is_layout) { Array($0.bindMemory(to: UInt8.self)) }
-                let isTerminal = withUnsafeBytes(of: snap.tab_is_terminal) { Array($0.bindMemory(to: UInt8.self)) }
-                let titleCap = Int(SUISEI_TITLE_CAP)
-                for i in 0..<min(tabCount, Int(SUISEI_MAX_TABS)) {
-                    let base = titlesRaw.baseAddress!.advanced(by: i * titleCap)
-                    let title = String(cString: base.assumingMemoryBound(to: CChar.self))
-                    tabs.append(TabItem(
-                        id: i,
-                        stableId: ids[i],
-                        title: title.isEmpty ? "[No Name]" : title,
-                        dirty: dirtyRaw[i] != 0,
-                        active: i == Int(snap.tab_active),
-                        group: groups[i],
-                        isLayout: isLayout[i] != 0,
-                        isTerminal: isTerminal[i] != 0
-                    ))
-                }
+        let tabs = PerfProbe.measure("  decodeTabs") { decodeTabs(from: snap) }
+
+        let (lines, split) = PerfProbe.measure("  decodeEditorLinesAndSplit(full)") {
+            decodeEditorLinesAndSplit(from: snap, engine: engine)
+        }
+        // These are FIVE separate `@Published` properties on this object, and
+        // each assignment is its own invalidation of everything observing
+        // `EngineBridge` — i.e. ContentView's whole body — before `chrome =
+        // next` further down has even run. `editorSplit` in particular is
+        // guaranteed to change on a layout-tab switch, because that is exactly
+        // what a layout does: rearrange the panes.
+        //
+        // Measured as one block because that is how they are paid.
+        PerfProbe.measure("  editor @Published block") {
+            if lines != editorLines { editorLines = lines }
+            PerfProbe.measure("    editorSplit publish") {
+                if split != editorSplit { editorSplit = split }
             }
+            // Always adopt Core residual (caret/goto clear it to 0).
+            let frac = CGFloat(snap.scroll_frac)
+            if abs(frac - editorScrollFrac) > 0.0001 {
+                editorScrollFrac = frac
+            }
+            if snap.hscroll != editorHScroll { editorHScroll = snap.hscroll }
+            let wrap = snap.wrap_lines != 0
+            if wrap != wrapLines { wrapLines = wrap }
         }
+        // Which panels are actually open — ONE u32, answered out of the last
+        // composed frame.
+        //
+        // Every `loadX` below copies a fixed-size C struct: the terminal's is
+        // 300 KiB, the git workbench's 55 KiB, preview 64 KiB, diagnostics 49
+        // KiB. This used to pull all of them unconditionally and only then
+        // check `.open`, discarding the copy when the panel was shut — roughly
+        // 730 KiB of memset and copy per refresh, twenty times a second, for a
+        // window showing none of them. Asking first costs four bytes.
+        let panels = PerfProbe.measure("  open_panels") { suisei_engine_open_panels(engine) }
+        func open(_ bit: UInt32) -> Bool { panels & bit != 0 }
 
-        let (lines, split) = decodeEditorLinesAndSplit(from: snap, engine: engine)
-        if lines != editorLines { editorLines = lines }
-        if split != editorSplit { editorSplit = split }
-        // Always adopt Core residual (caret/goto clear it to 0).
-        let frac = CGFloat(snap.scroll_frac)
-        if abs(frac - editorScrollFrac) > 0.0001 {
-            editorScrollFrac = frac
-        }
-        if snap.hscroll != editorHScroll { editorHScroll = snap.hscroll }
-        let wrap = snap.wrap_lines != 0
-        if wrap != wrapLines { wrapLines = wrap }
-        preview = loadPreview(engine)
+        // `preview` is @Published: assigning fires the publisher whether or not
+        // the value changed, so compare first. The old code assigned every
+        // refresh unconditionally.
+        let previewOut = open(SUISEI_PANEL_PREVIEW)
+            ? PerfProbe.measure("  loadPreview") { loadPreview(engine) }
+            : PreviewSnap.empty
+        if previewOut != preview { preview = previewOut }
 
-        // Always load explorer entries: docked Project navigator stays visible in Normal mode.
-        // (TUI-style open flag only affects keyboard focus, not tree paint.)
-        let explorer = loadExplorer(engine)
-        let palette = loadPalette(engine)
-        let paletteOut = palette.open ? palette : PaletteSnap.empty
-        let search = loadSearch(engine)
-        let searchOut = search.open ? search : SearchSnap.empty
-        let completions = loadCompletions(engine)
-        let compOut = completions.open ? completions : CompletionsSnap.empty
-        let terminal = loadTerminal(engine)
-        let termOut = terminal.open ? terminal : TerminalSnap.empty
-        let settings = loadSettings(engine)
-        let settingsOut = settings.open ? settings : SettingsSnap.empty
-        // Always pull SCM / Git WB when Core marks them open (mode-independent docked UI).
-        let scm = loadScm(engine)
-        let scmOut = scm
-        let gitWb = loadGitWb(engine)
-        let gitWbOut = gitWb
-        let theme = loadTheme(engine)
-        let outline = loadOutline(engine)
+        // Explorer is the docked Project navigator: it paints its entries in
+        // Normal mode too, so the engine sets this bit whenever it HAS entries,
+        // not merely when it owns the keyboard.
+        let explorer = open(SUISEI_PANEL_EXPLORER)
+            ? PerfProbe.measure("  loadExplorer") { loadExplorer(engine) }
+            : ExplorerSnap.empty
+        let paletteOut = open(SUISEI_PANEL_PALETTE)
+            ? PerfProbe.measure("  loadPalette") { loadPalette(engine) }
+            : PaletteSnap.empty
+        let searchOut = open(SUISEI_PANEL_SEARCH)
+            ? PerfProbe.measure("  loadSearch") { loadSearch(engine) }
+            : SearchSnap.empty
+        let compOut = open(SUISEI_PANEL_COMPLETIONS)
+            ? PerfProbe.measure("  loadCompletions") { loadCompletions(engine) }
+            : CompletionsSnap.empty
+        let termOut = open(SUISEI_PANEL_TERMINAL)
+            ? PerfProbe.measure("  loadTerminal") { loadTerminal(engine) }
+            : TerminalSnap.empty
+        let settingsOut = open(SUISEI_PANEL_SETTINGS)
+            ? PerfProbe.measure("  loadSettings") { loadSettings(engine) }
+            : SettingsSnap.empty
+        let scmOut = open(SUISEI_PANEL_SCM)
+            ? PerfProbe.measure("  loadScm") { loadScm(engine) }
+            : ScmSnap.empty
+        let gitWbOut = open(SUISEI_PANEL_GIT_WB)
+            ? PerfProbe.measure("  loadGitWb") { loadGitWb(engine) }
+            : GitWbSnap.empty
+        // Theme is 112 bytes and every surface reads it — always.
+        let theme = PerfProbe.measure("  loadTheme") { loadTheme(engine) }
+        let outline = open(SUISEI_PANEL_OUTLINE)
+            ? PerfProbe.measure("  loadOutline") { loadOutline(engine) }
+            : []
         var branch = ""
         var statusEx = SuiseiStatusExtra()
         if suisei_engine_status_extra(engine, &statusEx) != 0 {
@@ -3459,8 +4216,17 @@ final class EngineBridge: ObservableObject {
             outline: outline
         )
         // Equatable skip avoids SwiftUI thrash when nothing visual changed.
-        if next != chrome {
-            chrome = next
+        let chromeChanged = PerfProbe.measure("  chrome != compare") { next != chrome }
+        if chromeChanged {
+            PerfProbe.measure("  publish chrome (SwiftUI)") { chrome = next }
+        }
+        // Diagnostics use a separate bounded FFI snapshot. Core asks for a
+        // full refresh whenever its revision changes; adopt the list in the
+        // same transaction so an Issues panel opened during LSP indexing does
+        // not stay frozen at its initial "No issues".
+        PerfProbe.measure("  refreshDiagnostics") { refreshDiagnostics() }
+        PerfProbe.measure("  editorTick publish (full)") {
+            publishEditorTick(from: snap, split: split)
         }
     }
 
@@ -3895,8 +4661,21 @@ final class EngineBridge: ObservableObject {
         -> [EditorPaneSnap]
     {
         guard panes.contains(where: \.isTerminal) else { return panes }
+        // The grid in hand (last publish) is reused when the shell's content
+        // generation is unchanged — each pull decodes ~300 KiB, which used to
+        // run per keystroke per idle terminal. A tabIndex mismatch forces a
+        // pull, so a reshuffled split can never inherit another shell's grid.
+        let prev = editorSplit.panes
         var out = panes
         for i in out.indices where out[i].isTerminal {
+            if prev.indices.contains(i), !prev[i].termLines.isEmpty,
+               prev[i].tabIndex == out[i].tabIndex, prev[i].termGen == out[i].termGen
+            {
+                out[i].termLines = prev[i].termLines
+                out[i].termCursorRow = prev[i].termCursorRow
+                out[i].termCursorCol = prev[i].termCursorCol
+                continue
+            }
             var snap = SuiseiTerminalSnapshot()
             guard suisei_engine_terminal_for_pane(engine, UInt32(i), &snap) != 0 else { continue }
             var lines: [String] = []
@@ -3928,10 +4707,9 @@ final class EngineBridge: ObservableObject {
             }
         }
         let pane: Int? = snap.pane_bound == UInt32.max ? nil : Int(snap.pane_bound)
+        _ = pane // ABI carries a pane binding; the dock has no use for it.
         return TerminalSnap(
             open: snap.open != 0,
-            fullPanel: snap.full_panel != 0,
-            paneBound: pane,
             lines: lines,
             cursorRow: Int(snap.cursor_row),
             cursorCol: Int(snap.cursor_col)
@@ -3946,14 +4724,21 @@ private func cStringField<T>(_ field: T) -> String {
     }
 }
 
+/// Decode one fixed-capacity C string field out of a packed struct.
+///
+/// This used to append a `CChar` at a time into a growing Swift `Array` and
+/// then build a `String` from it — two heap allocations plus the array's
+/// reallocation ladder, per line, and `pullBand` calls it for every row of
+/// every band, on every repaint of every pane.
+///
+/// `String(decoding:as:)` is one allocation over the bytes we already have. It
+/// is also more forgiving than `String(cString:)`: it needs no NUL terminator
+/// (we bound the scan ourselves) and repairs invalid UTF-8 instead of trapping,
+/// which matters because the engine truncates these fields at a byte cap.
 private func readCString(at base: UnsafeRawPointer, offset: Int, cap: Int) -> String {
-    let p = base.advanced(by: offset).assumingMemoryBound(to: CChar.self)
-    var bytes: [CChar] = []
-    for i in 0..<cap {
-        let b = p[i]
-        if b == 0 { break }
-        bytes.append(b)
-    }
-    bytes.append(0)
-    return String(cString: bytes)
+    let p = base.advanced(by: offset).assumingMemoryBound(to: UInt8.self)
+    let bytes = UnsafeBufferPointer(start: p, count: cap)
+    let n = bytes.firstIndex(of: 0) ?? cap
+    if n == 0 { return "" }
+    return String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)
 }

@@ -24,12 +24,7 @@ pub enum FfiKeyCode {
     F = 16,
 }
 
-pub fn key_from_ffi(
-    code: u32,
-    ch: u32,
-    f_num: u8,
-    mods: u8,
-) -> Option<KeyEvent> {
+pub fn key_from_ffi(code: u32, ch: u32, f_num: u8, mods: u8) -> Option<KeyEvent> {
     let modifiers = map_mods(mods);
     let code = match code {
         x if x == FfiKeyCode::Char as u32 => {

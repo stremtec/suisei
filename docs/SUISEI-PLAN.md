@@ -936,6 +936,82 @@ Reuse core `buffer_col_to_screen_col` / width rules so TUI and desktop never dis
 - Modes reflected in status badge (NORMAL / INSERT / DEBUG / …)
 - Palette, which-key, peek as floating glass layers
 
+### 6.1.1 기능 추가 속히 요망 — 편집기 경로 헤더의 pane 컨트롤
+
+**우선순위: Urgent / P1 daily-driver.**
+
+여기서 말하는 “헤더”는 윈도우 최상단의 문서 탭 바가 아니다. 각 편집기
+pane 안에서 현재 파일의 경로를 `project › src › file.rs`처럼 보여주는
+breadcrumb/jump-bar 행이다.
+
+각 pane 헤더의 오른쪽 끝에는 다음 두 컨트롤을 둔다.
+
+```text
+[ current › file › path ] [ outline ]                    [ split ▾ ] [ × ]
+```
+
+- **분할 버튼 `split ▾`**
+  - pane 수와 관계없이 항상 보인다.
+  - 클릭하면 버튼에 anchor된 작은 menu/popover가 열린다.
+  - 필수 명령은 `위로 분할`과 `아래로 분할`이다.
+  - 명령은 버튼이 속한 pane을 기준으로 실행한다. 다른 pane이 focused여도
+    잘못된 pane을 분할하면 안 된다.
+  - 실제 분할은 기존 `Split Editor`의 문서·커서·스크롤 보존 규칙을
+    공유하며 별도의 임시 레이아웃 상태를 만들지 않는다.
+  - 최대 pane 수에 도달하면 명령을 disabled 처리하고 이유를 help로
+    설명한다. 클릭 뒤 상태 표시줄에서만 실패를 알리는 방식은 쓰지 않는다.
+
+- **닫기 버튼 `×`**
+  - 두 개 이상의 pane이 있을 때는 hover와 무관하게 항상 보인다.
+  - pane이 하나뿐일 때는 disabled 버튼이나 빈 자리로 남기지 않고 완전히
+    숨긴다.
+  - 클릭하면 버튼이 속한 pane만 닫는다. 문서의 전역 tab/buffer를 닫는
+    기능이 아니다.
+  - 닫힌 pane이 보던 문서는 상단 문서 탭 바에 남아야 하며, unsaved
+    buffer를 소리 없이 버리면 안 된다.
+
+이 컨트롤은 단순 편의 기능이 아니다. 사용자가 분할 레이아웃을 눈으로
+보면서 해당 pane을 직접 추가·제거하는 주 조작 경로다. Editor 메뉴나
+키보드 명령만으로 숨겨 두지 않는다.
+
+DoD:
+
+1. 1-pane: `split ▾`는 항상 보이고 `×`는 존재하지 않는다.
+2. 2–4-pane: 모든 pane 헤더에 `split ▾`, `×`가 hover 없이 보인다.
+3. `위로 분할`·`아래로 분할`은 클릭한 헤더의 stable pane ID를 대상으로
+   정확한 위치에 새 pane을 만든다.
+4. `×`는 클릭한 pane만 닫고 남은 split tree, focus, cursor, scroll,
+   document tab을 보존한다.
+5. 빠른 연속 클릭과 layout fold/unfold 뒤에도 stale pane index를
+   참조하지 않는다.
+6. 두 버튼은 최소 24×24pt hit target과 `Split editor` / `Close pane`
+   접근성 label·help를 가진다.
+7. 마우스, VoiceOver action, 키보드 메뉴 경로가 동일한 engine command를
+   호출한다.
+
+### 6.1.2 Terminal pane과 Terminal 탭의 identity — 의도된 동작
+
+`Ctrl+Shift+T`는 새 split이나 별도 macOS window를 만드는 명령이 아니다.
+focused editor pane의 content를 제자리에서 Terminal로 전환한다. pane
+개수와 split tree의 shape는 바뀌지 않는다.
+
+이 전환과 함께 상단 문서 탭 바에 `Terminal` 탭을 만드는 것은 **의도된
+기능**이다. Terminal을 임시 overlay로 취급하지 않고 tab identity를
+부여해야 다음 규칙이 하나의 모델로 맞아떨어진다.
+
+- 문서 pane과 Terminal pane이 같은 split tree의 leaf가 된다.
+- Terminal pane이 포함된 구성을 layout tab으로 fold할 수 있다.
+- layout tab을 떠났다가 돌아오거나 unfold해도 같은 Terminal leaf와
+  shell session을 복원할 수 있다.
+- Terminal 탭의 선택·닫기·그룹 표시는 일반 document/layout tab의
+  stable-ID 라우팅을 공유한다.
+- Terminal로 교체된 pane의 기존 문서는 문서 탭으로 계속 접근 가능하며
+  unsaved buffer를 잃지 않는다.
+
+따라서 `Terminal` 탭의 생성 자체를 중복 탭이나 창 생성 오류로 수정하면
+안 된다. 고칠 대상은 pane/tab identity가 어긋나는 경우, shell session이
+layout fold/unfold에서 유실되는 경우, 또는 실제 pane 수가 바뀌는 경우다.
+
 ### 6.2 macOS materials
 
 - **Swift (default):** transparent titlebar + real `NSVisualEffectView` / SwiftUI materials  

@@ -77,8 +77,7 @@ typedef struct SuiseiPaneC {
   uint32_t line_count;
   uint8_t focused;
   uint8_t is_terminal; /* pane runs its own shell */
-  uint8_t _pad1;
-  uint8_t _pad2;
+  uint16_t term_gen;   /* pane shell content generation; face skips re-pull when unchanged */
   uint32_t doc_line_count; /* total lines in this pane's buffer */
   uint32_t hscroll;        /* per-pane horizontal pan (0 when wrap on) */
   /* Normalised rect within the editor area (0..1), from the layout tree. */
@@ -115,6 +114,8 @@ typedef struct SuiseiChromeSnapshot {
   uint8_t _pad_h1;
   uint8_t _pad_h2;
   uint64_t buffer_version;
+  /* TRUE tab count — may exceed SUISEI_MAX_TABS; only the first MAX are
+     filled in the arrays below. Overflow = tab_count - filled. */
   uint32_t tab_count;
   uint32_t tab_active;
   uint8_t tab_dirty[SUISEI_MAX_TABS];
@@ -127,16 +128,26 @@ typedef struct SuiseiChromeSnapshot {
   uint8_t tab_is_layout[SUISEI_MAX_TABS];
   /* 1 when the tab is a terminal (a shell runs in it). */
   uint8_t tab_is_terminal[SUISEI_MAX_TABS];
-  /* Split: 0 none, 1 vertical (side-by-side), 2 horizontal (stacked). */
-  uint8_t split_kind;
+  /* Retired: the split shape lives in the per-pane rects (SuiseiPaneC).
+     Kept as pads — renamed, not removed — so offsets after this hold. */
+  uint8_t _pad_split_kind;
   uint8_t pane_count;
   uint8_t pane_focus;
   uint8_t _pad_split;
-  float split_ratio;
+  float _pad_split_ratio;
   SuiseiPaneC panes[SUISEI_MAX_PANES];
   uint32_t visible_line_count;
   uint32_t _pad_vis;
-  SuiseiEditorLineC lines[SUISEI_MAX_LINES];
+  /* A packed `SuiseiEditorLineC lines[SUISEI_MAX_LINES]` used to sit here. It
+     was 176,128 of this struct's 185,440 bytes and the face never decoded one
+     of them: the GUI is a PULL renderer, so each canvas fetches its own rows
+     through suisei_engine_editor_band() on draw. Removing it takes the struct
+     to 9,312 bytes. SuiseiPaneC::line_start / line_count are consequently
+     always 0; they remain only because the face reads that struct at hardcoded
+     byte offsets. See docs/SUISEI-GPU-ARCHITECTURE.md §2.1. */
+  /* Actual document title per pane. Unlike tab_titles, unified layout chips
+     do not collapse these buffer identities. */
+  char pane_titles[SUISEI_MAX_PANES][SUISEI_TITLE_CAP];
 } SuiseiChromeSnapshot;
 
 SuiseiEngine *suisei_engine_new(void);
@@ -150,6 +161,20 @@ uint8_t suisei_engine_dispatch_key(
 uint8_t suisei_engine_editor_accepts_text(const SuiseiEngine *ptr);
 /* Cheap probe: completion popup open? (typing fast path) */
 uint8_t suisei_engine_completions_open(const SuiseiEngine *ptr);
+/* Which chrome panels are open, as a bitmask of SUISEI_PANEL_*.
+   Every panel snapshot below is a fixed-size struct — the terminal's is 300
+   KiB — so the face asks this FIRST and skips the copy for anything closed. */
+#define SUISEI_PANEL_EXPLORER (1u << 0)
+#define SUISEI_PANEL_PALETTE (1u << 1)
+#define SUISEI_PANEL_SEARCH (1u << 2)
+#define SUISEI_PANEL_COMPLETIONS (1u << 3)
+#define SUISEI_PANEL_TERMINAL (1u << 4)
+#define SUISEI_PANEL_SETTINGS (1u << 5)
+#define SUISEI_PANEL_SCM (1u << 6)
+#define SUISEI_PANEL_GIT_WB (1u << 7)
+#define SUISEI_PANEL_PREVIEW (1u << 8)
+#define SUISEI_PANEL_OUTLINE (1u << 9)
+uint32_t suisei_engine_open_panels(const SuiseiEngine *ptr);
 /* Document width in display columns — the face's horizontal scroll extent. */
 uint32_t suisei_engine_content_cols(SuiseiEngine *ptr);
 /* Tab-bar reorder: move the tab at `from` to sit at `to`. 1 = order changed. */
@@ -159,6 +184,8 @@ void suisei_engine_clear_scroll_intent(SuiseiEngine *ptr);
 /* Project auto-indexing: pre-parse a file into the syntax cache. */
 uint8_t suisei_engine_prewarm_file(SuiseiEngine *ptr, const char *path);
 uint32_t suisei_engine_cached_parses(const SuiseiEngine *ptr);
+void suisei_engine_warm_grammars(SuiseiEngine *ptr);
+void suisei_engine_terminal_input(SuiseiEngine *ptr, const char *text);
 
 uint64_t suisei_engine_tick(SuiseiEngine *ptr, uint32_t dt_ms);
 uint64_t suisei_engine_frame_gen(const SuiseiEngine *ptr);
@@ -168,6 +195,8 @@ void suisei_engine_resize(
 uint8_t suisei_engine_running(const SuiseiEngine *ptr);
 uint8_t suisei_engine_chrome(const SuiseiEngine *ptr, SuiseiChromeSnapshot *out);
 uint8_t suisei_engine_open_path(SuiseiEngine *ptr, const char *path);
+/* Replace workspace with a directory: 1 switched, 2 dirty tabs blocked, 0 invalid. */
+uint8_t suisei_engine_switch_project(SuiseiEngine *ptr, const char *path);
 void suisei_engine_scroll(SuiseiEngine *ptr, int32_t delta_lines);
 /* Fractional lines (trackpad). Positive reveals content below. */
 void suisei_engine_scroll_frac(SuiseiEngine *ptr, float delta_lines);
@@ -239,6 +268,8 @@ void suisei_engine_select_all(SuiseiEngine *ptr);
    replaces active selection (Mac text-field contract). No-op when a
    panel/terminal owns input. */
 void suisei_engine_gui_type_char(SuiseiEngine *ptr, uint32_t ch);
+/* Absolute UTF-16 document offset used by NSTextInputClient composition. */
+uint64_t suisei_engine_caret_utf16_offset(const SuiseiEngine *ptr);
 /* Backspace with Mac selection semantics (deletes selection if active). */
 void suisei_engine_gui_delete_backward(SuiseiEngine *ptr);
 /* Forward-delete with Mac selection semantics. */
@@ -250,12 +281,18 @@ void suisei_engine_gui_ensure_insert(SuiseiEngine *ptr);
 
 void suisei_engine_find_open(SuiseiEngine *ptr);
 void suisei_engine_find_step(SuiseiEngine *ptr, uint8_t forward);
+void suisei_engine_find_set_input(SuiseiEngine *ptr, const char *input);
+void suisei_engine_palette_set_query(SuiseiEngine *ptr, const char *query);
 void suisei_engine_paste_text(SuiseiEngine *ptr, const char *text);
 void suisei_engine_terminal_resize(SuiseiEngine *ptr, uint32_t cols, uint32_t rows);
+void suisei_engine_terminal_resize_pane(SuiseiEngine *ptr, uint32_t pane, uint32_t cols,
+                                        uint32_t rows);
 uint8_t suisei_engine_fold_layout(SuiseiEngine *e);
 uint8_t suisei_engine_unfold_layout(SuiseiEngine *e);
 uint8_t suisei_engine_activate_layout(SuiseiEngine *e, uint64_t id, uint64_t focus_doc);
 uint8_t suisei_engine_toggle_layout_style(SuiseiEngine *e, uint64_t id);
+/* Non-zero when a layout currently owns the desk (`App::active_layout`). */
+uint64_t suisei_engine_active_layout_id(const SuiseiEngine *e);
 void suisei_engine_toggle_terminal_dock(SuiseiEngine *e);
 void suisei_engine_focus_terminal(SuiseiEngine *ptr, uint8_t on);
 /* Multi-session shells (active session lives in Core; parked ones keep running). */
@@ -332,12 +369,16 @@ uint8_t suisei_engine_search(const SuiseiEngine *ptr, SuiseiSearchSnapshot *out)
 void suisei_engine_goto_tab(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_close_tab(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_open_blank_tab(SuiseiEngine *ptr);
+/* Stable-id tab ops: strip slots are not buffer indices once a folded layout
+   gathers or hides members, so the face addresses chips by BufferTab::id. */
+void suisei_engine_goto_tab_id(SuiseiEngine *ptr, uint64_t id);
+void suisei_engine_close_tab_id(SuiseiEngine *ptr, uint64_t id);
+uint8_t suisei_engine_move_tab_ids(SuiseiEngine *ptr, uint64_t from, uint64_t to);
+uint8_t suisei_engine_drop_layout(SuiseiEngine *ptr, uint64_t id);
 void suisei_engine_split_vertical(SuiseiEngine *ptr);
 void suisei_engine_split_horizontal(SuiseiEngine *ptr);
-void suisei_engine_focus_next_pane(SuiseiEngine *ptr);
-void suisei_engine_focus_pane(SuiseiEngine *ptr, uint32_t index);
-void suisei_engine_close_focused_pane(SuiseiEngine *ptr);
-void suisei_engine_split_horizontal(SuiseiEngine *ptr);
+void suisei_engine_split_above(SuiseiEngine *ptr);
+void suisei_engine_split_left(SuiseiEngine *ptr);
 void suisei_engine_focus_next_pane(SuiseiEngine *ptr);
 void suisei_engine_focus_pane(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_close_focused_pane(SuiseiEngine *ptr);
@@ -429,6 +470,7 @@ uint8_t suisei_engine_terminal_for_pane(const SuiseiEngine *e, uint32_t pane,
                                         SuiseiTerminalSnapshot *out);
 /* Scroll the terminal panel through its scrollback; positive = older output. */
 void suisei_engine_terminal_scroll(SuiseiEngine *ptr, int32_t delta_rows);
+void suisei_engine_terminal_scroll_pane(SuiseiEngine *ptr, uint32_t pane, int32_t delta_rows);
 uint8_t suisei_engine_status_extra(const SuiseiEngine *ptr, SuiseiStatusExtra *out);
 uint8_t suisei_engine_settings(const SuiseiEngine *ptr, SuiseiSettingsSnapshot *out);
 uint8_t suisei_engine_theme(const SuiseiEngine *ptr, SuiseiThemeSnapshot *out);
@@ -487,9 +529,16 @@ typedef struct SuiseiGitWbSnapshot {
 } SuiseiGitWbSnapshot;
 
 uint8_t suisei_engine_scm(const SuiseiEngine *ptr, SuiseiScmSnapshot *out);
+void suisei_engine_scm_select(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_scm_activate(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_scm_toggle_stage(SuiseiEngine *ptr, uint32_t row);
 uint8_t suisei_engine_git_wb(const SuiseiEngine *ptr, SuiseiGitWbSnapshot *out);
 /* key 1..=9 maps to xei toolbar chips */
 void suisei_engine_git_wb_set_tab(SuiseiEngine *ptr, uint32_t key);
+void suisei_engine_git_wb_select_change(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_git_wb_select_history(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_git_wb_select_commit_file(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_git_wb_select_special(SuiseiEngine *ptr, uint32_t row);
 
 /* Breakpoints navigator (replaces Find in the icon rail). */
 #define SUISEI_MAX_BREAKPOINTS 128
@@ -533,12 +582,6 @@ typedef struct SuiseiPreviewSnapshot {
 /* Load preview lines starting at `start` (0-based). Loop until start+count >= total. */
 uint8_t suisei_engine_preview(const SuiseiEngine *ptr, uint32_t start, SuiseiPreviewSnapshot *out);
 
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* SUISEI_ENGINE_H */
-
 /* Issue navigator — diagnostics the core has always had but never exposed. */
 #define SUISEI_MAX_DIAGS 200
 #define SUISEI_DIAG_MSG 240
@@ -554,6 +597,10 @@ typedef struct SuiseiDiagnosticsSnapshot {
 
 uint8_t suisei_engine_diagnostics(const SuiseiEngine *ptr,
                                   SuiseiDiagnosticsSnapshot *out);
+/* Fingerprint of the diagnostic set (0 = none). The snapshot above is 48.6 KiB
+   and diagnostics change when a language server answers, not on the tick — so
+   compare this first and only pull when it moves. */
+uint64_t suisei_engine_diagnostics_fingerprint(const SuiseiEngine *ptr);
 
 /* Find navigator. Takes NO engine pointer on purpose — safe to call off the
    main thread, which is what keeps a project-wide grep from freezing the UI. */
@@ -616,6 +663,21 @@ uint8_t suisei_engine_replace_in_file(const char *path, uint32_t row,
 uint32_t suisei_engine_replace_all_in_file(const char *path, const char *query,
                                           const char *replace);
 
+/* Forward a mouse event to a terminal's inner app (xterm tracking).
+   pane = 0xFFFF targets the dock. Returns 1 when consumed (the face should
+   NOT also act — e.g. wheel scrollback). button: 0 left, 1 middle, 2 right,
+   64 wheel-up, 65 wheel-down. x/y: 1-based cells. */
+uint8_t suisei_engine_terminal_mouse(SuiseiEngine *ptr, uint32_t pane, uint8_t button,
+                                     uint16_t x, uint16_t y, uint8_t pressed,
+                                     uint8_t motion);
+
+/* ── Session persistence ───────────────────────────────────────────────── */
+
+/* Restore the previous session's files + cursors (call once at startup). */
+void suisei_engine_restore_session(SuiseiEngine *ptr);
+/* Persist open files + cursors for the next launch. */
+void suisei_engine_save_session(const SuiseiEngine *ptr);
+
 /* ── Shadow WAL recovery (D0) ──────────────────────────────────────────── */
 
 /* Number of pending crash-recovery entries found on startup. */
@@ -630,3 +692,9 @@ uint8_t suisei_engine_recovery_path(const SuiseiEngine *ptr, uint32_t idx,
 uint8_t suisei_engine_recovery_accept(SuiseiEngine *ptr, uint32_t idx);
 /* Discard recovery entry idx (user chose not to recover). Deletes the WAL file. */
 void suisei_engine_recovery_discard(SuiseiEngine *ptr, uint32_t idx);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SUISEI_ENGINE_H */

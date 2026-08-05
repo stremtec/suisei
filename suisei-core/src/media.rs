@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use crate::pet::{resize_rgba, PetFrame};
 use crate::preview::{PreviewLine, PreviewStyle};
 
 // ── Classification ──────────────────────────────────────────────────────
@@ -33,9 +32,7 @@ pub fn is_audio_ext(ext: &str) -> bool {
 pub fn is_media_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| {
-            is_image_ext(e) || is_csv_ext(e) || is_npy_ext(e) || is_audio_ext(e)
-        })
+        .is_some_and(|e| is_image_ext(e) || is_csv_ext(e) || is_npy_ext(e) || is_audio_ext(e))
 }
 
 // ── Image ───────────────────────────────────────────────────────────────
@@ -91,34 +88,104 @@ impl ImageAsset {
         } else {
             (tw as u64 * self.src_h as u64 / self.src_w as u64).max(1) as u32
         };
-        let frame = PetFrame {
+        let frame = RgbaFrame {
             width: self.src_w,
             height: self.src_h,
             rgba: self.rgba.clone(),
-            delay: std::time::Duration::from_secs(1),
         };
         let out = resize_rgba(&frame, tw, th);
-        self.cached_b64 = crate::pet::encode_b64_public(&out);
+        self.cached_b64 = encode_b64(&out);
         self.cached_rgba = out;
         self.cached_w = tw;
         self.cached_h = th;
     }
 }
 
-// Expose base64 from pet for media (or duplicate) — add pub fn on pet
-// We'll add encode_b64_public to pet.rs
+/// One decoded RGBA frame (input for the preview resize path).
+#[derive(Clone)]
+struct RgbaFrame {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+/// Bilinear resize of RGBA to target size (nearest looked blocky once the
+/// terminal rescaled to real cell pixels).
+fn resize_rgba(src: &RgbaFrame, tw: u32, th: u32) -> Vec<u8> {
+    let (sw, sh) = (src.width.max(1), src.height.max(1));
+    let mut out = vec![0u8; (tw * th * 4) as usize];
+    if tw == 0 || th == 0 {
+        return out;
+    }
+    let fx = sw as f32 / tw as f32;
+    let fy = sh as f32 / th as f32;
+    for y in 0..th {
+        let sy = (y as f32 + 0.5) * fy - 0.5;
+        let y0 = sy.floor().max(0.0) as u32;
+        let y1 = (y0 + 1).min(sh - 1);
+        let wy = (sy - y0 as f32).clamp(0.0, 1.0);
+        for x in 0..tw {
+            let sx = (x as f32 + 0.5) * fx - 0.5;
+            let x0 = sx.floor().max(0.0) as u32;
+            let x1 = (x0 + 1).min(sw - 1);
+            let wx = (sx - x0 as f32).clamp(0.0, 1.0);
+            let di = ((y * tw + x) * 4) as usize;
+            for ch in 0..4 {
+                let p = |px: u32, py: u32| -> f32 {
+                    let i = ((py * sw + px) * 4) as usize + ch;
+                    src.rgba.get(i).copied().unwrap_or(0) as f32
+                };
+                let top = p(x0, y0) * (1.0 - wx) + p(x1, y0) * wx;
+                let bot = p(x0, y1) * (1.0 - wx) + p(x1, y1) * wx;
+                out[di + ch] = (top * (1.0 - wy) + bot * wy).round() as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Base64 encode for the Kitty graphics payload cache.
+fn encode_b64(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(T[((n >> 6) & 63) as usize] as char);
+        out.push(T[(n & 63) as usize] as char);
+        i += 3;
+    }
+    if i < data.len() {
+        let rem = data.len() - i;
+        let n = if rem == 1 {
+            (data[i] as u32) << 16
+        } else {
+            ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8)
+        };
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        if rem == 1 {
+            out.push('=');
+            out.push('=');
+        } else {
+            out.push(T[((n >> 6) & 63) as usize] as char);
+            out.push('=');
+        }
+    }
+    out
+}
 
 // ── CSV ─────────────────────────────────────────────────────────────────
 
 pub fn render_csv(text: &str, tsv: bool) -> Vec<PreviewLine> {
     let sep = if tsv { '\t' } else { ',' };
     let mut out = Vec::new();
-    out.push(pl(
-        vec![(
-            format!("  CSV/TSV table  ·  sep={sep:?}"),
-            PreviewStyle::Dim,
-        )],
-    ));
+    out.push(pl(vec![(
+        format!("  CSV/TSV table  ·  sep={sep:?}"),
+        PreviewStyle::Dim,
+    )]));
     out.push(pl(vec![("".into(), PreviewStyle::Normal)]));
 
     // Parse first, then size columns so the table actually lines up.
@@ -267,7 +334,10 @@ pub fn render_npy(path: &Path) -> Result<Vec<PreviewLine>, String> {
     let mut out = Vec::new();
     out.push(pl(vec![("  NumPy .npy".into(), PreviewStyle::H2)]));
     out.push(pl(vec![(format!("  dtype   {descr}"), PreviewStyle::Code)]));
-    out.push(pl(vec![(format!("  shape   {shape_s}"), PreviewStyle::Code)]));
+    out.push(pl(vec![(
+        format!("  shape   {shape_s}"),
+        PreviewStyle::Code,
+    )]));
     out.push(pl(vec![(
         format!("  fortran {fortran}  ·  payload {} bytes", payload.len()),
         PreviewStyle::Dim,
@@ -480,9 +550,7 @@ impl AudioPlayer {
                         .spawn()
                 })
         }
-        .map_err(|e| {
-            format!("cannot play audio ({e}) — install afplay/ffplay/mpv")
-        })?;
+        .map_err(|e| format!("cannot play audio ({e}) — install afplay/ffplay/mpv"))?;
         self.child = Some(child);
         Ok(format!("Playing {}", self.path.display()))
     }
@@ -502,24 +570,19 @@ impl Drop for AudioPlayer {
 }
 
 pub fn audio_info_lines(path: &Path, playing: bool) -> Vec<PreviewLine> {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("audio");
-    let status = if playing { "▶ playing" } else { "■ stopped" };
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("audio");
+    let status = if playing {
+        "▶ playing"
+    } else {
+        "■ stopped"
+    };
     vec![
         pl(vec![("  Audio".into(), PreviewStyle::H2)]),
         pl(vec![(format!("  {name}"), PreviewStyle::Normal)]),
         pl(vec![(format!("  {status}"), PreviewStyle::Code)]),
         pl(vec![("".into(), PreviewStyle::Normal)]),
-        pl(vec![(
-            "  Space  play / stop".into(),
-            PreviewStyle::Dim,
-        )]),
-        pl(vec![(
-            "  Esc    close preview".into(),
-            PreviewStyle::Dim,
-        )]),
+        pl(vec![("  Space  play / stop".into(), PreviewStyle::Dim)]),
+        pl(vec![("  Esc    close preview".into(), PreviewStyle::Dim)]),
         pl(vec![(
             "  (uses afplay / ffplay / mpv)".into(),
             PreviewStyle::Dim,

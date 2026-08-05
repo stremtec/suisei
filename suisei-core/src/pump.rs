@@ -53,7 +53,7 @@ impl App {
         let mut change = PumpChange::default();
 
         // Navigator-visible quantities, sampled before the drain.
-        let diags_before = self.lsp.diagnostics.len();
+        let diagnostics_revision_before = self.lsp.diagnostics_revision;
         let running_before = self.lsp.server_running;
 
         if self.lsp.poll() {
@@ -74,14 +74,21 @@ impl App {
         let lsp_comps = std::mem::take(&mut self.lsp.pending_completions);
         if !lsp_comps.is_empty() && self.completions.active {
             for item in lsp_comps {
-                if self.completions.suggestions.iter().any(|s| s.label == item.label) {
+                if self
+                    .completions
+                    .suggestions
+                    .iter()
+                    .any(|s| s.label == item.label)
+                {
                     continue;
                 }
-                self.completions.suggestions.push(crate::completion::Suggestion {
-                    label: item.label.clone(),
-                    detail: item.detail.unwrap_or_else(|| "LSP".to_string()),
-                    insert_text: item.label,
-                });
+                self.completions
+                    .suggestions
+                    .push(crate::completion::Suggestion {
+                        label: item.label.clone(),
+                        detail: item.detail.unwrap_or_else(|| "LSP".to_string()),
+                        insert_text: item.label,
+                    });
             }
             change.chrome = true;
         }
@@ -146,7 +153,7 @@ impl App {
             }
         }
 
-        if self.lsp.diagnostics.len() != diags_before
+        if self.lsp.diagnostics_revision != diagnostics_revision_before
             || self.lsp.server_running != running_before
         {
             change.chrome = true;

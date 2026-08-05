@@ -1,81 +1,10 @@
-//! Multi-cursor (v1) — primary + extra carets for insert/edit.
+//! Multi-cursor helpers — word/occurrence finding for "select next
+//! occurrence" (Ctrl+D). The selections themselves live in
+//! [`crate::selection::SelectionSet`]; the old parallel `MultiCursor` caret
+//! store is gone (it duplicated the selection set and painted carets in
+//! cell columns that drifted on CJK).
 
 use crate::buffer::{Buffer, Position};
-
-/// Extra carets beyond `Buffer.cursor` (the primary).
-#[derive(Debug, Clone, Default)]
-pub struct MultiCursor {
-    pub extras: Vec<Position>,
-}
-
-impl MultiCursor {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn clear(&mut self) {
-        self.extras.clear();
-    }
-
-    pub fn is_active(&self) -> bool {
-        !self.extras.is_empty()
-    }
-
-    pub fn count(&self, _primary: Position) -> usize {
-        1 + self.extras.len()
-    }
-
-    /// All cursors including primary, sorted document order, deduped.
-    pub fn all(&self, primary: Position) -> Vec<Position> {
-        let mut v = vec![primary];
-        v.extend(self.extras.iter().copied());
-        v.sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
-        v.dedup();
-        v
-    }
-
-    /// After an edit, replace set from new primary + extras (already sorted).
-    pub fn set_from_all(&mut self, mut all: Vec<Position>) {
-        all.sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
-        all.dedup();
-        if all.is_empty() {
-            self.extras.clear();
-            return;
-        }
-        // Keep first as primary (caller assigns buffer.cursor)
-        self.extras = all.into_iter().skip(1).collect();
-    }
-
-    pub fn add(&mut self, primary: Position, pos: Position) {
-        if pos == primary {
-            return;
-        }
-        if !self.extras.iter().any(|p| *p == pos) {
-            self.extras.push(pos);
-            self.extras
-                .sort_by(|a, b| a.row.cmp(&b.row).then(a.col.cmp(&b.col)));
-        }
-    }
-
-    pub fn remove_last(&mut self) -> bool {
-        self.extras.pop().is_some()
-    }
-
-    /// Clamp every cursor to buffer bounds.
-    pub fn clamp_all(&mut self, buf: &Buffer) {
-        let max_row = buf.line_count().saturating_sub(1);
-        for p in &mut self.extras {
-            if p.row > max_row {
-                p.row = max_row;
-            }
-            let max_col = buf.line(p.row).chars().count();
-            if p.col > max_col {
-                p.col = max_col;
-            }
-        }
-        self.extras.retain(|p| p.row <= max_row);
-    }
-}
 
 /// Word under cursor for multi-cursor "select next".
 pub fn word_at(buf: &Buffer, pos: Position) -> Option<(Position, Position, String)> {
@@ -139,10 +68,7 @@ pub fn find_next(buf: &Buffer, word: &str, from: Position) -> Option<Position> {
             // Verify word boundary-ish: check not mid-identifier for alphanumeric words
             let abs = start_col + rel;
             if is_word_match(&chars, abs, word) {
-                return Some(Position {
-                    row,
-                    col: abs,
-                });
+                return Some(Position { row, col: abs });
             }
             // keep searching same line for next
             let mut search_from = abs + 1;
@@ -151,10 +77,7 @@ pub fn find_next(buf: &Buffer, word: &str, from: Position) -> Option<Position> {
                 if let Some(r2) = rest.find(word) {
                     let abs2 = search_from + r2;
                     if is_word_match(&chars, abs2, word) {
-                        return Some(Position {
-                            row,
-                            col: abs2,
-                        });
+                        return Some(Position { row, col: abs2 });
                     }
                     search_from = abs2 + 1;
                 } else {
@@ -190,11 +113,9 @@ fn is_word_match(chars: &[char], start: usize, word: &str) -> bool {
     if chars[start..start + wchars.len()] != wchars[..] {
         return false;
     }
-    let before_ok = start == 0
-        || !(chars[start - 1].is_alphanumeric() || chars[start - 1] == '_');
+    let before_ok = start == 0 || !(chars[start - 1].is_alphanumeric() || chars[start - 1] == '_');
     let after = start + wchars.len();
-    let after_ok = after >= chars.len()
-        || !(chars[after].is_alphanumeric() || chars[after] == '_');
+    let after_ok = after >= chars.len() || !(chars[after].is_alphanumeric() || chars[after] == '_');
     before_ok && after_ok
 }
 

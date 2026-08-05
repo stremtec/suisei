@@ -8,7 +8,10 @@ members = ["suisei-core", "suisei-engine", "suisei-daemon"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+# Custom source-available licence: closed source + 1-year-delayed public
+# release. Only the delayed snapshot (e.g. `2026dev`) is forkable, private-use
+# only. See LICENSE and docs/SUISEI-LICENSE-POLICY.md before changing this.
+license = "LicenseRef-Suisei"
 repository = "https://github.com/stremtec/suisei"
 
 [profile.release]

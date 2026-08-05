@@ -1,45 +1,36 @@
-//! Delta-based undo with SSD spill + optional on-close persistence.
+//! Delta-based undo: the log stores [`Delta`]s — char-offset changes that
+//! carry their own inverse description — never full-buffer snapshots.
+//! Undo/redo apply deltas straight to the buffer via [`Buffer::apply_edit`].
 //!
-//! Memory model (replaces full-buffer snapshots that grew O(edits × file)):
-//! - each history entry is a **line-range delta** (changed lines only)
-//! - one full snapshot (`last`, Arc-shared) anchors the live end of the chain
+//! Memory model:
 //! - only the newest [`IN_RAM_MAX`] deltas stay in RAM; older ones spill to
 //!   `~/.suisei/undo/<fnv(path)>.undo` and stream back in on deep undo
 //! - `undo_caching = true` keeps the spill file on close (plus a `.meta`
 //!   content hash) so reopening the same, unchanged file resumes its history;
 //!   `false` (default) deletes it
 //!
-//! The public API mirrors the old snapshot stack (`push` the pre-edit state,
-//! `undo/redo` exchange full snapshots) so call sites stay untouched.
+//! The push path still diffs consecutive checkpoints into a delta (the edit
+//! paths record checkpoints, not raw edits — yet). The diff is line-granular
+//! but stored as a char-offset [`Change`], so undo already applies through
+//! the same `apply_edit` the native edit migration will use; swapping the
+//! push path to edit-produced deltas later changes nothing downstream.
 
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use crate::buffer::{BufferSnapshot, Position};
+use crate::buffer::{Buffer, BufferSnapshot, Position};
+use crate::edit::{Change, Delta, Edit};
 
 /// Newest deltas kept in RAM; older ones go to the spill file.
 pub const IN_RAM_MAX: usize = 50;
 /// Safety cap for unnamed buffers (no spill target): drop oldest beyond this.
 const NO_SPILL_MAX: usize = 500;
 
-/// One edit as a reversible line-range patch.
-#[derive(Clone, Debug)]
-struct EditDelta {
-    /// First differing line index.
-    start: usize,
-    /// Lines this range held *before* the edit (apply to undo).
-    old: Vec<String>,
-    /// Lines this range holds *after* the edit (apply to redo).
-    new: Vec<String>,
-    cursor_old: Position,
-    cursor_new: Position,
-}
-
 #[derive(Clone, Default)]
 pub struct UndoStack {
-    past: Vec<EditDelta>,
-    future: Vec<EditDelta>,
-    /// Anchor: the most recent state the stack has seen (Arc → cheap tab clones).
+    past: Vec<Delta>,
+    future: Vec<Delta>,
+    /// Anchor: the most recent checkpoint (Arc → cheap tab clones).
     last: Option<std::sync::Arc<BufferSnapshot>>,
     /// Spill file for entries beyond IN_RAM_MAX (None for unnamed buffers).
     spill_path: Option<PathBuf>,
@@ -52,8 +43,9 @@ impl UndoStack {
         Self::default()
     }
 
-    /// Record the state *before* a mutating edit. Consecutive pushes diff into
-    /// a delta; identical states are discarded (no more wasted `i`+Esc slots).
+    /// Checkpoint the state after an edit. Consecutive checkpoints diff into
+    /// one delta each; identical states are discarded (no wasted slots for
+    /// `i`+Esc no-typing).
     pub fn push(&mut self, snapshot: BufferSnapshot) {
         if let Some(prev) = self.last.clone() {
             if let Some(delta) = diff_snapshots(&prev, &snapshot) {
@@ -65,27 +57,42 @@ impl UndoStack {
         self.last = Some(std::sync::Arc::new(snapshot));
     }
 
-    /// Undo: absorb any uncommitted edit, then walk one delta back.
-    pub fn undo(&mut self, current: BufferSnapshot) -> Option<BufferSnapshot> {
-        self.absorb_tail(&current);
+    /// Undo: absorb any uncommitted tail (edits in flight when undo is hit),
+    /// then apply one delta's inverse straight to the buffer. Restores the
+    /// pre-edit cursor.
+    pub fn undo(&mut self, buffer: &mut Buffer) -> bool {
+        self.absorb_tail(&buffer.snapshot());
         let delta = match self.past.pop() {
             Some(d) => d,
-            None => self.unspill_one()?,
+            None => match self.unspill_one() {
+                Some(d) => d,
+                None => return false,
+            },
         };
-        let prev = apply_delta(&current, &delta, false);
+        buffer.apply_edit(&delta.inverse());
+        buffer.cursor = delta.cursor_before;
+        // The anchor must follow the buffer: without this, the next undo's
+        // absorb_tail diffs against a stale state and re-captures the edit
+        // this undo just removed (undo runaway).
+        self.last = Some(std::sync::Arc::new(buffer.snapshot()));
         self.future.push(delta);
-        self.last = Some(std::sync::Arc::new(prev.clone()));
-        Some(prev)
+        true
     }
 
-    /// Redo the most recently undone delta.
-    pub fn redo(&mut self, current: BufferSnapshot) -> Option<BufferSnapshot> {
-        let delta = self.future.pop()?;
-        let next = apply_delta(&current, &delta, true);
+    /// Redo the most recently undone delta (re-applied forward).
+    pub fn redo(&mut self, buffer: &mut Buffer) -> bool {
+        let Some(delta) = self.future.pop() else {
+            return false;
+        };
+        let edit = Edit {
+            changes: delta.changes.clone(),
+        };
+        buffer.apply_edit(&edit);
+        buffer.cursor = delta.cursor_after;
+        self.last = Some(std::sync::Arc::new(buffer.snapshot()));
         self.past.push(delta);
         self.spill_overflow();
-        self.last = Some(std::sync::Arc::new(next.clone()));
-        Some(next)
+        true
     }
 
     pub fn can_undo(&self) -> bool {
@@ -96,8 +103,8 @@ impl UndoStack {
         !self.future.is_empty()
     }
 
-    /// The buffer changed after the last `push` without another push (edits in
-    /// flight when `u` is hit) — capture that edit so it undoes first.
+    /// The buffer changed after the last checkpoint without another push —
+    /// capture that edit so it undoes first.
     fn absorb_tail(&mut self, current: &BufferSnapshot) {
         if let Some(prev) = self.last.clone() {
             if let Some(delta) = diff_snapshots(&prev, current) {
@@ -146,7 +153,7 @@ impl UndoStack {
     }
 
     /// Pull the newest spilled record back off disk.
-    fn unspill_one(&mut self) -> Option<EditDelta> {
+    fn unspill_one(&mut self) -> Option<Delta> {
         let path = self.spill_path.clone()?;
         let off = self.spill_offsets.pop()?;
         let delta = read_record_at(&path, off)?;
@@ -165,7 +172,7 @@ impl UndoStack {
         };
         if caching {
             let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
-            let drained: Vec<EditDelta> = std::mem::take(&mut self.past);
+            let drained: Vec<Delta> = std::mem::take(&mut self.past);
             for d in drained {
                 if let Some(off) = append_record(&path, &d) {
                     self.spill_offsets.push(off);
@@ -179,18 +186,35 @@ impl UndoStack {
     }
 }
 
-// ── Diff / apply ───────────────────────────────────────────────────────────
+// ── Diff / convert ─────────────────────────────────────────────────────────
 
-/// Line-range diff via common prefix/suffix trim. None when identical.
-fn diff_snapshots(a: &BufferSnapshot, b: &BufferSnapshot) -> Option<EditDelta> {
-    let (al, bl) = (a.lines(), b.lines());
+/// Line-range diff via common prefix/suffix trim, stored as a char-offset
+/// delta. None when identical.
+fn diff_snapshots(a: &BufferSnapshot, b: &BufferSnapshot) -> Option<Delta> {
+    let (start, old, new) = diff_lines(a.lines(), b.lines())?;
+    let change = line_delta_to_change(start, old, new, a.lines());
+    Some(Delta {
+        version_before: a.version(),
+        version_after: b.version(),
+        changes: vec![change],
+        cursor_before: a.cursor(),
+        cursor_after: b.cursor(),
+    })
+}
+
+/// Common prefix/suffix trim → (start line, old lines, new lines). None when
+/// identical. Shared with the LSP incremental sync.
+pub(crate) fn diff_lines<'a>(
+    al: &'a [String],
+    bl: &'a [String],
+) -> Option<(usize, &'a [String], &'a [String])> {
     let mut start = 0;
     let max_start = al.len().min(bl.len());
     while start < max_start && al[start] == bl[start] {
         start += 1;
     }
     if start == al.len() && start == bl.len() {
-        return None; // identical content
+        return None;
     }
     let mut a_end = al.len();
     let mut b_end = bl.len();
@@ -198,128 +222,184 @@ fn diff_snapshots(a: &BufferSnapshot, b: &BufferSnapshot) -> Option<EditDelta> {
         a_end -= 1;
         b_end -= 1;
     }
-    Some(EditDelta {
-        start,
-        old: al[start..a_end].to_vec(),
-        new: bl[start..b_end].to_vec(),
-        cursor_old: a.cursor(),
-        cursor_new: b.cursor(),
-    })
+    Some((start, &al[start..a_end], &bl[start..b_end]))
 }
 
-/// Rebuild the neighbouring state from `current` and a delta.
-fn apply_delta(current: &BufferSnapshot, d: &EditDelta, forward: bool) -> BufferSnapshot {
-    let (replace_with, expect_len, cursor) = if forward {
-        (&d.new, d.old.len(), d.cursor_new)
-    } else {
-        (&d.old, d.new.len(), d.cursor_old)
-    };
-    let mut lines = current.lines().to_vec();
-    let end = (d.start + expect_len).min(lines.len());
-    let start = d.start.min(lines.len());
-    lines.splice(start..end, replace_with.iter().cloned());
-    if lines.is_empty() {
-        lines.push(String::new());
+/// Line-range replacement → one char-offset [`Change`] against `before`.
+///
+/// Lines are stored without their terminators, so a line range maps to a
+/// char range plus exactly one boundary newline, chosen so the round trip
+/// is exact: replacements keep the separator after the range; deletions
+/// consume one separator (the trailing one mid-document, the leading one
+/// when the tail is removed); insertions bring their own separator.
+pub(crate) fn line_delta_to_change(
+    start_line: usize,
+    old_lines: &[String],
+    new_lines: &[String],
+    before: &[String],
+) -> Change {
+    let start = line_off(before, start_line);
+    let old = old_lines.join("\n");
+    let new = new_lines.join("\n");
+
+    if old_lines.is_empty() && !new_lines.is_empty() {
+        // Pure line insertion: the inserted lines carry their own separator
+        // — trailing mid-document, leading at the document end.
+        let new = if start_line >= before.len() {
+            format!("\n{new}")
+        } else {
+            format!("{new}\n")
+        };
+        return Change { start, old, new };
     }
-    BufferSnapshot::from_parts(lines, cursor)
+    if new_lines.is_empty() && !old_lines.is_empty() {
+        // Pure line deletion: consume one separator too. At the document
+        // tail that is the LEADING newline (there is no trailing one).
+        let (start, old) = if start_line + old_lines.len() >= before.len() && start_line > 0 {
+            (start.saturating_sub(1), format!("\n{old}"))
+        } else {
+            (start, format!("{old}\n"))
+        };
+        return Change { start, old, new };
+    }
+    // Replacement: the separator after the range stays put.
+    Change { start, old, new }
+}
+
+/// Char offset of the start of `row` (== document end when row >= len).
+fn line_off(lines: &[String], row: usize) -> usize {
+    if row >= lines.len() {
+        return lines.iter().map(|l| l.chars().count()).sum::<usize>()
+            + lines.len().saturating_sub(1);
+    }
+    lines.iter().take(row).map(|l| l.chars().count() + 1).sum()
 }
 
 // ── Spill file format ──────────────────────────────────────────────────────
 //
-// Buffer lines never contain `\n`, so a line-oriented record is unambiguous:
-//   @ <start> <n_old> <n_new> <cor> <coc> <cnr> <cnc>
-//   …n_old old lines…
-//   …n_new new lines…
+// Binary, length-prefixed (change text may contain anything):
+//   [u64 version_before][u64 version_after][u32 n_changes]
+//   per change: [u64 start][u64 old_len][old bytes][u64 new_len][new bytes]
+//   [u32 cursor_before.row][u32 .col][u32 cursor_after.row][u32 .col]
 
-fn append_record(path: &Path, d: &EditDelta) -> Option<u64> {
+fn append_record(path: &Path, d: &Delta) -> Option<u64> {
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .ok()?;
     let off = f.metadata().ok()?.len();
-    let mut buf = format!(
-        "@ {} {} {} {} {} {} {}\n",
-        d.start,
-        d.old.len(),
-        d.new.len(),
-        d.cursor_old.row,
-        d.cursor_old.col,
-        d.cursor_new.row,
-        d.cursor_new.col
-    );
-    for l in &d.old {
-        buf.push_str(l);
-        buf.push('\n');
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&d.version_before.to_le_bytes());
+    buf.extend_from_slice(&d.version_after.to_le_bytes());
+    buf.extend_from_slice(&(d.changes.len() as u32).to_le_bytes());
+    for c in &d.changes {
+        buf.extend_from_slice(&(c.start as u64).to_le_bytes());
+        buf.extend_from_slice(&(c.old.len() as u64).to_le_bytes());
+        buf.extend_from_slice(c.old.as_bytes());
+        buf.extend_from_slice(&(c.new.len() as u64).to_le_bytes());
+        buf.extend_from_slice(c.new.as_bytes());
     }
-    for l in &d.new {
-        buf.push_str(l);
-        buf.push('\n');
-    }
-    f.write_all(buf.as_bytes()).ok()?;
+    buf.extend_from_slice(&(d.cursor_before.row as u32).to_le_bytes());
+    buf.extend_from_slice(&(d.cursor_before.col as u32).to_le_bytes());
+    buf.extend_from_slice(&(d.cursor_after.row as u32).to_le_bytes());
+    buf.extend_from_slice(&(d.cursor_after.col as u32).to_le_bytes());
+    f.write_all(&buf).ok()?;
     Some(off)
 }
 
-fn read_record_at(path: &Path, off: u64) -> Option<EditDelta> {
-    let data = std::fs::read_to_string(path).ok()?;
-    let rec = data.get(off as usize..)?;
-    let mut it = rec.lines();
-    let header = it.next()?;
-    let mut h = header.strip_prefix("@ ")?.split_whitespace();
-    let start: usize = h.next()?.parse().ok()?;
-    let n_old: usize = h.next()?.parse().ok()?;
-    let n_new: usize = h.next()?.parse().ok()?;
-    let cor: usize = h.next()?.parse().ok()?;
-    let coc: usize = h.next()?.parse().ok()?;
-    let cnr: usize = h.next()?.parse().ok()?;
-    let cnc: usize = h.next()?.parse().ok()?;
-    let mut old = Vec::with_capacity(n_old);
-    for _ in 0..n_old {
-        old.push(it.next()?.to_string());
+fn read_record_at(path: &Path, off: u64) -> Option<Delta> {
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(std::io::SeekFrom::Start(off)).ok()?;
+    let mut h = [0u8; 20];
+    f.read_exact(&mut h).ok()?;
+    let vb = u64::from_le_bytes(h[0..8].try_into().ok()?);
+    let va = u64::from_le_bytes(h[8..16].try_into().ok()?);
+    let n = u32::from_le_bytes(h[16..20].try_into().ok()?) as usize;
+    let mut changes = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut m = [0u8; 16];
+        f.read_exact(&mut m).ok()?;
+        let start = u64::from_le_bytes(m[0..8].try_into().ok()?) as usize;
+        let old_len = u64::from_le_bytes(m[8..16].try_into().ok()?) as usize;
+        let mut old_bytes = vec![0u8; old_len];
+        f.read_exact(&mut old_bytes).ok()?;
+        let mut nl = [0u8; 8];
+        f.read_exact(&mut nl).ok()?;
+        let new_len = u64::from_le_bytes(nl) as usize;
+        let mut new_bytes = vec![0u8; new_len];
+        f.read_exact(&mut new_bytes).ok()?;
+        changes.push(Change {
+            start,
+            old: String::from_utf8(old_bytes).ok()?,
+            new: String::from_utf8(new_bytes).ok()?,
+        });
     }
-    let mut new = Vec::with_capacity(n_new);
-    for _ in 0..n_new {
-        new.push(it.next()?.to_string());
-    }
-    Some(EditDelta {
-        start,
-        old,
-        new,
-        cursor_old: Position::new(cor, coc),
-        cursor_new: Position::new(cnr, cnc),
+    let mut c = [0u8; 16];
+    f.read_exact(&mut c).ok()?;
+    let cor = u32::from_le_bytes(c[0..4].try_into().ok()?) as usize;
+    let coc = u32::from_le_bytes(c[4..8].try_into().ok()?) as usize;
+    let cnr = u32::from_le_bytes(c[8..12].try_into().ok()?) as usize;
+    let cnc = u32::from_le_bytes(c[12..16].try_into().ok()?) as usize;
+    Some(Delta {
+        version_before: vb,
+        version_after: va,
+        changes,
+        cursor_before: Position::new(cor, coc),
+        cursor_after: Position::new(cnr, cnc),
     })
 }
 
 /// Offsets of every record in an existing spill file (resume path).
 fn scan_offsets(path: &Path) -> Vec<u64> {
-    let Ok(data) = std::fs::read_to_string(path) else {
-        return Vec::new();
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
     };
     let mut offsets = Vec::new();
-    let mut off = 0u64;
-    let mut lines = data.split_inclusive('\n');
-    while let Some(header) = lines.next() {
-        let Some(h) = header.trim_end().strip_prefix("@ ") else {
-            break; // corrupt tail — ignore the rest
+    loop {
+        let off = match f.stream_position() {
+            Ok(o) => o,
+            Err(_) => break,
         };
-        let mut parts = h.split_whitespace();
-        let (Some(_), Some(n_old), Some(n_new)) =
-            (parts.next(), parts.next(), parts.next())
-        else {
-            break;
-        };
-        let (Ok(n_old), Ok(n_new)) = (n_old.parse::<usize>(), n_new.parse::<usize>())
-        else {
-            break;
-        };
-        offsets.push(off);
-        off += header.len() as u64;
-        for _ in 0..(n_old + n_new) {
-            match lines.next() {
-                Some(l) => off += l.len() as u64,
-                None => return offsets, // truncated body — keep what parsed
+        let mut h = [0u8; 20];
+        if f.read_exact(&mut h).is_err() {
+            break; // clean EOF or corrupt tail — keep what parsed
+        }
+        let n = u32::from_le_bytes(h[16..20].try_into().unwrap_or([0; 4])) as usize;
+        let mut ok = true;
+        for _ in 0..n {
+            // Record order is [start][old_len][old bytes][new_len][new
+            // bytes] — skip in exactly that order.
+            let mut m = [0u8; 16];
+            if f.read_exact(&mut m).is_err() {
+                ok = false;
+                break;
+            }
+            let old_len = u64::from_le_bytes(m[8..16].try_into().unwrap_or([0; 8]));
+            if f.seek(std::io::SeekFrom::Current(old_len as i64)).is_err() {
+                ok = false;
+                break;
+            }
+            let mut nl = [0u8; 8];
+            if f.read_exact(&mut nl).is_err() {
+                ok = false;
+                break;
+            }
+            let new_len = u64::from_le_bytes(nl);
+            if f.seek(std::io::SeekFrom::Current(new_len as i64)).is_err() {
+                ok = false;
+                break;
             }
         }
+        if !ok {
+            break;
+        }
+        let mut c = [0u8; 16];
+        if f.read_exact(&mut c).is_err() {
+            break;
+        }
+        offsets.push(off);
     }
     offsets
 }
@@ -367,51 +447,85 @@ mod tests {
     use super::*;
     use crate::buffer::Buffer;
 
-    fn snap(text: &str, row: usize, col: usize) -> BufferSnapshot {
+    fn buf(text: &str, row: usize, col: usize) -> Buffer {
         let mut b = Buffer::from_string(text);
         b.cursor = Position::new(row, col);
-        b.snapshot()
+        b
+    }
+
+    /// undo restores `before` (and its cursor), redo restores `after`.
+    fn undo_redo(before: &str, after: &str) {
+        let mut u = UndoStack::new();
+        let mut b = buf(before, 0, 0);
+        u.push(b.snapshot());
+        b = buf(after, 0, 0);
+        assert!(u.undo(&mut b), "undo failed: {before:?} → {after:?}");
+        assert_eq!(
+            b.text(),
+            before,
+            "undo must restore {before:?} (from {after:?})"
+        );
+        assert!(u.redo(&mut b), "redo failed: {before:?} → {after:?}");
+        assert_eq!(b.text(), after, "redo must restore {after:?}");
     }
 
     #[test]
     fn delta_roundtrip_single_line() {
         let mut u = UndoStack::new();
-        u.push(snap("alpha\nbeta\ngamma", 1, 0)); // initial
-        u.push(snap("alpha\nbeta\ngamma", 1, 0)); // pre-edit (same → no delta)
-        // edit happened: beta → BETA
-        let cur = snap("alpha\nBETA\ngamma", 1, 4);
-        let back = u.undo(cur.clone()).expect("undo");
-        assert_eq!(back.lines()[1], "beta");
-        let fwd = u.redo(back).expect("redo");
-        assert_eq!(fwd.lines()[1], "BETA");
+        let mut b = buf("alpha\nbeta\ngamma", 1, 0);
+        u.push(b.snapshot());
+        b = buf("alpha\nBETA\ngamma", 1, 4);
+        assert!(u.undo(&mut b));
+        assert_eq!(b.text(), "alpha\nbeta\ngamma");
+        assert_eq!(b.cursor, Position::new(1, 0), "pre-edit cursor restored");
+        assert!(u.redo(&mut b));
+        assert_eq!(b.text(), "alpha\nBETA\ngamma");
+        assert_eq!(b.cursor, Position::new(1, 4), "post-edit cursor restored");
     }
 
     #[test]
     fn noop_push_consumes_nothing() {
         let mut u = UndoStack::new();
-        u.push(snap("x", 0, 0));
-        u.push(snap("x", 0, 0)); // i + Esc, no typing
-        u.push(snap("x", 0, 0));
+        let b = buf("x", 0, 0);
+        u.push(b.snapshot());
+        u.push(b.snapshot()); // no typing between checkpoints
+        u.push(b.snapshot());
         assert!(!u.can_undo());
     }
 
     #[test]
     fn insert_and_delete_lines() {
         let mut u = UndoStack::new();
-        u.push(snap("a\nb", 0, 0));
-        let grown = snap("a\nnew1\nnew2\nb", 2, 0);
-        u.push(grown.clone()); // next pre-edit commits the growth delta
-        let shrunk = snap("a", 0, 0);
-        let mid = u.undo(shrunk).expect("undo shrink");
-        assert_eq!(mid.lines(), grown.lines());
-        let orig = u.undo(mid).expect("undo growth");
-        assert_eq!(orig.lines(), ["a", "b"]);
+        let mut b = buf("a\nb", 0, 0);
+        u.push(b.snapshot());
+        b = buf("a\nnew1\nnew2\nb", 2, 0);
+        u.push(b.snapshot()); // growth committed
+        b = buf("a", 0, 0); // uncommitted shrink
+        assert!(u.undo(&mut b), "undo shrink");
+        assert_eq!(b.text(), "a\nnew1\nnew2\nb");
+        assert!(u.undo(&mut b), "undo growth");
+        assert_eq!(b.text(), "a\nb");
         assert!(!u.can_undo());
+    }
+
+    /// The newline-boundary rules, one per shape of line-range edit.
+    #[test]
+    fn line_delta_edge_cases() {
+        undo_redo("l1\nl2\nl3", "l1\nx\nl3"); // mid replace
+        undo_redo("l1\nl2\nl3", "l1\nl2\nx"); // tail replace
+        undo_redo("l1\nl2\nl3", "l1\nl3"); // mid delete
+        undo_redo("l1\nl2\nl3", "l1\nl2"); // tail delete
+        undo_redo("l1\nl2", "l1\nx\nl2"); // mid insert
+        undo_redo("l1\nl2", "l1\nl2\nx"); // tail insert
+        undo_redo("l1\nl2\nl3", "x"); // replace all
+        undo_redo("l1", "l1\na\nb"); // one line grows
+        undo_redo("l1\nl2\nl3", "l1"); // delete tail lines
+        undo_redo("a\nb\nc\nd", "a\nd"); // delete middle lines
     }
 
     #[test]
     fn spill_and_deep_undo() {
-        let dir = std::env::temp_dir().join(format!("xei-undo-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("suisei-undo-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("doc.txt");
         std::fs::write(&file, "seed").unwrap();
@@ -420,46 +534,48 @@ mod tests {
         u.attach_file(&file, false, "seed");
         // 80 edits → 30 must spill to disk (IN_RAM_MAX = 50).
         let mut text = String::from("line0");
-        u.push(snap(&text, 0, 0));
+        let mut b = buf(&text, 0, 0);
+        u.push(b.snapshot());
         for i in 1..=80 {
             let next = format!("{text}\nline{i}");
-            u.push(snap(&next, 0, 0));
+            b = buf(&next, 0, 0);
+            u.push(b.snapshot());
             text = next;
         }
-        // absorb final edit then walk all 80 back.
-        let mut cur = snap(&text, 0, 0);
         let mut steps = 0;
-        while let Some(prev) = u.undo(cur.clone()) {
-            cur = prev;
+        while u.undo(&mut b) {
             steps += 1;
             if steps > 200 {
                 panic!("undo runaway");
             }
         }
-        assert_eq!(cur.lines(), ["line0"]);
+        assert_eq!(b.text(), "line0");
         assert_eq!(steps, 80);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn persist_and_resume() {
-        let dir = std::env::temp_dir().join(format!("xei-undo-res-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("suisei-undo-res-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("doc.txt");
         std::fs::write(&file, "v2").unwrap();
 
         let mut u = UndoStack::new();
         u.attach_file(&file, true, "v2");
-        u.push(snap("v1", 0, 0));
-        u.push(snap("v2", 0, 0)); // delta v1→v2 committed
+        let mut b = buf("v1", 0, 0);
+        u.push(b.snapshot());
+        b = buf("v2", 0, 0);
+        u.push(b.snapshot()); // delta v1→v2 committed
         u.finish(true, "v2");
 
         // Reopen same content → history resumes from disk.
         let mut u2 = UndoStack::new();
         u2.attach_file(&file, true, "v2");
         assert!(u2.can_undo(), "cached history should resume");
-        let back = u2.undo(snap("v2", 0, 0)).expect("undo from cache");
-        assert_eq!(back.lines(), ["v1"]);
+        let mut b2 = buf("v2", 0, 0);
+        assert!(u2.undo(&mut b2), "undo from cache");
+        assert_eq!(b2.text(), "v1");
 
         // Changed content → cache invalidated.
         let mut u3 = UndoStack::new();
@@ -470,17 +586,19 @@ mod tests {
 
     #[test]
     fn finish_without_caching_removes_spill() {
-        let dir = std::env::temp_dir().join(format!("xei-undo-rm-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("suisei-undo-rm-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("doc.txt");
         std::fs::write(&file, "x").unwrap();
         let mut u = UndoStack::new();
         u.attach_file(&file, false, "x");
         let mut text = String::from("l0");
-        u.push(snap(&text, 0, 0));
+        let mut b = buf(&text, 0, 0);
+        u.push(b.snapshot());
         for i in 1..=60 {
             let next = format!("{text}\nl{i}");
-            u.push(snap(&next, 0, 0));
+            b = buf(&next, 0, 0);
+            u.push(b.snapshot());
             text = next;
         }
         let spill = spill_file_for(&file);

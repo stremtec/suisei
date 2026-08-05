@@ -41,14 +41,19 @@ fn the_engine_reports_its_live_state_into_a_running_daemon() {
 
     let mut eng = Engine::new();
     eng.app.lsp.server_running = true; // stands in for a handshaked server
-    eng.app.lsp.set_progress_open_for_test("rustAnalyzer/Indexing", true);
+    eng.app
+        .lsp
+        .set_progress_open_for_test("rustAnalyzer/Indexing", true);
     eng.app.dap.state = suisei_core::dap::DapState::Stopped;
     eng.app.explorer.cwd = project.clone();
-    eng.app.explorer.entries.push(suisei_core::explorer::ExplorerEntry {
-        name: "a.rs".into(),
-        path: project.join("a.rs"),
-        is_dir: false,
-    });
+    eng.app
+        .explorer
+        .entries
+        .push(suisei_core::explorer::ExplorerEntry {
+            name: "a.rs".into(),
+            path: project.join("a.rs"),
+            is_dir: false,
+        });
     eng.start_daemon_reporting();
 
     let deadline = Instant::now() + Duration::from_secs(5);

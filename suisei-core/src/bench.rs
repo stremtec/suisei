@@ -21,7 +21,11 @@ pub struct BenchResult {
 
 impl BenchResult {
     fn new(name: &str, ms: f64, detail: String) -> Self {
-        Self { name: name.to_string(), ms, detail }
+        Self {
+            name: name.to_string(),
+            ms,
+            detail,
+        }
     }
 }
 
@@ -82,7 +86,10 @@ pub fn run(app: &App) -> BenchReport {
     results.push(BenchResult::new(
         "syntax parse (rust)",
         ms,
-        format!("{n_lines} lines · {tokens} tokens · {:.0} klines/s", n_lines as f64 / ms.max(1e-9)),
+        format!(
+            "{n_lines} lines · {tokens} tokens · {:.0} klines/s",
+            n_lines as f64 / ms.max(1e-9)
+        ),
     ));
 
     // 2) Indent-fold rebuild.
@@ -92,7 +99,10 @@ pub fn run(app: &App) -> BenchReport {
     results.push(BenchResult::new(
         "fold rebuild",
         ms,
-        format!("{ranges} ranges · {:.0} klines/s", n_lines as f64 / ms.max(1e-9)),
+        format!(
+            "{ranges} ranges · {:.0} klines/s",
+            n_lines as f64 / ms.max(1e-9)
+        ),
     ));
 
     // 3) fold_at lookup — the per-row-per-frame call, now O(1).
@@ -126,7 +136,10 @@ pub fn run(app: &App) -> BenchReport {
     results.push(BenchResult::new(
         "tokens_for_row (render path)",
         ms,
-        format!("{:.1} Mops/s ({calls} calls, {counted} toks)", mops(calls, ms)),
+        format!(
+            "{:.1} Mops/s ({calls} calls, {counted} toks)",
+            mops(calls, ms)
+        ),
     ));
 
     // 5) Bulk paste — insert_str of a long single line, now O(n) not O(n²).
@@ -168,7 +181,11 @@ pub fn run(app: &App) -> BenchReport {
     }
 
     let total_ms = results.iter().map(|r| r.ms).sum();
-    BenchReport { results, total_ms, synthetic_lines: n_lines }
+    BenchReport {
+        results,
+        total_ms,
+        synthetic_lines: n_lines,
+    }
 }
 
 #[cfg(test)]
@@ -181,7 +198,11 @@ mod tests {
         let report = run(&app);
         // The six synthetic benches always run (the "your file" one is skipped
         // for an empty buffer).
-        assert!(report.results.len() >= 6, "got {} results", report.results.len());
+        assert!(
+            report.results.len() >= 6,
+            "got {} results",
+            report.results.len()
+        );
         assert!(report.total_ms >= 0.0);
         for r in &report.results {
             assert!(r.ms >= 0.0, "{} had negative time", r.name);

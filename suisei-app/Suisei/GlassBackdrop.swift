@@ -15,6 +15,22 @@ enum SuiseiGlass {
     static func chrome(light: Bool) -> Glass {
         Glass.regular.tint(light ? Color.white.opacity(0.10) : Color.white.opacity(0.05))
     }
+
+    /// Secondary surfaces that should recede (Welcome recents): the SAME
+    /// regular family as `panel`, just a quieter tint. This used to be
+    /// `Glass.clear` — but mixing clear and regular in one window breaks
+    /// Apple's "never mix the variants" rule, and clear demands a dimming
+    /// layer it never had.
+    static func recessed(light: Bool) -> Glass {
+        Glass.regular.tint(light ? Color.white.opacity(0.06) : Color.white.opacity(0.03))
+    }
+
+    /// Welcome launch card — stronger liquid refraction of the desktop.
+    /// Minimal tint so the lens does most of the work; a heavy white wash
+    /// turns the surface into frosted plastic with no visible warp.
+    static func welcome(light: Bool) -> Glass {
+        Glass.regular.tint(light ? Color.white.opacity(0.04) : Color.white.opacity(0.02))
+    }
 }
 
 struct GlassScrim: View {

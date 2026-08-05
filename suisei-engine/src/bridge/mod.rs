@@ -3,4 +3,4 @@
 
 pub mod input;
 
-pub use input::{key_from_ffi, FfiKeyCode};
+pub use input::{FfiKeyCode, key_from_ffi};

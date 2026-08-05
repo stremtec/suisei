@@ -19,7 +19,7 @@ pub struct Config {
     pub update_check: bool,
     /// Keep undo history on disk when a file closes (resume on reopen).
     pub undo_caching: bool,
-    /// Kitty-graphics layer (inline preview images, pet, media previews).
+    /// Kitty-graphics layer (inline preview images, media previews).
     pub gpu_graphics: bool,
     /// OSC 8 hyperlinks.
     pub gpu_hyperlinks: bool,
@@ -34,14 +34,6 @@ pub struct Config {
     /// Value = command line; empty string = disabled for that language.
     /// Missing key = use built-in default.
     pub lsp_servers: HashMap<String, String>,
-    /// Desktop pet GIF overlay (requires gpu_acc + Kitty graphics).
-    pub pet_enabled: bool,
-    pub pet_path: String,
-    pub pet_x: u16,
-    pub pet_y: u16,
-    pub pet_width_cells: u16,
-    /// Playback speed percent (25..=400). 100 = native GIF timing.
-    pub pet_speed: u16,
 }
 
 impl Default for Config {
@@ -60,12 +52,6 @@ impl Default for Config {
             key_hints: true,
             lsp_enabled: true,
             lsp_servers: HashMap::new(),
-            pet_enabled: false,
-            pet_path: String::new(),
-            pet_x: 2,
-            pet_y: 2,
-            pet_width_cells: 12,
-            pet_speed: 100,
         }
     }
 }
@@ -76,8 +62,16 @@ pub fn lsp_lang_catalog() -> &'static [(&'static str, &'static str, &'static str
     &[
         ("rust", "Rust", "rust-analyzer"),
         ("python", "Python", "pyright-langserver --stdio"),
-        ("typescript", "TypeScript", "typescript-language-server --stdio"),
-        ("javascript", "JavaScript", "typescript-language-server --stdio"),
+        (
+            "typescript",
+            "TypeScript",
+            "typescript-language-server --stdio",
+        ),
+        (
+            "javascript",
+            "JavaScript",
+            "typescript-language-server --stdio",
+        ),
         ("c", "C / C++", "clangd"),
         ("go", "Go", "gopls"),
         ("java", "Java", "jdtls"),
@@ -125,7 +119,10 @@ fn migrate_from_xei() {
             .filter(|l| !l.trim_start().starts_with("theme"))
             .map(|l| format!("{l}\n"))
             .collect();
-        let _ = fs::write(&ours, format!("# suisei config\ntheme = \"system\"\n{kept}"));
+        let _ = fs::write(
+            &ours,
+            format!("# suisei config\ntheme = \"system\"\n{kept}"),
+        );
     }
 }
 
@@ -191,33 +188,6 @@ pub fn load() -> Config {
             "lsp_enabled" | "lsp" => {
                 cfg.lsp_enabled = matches!(v, "true" | "1" | "yes" | "on");
             }
-            "pet_enabled" | "pet" => {
-                cfg.pet_enabled = matches!(v, "true" | "1" | "yes" | "on");
-            }
-            "pet_path" => {
-                cfg.pet_path = v.to_string();
-            }
-            "pet_x" => {
-                if let Ok(n) = v.parse::<u16>() {
-                    // Soft cap only; runtime clamps to terminal size.
-                    cfg.pet_x = n.min(10_000);
-                }
-            }
-            "pet_y" => {
-                if let Ok(n) = v.parse::<u16>() {
-                    cfg.pet_y = n.min(10_000);
-                }
-            }
-            "pet_width_cells" | "pet_width" => {
-                if let Ok(n) = v.parse::<u16>() {
-                    cfg.pet_width_cells = n.clamp(4, 80);
-                }
-            }
-            "pet_speed" => {
-                if let Ok(n) = v.parse::<u16>() {
-                    cfg.pet_speed = n.clamp(25, 400);
-                }
-            }
             k if k.starts_with("lsp.") => {
                 let lang = k.trim_start_matches("lsp.").trim().to_lowercase();
                 if !lang.is_empty() {
@@ -237,7 +207,7 @@ pub fn load() -> Config {
 
 pub fn save(cfg: &Config) {
     let mut content = format!(
-        "# xei config\ntheme = \"{}\"\ntab_width = {}\nclipboard_sync = {}\nrelative_number = {}\nwrap_lines = {}\nupdate_check = {}\nundo_caching = {}\ngpu_graphics = {}\ngpu_hyperlinks = {}\ngpu_acc = {}\nkey_hints = {}\nlsp_enabled = {}\npet_enabled = {}\npet_path = \"{}\"\npet_x = {}\npet_y = {}\npet_width_cells = {}\npet_speed = {}\n",
+        "# xei config\ntheme = \"{}\"\ntab_width = {}\nclipboard_sync = {}\nrelative_number = {}\nwrap_lines = {}\nupdate_check = {}\nundo_caching = {}\ngpu_graphics = {}\ngpu_hyperlinks = {}\ngpu_acc = {}\nkey_hints = {}\nlsp_enabled = {}\n",
         cfg.theme,
         cfg.tab_width,
         cfg.clipboard_sync,
@@ -250,12 +220,6 @@ pub fn save(cfg: &Config) {
         if cfg.gpu_acc { "true" } else { "false" },
         if cfg.key_hints { "true" } else { "false" },
         if cfg.lsp_enabled { "true" } else { "false" },
-        if cfg.pet_enabled { "true" } else { "false" },
-        cfg.pet_path.replace('"', ""),
-        cfg.pet_x,
-        cfg.pet_y,
-        cfg.pet_width_cells,
-        cfg.pet_speed.clamp(25, 400),
     );
     content.push_str("\n# LSP servers (empty / off = disabled; omit = built-in default)\n");
     // Save known catalog keys first (stable order), then any extras
@@ -303,8 +267,6 @@ pub fn load_theme() -> Option<String> {
 
 #[cfg(test)]
 mod migration_tests {
-    use super::*;
-
     /// The xei config's `theme` is the *TUI's* choice and has no notion of
     /// following the system. Carrying it over is what put the GUI in light mode
     /// on a dark desktop — twice.

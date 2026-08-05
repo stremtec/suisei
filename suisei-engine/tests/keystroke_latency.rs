@@ -12,8 +12,8 @@
 
 use std::time::Instant;
 
-use suisei_engine::bridge::input::key_from_ffi;
 use suisei_engine::Engine;
+use suisei_engine::bridge::input::key_from_ffi;
 
 /// FfiKeyCode::Char — see bridge::input.
 const CODE_CHAR: u32 = 1;
@@ -101,7 +101,10 @@ fn idle_tick_cost_by_file_size() {
                 samples.push(t.elapsed().as_secs_f64() * 1000.0);
             }
             report(
-                &format!("{lines:>6} lines · {}", if dirty { "dirty" } else { "clean" }),
+                &format!(
+                    "{lines:>6} lines · {}",
+                    if dirty { "dirty" } else { "clean" }
+                ),
                 samples,
             );
         }

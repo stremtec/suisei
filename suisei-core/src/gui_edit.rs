@@ -99,7 +99,7 @@ impl App {
     /// line you were reading stays on screen. Falls back to a sane page when
     /// the viewport has not been sized yet (headless tests).
     fn page_rows(&self) -> usize {
-        let h = self.viewport.height as usize;
+        let h = self.grid_rows() as usize;
         if h > 1 { h - 1 } else { 20 }
     }
 
@@ -126,6 +126,11 @@ impl App {
     /// edge without moving further — the macOS text-field convention.
     pub fn caret_move(&mut self, motion: Motion) {
         self.edit_run = crate::app::EditRun::None;
+        // Any real caret motion dismisses the keyword popup — otherwise it
+        // trails the cursor until Esc. List navigation goes through
+        // `completion_move` (Up/Down are intercepted before this runs), so this
+        // never swallows the popup's own arrow keys.
+        self.completions.deactivate();
         let sel = self.sel.primary();
         if !sel.is_empty() && matches!(motion, Motion::Left | Motion::Right) {
             let collapsed = match motion {
@@ -138,7 +143,11 @@ impl App {
             return;
         }
         let (head, goal) = self.apply_motion(motion);
-        self.sel.set_primary(Selection { anchor: head, head, goal_x: goal });
+        self.sel.set_primary(Selection {
+            anchor: head,
+            head,
+            goal_x: goal,
+        });
         self.buffer.cursor = head;
     }
 
@@ -146,15 +155,24 @@ impl App {
     /// If there is no selection yet, the current head becomes the anchor.
     pub fn caret_extend(&mut self, motion: Motion) {
         self.edit_run = crate::app::EditRun::None;
+        // Extending a selection moves away from the completion prefix — drop it.
+        self.completions.deactivate();
         let sel = self.sel.primary();
         let (head, goal) = self.apply_motion(motion);
-        self.sel.set_primary(Selection { anchor: sel.anchor, head, goal_x: goal });
+        self.sel.set_primary(Selection {
+            anchor: sel.anchor,
+            head,
+            goal_x: goal,
+        });
         self.buffer.cursor = head;
     }
 
     /// Place a single caret at `pos` (a plain click), discarding other cursors.
     pub fn caret_place(&mut self, pos: Position) {
         self.edit_run = crate::app::EditRun::None;
+        // A click moves the caret off the completion prefix; drop the popup
+        // rather than let it follow the new caret position.
+        self.completions.deactivate();
         let clamped = self.clamp_to_document(pos);
         self.sel = crate::selection::SelectionSet::single(Selection::caret(clamped));
         self.buffer.cursor = clamped;
@@ -234,8 +252,76 @@ impl App {
     }
 
     /// Insert `text` at every caret, replacing any non-empty selection first.
+    /// Bracket/quote auto-pairing at a single caret. Returns true when it took
+    /// over the keystroke: an opener that inserted its matching closer (caret
+    /// left between them), or a closer typed directly in front of its own match
+    /// (the caret skips past it instead of doubling — the VS Code / CodeMirror
+    /// convention). False falls through to a plain insert.
+    fn try_auto_pair(&mut self, text: &str) -> bool {
+        let mut it = text.chars();
+        let (Some(ch), None) = (it.next(), it.next()) else {
+            return false; // only single-scalar inserts pair
+        };
+        if self.sel.len() != 1 || !self.sel.primary().is_empty() {
+            return false;
+        }
+        let caret = self.sel.primary().head;
+        let line = self.buffer.line(caret.row);
+        let next = line.chars().nth(caret.col);
+        let prev = caret.col.checked_sub(1).and_then(|i| line.chars().nth(i));
+
+        let closer_for = |c: char| match c {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            '{' => Some('}'),
+            '"' => Some('"'),
+            '\'' => Some('\''),
+            '`' => Some('`'),
+            _ => None,
+        };
+        let is_bracket_close = |c: char| matches!(c, ')' | ']' | '}');
+        let is_quote = |c: char| matches!(c, '"' | '\'' | '`');
+
+        // Type-over: a closer (or quote) typed right in front of the same glyph
+        // steps past it rather than inserting a duplicate.
+        if (is_bracket_close(ch) || is_quote(ch)) && next == Some(ch) {
+            let to = Position::new(caret.row, caret.col + 1);
+            self.sel = crate::selection::SelectionSet::single(Selection::caret(to));
+            self.buffer.cursor = to;
+            self.edit_run = crate::app::EditRun::None; // a move, not an edit
+            return true;
+        }
+
+        // Auto-close an opener, but only where it reads as opening a new pair:
+        // end of line, before whitespace, or before a closing bracket — never
+        // mid-word. Quotes additionally never pair right after a word character
+        // (English apostrophes: don't, it's).
+        if let Some(close) = closer_for(ch) {
+            let context_ok = match next {
+                None => true,
+                Some(n) => n.is_whitespace() || is_bracket_close(n) || is_quote(n),
+            };
+            let quote_ok = !is_quote(ch) || prev.map_or(true, |p| !p.is_alphanumeric());
+            if context_ok && quote_ok {
+                if self.edit_run != crate::app::EditRun::Insert {
+                    self.push_undo();
+                    self.edit_run = crate::app::EditRun::Insert;
+                }
+                self.buffer.cursor = caret;
+                self.buffer.insert_char_pair(ch, close);
+                let head = self.buffer.cursor;
+                self.sel = crate::selection::SelectionSet::single(Selection::caret(head));
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn gui_insert_text(&mut self, text: &str) {
         if text.is_empty() {
+            return;
+        }
+        if self.try_auto_pair(text) {
             return;
         }
         // Coalesce a typing run: snapshot once when the run starts, not per key.
@@ -285,6 +371,37 @@ impl App {
 
     /// Backspace: delete the selection, or one grapheme before each caret.
     pub fn gui_delete_backward(&mut self) {
+        // Auto-pair: backspacing between an empty pair — `(|)`, `"|"` — removes
+        // BOTH the opener and its closer, the counterpart to auto-close.
+        if self.sel.len() == 1 && self.sel.primary().is_empty() {
+            let c = self.sel.primary().head;
+            if c.col > 0 {
+                let line = self.buffer.line(c.row);
+                let prev = line.chars().nth(c.col - 1);
+                let next = line.chars().nth(c.col);
+                let empty_pair = matches!(
+                    (prev, next),
+                    (Some('('), Some(')'))
+                        | (Some('['), Some(']'))
+                        | (Some('{'), Some('}'))
+                        | (Some('"'), Some('"'))
+                        | (Some('\''), Some('\''))
+                        | (Some('`'), Some('`'))
+                );
+                if empty_pair {
+                    if self.edit_run != crate::app::EditRun::Delete {
+                        self.push_undo();
+                        self.edit_run = crate::app::EditRun::Delete;
+                    }
+                    let from = Position::new(c.row, c.col - 1);
+                    self.buffer
+                        .delete_range(from, Position::new(c.row, c.col + 1));
+                    self.sel = crate::selection::SelectionSet::single(Selection::caret(from));
+                    self.buffer.cursor = from;
+                    return;
+                }
+            }
+        }
         if self.edit_run != crate::app::EditRun::Delete {
             self.push_undo();
             self.edit_run = crate::app::EditRun::Delete;
@@ -359,11 +476,7 @@ impl App {
     /// Exclusive: `end` is the boundary past the last selected grapheme.
     pub fn gui_selection_range(&self) -> Option<(Position, Position)> {
         let s = self.sel.primary();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s.range())
-        }
+        if s.is_empty() { None } else { Some(s.range()) }
     }
 }
 
@@ -428,15 +541,18 @@ impl App {
             return;
         }
         let ext = self.file_extension();
+        let symbols = self.symbols_in_scope_at_caret();
         if self.completions.active {
             self.completions.refine(&prefix);
             // `refine` only narrows; a fresh activate re-widens when the user
             // deletes back to a shorter prefix.
             if !self.completions.active {
-                self.completions.activate(&prefix, ext.as_deref());
+                self.completions
+                    .activate_with(&prefix, ext.as_deref(), &symbols);
             }
         } else {
-            self.completions.activate(&prefix, ext.as_deref());
+            self.completions
+                .activate_with(&prefix, ext.as_deref(), &symbols);
         }
         self.request_lsp_completions();
     }
@@ -444,6 +560,49 @@ impl App {
     /// Two characters, not one: a popup on every single letter is noise, and
     /// the suggestion list for a one-character prefix is never useful.
     const COMPLETION_MIN_PREFIX: usize = 2;
+
+    /// Symbols lexically visible at the caret — see `crate::scope`.
+    ///
+    /// Reads the WARM tree rather than parsing: this runs on the typing path,
+    /// where a cold parse would cost far more than the suggestions are worth.
+    /// When the tree is stale relative to the buffer (mid-edit, before the next
+    /// `parse`) the offsets would name the wrong nodes, so it returns nothing
+    /// and completion falls back to keywords — a missing suggestion is a much
+    /// smaller failure than a wrong one.
+    ///
+    /// Current file only. Symbols from other open files are deliberately out of
+    /// scope here: the indexer has their trees, but "every identifier in the
+    /// project" is a different feature with a different ranking problem, and it
+    /// is not what lexical visibility means.
+    fn symbols_in_scope_at_caret(&self) -> Vec<crate::scope::ScopeSymbol> {
+        let Some(lang) = crate::scope::ScopeLang::from_ext(self.syntax.live_ext()) else {
+            return Vec::new();
+        };
+        let Some((tree, text)) = self.syntax.live_tree() else {
+            return Vec::new();
+        };
+        // Byte offset of the caret within the tree's own text.
+        //
+        // `self.sel.primary().head`, NOT `buffer.cursor` — this must be the
+        // same caret `prefix_at_caret` used. Reading a different one would rank
+        // the scope of one position against the prefix of another, which is a
+        // wrong answer that still looks plausible.
+        let cursor = self.sel.primary().head;
+        let mut byte = 0usize;
+        for (i, line) in text.lines().enumerate() {
+            if i == cursor.row {
+                byte += line
+                    .char_indices()
+                    .nth(cursor.col)
+                    .map(|(b, _)| b)
+                    .unwrap_or(line.len());
+                return crate::scope::visible_at(tree, text, byte, lang);
+            }
+            byte += line.len() + 1;
+        }
+        // Caret past the tree's last line: the tree is behind the buffer.
+        Vec::new()
+    }
 
     fn request_lsp_completions(&mut self) {
         if !self.lsp.server_running {
@@ -508,6 +667,58 @@ mod tests {
     }
 
     #[test]
+    fn auto_pair_closes_a_bracket_and_leaves_caret_inside() {
+        let mut app = app_with("");
+        app.gui_insert_text("(");
+        assert_eq!(app.buffer.text(), "()");
+        assert_eq!(app.sel.primary().head, Position::new(0, 1), "caret between");
+    }
+
+    #[test]
+    fn auto_pair_quotes_and_braces() {
+        let mut app = app_with("");
+        app.gui_insert_text("\"");
+        app.gui_insert_text("{");
+        assert_eq!(app.buffer.text(), "\"{}\"");
+        assert_eq!(app.sel.primary().head, Position::new(0, 2));
+    }
+
+    #[test]
+    fn typing_the_closer_skips_over_the_auto_inserted_one() {
+        let mut app = app_with("");
+        app.gui_insert_text("("); // -> "(|)"
+        app.gui_insert_text(")"); // type-over, not a second ")"
+        assert_eq!(app.buffer.text(), "()");
+        assert_eq!(app.sel.primary().head, Position::new(0, 2), "caret past closer");
+    }
+
+    #[test]
+    fn backspace_between_an_empty_pair_removes_both() {
+        let mut app = app_with("");
+        app.gui_insert_text("("); // "(|)"
+        app.gui_delete_backward();
+        assert_eq!(app.buffer.text(), "");
+        assert_eq!(app.sel.primary().head, Position::new(0, 0));
+    }
+
+    #[test]
+    fn opener_before_a_word_does_not_pair() {
+        // Typing "(" right before existing text must not inject a stray ")".
+        let mut app = app_with("word");
+        app.caret_place(Position::zero());
+        app.gui_insert_text("(");
+        assert_eq!(app.buffer.text(), "(word");
+    }
+
+    #[test]
+    fn apostrophe_after_a_letter_does_not_pair() {
+        let mut app = app_with("dont");
+        app.caret_place(Position::new(0, 3)); // don|t
+        app.gui_insert_text("'");
+        assert_eq!(app.buffer.text(), "don't", "no stray closing quote");
+    }
+
+    #[test]
     fn caret_move_right_is_grapheme_aware() {
         let mut app = app_with("héllo"); // é is one grapheme
         app.caret_move(Motion::Right);
@@ -524,7 +735,10 @@ mod tests {
         let s = app.sel.primary();
         assert_eq!(s.anchor, Position::new(0, 0));
         assert_eq!(s.head, Position::new(0, 2));
-        assert_eq!(app.gui_selection_range(), Some((Position::new(0, 0), Position::new(0, 2))));
+        assert_eq!(
+            app.gui_selection_range(),
+            Some((Position::new(0, 0), Position::new(0, 2)))
+        );
     }
 
     #[test]
@@ -635,6 +849,19 @@ mod tests {
         assert_eq!(
             app.selected_range(),
             Some((Position::new(0, 0), Position::new(0, 4)))
+        );
+    }
+
+    #[test]
+    fn unicode_gui_selection_copies_exact_text() {
+        let mut app = app_with("a한글🙂b");
+        app.caret_place(Position::new(0, 1));
+        app.caret_drag_to(Position::new(0, 4));
+        app.clipboard_copy();
+        assert_eq!(app.yank_buffer.as_deref(), Some("한글🙂"));
+        assert_eq!(
+            app.selected_range(),
+            Some((Position::new(0, 1), Position::new(0, 3)))
         );
     }
 
@@ -766,5 +993,35 @@ mod tests {
         app.caret_move(Motion::Right);
         app.caret_extend(Motion::Right);
         assert_eq!(app.buffer.cursor(), app.sel.primary().head);
+    }
+
+    #[test]
+    fn undo_resyncs_gui_caret_before_cjk_paste() {
+        let mut app = app_with("middle 한국어 insertion");
+        app.caret_place(Position::new(0, 7));
+
+        app.gui_insert_text("xptmxm");
+        assert_eq!(app.buffer.line(0), "middle xptmxm한국어 insertion");
+        app.undo();
+        assert_eq!(app.buffer.cursor(), Position::new(0, 7));
+
+        app.gui_insert_text("테스트");
+        assert_eq!(app.buffer.line(0), "middle 테스트한국어 insertion");
+        assert_eq!(app.buffer.cursor(), Position::new(0, 10));
+        assert_eq!(app.sel.primary().head, Position::new(0, 10));
+    }
+
+    #[test]
+    fn redo_resyncs_gui_caret_before_typing() {
+        let mut app = app_with("abc");
+        app.caret_place(Position::new(0, 1));
+        app.gui_insert_text("X");
+        app.undo();
+        app.redo();
+
+        app.gui_insert_text("Y");
+        assert_eq!(app.buffer.line(0), "aXYbc");
+        assert_eq!(app.buffer.cursor(), Position::new(0, 3));
+        assert_eq!(app.sel.primary().head, Position::new(0, 3));
     }
 }

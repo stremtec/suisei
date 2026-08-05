@@ -41,7 +41,11 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/SuiseiApp.swift"
   "$ROOT/suisei-app/Suisei/ContentView.swift"
   "$ROOT/suisei-app/Suisei/EngineBridge.swift"
+  "$ROOT/suisei-app/Suisei/EditorTickStore.swift"
   "$ROOT/suisei-app/Suisei/EditorHost.swift"
+  "$ROOT/suisei-app/Suisei/MetalTextRenderer.swift"
+  "$ROOT/suisei-app/Suisei/TabStripLayout.swift"
+  "$ROOT/suisei-app/Suisei/TabChipMetrics.swift"
   "$ROOT/suisei-app/Suisei/GlassBackdrop.swift"
   "$ROOT/suisei-app/Suisei/WelcomeView.swift"
   "$ROOT/suisei-app/Suisei/ProjectTreeView.swift"
@@ -51,6 +55,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/WindowChrome.swift"
   "$ROOT/suisei-app/Suisei/DaemonLauncher.swift"
   "$ROOT/suisei-app/Suisei/PerfProbe.swift"
+  "$ROOT/suisei-app/Suisei/AnimationTrace.swift"
 )
 
 need_engine=0
@@ -130,6 +135,7 @@ fi
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 SDKROOT="${SDKROOT:-$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk}"
 MACOS_TARGET="${MACOS_TARGET:-arm64-apple-macos26.0}"
+MACOS_MIN="${MACOS_TARGET##*macos}"
 
 if [[ "$need_swift" == "1" ]]; then
   echo "→ swiftc → Contents/MacOS/Suisei (sdk=$(basename "$SDKROOT"), $MACOS_TARGET, $SWIFT_OPT)"
@@ -201,10 +207,12 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
   <string>${SUISEI_VERSION}</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>© 2026 Stremtec. Closed source — see LICENSE. Suisei is not open-source.</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
-  <string>14.0</string>
+  <string>${MACOS_MIN}</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>
@@ -213,6 +221,9 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>Suisei</string>
   <key>CFBundleIconName</key>
   <string>Suisei</string>
+  <!-- Bundled display fonts (Welcome wordmark: Gondens DEMO). -->
+  <key>ATSApplicationFontsPath</key>
+  <string>Fonts</string>
 </dict>
 </plist>
 PLIST
@@ -232,9 +243,26 @@ if [[ -f "$ICON_SRC_DIR/Suisei.icns" ]]; then
   cp -f "$ICON_SRC_DIR/Suisei.icns" "$RES/Suisei.icns"
 fi
 # Optional flat masters / package for reference (not Dock source of truth on macOS 26+)
-for f in Suisei.png Suisei-dark.png Suisei-mono.png; do
+for f in Suisei.png Suisei-dark.png Suisei-mono.png WelcomeHero.jpg; do
   [[ -f "$ICON_SRC_DIR/$f" ]] && cp -f "$ICON_SRC_DIR/$f" "$RES/$f" || true
 done
+# Bundled fonts (Welcome wordmark etc.).
+if [[ -d "$ICON_SRC_DIR/Fonts" ]]; then
+  rm -rf "$RES/Fonts"
+  mkdir -p "$RES/Fonts"
+  find "$ICON_SRC_DIR/Fonts" -maxdepth 1 -type f \( -iname '*.otf' -o -iname '*.ttf' -o -iname '*.ttc' \) \
+    -exec cp -f {} "$RES/Fonts/" \;
+  echo "→ Fonts: $(ls "$RES/Fonts" 2>/dev/null | wc -l | tr -d ' ') files"
+fi
+# Launch-art rotation pool (one random image per app start).
+if [[ -d "$ICON_SRC_DIR/WelcomeHeroes" ]]; then
+  rm -rf "$RES/WelcomeHeroes"
+  mkdir -p "$RES/WelcomeHeroes"
+  # Only ship real image files (skip .DS_Store / notes).
+  find "$ICON_SRC_DIR/WelcomeHeroes" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) \
+    -exec cp -f {} "$RES/WelcomeHeroes/" \;
+  echo "→ WelcomeHeroes: $(ls "$RES/WelcomeHeroes" | wc -l | tr -d ' ') images"
+fi
 if [[ -d "$ICON_SRC_DIR/Suisei.icon" ]]; then
   rm -rf "$RES/Suisei.icon"
   cp -R "$ICON_SRC_DIR/Suisei.icon" "$RES/Suisei.icon"
@@ -260,13 +288,13 @@ else
   echo "  ⚠︎ agent build failed — menu-bar status will be unavailable"
 fi
 
-# Sign only when binary/dylib changed (slow otherwise)
-if [[ "$need_swift" == "1" || "$need_engine" == "1" || "$need_icon" == "1" ]]; then
-  if command -v codesign >/dev/null; then
-    codesign --force --deep --sign - "$APP" 2>/dev/null || true
-  fi
-  touch "$APP"
+# Info.plist, PkgInfo, resources and helpers are refreshed even on an
+# incremental build. Any one of those writes invalidates the outer bundle
+# signature, so signing cannot be conditional on the main binary/dylib.
+if command -v codesign >/dev/null; then
+  codesign --force --deep --sign - "$APP" 2>/dev/null || true
 fi
+touch "$APP"
 
 echo "→ packaged $APP  (engine=$need_engine swift=$need_swift icon=$need_icon)"
 if [[ "$need_swift" == "1" ]]; then

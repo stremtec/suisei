@@ -3,6 +3,9 @@ import SwiftUI
 
 /// Settings / document window chrome — theme background without killing traffic lights.
 enum WindowChrome {
+    static let editorIdentifier = NSUserInterfaceItemIdentifier("suisei.window.editor")
+    static let settingsIdentifier = NSUserInterfaceItemIdentifier("suisei.window.settings")
+
     static func applyThemedTitlebar(to window: NSWindow, background: NSColor, light: Bool) {
         window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
         window.backgroundColor = background
@@ -36,6 +39,7 @@ enum WindowChrome {
 struct ThemedWindowChrome: NSViewRepresentable {
     var background: NSColor
     var light: Bool
+    var identifier: NSUserInterfaceItemIdentifier? = nil
 
     func makeNSView(context: Context) -> NSView {
         let v = NSView(frame: .zero)
@@ -50,7 +54,36 @@ struct ThemedWindowChrome: NSViewRepresentable {
 
     private func apply(_ nsView: NSView) {
         guard let window = nsView.window else { return }
+        if let identifier {
+            window.identifier = identifier
+        }
         WindowChrome.applyThemedTitlebar(to: window, background: background, light: light)
+    }
+}
+
+/// Tags a SwiftUI window without applying titlebar policy. The editor and
+/// Settings deliberately use different chrome, so title strings and broad
+/// `NSApp.windows` heuristics are not safe window-role identifiers.
+struct WindowIdentityProbe: NSViewRepresentable {
+    var identifier: NSUserInterfaceItemIdentifier
+    var onResolved: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.isHidden = true
+        DispatchQueue.main.async { resolve(view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard nsView.window?.identifier != identifier else { return }
+        DispatchQueue.main.async { resolve(nsView) }
+    }
+
+    private func resolve(_ view: NSView) {
+        guard let window = view.window else { return }
+        window.identifier = identifier
+        onResolved(window)
     }
 }
 

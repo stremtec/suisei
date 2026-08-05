@@ -239,11 +239,7 @@ impl PreviewState {
             return self.anim_from;
         }
         let Some(t0) = self.opened_at else {
-            return if self.open && !self.closing {
-                1.0
-            } else {
-                0.0
-            };
+            return if self.open && !self.closing { 1.0 } else { 0.0 };
         };
         let u = (t0.elapsed().as_millis() as f32 / PREVIEW_ANIM_MS as f32).min(1.0);
         self.anim_from + (self.anim_to - self.anim_from) * u
@@ -256,11 +252,7 @@ impl PreviewState {
             return self.anim_from;
         }
         let Some(t0) = self.opened_at else {
-            return if self.open && !self.closing {
-                1.0
-            } else {
-                0.0
-            };
+            return if self.open && !self.closing { 1.0 } else { 0.0 };
         };
         let u = (t0.elapsed().as_millis() as f32 / PREVIEW_ANIM_MS as f32).min(1.0);
         self.anim_from + (self.anim_to - self.anim_from) * u
@@ -406,7 +398,6 @@ impl PreviewState {
 
 // ── Markdown (GFM-oriented) ─────────────────────────────
 
-
 /// Resolve a markdown image to a drawable local file + row budget.
 fn image_block_for(url: &str, base: Option<&Path>, cell: (u32, u32)) -> Option<ImageBlock> {
     if url.starts_with("http://") || url.starts_with("https://") {
@@ -438,11 +429,7 @@ fn image_block_for(url: &str, base: Option<&Path>, cell: (u32, u32)) -> Option<I
     })
 }
 
-fn render_markdown(
-    text: &str,
-    base: Option<&Path>,
-    cell: (u32, u32),
-) -> Vec<PreviewLine> {
+fn render_markdown(text: &str, base: Option<&Path>, cell: (u32, u32)) -> Vec<PreviewLine> {
     let mut out = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut li = 0;
@@ -488,7 +475,9 @@ fn render_markdown(
         // Fenced code open/close: ``` or ~~~
         if let Some((fence, rest)) = detect_fence(line) {
             if in_code {
-                if fence.starts_with(&code_fence) || code_fence.starts_with(&fence[..fence.len().min(3)]) {
+                if fence.starts_with(&code_fence)
+                    || code_fence.starts_with(&fence[..fence.len().min(3)])
+                {
                     // close if same char and length >= open
                     if fence.chars().next() == code_fence.chars().next()
                         && fence.len() >= code_fence.len()
@@ -497,7 +486,10 @@ fn render_markdown(
                         in_code = false;
                         code_fence.clear();
                         code_lang.clear();
-                        out.push(pl(vec![("└────────────────────────".into(), PreviewStyle::Dim)]));
+                        out.push(pl(vec![(
+                            "└────────────────────────".into(),
+                            PreviewStyle::Dim,
+                        )]));
                         li += 1;
                         continue;
                     }
@@ -600,7 +592,10 @@ fn render_markdown(
             for b in block {
                 out.push(code_body_line(&b));
             }
-            out.push(pl(vec![("└────────────────────────".into(), PreviewStyle::Dim)]));
+            out.push(pl(vec![(
+                "└────────────────────────".into(),
+                PreviewStyle::Dim,
+            )]));
             continue;
         }
 
@@ -729,11 +724,7 @@ fn is_setext_underline(s: &str, ch: char) -> bool {
 }
 
 fn is_hr(line: &str) -> bool {
-    let t: String = line
-        .trim()
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
+    let t: String = line.trim().chars().filter(|c| !c.is_whitespace()).collect();
     if t.len() < 3 {
         return false;
     }
@@ -802,10 +793,16 @@ fn heading_lines(level: usize, title: &str) -> Vec<PreviewLine> {
     let mut out = Vec::new();
     if level == 1 {
         out.push(pl(spans));
-        out.push(pl(vec![("═".repeat(title_display_width(title).max(8).min(56)), PreviewStyle::Hr)]));
+        out.push(pl(vec![(
+            "═".repeat(title_display_width(title).max(8).min(56)),
+            PreviewStyle::Hr,
+        )]));
     } else if level == 2 {
         out.push(pl(spans));
-        out.push(pl(vec![("─".repeat(title_display_width(title).max(6).min(48)), PreviewStyle::Hr)]));
+        out.push(pl(vec![(
+            "─".repeat(title_display_width(title).max(6).min(48)),
+            PreviewStyle::Hr,
+        )]));
     } else {
         // h3+: slight indent by level
         let _ = marker;
@@ -925,10 +922,7 @@ fn render_blockquote(raw_lines: &[&str]) -> Vec<PreviewLine> {
     if let Some(k) = alert {
         let (st, label) = alert_style(k);
         let bar = "┃ ".repeat(depth.max(1));
-        out.push(pl(vec![
-            (bar.clone(), st),
-            (format!("⚠ {label}"), st),
-        ]));
+        out.push(pl(vec![(bar.clone(), st), (format!("⚠ {label}"), st)]));
         for b in bodies.iter().skip(start) {
             if b.trim().is_empty() {
                 out.push(pl(vec![(bar.clone(), st)]));
@@ -1228,14 +1222,10 @@ fn is_table_separator(line: &str) -> bool {
     if t.is_empty() || !t.contains('|') || !t.contains('-') {
         return false;
     }
-    t.split('|')
-        .filter(|s| !s.trim().is_empty())
-        .all(|seg| {
-            let s = seg.trim();
-            !s.is_empty()
-                && s.chars().all(|c| c == '-' || c == ':' || c == ' ')
-                && s.contains('-')
-        })
+    t.split('|').filter(|s| !s.trim().is_empty()).all(|seg| {
+        let s = seg.trim();
+        !s.is_empty() && s.chars().all(|c| c == '-' || c == ':' || c == ' ') && s.contains('-')
+    })
 }
 
 fn parse_table_aligns(sep: &str) -> Vec<ColAlign> {
@@ -1284,7 +1274,10 @@ fn render_table(rows: &[&str], aligns: &[ColAlign]) -> Vec<PreviewLine> {
     }
 
     let is_header = rows.len() >= 2;
-    out.push(pl(vec![(make_table_border(&col_widths, '┌', '┬', '┐'), PreviewStyle::Hr)]));
+    out.push(pl(vec![(
+        make_table_border(&col_widths, '┌', '┬', '┐'),
+        PreviewStyle::Hr,
+    )]));
 
     for (row_i, row) in cells_all.iter().enumerate() {
         let mut spans = vec![("│".into(), PreviewStyle::Hr)];
@@ -1331,7 +1324,10 @@ fn render_table(rows: &[&str], aligns: &[ColAlign]) -> Vec<PreviewLine> {
             )]));
         }
     }
-    out.push(pl(vec![(make_table_border(&col_widths, '└', '┴', '┘'), PreviewStyle::Hr)]));
+    out.push(pl(vec![(
+        make_table_border(&col_widths, '└', '┴', '┘'),
+        PreviewStyle::Hr,
+    )]));
     out
 }
 
@@ -1359,7 +1355,7 @@ fn make_table_border(col_widths: &[usize], left: char, mid: char, right: char) -
 fn split_table_row(line: &str) -> Vec<String> {
     let t = line.trim();
     let inner = t.trim_start_matches('|').trim_end_matches('|');
-    // don't split on \| 
+    // don't split on \|
     let mut cells = Vec::new();
     let mut cur = String::new();
     let chars: Vec<char> = inner.chars().collect();
@@ -1656,7 +1652,12 @@ fn take_code_span(chars: &[char], start: usize, open_n: usize) -> Option<(String
     None
 }
 
-fn take_delimited(chars: &[char], start: usize, open: &str, close: &str) -> Option<(String, usize)> {
+fn take_delimited(
+    chars: &[char],
+    start: usize,
+    open: &str,
+    close: &str,
+) -> Option<(String, usize)> {
     let open_chars: Vec<char> = open.chars().collect();
     let close_chars: Vec<char> = close.chars().collect();
     if open_chars.is_empty() || !chars[start..].starts_with(&open_chars) {
@@ -1861,9 +1862,7 @@ fn take_angle_autolink(chars: &[char], start: usize) -> Option<(String, usize)> 
         return None;
     }
     // must look like url or email
-    let ok = url.contains("://")
-        || url.contains('@')
-        || url.starts_with("www.");
+    let ok = url.contains("://") || url.contains('@') || url.starts_with("www.");
     if !ok {
         return None;
     }
@@ -1892,11 +1891,7 @@ fn take_bare_url(chars: &[char], start: usize) -> Option<(String, usize)> {
         i += 1;
     }
     // strip trailing .,;:!?)]
-    while url
-        .chars()
-        .last()
-        .is_some_and(|c| ".,;:!?)]}".contains(c))
-    {
+    while url.chars().last().is_some_and(|c| ".,;:!?)]}".contains(c)) {
         url.pop();
         i -= 1;
     }
@@ -2155,11 +2150,7 @@ fn pretty_json_heuristic(s: &str) -> String {
         }
         i += 1;
     }
-    if out.is_empty() {
-        s.to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { s.to_string() } else { out }
 }
 
 fn colorize_json_line(line: &str) -> Vec<(String, PreviewStyle)> {
@@ -2191,7 +2182,11 @@ fn json_val_style(v: &str) -> PreviewStyle {
         PreviewStyle::JsonString
     } else if v == "true" || v == "false" || v == "null" {
         PreviewStyle::JsonLit
-    } else if v.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-') {
+    } else if v
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || c == '-')
+    {
         PreviewStyle::JsonNumber
     } else {
         PreviewStyle::Normal
@@ -2219,11 +2214,9 @@ mod tests {
     }
 
     fn has_style(lines: &[PreviewLine], text: &str, style: PreviewStyle) -> bool {
-        lines.iter().any(|l| {
-            l.spans
-                .iter()
-                .any(|(t, s)| t.contains(text) && *s == style)
-        })
+        lines
+            .iter()
+            .any(|l| l.spans.iter().any(|(t, s)| t.contains(text) && *s == style))
     }
 
     #[test]
@@ -2238,10 +2231,12 @@ mod tests {
     fn md_list() {
         let lines = render_markdown_t("- one\n- two\n");
         assert!(lines.len() >= 2);
-        assert!(lines[0]
-            .spans
-            .iter()
-            .any(|(_, s)| *s == PreviewStyle::ListBullet));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|(_, s)| *s == PreviewStyle::ListBullet)
+        );
     }
 
     #[test]
@@ -2267,12 +2262,16 @@ mod tests {
     #[test]
     fn md_inline_underscore_italic_and_bold() {
         let spans = inline_md("say _hi_ and __bye__");
-        assert!(spans
-            .iter()
-            .any(|(t, s)| t == "hi" && *s == PreviewStyle::Italic));
-        assert!(spans
-            .iter()
-            .any(|(t, s)| t == "bye" && *s == PreviewStyle::Bold));
+        assert!(
+            spans
+                .iter()
+                .any(|(t, s)| t == "hi" && *s == PreviewStyle::Italic)
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|(t, s)| t == "bye" && *s == PreviewStyle::Bold)
+        );
         let spans2 = inline_md("snake_case");
         let joined: String = spans2.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(joined, "snake_case");
@@ -2281,9 +2280,11 @@ mod tests {
     #[test]
     fn md_inline_strike_and_unmatched_star() {
         let spans = inline_md("~~gone~~ and lone * star");
-        assert!(spans
-            .iter()
-            .any(|(t, s)| t == "gone" && *s == PreviewStyle::Strike));
+        assert!(
+            spans
+                .iter()
+                .any(|(t, s)| t == "gone" && *s == PreviewStyle::Strike)
+        );
         let joined: String = spans.iter().map(|(t, _)| t.as_str()).collect();
         assert!(joined.contains("lone * star"));
     }
@@ -2291,9 +2292,11 @@ mod tests {
     #[test]
     fn md_code_with_inner_backticks() {
         let spans = inline_md("use `` `x` `` please");
-        assert!(spans
-            .iter()
-            .any(|(t, s)| t.contains("`x`") && *s == PreviewStyle::Code));
+        assert!(
+            spans
+                .iter()
+                .any(|(t, s)| t.contains("`x`") && *s == PreviewStyle::Code)
+        );
     }
 
     #[test]
@@ -2313,15 +2316,21 @@ mod tests {
     fn md_task_list_and_nested() {
         let md = "- [x] done\n- [ ] todo\n  - nested\n";
         let lines = render_markdown_t(md);
-        assert!(has_style(&lines, "done", PreviewStyle::Strike) || has_style(&lines, "☑", PreviewStyle::TaskDone));
+        assert!(
+            has_style(&lines, "done", PreviewStyle::Strike)
+                || has_style(&lines, "☑", PreviewStyle::TaskDone)
+        );
         assert!(lines.iter().any(|l| {
             l.spans
                 .iter()
                 .any(|(t, s)| t.contains("☐") && *s == PreviewStyle::TaskTodo)
         }));
-        assert!(has_style(&lines, "nested", PreviewStyle::Normal) || lines.iter().any(|l| {
-            l.spans.iter().any(|(t, _)| t.contains("nested"))
-        }));
+        assert!(
+            has_style(&lines, "nested", PreviewStyle::Normal)
+                || lines
+                    .iter()
+                    .any(|l| { l.spans.iter().any(|(t, _)| t.contains("nested")) })
+        );
     }
 
     #[test]
@@ -2339,7 +2348,11 @@ mod tests {
     #[test]
     fn md_autolink_image_entity_escape() {
         let spans = inline_md(r#"see https://example.com and ![logo](a.png) &amp; \*star\*"#);
-        assert!(spans.iter().any(|(t, s)| t.contains("example.com") && *s == PreviewStyle::Link));
+        assert!(
+            spans
+                .iter()
+                .any(|(t, s)| t.contains("example.com") && *s == PreviewStyle::Link)
+        );
         assert!(spans.iter().any(|(_, s)| *s == PreviewStyle::Image));
         let joined: String = spans.iter().map(|(t, _)| t.as_str()).collect();
         assert!(joined.contains('&'));
@@ -2351,7 +2364,11 @@ mod tests {
         let md = "Hello[^1]\n\n[^1]: World note\n";
         let lines = render_markdown_t(md);
         assert!(has_style(&lines, "[^1]", PreviewStyle::Footnote));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|(t, _)| t.contains("World"))));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|(t, _)| t.contains("World")))
+        );
     }
 
     #[test]
@@ -2361,16 +2378,25 @@ mod tests {
         assert!(has_style(&lines, "Main", PreviewStyle::H1));
         assert!(has_style(&lines, "Sub", PreviewStyle::H2));
         assert!(has_style(&lines, "tiny", PreviewStyle::H6));
-        assert!(has_style(&lines, "rs", PreviewStyle::CodeLang) || has_style(&lines, "fn x", PreviewStyle::CodeBlock));
+        assert!(
+            has_style(&lines, "rs", PreviewStyle::CodeLang)
+                || has_style(&lines, "fn x", PreviewStyle::CodeBlock)
+        );
     }
 
     #[test]
     fn md_kbd_and_bold_italic() {
         let spans = inline_md("press <kbd>Ctrl</kbd> and ***both***");
-        assert!(spans.iter().any(|(t, s)| t == "Ctrl" && *s == PreviewStyle::Kbd));
-        assert!(spans
-            .iter()
-            .any(|(t, s)| t == "both" && *s == PreviewStyle::BoldItalic));
+        assert!(
+            spans
+                .iter()
+                .any(|(t, s)| t == "Ctrl" && *s == PreviewStyle::Kbd)
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|(t, s)| t == "both" && *s == PreviewStyle::BoldItalic)
+        );
     }
 
     #[test]
@@ -2412,6 +2438,10 @@ mod tests {
         let md = "---\ntitle: x\n---\n# Hi\n";
         let lines = render_markdown_t(md);
         assert!(has_style(&lines, "Hi", PreviewStyle::H1));
-        assert!(!lines.iter().any(|l| l.spans.iter().any(|(t, _)| t.contains("title:"))));
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.spans.iter().any(|(t, _)| t.contains("title:")))
+        );
     }
 }

@@ -1,0 +1,178 @@
+Suisei End User License Agreement (Suisei EULA)
+Version 1.0 — 2026
+
+Copyright (c) 2026 Stremtec and Suisei contributors
+https://github.com/stremtec/suisei
+
+──────────────────────────────────────────────────────────────────
+한국어 요약 (비규범적)
+──────────────────────────────────────────────────────────────────
+
+> 본 요약은 영문 본문의 이해를 돕기 위한 비규범적 요약이다. 요약과
+> 영문 본문이 충돌하는 경우 관련 법령이 허용하는 범위에서 영문 본문이
+> 우선한다. 대한민국 내 소비자 대상 배포 시 한국어 정식본을 별도로
+> 제공하는 것을 원칙으로 한다.
+
+이 EULA는 Suisei의 배포된 실행 바이너리(.app 등)와 그 실행
+파일, 업데이트에 적용된다. 공개된 소스 스냅샷(예: 2026dev —
+Released Version)에는 이 EULA가 아니라 Suisei Source License가
+적용된다.
+
+- 동의: "Agree" 선택, 또는 약관 제시 후 설치·사용 시 이 EULA에
+  동의한 것으로 본다. 동의하지 않으면 설치·사용하지 말 것.
+- Suisei를 개인·비상업적 목적으로 설치·실행할 수 있는 권리를
+  부여한다.
+- 상업적 이용(영리 기업 내부 운영 포함)은 별도 서면 계약이
+  필요하다.
+- 소스 코드에 대한 권리는 제공되지 않는다. 재배포·공개 배포는
+  금지된다.
+- 역공학·디컴파일·디스어셈블은 법령이 강행적으로 허용하는 범위
+  밖에서는 금지된다.
+- 업데이트에 새 약관이 붙는 경우, 그 약관은 설치·사용 전에
+  제시되어 수락될 때만 적용된다.
+- Suisei로 만든 결과물(User Works)의 소유권은 Stremtec이
+  주장하지 않는다. 결과물에 대한 이용자와 제3자의 권리는 이
+  계약의 영향을 받지 않는다.
+- 이 응용 프로그램은 Suisei(https://github.com/stremtec/suisei)의
+  일부이며 오픈소스가 아니다. 별도 고지가 있는 구성 요소는
+  각각의 라이선스를 따른다.
+
+──────────────────────────────────────────────────────────────────
+Terms and Conditions
+──────────────────────────────────────────────────────────────────
+
+1. Acceptance
+
+  By downloading, installing, or using the Software after being
+  presented with this Agreement, or by selecting an "Agree" (or
+  equivalent) control presented to You, You acknowledge that You have
+  read this Agreement and agree to be bound by its terms. If You do
+  not agree, do not install or use the Software. The Licensor may
+  require an explicit acknowledgement at first launch of the
+  Software; where it does, use of the Software before acknowledging
+  this Agreement is not permitted.
+
+2. Definitions
+
+  "Software" means the official binary distribution of the Suisei
+  application provided by the Licensor, including its bundled
+  executable components, resources, and updates, but excluding any
+  components or assets expressly governed by separate licence terms
+  (for example, third-party open-source components and bundled fonts
+  that carry their own notices).
+
+  "Licensor" means Stremtec, or its successor in interest, the entity
+  that distributes the Software under this Agreement.
+
+  "Commercial Use" means use of the Software primarily intended for
+  or directed toward commercial advantage, monetary compensation, or
+  revenue-generating activity, or for the internal operations of a
+  for-profit business, regardless of Your legal form or of whether
+  any fee is charged. Consistent with Section 7 and with the Suisei
+  Source License, works You create or edit using the Software are not
+  themselves the Software, but using the Software to create or edit
+  works for commercial purposes is Commercial Use.
+
+  "You" means the individual accepting this Agreement. This
+  Agreement is offered to individuals only; Section 4 governs the
+  position of businesses, agencies, schools, institutions, and
+  organizations.
+
+  "Organizational Use" means any install or use of the Software by,
+  or for the benefit of, a business, government agency, school or
+  other educational institution, or non-profit organization, or any
+  use of the Software by an individual acting for or on behalf of
+  any of them.
+
+3. License Grant
+
+  Subject to the terms of this Agreement, the Licensor grants You a
+  limited, non-exclusive, non-transferable licence to install and
+  run the Software on your own devices for personal, non-commercial
+  purposes. This licence is terminable only as provided in this
+  Agreement. No right to the Software's source code is granted.
+
+4. Commercial Use and Organizational Use
+
+  Neither Commercial Use nor Organizational Use is covered by this
+  Agreement. Both require the Licensor's prior written permission,
+  which may be subject to a separate agreement and/or a fee. An
+  educational, charitable, or governmental organization seeking
+  non-commercial use should contact the Licensor for a suitable
+  non-commercial organizational licence; none is granted by this
+  Agreement.
+
+──────────────────────────────────────────────────────────────────
+
+5. Restrictions
+
+  You may not:
+    (a) redistribute, publish, sell, rent, lend, sublicense, or
+        otherwise make the Software available to any third party;
+    (b) reverse engineer, decompile, or disassemble the Software,
+        except to the extent such restriction is prohibited, or such
+        conduct is expressly permitted, by applicable law
+        notwithstanding this provision;
+    (c) remove, alter, or obscure any copyright, trademark, or
+        licence notices in or on the Software;
+    (d) use the "Suisei" name, logo, or icon in any way that falsely
+        suggests Your product is the official Suisei application or
+        is endorsed by the Licensor.
+
+6. Updates
+
+  Updates, upgrades, and replacements distributed by the Licensor are
+  part of the Software and subject to this Agreement. Updates may be
+  accompanied by additional or replacement terms. Such terms apply
+  only if You are presented with and accept them before installing
+  or using the applicable update.
+
+7. Third-party components and user works
+
+  Components of the Software that are identified as third-party or
+  open-source remain subject to their own licences, and nothing in
+  this Agreement limits rights granted by those licences. The
+  Licensor claims no ownership of works You create, edit, compile,
+  or build using the Software ("User Works"). Your rights, and the
+  rights of any applicable third parties, in User Works are
+  unaffected by this Agreement.
+
+8. No warranty
+
+  TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE SOFTWARE IS
+  PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+  INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+  Nothing in this Agreement excludes or limits any liability that
+  cannot lawfully be excluded or limited.
+
+9. Limitation of liability
+
+  TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT
+  SHALL THE LICENSOR OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM,
+  DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH
+  THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+  Nothing in this Agreement excludes or limits any liability that
+  cannot lawfully be excluded or limited.
+
+10. Termination
+
+  This Agreement terminates automatically upon Your material breach
+  of its terms, including, without limitation, any breach of Section
+  5 (Restrictions). Upon termination, You must cease all use of the
+  Software and delete all copies in Your possession or control.
+  Sections 2, 8, 9, and 11 survive any termination.
+
+11. Governing law and general provisions
+
+  This Agreement is governed by the laws of the Republic of Korea,
+  without regard to conflicts of law principles. If any provision is
+  held to be unenforceable, the remaining provisions remain in full
+  force. This Agreement is the entire agreement between You and the
+  Licensor with respect to the Software. The Suisei Source License
+  (delayed public source snapshots) and the Suisei Contributor
+  License Agreement (external contributions) are separate contracts
+  with their own terms.

@@ -141,7 +141,13 @@ impl Palette {
                     DiagnosticSeverity::Hint => "H",
                 };
                 PaletteItem {
-                    label: format!("L{}:{}  [{}] {}", d.row + 1, d.col_start + 1, sev, d.message),
+                    label: format!(
+                        "L{}:{}  [{}] {}",
+                        d.row + 1,
+                        d.col_start + 1,
+                        sev,
+                        d.message
+                    ),
                     detail: String::new(),
                     action: PaletteAction::Goto {
                         row: d.row,
@@ -167,6 +173,16 @@ impl Palette {
 
     pub fn pop_char(&mut self) {
         self.query.pop();
+        self.refilter();
+    }
+
+    /// Replace the native GUI field's full value (including committed IME
+    /// text) and update the filtered list in one transaction.
+    pub fn set_query(&mut self, query: String) {
+        if self.query == query {
+            return;
+        }
+        self.query = query;
         self.refilter();
     }
 
@@ -273,7 +289,10 @@ fn fuzzy_score(hay: &str, needle: &str) -> Option<i32> {
     }
     // Where the basename starts — a hit there is worth far more than one
     // buried in a directory component.
-    let base = hay.rfind('/').map(|i| hay[..i].chars().count() + 1).unwrap_or(0);
+    let base = hay
+        .rfind('/')
+        .map(|i| hay[..i].chars().count() + 1)
+        .unwrap_or(0);
 
     let mut score = 0i32;
     let mut hi = 0usize;
@@ -313,38 +332,31 @@ fn fuzzy_score(hay: &str, needle: &str) -> Option<i32> {
 
 fn builtin_commands() -> Vec<PaletteItem> {
     [
-        ("Save file", "w", "save"),
-        ("Save and quit", "wq", "wq"),
-        ("Quit", "q", "quit"),
-        ("Force quit", "q!", "quit!"),
-        ("Toggle explorer", "Ctrl+F", "explorer"),
-        ("Toggle side terminal", "Ctrl+T", "terminal"),
-        ("Pane / full terminal", "Ctrl+Shift+T", "terminal_full"),
-        ("Source Control", "Ctrl+G", "scm"),
-        ("Git workbench", "Ctrl+Shift+G", "git"),
-        ("Settings", "Ctrl+,", "settings"),
-        ("Preview document", "Ctrl+Shift+V", "preview"),
-        ("Command panel (XLC)", ":", "xlc"),
-        ("Next tab", "gt", "tab_next"),
-        ("Previous tab", "gT", "tab_prev"),
-        ("Close tab", ":bd", "tab_close"),
-        ("Theme: ocean", "", "theme:ocean"),
-        ("Theme: monokai", "", "theme:monokai"),
-        ("Theme: nord", "", "theme:nord"),
-        ("Theme: gruvbox", "", "theme:gruvbox"),
-        ("Theme: sakura", "", "theme:sakura"),
-        ("Show problems", "", "problems"),
-        ("Go to definition", "gd", "lsp_def"),
-        ("Peek definition", "gp", "lsp_peek"),
-        ("Format document", "Ctrl+Shift+I", "format"),
-        ("Code actions / Quick fix", "Ctrl+.", "code_action"),
-        ("Document symbols", "gO / Ctrl+Shift+O", "symbols"),
-        ("Workspace symbols", "", "workspace_symbols"),
-        ("Find in files", "Ctrl+Shift+F", "workspace_find"),
-        ("Split vertical", "Ctrl+W v", "split_v"),
-        ("Split horizontal", "Ctrl+W s", "split_h"),
-        ("Find files", "Ctrl+P", "files"),
-        ("Help", ":help", "help"),
+        ("Save", "⌘S", "save"),
+        ("Open File…", "⌘P", "files"),
+        ("Find in Project", "⇧⌘F", "workspace_find"),
+        ("Source Control", "⌃G", "scm"),
+        ("Git Workbench", "⌃⇧G", "git"),
+        ("Settings…", "⌘,", "settings"),
+        ("Preview Document", "⇧⌘V", "preview"),
+        ("Terminal in Editor Pane", "⌃⇧T", "terminal_full"),
+        ("Next Tab", "⌃⇥", "tab_next"),
+        ("Previous Tab", "⌃⇧⇥", "tab_prev"),
+        ("Close Tab", "⌘W", "tab_close"),
+        ("Show Problems", "⇧⌘M", "problems"),
+        ("Go to Definition", "F12", "lsp_def"),
+        ("Peek Definition", "⌥F12", "lsp_peek"),
+        ("Format Document", "⇧⌥F", "format"),
+        ("Code Actions…", "⌘.", "code_action"),
+        ("Document Symbols…", "⇧⌘O", "symbols"),
+        ("Workspace Symbols…", "⌘T", "workspace_symbols"),
+        ("Split Editor Right", "", "split_v"),
+        ("Split Editor Below", "", "split_h"),
+        ("Theme: Ocean", "", "theme:ocean"),
+        ("Theme: Monokai", "", "theme:monokai"),
+        ("Theme: Nord", "", "theme:nord"),
+        ("Theme: Gruvbox", "", "theme:gruvbox"),
+        ("Theme: Sakura", "", "theme:sakura"),
     ]
     .into_iter()
     .map(|(label, detail, id)| PaletteItem {
@@ -379,7 +391,13 @@ fn collect_files(root: &Path, max: usize) -> Vec<PaletteItem> {
                 continue;
             }
             if path.is_dir() {
-                if skip.iter().any(|s| *s == name) {
+                // macOS bundles are directories at the filesystem layer but
+                // single artifacts in an editor. Descending into a built .app
+                // filled Go to File with signatures, binaries and resources.
+                let is_bundle = path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("app"));
+                if skip.iter().any(|s| *s == name) || is_bundle {
                     continue;
                 }
                 stack.push(path);
@@ -418,6 +436,61 @@ mod tests {
         p.refilter();
         assert!(!p.filtered.is_empty());
     }
+
+    #[test]
+    fn file_palette_treats_app_bundles_as_single_artifacts() {
+        let root =
+            std::env::temp_dir().join(format!("suisei_palette_bundle_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Demo.app/Contents/MacOS")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("Demo.app/Contents/MacOS/Demo"), "binary").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let labels: Vec<String> = collect_files(&root, 400)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert_eq!(labels, vec!["src/main.rs"]);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_query_replaces_the_full_composed_value() {
+        let mut p = Palette::new();
+        p.open_commands();
+        p.items.push(PaletteItem {
+            label: "한글 명령".into(),
+            detail: String::new(),
+            action: PaletteAction::Command("noop"),
+        });
+        p.set_query("한글".into());
+
+        assert_eq!(p.query, "한글");
+        assert_eq!(p.filtered.len(), 1);
+        assert_eq!(p.items[p.filtered[0]].label, "한글 명령");
+    }
+
+    #[test]
+    fn command_palette_exposes_mac_commands_not_quit_or_vim_commands() {
+        let mut p = Palette::new();
+        p.open_commands();
+        let labels: Vec<_> = p.items.iter().map(|item| item.label.as_str()).collect();
+        let details: Vec<_> = p.items.iter().map(|item| item.detail.as_str()).collect();
+
+        assert!(labels.contains(&"Save"));
+        assert!(details.contains(&"⌘S"));
+        for legacy in ["Save and quit", "Quit", "Force quit", "Command panel (XLC)"] {
+            assert!(!labels.contains(&legacy), "legacy command leaked: {legacy}");
+        }
+        for legacy in ["w", "wq", "q", "q!", ":bd", "gt", "gT"] {
+            assert!(
+                !details.contains(&legacy),
+                "legacy shortcut leaked: {legacy}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -437,7 +510,10 @@ mod fuzzy_tests {
         p.items = files.iter().map(|f| item(f)).collect();
         p.query = query.into();
         p.refilter();
-        p.filtered.iter().map(|&i| p.items[i].label.clone()).collect()
+        p.filtered
+            .iter()
+            .map(|&i| p.items[i].label.clone())
+            .collect()
     }
 
     /// The bug this replaces: an unranked subsequence test left the wanted file
@@ -453,7 +529,10 @@ mod fuzzy_tests {
             ],
             "gui_edit",
         );
-        assert_eq!(out.first().map(String::as_str), Some("suisei-core/src/gui_edit.rs"));
+        assert_eq!(
+            out.first().map(String::as_str),
+            Some("suisei-core/src/gui_edit.rs")
+        );
     }
 
     #[test]

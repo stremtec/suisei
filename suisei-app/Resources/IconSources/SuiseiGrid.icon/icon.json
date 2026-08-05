@@ -1,0 +1,98 @@
+{
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.04314,0.04314,0.04706,1.00000",
+          "srgb:0.14118,0.14118,0.15294,1.00000"
+        ],
+        "orientation" : {
+          "start" : { "x" : 0.12, "y" : 0.08 },
+          "stop" : { "x" : 0.88, "y" : 0.92 }
+        }
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.00000,0.00000,0.00000,1.00000",
+          "srgb:0.05490,0.05490,0.05882,1.00000"
+        ],
+        "orientation" : {
+          "start" : { "x" : 0.12, "y" : 0.08 },
+          "stop" : { "x" : 0.88, "y" : 0.92 }
+        }
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            { "value" : { "solid" : "srgb:0.93333,0.93333,0.91765,1.00000" } },
+            { "appearance" : "dark", "value" : { "solid" : "srgb:1.00000,1.00000,0.97647,1.00000" } }
+          ],
+          "image-name" : "suisei-grid-vertical.svg",
+          "name" : "Vertical Rhythm"
+        },
+        {
+          "fill-specializations" : [
+            { "value" : { "solid" : "srgb:0.07843,0.07843,0.08627,1.00000" } },
+            { "appearance" : "dark", "value" : { "solid" : "srgb:0.01569,0.01569,0.01961,1.00000" } }
+          ],
+          "image-name" : "suisei-grid-horizontal.svg",
+          "name" : "Horizontal Rhythm"
+        },
+        {
+          "fill-specializations" : [
+            { "value" : { "solid" : "srgb:0.03137,0.03137,0.03529,1.00000" } },
+            { "appearance" : "dark", "value" : { "solid" : "srgb:0.00000,0.00000,0.00000,1.00000" } }
+          ],
+          "image-name" : "suisei-grid-aperture.svg",
+          "name" : "Editor Aperture"
+        },
+        {
+          "fill-specializations" : [
+            { "value" : { "solid" : "srgb:0.76078,0.76078,0.74118,1.00000" } },
+            { "appearance" : "dark", "value" : { "solid" : "srgb:0.84706,0.84706,0.82745,1.00000" } }
+          ],
+          "image-name" : "suisei-grid-top-left.svg",
+          "name" : "Light Facet"
+        },
+        {
+          "fill-specializations" : [
+            { "value" : { "solid" : "srgb:0.45882,0.45882,0.46667,1.00000" } },
+            { "appearance" : "dark", "value" : { "solid" : "srgb:0.56078,0.56078,0.56863,1.00000" } }
+          ],
+          "image-name" : "suisei-grid-top-right.svg",
+          "name" : "Mid Facet"
+        },
+        {
+          "fill-specializations" : [
+            { "value" : { "solid" : "srgb:0.70196,0.70196,0.68627,1.00000" } },
+            { "appearance" : "dark", "value" : { "solid" : "srgb:0.76078,0.76078,0.74510,1.00000" } }
+          ],
+          "image-name" : "suisei-grid-left-face.svg",
+          "name" : "Left Plane"
+        },
+        {
+          "fill-specializations" : [
+            { "value" : { "solid" : "srgb:0.20784,0.20784,0.21961,1.00000" } },
+            { "appearance" : "dark", "value" : { "solid" : "srgb:0.25882,0.25882,0.27059,1.00000" } }
+          ],
+          "image-name" : "suisei-grid-right-face.svg",
+          "name" : "Right Plane"
+        }
+      ],
+      "name" : "Suisei Grid",
+      "shadow" : { "kind" : "neutral", "opacity" : 0.48 },
+      "translucency" : { "enabled" : true, "value" : 0.08 }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [ "watchOS" ],
+    "squares" : "shared"
+  }
+}

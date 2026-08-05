@@ -102,10 +102,7 @@ fn per_keystroke_syntax_cost() {
             measure_typing(lines, 40, false),
         );
     }
-    report(
-        "3000 lines · append at end",
-        measure_typing(3000, 40, true),
-    );
+    report("3000 lines · append at end", measure_typing(3000, 40, true));
     println!();
     println!("--- as the engine actually calls it: viewport window + 400 overscan ---");
     for lines in [3000usize, 6000, 20000] {

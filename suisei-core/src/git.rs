@@ -95,11 +95,7 @@ impl GitBlame {
             return self.anim_from;
         }
         let Some(t0) = self.opened_at else {
-            return if self.open && !self.closing {
-                1.0
-            } else {
-                0.0
-            };
+            return if self.open && !self.closing { 1.0 } else { 0.0 };
         };
         let u = (t0.elapsed().as_millis() as f32 / BLAME_ANIM_MS as f32).min(1.0);
         self.anim_from + (self.anim_to - self.anim_from) * u
@@ -233,14 +229,14 @@ pub fn compute_blame(path: &str) -> (bool, HashMap<usize, BlameLine>) {
 pub fn flame_color_for(key: &str) -> (u8, u8, u8) {
     // Warm fire: deep red → orange → gold → ember
     const FLAME: &[(u8, u8, u8)] = &[
-        (255, 48, 20),   // core red
-        (255, 90, 25),   // orange-red
-        (255, 130, 30),  // orange
-        (255, 170, 40),  // amber
-        (255, 200, 55),  // gold
-        (255, 110, 45),  // ember
-        (255, 70, 35),   // flame edge
-        (255, 150, 60),  // bright orange
+        (255, 48, 20),  // core red
+        (255, 90, 25),  // orange-red
+        (255, 130, 30), // orange
+        (255, 170, 40), // amber
+        (255, 200, 55), // gold
+        (255, 110, 45), // ember
+        (255, 70, 35),  // flame edge
+        (255, 150, 60), // bright orange
     ];
     let h = key
         .bytes()
@@ -262,7 +258,12 @@ pub fn parse_blame_porcelain(text: &str, out: &mut HashMap<usize, BlameLine>) {
     let mut line_no: Option<usize> = None; // 0-based final line
 
     for line in text.lines() {
-        if line.len() >= 40 && line.as_bytes().get(0).is_some_and(|b| b.is_ascii_hexdigit()) {
+        if line.len() >= 40
+            && line
+                .as_bytes()
+                .get(0)
+                .is_some_and(|b| b.is_ascii_hexdigit())
+        {
             // header: hash orig final [group]
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 {
@@ -304,7 +305,6 @@ pub fn parse_blame_porcelain(text: &str, out: &mut HashMap<usize, BlameLine>) {
         }
     }
 }
-
 
 /// Blocking gutter computation (runs on a background thread).
 pub fn compute_gutter(path: &str) -> (bool, HashMap<usize, GitSign>) {
@@ -372,7 +372,11 @@ impl GitGutter {
 
 /// Format blame for a narrow gutter: `ab  a1b2c3d`
 pub fn format_blame_gutter(b: &BlameLine, width: usize) -> String {
-    let s = format!("{:<8} {}", b.author.chars().take(8).collect::<String>(), b.hash);
+    let s = format!(
+        "{:<8} {}",
+        b.author.chars().take(8).collect::<String>(),
+        b.hash
+    );
     s.chars().take(width).collect()
 }
 
@@ -431,7 +435,8 @@ pub fn parse_diff_hunks(diff: &str, signs: &mut HashMap<usize, GitSign>) {
                 }
             }
             if o > n {
-                signs.entry(base.saturating_add(n.saturating_sub(1)).max(0))
+                signs
+                    .entry(base.saturating_add(n.saturating_sub(1)).max(0))
                     .or_insert(GitSign::Deleted);
             }
         }

@@ -59,6 +59,12 @@ struct SuiseiApp: App {
         .windowResizability(.contentMinSize)
         // Don't open an empty editor until the user leaves Welcome.
         .defaultLaunchBehavior(.suppressed)
+        // No window restoration: the app has no document-session restore yet
+        // (core `restore_session` is unwired), so SwiftUI would bring back
+        // EMPTY untitled shells — and stack them launch over launch (two
+        // editors on open, the traffic-light placement race lost in the
+        // multi-window chaos). Welcome is disabled for the same reason.
+        .restorationBehavior(.disabled)
         .commands {
             suiseiCommands
         }
@@ -109,8 +115,9 @@ struct SuiseiApp: App {
             Toggle("Minimap", isOn: minimapBinding)
         }
 
-        // View — chrome panels (roles, not ad-hoc chords only).
-        CommandMenu("View") {
+        // Workspace destinations. Keep this distinct from macOS' built-in
+        // View menu so the menu bar never contains two adjacent “View” items.
+        CommandMenu("Workspace") {
             Button("File Explorer") {
                 NotificationCenter.default.post(name: .suiseiNavProject, object: nil)
                 engine.animatingPanels { engine.uiNavVisible = true }
@@ -211,18 +218,34 @@ struct SuiseiApp: App {
             Button("Split Editor Right") {
                 engine.splitEditorRight()
             }
+            .disabled(engine.editorSplit.panes.count >= 4)
 
             Button("Split Editor Below") {
                 engine.splitEditorBelow()
             }
+            .disabled(engine.editorSplit.panes.count >= 4)
 
             Button("Focus Next Pane") {
                 engine.focusNextPane()
             }
+            .disabled(!engine.editorSplit.isSplit)
 
             Button("Close Focused Pane") {
                 engine.closeFocusedPane()
             }
+            .disabled(!engine.editorSplit.isSplit)
+
+            Divider()
+
+            Button("Save Split as Layout Tab") {
+                engine.foldLayout()
+            }
+            .disabled(!engine.editorSplit.isSplit || engine.hasActiveLayout)
+
+            Button("Unfold Active Layout") {
+                engine.unfoldLayout()
+            }
+            .disabled(!engine.hasActiveLayout)
 
             Divider()
 
@@ -295,26 +318,20 @@ struct SuiseiApp: App {
         }
 
         CommandGroup(replacing: .undoRedo) {
-            Button("Undo") { engine.undo() }
+            Button("Undo") { engine.undoCommand() }
                 .keyboardShortcut("z", modifiers: .command)
-            Button("Redo") { engine.redo() }
+            Button("Redo") { engine.redoCommand() }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
         }
 
         CommandGroup(replacing: .pasteboard) {
-            Button("Cut") {
-                engine.dispatch(code: .char_, ch: UInt32(UnicodeScalar("x").value), mods: .superKey)
-            }
+            Button("Cut") { engine.cutCommand() }
             .keyboardShortcut("x", modifiers: .command)
-            Button("Copy") {
-                engine.dispatch(code: .char_, ch: UInt32(UnicodeScalar("c").value), mods: .superKey)
-            }
+            Button("Copy") { engine.copyCommand() }
             .keyboardShortcut("c", modifiers: .command)
-            Button("Paste") {
-                engine.dispatch(code: .char_, ch: UInt32(UnicodeScalar("v").value), mods: .superKey)
-            }
+            Button("Paste") { engine.pasteCommand() }
             .keyboardShortcut("v", modifiers: .command)
-            Button("Select All") { engine.selectAll() }
+            Button("Select All") { engine.selectAllCommand() }
                 .keyboardShortcut("a", modifiers: .command)
         }
 
@@ -392,7 +409,16 @@ private struct WelcomeSceneRoot: View {
                     }
                 }
             },
-            recents: recents
+            recents: recents,
+            // Launch warmup sequence (app-boot tier). Grammar warming is real
+            // now — the rest of the pipeline (project index, LSP, git) attaches
+            // at project-open per docs/SUISEI-EDIT-ARCHITECTURE.md §3. Engine
+            // calls hop to the main actor so they serialise with the tick.
+            bootStages: [
+                BootStage(label: "Preparing editor") { Boot.warmEditorGlyphs() },
+                BootStage(label: "Loading grammars") { await MainActor.run { engine.warmGrammars() } },
+                BootStage(label: "Restoring session") { Boot.primeRecents() },
+            ]
         )
         .frame(
             width: WelcomeView.windowSize.width,
@@ -422,6 +448,9 @@ private struct WelcomeSceneRoot: View {
                 promoteToEditor()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .suiseiRecoveryAccepted)) { _ in
+            promoteToEditor()
+        }
         // ── Shadow WAL recovery sheet ──────────────────────────────────
         // Presented when the engine found unsaved work from a previous crash.
         // Each row shows the file path; Accept opens it with the recovered
@@ -438,7 +467,15 @@ private struct WelcomeSceneRoot: View {
     }
 
     private func promoteToEditor() {
-        openWindow(id: "editor")
+        // Idempotent: the welcome→false flip can arrive more than once (an
+        // editor opened early seeds the project, which ends welcome, which
+        // fires this again), and each arrival used to open ANOTHER editor.
+        let editorExists = NSApp.windows.contains {
+            $0.identifier?.rawValue.hasPrefix("editor") ?? false
+        }
+        if !editorExists {
+            openWindow(id: "editor")
+        }
         dismissWindow(id: "welcome")
         DispatchQueue.main.async {
             SuiseiWindowLayout.apply(welcome: false, animate: true)
@@ -471,6 +508,12 @@ extension Notification.Name {
     static let suiseiNavFind = Notification.Name("suisei.nav.find")
     static let suiseiNavBreakpoints = Notification.Name("suisei.nav.breakpoints")
     static let suiseiNewUntitledTab = Notification.Name("suisei.newUntitledTab")
+    /// Navigator title-row commands, executed inside `ProjectTreeView`
+    /// (that is where the tree state — expansion, inline rename — lives).
+    static let suiseiNavNewFile = Notification.Name("suisei.nav.newFile")
+    static let suiseiNavNewFolder = Notification.Name("suisei.nav.newFolder")
+    static let suiseiNavCollapseAll = Notification.Name("suisei.nav.collapseAll")
+    static let suiseiRecoveryAccepted = Notification.Name("suisei.recoveryAccepted")
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {

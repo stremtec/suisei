@@ -84,9 +84,7 @@ impl UpdateState {
                             return Some(self.start_install());
                         }
                         let v = self.latest.as_deref().unwrap_or_default();
-                        return Some(format!(
-                            "⬆ xei v{v} available — :update to install"
-                        ));
+                        return Some(format!("⬆ xei v{v} available — :update to install"));
                     } else if auto {
                         return Some("Already up to date".into());
                     }
@@ -249,9 +247,8 @@ fn release_triple() -> Option<&'static str> {
 
 /// Download + gunzip + atomic rename over the running executable.
 fn install_binary(latest: &str, triple: &str, exe: PathBuf) -> Result<String, String> {
-    let url = format!(
-        "https://github.com/stremtec/xei/releases/download/v{latest}/xei-{triple}.gz"
-    );
+    let url =
+        format!("https://github.com/stremtec/xei/releases/download/v{latest}/xei-{triple}.gz");
     let tmp = exe.with_extension(format!("update-{latest}"));
     let tmp_s = tmp.display().to_string();
     let exe_s = exe.display().to_string();

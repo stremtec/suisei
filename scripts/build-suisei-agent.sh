@@ -14,6 +14,7 @@ RES="$APP/Contents/Resources"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 SDKROOT="${SDKROOT:-$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk}"
 MACOS_TARGET="${MACOS_TARGET:-arm64-apple-macos26.0}"
+MACOS_MIN="${MACOS_TARGET##*macos}"
 OPT="${SUISEI_OPT:--O}"
 [[ "${SUISEI_FAST:-0}" == "1" ]] && OPT="-Onone"
 
@@ -28,6 +29,9 @@ swiftc "$OPT" \
   "$AGENT"/Sources/*.swift
 
 cp -f "$AGENT/Info.plist" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy \
+  -c "Set :LSMinimumSystemVersion $MACOS_MIN" \
+  "$APP/Contents/Info.plist"
 cp -f "$AGENT/Resources/StatusIcon.png" "$RES/StatusIcon.png"
 
 # Ad-hoc sign so macOS lets it launch without a developer identity.

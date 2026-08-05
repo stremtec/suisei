@@ -1,65 +1,45 @@
 {
-  "fill-specializations" : [
-    {
-      "value" : {
-        "linear-gradient" : [
-          "srgb:1.00000,1.00000,1.00000,1.00000",
-          "srgb:0.00000,0.00000,0.00000,1.00000"
-        ],
-        "orientation" : {
-          "start" : {
-            "x" : 0.5,
-            "y" : 1
-          },
-          "stop" : {
-            "x" : 0.5,
-            "y" : 0.3
-          }
-        }
-      }
-    },
-    {
-      "appearance" : "dark",
-      "value" : {
-        "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+  "fill" : {
+    "linear-gradient" : [
+      "srgb:0.97255,0.98039,0.99608,1.00000",
+      "srgb:0.85882,0.89020,0.94902,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
       }
     }
-  ],
+  },
   "groups" : [
     {
       "layers" : [
         {
-          "blend-mode" : "hard-light",
-          "fill" : {
-            "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
-          },
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
+              }
+            }
+          ],
           "glass" : false,
-          "hidden" : false,
-          "image-name" : "stars-only-1024.png",
-          "name" : "stars-only-1024",
-          "opacity" : 0.33,
+          "image-name" : "제목을 입력해주세요. (12).png",
+          "name" : "제목을 입력해주세요. (12)",
           "position" : {
-            "scale" : 1.58,
+            "scale" : 0.22,
             "translation-in-points" : [
-              -249,
-              81
-            ]
-          }
-        },
-        {
-          "fill" : {
-            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-          },
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (13).png",
-          "name" : "제목을 입력해주세요. (13)",
-          "opacity" : 0.69,
-          "position" : {
-            "scale" : 0.5,
-            "translation-in-points" : [
-              -116.8404517560532,
-              324.2947207419817
+              -235.22125,
+              111.03694341734877
             ]
           }
         },
@@ -68,40 +48,29 @@
             "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
           },
           "glass" : false,
-          "hidden" : false,
-          "image-name" : "제목을 입력해주세요. (13).png",
-          "name" : "제목을 입력해주세요. (13)",
-          "opacity" : 1,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
           "position" : {
-            "scale" : 0.5,
+            "scale" : 0.57,
             "translation-in-points" : [
-              -32.23362274009918,
-              -218.6393782289182
+              -42.75,
+              -136.71710903672874
             ]
           }
         },
         {
           "fill" : {
-            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid" : "srgb:0.96863,0.97647,1.00000,1.00000"
           },
-          "glass" : false,
           "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (13).png",
-          "name" : "제목을 입력해주세요. (13)",
-          "opacity" : 1,
-          "position" : {
-            "scale" : 0.5,
-            "translation-in-points" : [
-              -18.23362274009918,
-              -229.4516127995156
-            ]
-          }
+          "image-name" : "suisei-pane-knot-core.svg",
+          "name" : "suisei-pane-knot-core"
         },
         {
           "fill-specializations" : [
             {
               "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+                "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
               }
             },
             {
@@ -111,285 +80,25 @@
               }
             }
           ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -81.23362274009918,
-              485.8205377821117
-            ]
-          }
-        },
-        {
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -80.23362274009918,
-              542.7572964637617
-            ]
-          }
-        },
-        {
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -123.60538851371945,
-              542.7572964637617
-            ]
-          }
-        },
-        {
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -179.84045175605314,
-              542.7572964637617
-            ]
-          }
-        },
-        {
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -415.9314838934457,
-              431.09509755084673
-            ]
-          }
-        },
-        {
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -415.9314838934457,
-              431.09509755084673
-            ]
-          }
-        },
-        {
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -395,
-              484.4178047660363
-            ]
-          }
-        },
-        {
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -352.3404517560531,
-              526.0616537578516
-            ]
-          }
-        },
-        {
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -382.8559194081905,
-              526.0616537578516
-            ]
-          }
-        },
-        {
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "glass" : false,
-          "hidden" : true,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.78,
-            "translation-in-points" : [
-              -352.3404517560531,
-              484.4178047660363
-            ]
-          }
+          "image-name" : "suisei-pane-knot-left.svg",
+          "name" : "suisei-pane-knot-left"
         },
         {
           "fill" : {
-            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+            "solid" : "srgb:0.20392,0.33333,0.92941,1.00000"
           },
-          "glass" : false,
-          "hidden" : false,
-          "image-name" : "제목을 입력해주세요. (11).png",
-          "name" : "제목을 입력해주세요. (11)",
-          "position" : {
-            "scale" : 0.58,
-            "translation-in-points" : [
-              -249.5,
-              -207.25161279951556
-            ]
-          }
+          "image-name" : "suisei-pane-knot-right.svg",
+          "name" : "suisei-pane-knot-right"
         },
         {
-          "blend-mode" : "overlay",
-          "fill" : "none",
-          "glass" : false,
-          "hidden" : false,
-          "image-name" : "blackhole-silhouette-1024 (1).png",
-          "name" : "blackhole-silhouette-1024 (1)",
-          "opacity" : 1,
-          "position" : {
-            "scale" : 2.28,
-            "translation-in-points" : [
-              572.7547858050675,
-              439.39999999999986
-            ]
-          }
+          "fill" : {
+            "solid" : "srgb:0.01680,0.19835,1.00000,1.00000"
+          },
+          "image-name" : "suisei-pane-knot-back.svg",
+          "name" : "suisei-pane-knot-back"
         }
       ],
+      "name" : "Pane Knot",
       "shadow" : {
         "kind" : "neutral",
         "opacity" : 0.5

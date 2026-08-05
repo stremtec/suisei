@@ -24,7 +24,7 @@ streaming-iterator = "0.1"
 serde_json = "1"
 unicode-segmentation = "1"
 
-# NOTE: the VSCode-compatible extension host (`extensions` feature → xei-ext-host)
-# was dropped when Suisei split from the xei workspace. All call sites remain
-# behind `#[cfg(feature = "extensions")]` and never compile in this build. To
-# revive it, vendor the ext-host crate into this repo and re-add the feature.
+# NOTE: the VSCode-compatible extension host (xei-ext-host) was REMOVED when
+# Suisei split from the xei workspace. `:exttest` / `:extapi` / `:plugins`
+# survive as stubs that report the removal. To revive: vendor the ext-host
+# crate and restore the deleted call sites from git history.

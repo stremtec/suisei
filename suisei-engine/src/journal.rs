@@ -158,8 +158,8 @@ impl Journal {
         }
 
         let elapsed = self.last_flush.elapsed().as_millis();
-        let should_flush = elapsed >= FLUSH_INTERVAL_MS
-            || self.pending_bytes >= FLUSH_SIZE_THRESHOLD;
+        let should_flush =
+            elapsed >= FLUSH_INTERVAL_MS || self.pending_bytes >= FLUSH_SIZE_THRESHOLD;
 
         if !should_flush {
             return;
@@ -236,7 +236,9 @@ impl Journal {
     /// Scan the WAL directory for valid recovery entries.
     fn scan_recovery(wal_dir: &Path) -> Vec<RecoveryEntry> {
         let mut entries = Vec::new();
-        let Ok(dir) = fs::read_dir(wal_dir) else { return entries };
+        let Ok(dir) = fs::read_dir(wal_dir) else {
+            return entries;
+        };
         for item in dir.flatten() {
             let path = item.path();
             if path.extension().map(|e| e == "wal").unwrap_or(false) {

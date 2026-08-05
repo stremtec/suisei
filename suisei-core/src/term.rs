@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use unicode_width::UnicodeWidthChar;
 
 pub struct Terminal {
@@ -29,8 +29,18 @@ pub struct Terminal {
     cols: u16,
     rows_count: u16,
     scroll_offset: usize,
-    /// Inner app enabled mouse reporting (CSI ?1000/1002/1003 h).
-    mouse_reporting: bool,
+    /// DECSTBM scroll region, inclusive 0-based rows. Full grid when
+    /// `top == 0 && bottom == rows - 1`; tmux/screen/vim set it constantly —
+    /// ignoring it smeared their partial-screen redraws across the grid.
+    scroll_top: usize,
+    scroll_bottom: usize,
+    /// Mouse tracking the inner app requested: 0 = off, 1 = press/release
+    /// (?1000), 2 = + button-motion (?1002), 3 = any motion (?1003). Without
+    /// this the face's mouse events never reach vim/htop/tmux.
+    mouse_mode: u8,
+    /// SGR extended mouse coordinates (?1006) — the only encoding that
+    /// survives columns past 223; modern apps enable it alongside tracking.
+    mouse_sgr: bool,
     /// DECCKM — application cursor keys (arrows as ESC O A..D).
     app_cursor_keys: bool,
     /// Child enabled bracketed paste (DECSET 2004) — wrap forwarded pastes.
@@ -50,6 +60,10 @@ pub struct Terminal {
     pub started: bool,
     /// Full/pane terminal: Esc asked once — wait for y/n before closing.
     pub close_confirm: bool,
+    /// Window title the shell reported last (OSC 0/2) — surfaced as the
+    /// terminal tab's title so `make`, `vim file`, an ssh session each name
+    /// their own tab instead of every shell reading "Terminal".
+    pub title: Option<String>,
 }
 
 struct SavedScreen {
@@ -64,6 +78,10 @@ struct Cell {
     ch: char,
     fg: Option<Color>,
     bg: Option<Color>,
+    /// SGR 1 at write time. Kept on the cell (not just parser state) so the
+    /// SGR re-encoding can transmit it — `ls --color` and git diffs used to
+    /// arrive flat because bold died with the parser run.
+    bold: bool,
 }
 
 impl Cell {
@@ -72,6 +90,7 @@ impl Cell {
             ch: ' ',
             fg: None,
             bg: None,
+            bold: false,
         }
     }
 }
@@ -149,7 +168,10 @@ impl Default for Terminal {
             cols,
             rows_count: rows,
             scroll_offset: 0,
-            mouse_reporting: false,
+            scroll_top: 0,
+            scroll_bottom: rows as usize - 1,
+            mouse_mode: 0,
+            mouse_sgr: false,
             app_cursor_keys: false,
             bracketed_paste: false,
             master: None,
@@ -164,7 +186,25 @@ impl Default for Terminal {
             pending: Vec::new(),
             started: false,
             close_confirm: false,
+            title: None,
         }
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        // No orphaned PTYs: a dropped terminal kills its shell and reaps it.
+        // Closing the master SIGHUPs the slave's session, but an explicit
+        // kill covers hup-ignoring shells and reaps promptly — owners that
+        // never call `shutdown` (a replaced session, a dropped state) must
+        // not leak processes.
+        self.writer = None;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.master = None;
+        self.rx = None;
     }
 }
 
@@ -185,8 +225,8 @@ impl Terminal {
         let cols = cols.max(2);
         let rows = rows.max(2);
         if cols == self.cols && rows == self.rows_count {
-            // Still push size to PTY in case we started before first paint
-            // already matched — no-op when equal.
+            // The PTY already has this size (openpty spawned with it, or an
+            // earlier resize pushed it) — nothing to do.
             return;
         }
         self.resize_grid(cols, rows);
@@ -230,6 +270,9 @@ impl Terminal {
         self.rows_count = rows;
         self.cursor_row = self.cursor_row.min(rows as usize - 1);
         self.cursor_col = self.cursor_col.min(cols as usize - 1);
+        // Margins reference the old grid — back to the full grid.
+        self.scroll_top = 0;
+        self.scroll_bottom = rows as usize - 1;
     }
 
     /// Open a real PTY and spawn the user shell at the current grid size.
@@ -317,13 +360,17 @@ impl Terminal {
         self.cursor_col = 0;
         self.scrollback.clear();
         self.scroll_offset = 0;
-        self.mouse_reporting = false;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows_count as usize - 1;
+        self.mouse_mode = 0;
+        self.mouse_sgr = false;
         self.app_cursor_keys = false;
         self.bracketed_paste = false;
         self.fg = Color::Default;
         self.bg = Color::Default;
         self.bold = false;
         self.reverse = false;
+        self.title = None;
     }
 
     pub fn shutdown(&mut self) {
@@ -346,18 +393,28 @@ impl Terminal {
         self.cursor_col = 0;
         self.scrollback.clear();
         self.scroll_offset = 0;
-        self.mouse_reporting = false;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows_count as usize - 1;
+        self.mouse_mode = 0;
+        self.mouse_sgr = false;
         self.app_cursor_keys = false;
         self.bracketed_paste = false;
         self.fg = Color::Default;
         self.bg = Color::Default;
         self.bold = false;
         self.reverse = false;
+        self.title = None;
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) {
         // Typing snaps the view back to the live prompt.
         self.scroll_offset = 0;
+        self.write_raw(bytes);
+    }
+
+    /// Write to the child without touching view state. Terminal-initiated
+    /// replies (CPR, DA1) must not snap a scrolled-back view to the prompt.
+    fn write_raw(&mut self, bytes: &[u8]) {
         if let Some(ref mut w) = self.writer {
             let _ = w.write_all(bytes);
             let _ = w.flush();
@@ -384,11 +441,21 @@ impl Terminal {
     }
 
     pub fn poll(&mut self) {
+        // One tick's parsing budget. A flood (`yes | head -100000`) used to
+        // drain and parse every queued chunk in one go, stalling the face's
+        // main-thread timer for tens of ms; the rest now stays queued and the
+        // damage flag keeps the next tick draining.
+        const MAX_BYTES_PER_POLL: usize = 256 * 1024;
         let data = if let Some(ref rx) = self.rx {
             let mut all = Vec::new();
             loop {
                 match rx.try_recv() {
-                    Ok(part) => all.extend_from_slice(&part),
+                    Ok(part) => {
+                        all.extend_from_slice(&part);
+                        if all.len() >= MAX_BYTES_PER_POLL {
+                            break;
+                        }
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break,
                 }
@@ -465,7 +532,23 @@ impl Terminal {
                     self.cursor_col = self.saved_cursor.1.min(self.cols as usize - 1);
                     return Consume::Advanced(i + 2);
                 }
-                b'=' | b'>' | b'c' | b'M' | b'E' | b'D' | b'H' | b'Z' => {
+                b'=' | b'>' | b'c' | b'H' | b'Z' => {
+                    return Consume::Advanced(i + 2);
+                }
+                b'D' => {
+                    // IND — index: down one, scrolling at the bottom margin.
+                    self.index_down();
+                    return Consume::Advanced(i + 2);
+                }
+                b'E' => {
+                    // NEL — next line: index + carriage return.
+                    self.index_down();
+                    self.cursor_col = 0;
+                    return Consume::Advanced(i + 2);
+                }
+                b'M' => {
+                    // RI — reverse index: up one, scrolling at the top margin.
+                    self.reverse_index();
                     return Consume::Advanced(i + 2);
                 }
                 _ if n >= 0x20 && n < 0x7f => return Consume::Advanced(i + 2),
@@ -561,21 +644,42 @@ impl Terminal {
     fn consume_osc(&mut self, data: &[u8], start: usize) -> Consume {
         let mut i = start;
         while i < data.len() {
-            if data[i] == 0x07 {
-                return Consume::Advanced(i + 1);
+            // OSC ends at BEL or ST (ESC \).
+            let bel = data[i] == 0x07;
+            let st = data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'\\';
+            if bel || st {
+                self.apply_osc(&data[start..i]);
+                return Consume::Advanced(if bel { i + 1 } else { i + 2 });
             }
             if data[i] == 0x1b {
                 if i + 1 >= data.len() {
                     return Consume::NeedMore;
-                }
-                if data[i + 1] == b'\\' {
-                    return Consume::Advanced(i + 2);
                 }
                 return Consume::Advanced(i);
             }
             i += 1;
         }
         Consume::NeedMore
+    }
+
+    /// OSC payload `code;text`. Only window titles matter here — 0 (icon +
+    /// title) and 2 (title), which shells, vim and tmux all send. Everything
+    /// else (7 = cwd, 52 = clipboard, …) is dropped.
+    fn apply_osc(&mut self, payload: &[u8]) {
+        let Ok(s) = std::str::from_utf8(payload) else {
+            return;
+        };
+        let Some((code, rest)) = s.split_once(';') else {
+            return;
+        };
+        if matches!(code, "0" | "2") {
+            let title = rest.trim();
+            self.title = if title.is_empty() {
+                None
+            } else {
+                Some(title.to_string())
+            };
+        }
     }
 
     fn consume_string_seq(&mut self, data: &[u8], start: usize) -> Consume {
@@ -596,56 +700,38 @@ impl Terminal {
             return;
         }
 
-        let n = |i: usize, d: i32| -> i32 {
-            nums.get(i)
-                .copied()
-                .filter(|&v| v != 0)
-                .unwrap_or(d)
-        };
+        let n = |i: usize, d: i32| -> i32 { nums.get(i).copied().filter(|&v| v != 0).unwrap_or(d) };
         let n0 = |i: usize, d: i32| -> i32 { nums.get(i).copied().unwrap_or(d) };
 
         match cmd {
-            'A' => {
-                self.cursor_row = self
-                    .cursor_row
-                    .saturating_sub(n(0, 1).max(1) as usize)
-            }
+            'A' => self.cursor_row = self.cursor_row.saturating_sub(n(0, 1).max(1) as usize),
             'B' => {
-                self.cursor_row = (self.cursor_row + n(0, 1).max(1) as usize)
-                    .min(self.rows_count as usize - 1)
+                self.cursor_row =
+                    (self.cursor_row + n(0, 1).max(1) as usize).min(self.rows_count as usize - 1)
             }
             'C' => {
-                self.cursor_col = (self.cursor_col + n(0, 1).max(1) as usize)
-                    .min(self.cols as usize - 1)
+                self.cursor_col =
+                    (self.cursor_col + n(0, 1).max(1) as usize).min(self.cols as usize - 1)
             }
-            'D' => {
-                self.cursor_col = self
-                    .cursor_col
-                    .saturating_sub(n(0, 1).max(1) as usize)
-            }
+            'D' => self.cursor_col = self.cursor_col.saturating_sub(n(0, 1).max(1) as usize),
             'E' => {
-                self.cursor_row = (self.cursor_row + n(0, 1).max(1) as usize)
-                    .min(self.rows_count as usize - 1);
+                self.cursor_row =
+                    (self.cursor_row + n(0, 1).max(1) as usize).min(self.rows_count as usize - 1);
                 self.cursor_col = 0;
             }
             'F' => {
-                self.cursor_row = self
-                    .cursor_row
-                    .saturating_sub(n(0, 1).max(1) as usize);
+                self.cursor_row = self.cursor_row.saturating_sub(n(0, 1).max(1) as usize);
                 self.cursor_col = 0;
             }
             'G' => {
                 self.cursor_col = (n(0, 1).max(1) as usize - 1).min(self.cols as usize - 1);
             }
             'H' | 'f' => {
-                self.cursor_row =
-                    (n(0, 1).max(1) as usize - 1).min(self.rows_count as usize - 1);
-                self.cursor_col =
-                    (n(1, 1).max(1) as usize - 1).min(self.cols as usize - 1);
+                self.cursor_row = (n(0, 1).max(1) as usize - 1).min(self.rows_count as usize - 1);
+                self.cursor_col = (n(1, 1).max(1) as usize - 1).min(self.cols as usize - 1);
             }
             'd' => {
-                self.cursor_row =
-                    (n(0, 1).max(1) as usize - 1).min(self.rows_count as usize - 1);
+                self.cursor_row = (n(0, 1).max(1) as usize - 1).min(self.rows_count as usize - 1);
             }
             'J' => self.erase_display(n0(0, 0)),
             'K' => self.erase_line(n0(0, 0)),
@@ -700,7 +786,37 @@ impl Terminal {
                 self.cursor_col = self.saved_cursor.1.min(self.cols as usize - 1);
             }
             'm' => self.apply_sgr(nums),
-            'n' | 'r' | 't' => {}
+            'n' => {
+                // DSR 6 → CPR: report the cursor position. Probing tools
+                // (tmux startup, `tput u7`, zsh prompt widgets) stall or time
+                // out on a terminal that never answers.
+                if n0(0, 0) == 6 {
+                    let reply = format!("\x1b[{};{}R", self.cursor_row + 1, self.cursor_col + 1);
+                    self.write_raw(reply.as_bytes());
+                }
+            }
+            'c' => {
+                // DA1: identify as a VT220 with ANSI colour so startup probes
+                // get an answer instead of a timeout.
+                self.write_raw(b"\x1b[?62;22c");
+            }
+            'r' => {
+                // DECSTBM — set top/bottom scroll margins (1-based,
+                // inclusive). No args — or an invalid pair — resets to the
+                // full grid. The cursor goes home, per the DEC spec.
+                let top = n(0, 1).max(1) as usize - 1;
+                let bottom = n(1, self.rows_count as i32).max(1) as usize - 1;
+                if top < bottom && bottom < self.rows_count as usize {
+                    self.scroll_top = top;
+                    self.scroll_bottom = bottom;
+                } else {
+                    self.scroll_top = 0;
+                    self.scroll_bottom = self.rows_count as usize - 1;
+                }
+                self.cursor_row = 0;
+                self.cursor_col = 0;
+            }
+            't' => {}
             _ => {}
         }
     }
@@ -717,12 +833,16 @@ impl Terminal {
             }
             // DECCKM: arrows switch between CSI (\x1b[A) and SS3 (\x1bOA).
             1 => self.app_cursor_keys = enable,
-            // The inner app asked for mouse events — the shell forwards wheel.
-            1000 | 1002 | 1003 => self.mouse_reporting = enable,
+            // The inner app asked for mouse events — the face forwards them.
+            1000 => self.mouse_mode = if enable { 1 } else { 0 },
+            1002 => self.mouse_mode = if enable { 2 } else { 0 },
+            1003 => self.mouse_mode = if enable { 3 } else { 0 },
+            // SGR extended coordinates for mouse reports.
+            1006 => self.mouse_sgr = enable,
             // Bracketed paste — remember so forwarded pastes get wrapped.
             2004 => self.bracketed_paste = enable,
-            // Cursor visibility, SGR encoding, focus — ignore
-            25 | 1006 | 1004 | 7 | 12 => {}
+            // Cursor visibility, focus — ignore
+            25 | 1004 | 7 | 12 => {}
             _ => {}
         }
     }
@@ -822,6 +942,17 @@ impl Terminal {
         if self.rows.is_empty() {
             return;
         }
+        if self.region_active() {
+            // Region scroll moves only the rows inside the margins — the
+            // content above and below must not shift, and nothing goes to
+            // scrollback (DEC: region scrolls are not history).
+            let bottom = self.scroll_bottom.min(self.rows.len() - 1);
+            let top = self.scroll_top.min(bottom);
+            self.rows.remove(top);
+            self.rows
+                .insert(bottom, vec![Cell::blank(); self.cols as usize]);
+            return;
+        }
         if !self.alt_screen {
             self.scrollback.push(self.rows[0].clone());
             if self.scrollback.len() > 5000 {
@@ -830,15 +961,50 @@ impl Terminal {
             }
         }
         self.rows.remove(0);
-        self.rows
-            .push(vec![Cell::blank(); self.cols as usize]);
+        self.rows.push(vec![Cell::blank(); self.cols as usize]);
     }
 
     fn scroll_down_one(&mut self) {
-        self.rows
-            .insert(0, vec![Cell::blank(); self.cols as usize]);
+        if self.rows.is_empty() {
+            return;
+        }
+        if self.region_active() {
+            let bottom = self.scroll_bottom.min(self.rows.len() - 1);
+            let top = self.scroll_top.min(bottom);
+            self.rows.remove(bottom);
+            self.rows
+                .insert(top, vec![Cell::blank(); self.cols as usize]);
+            return;
+        }
+        self.rows.insert(0, vec![Cell::blank(); self.cols as usize]);
         if self.rows.len() > self.rows_count as usize {
             self.rows.pop();
+        }
+    }
+
+    /// True while DECSTBM margins are narrower than the full grid.
+    fn region_active(&self) -> bool {
+        self.scroll_top > 0 || self.scroll_bottom < self.rows_count as usize - 1
+    }
+
+    /// IND / NEL body: cursor down one line; at the bottom margin the scroll
+    /// region (or the full grid) scrolls up instead, so the cursor never
+    /// leaves the region. Column is preserved — NEL adds the column reset.
+    fn index_down(&mut self) {
+        let bottom = self.scroll_bottom.min(self.rows_count as usize - 1);
+        if self.cursor_row == bottom {
+            self.scroll_up_one();
+        } else if self.cursor_row + 1 < self.rows_count as usize {
+            self.cursor_row += 1;
+        }
+    }
+
+    /// RI: cursor up one line; at the top margin the region scrolls down.
+    fn reverse_index(&mut self) {
+        if self.cursor_row == self.scroll_top {
+            self.scroll_down_one();
+        } else {
+            self.cursor_row = self.cursor_row.saturating_sub(1);
         }
     }
 
@@ -886,11 +1052,7 @@ impl Terminal {
     }
 
     fn newline(&mut self) {
-        if self.cursor_row + 1 >= self.rows_count as usize {
-            self.scroll_up_one();
-        } else {
-            self.cursor_row += 1;
-        }
+        self.index_down();
         self.cursor_col = 0;
     }
 
@@ -911,12 +1073,18 @@ impl Terminal {
         }
         let fg = if fg != Color::Default { Some(fg) } else { None };
         let bg = if bg != Color::Default { Some(bg) } else { None };
-        self.rows[self.cursor_row][self.cursor_col] = Cell { ch, fg, bg };
+        self.rows[self.cursor_row][self.cursor_col] = Cell {
+            ch,
+            fg,
+            bg,
+            bold: self.bold,
+        };
         if w >= 2 && self.cursor_col + 1 < self.cols as usize {
             self.rows[self.cursor_row][self.cursor_col + 1] = Cell {
                 ch: ' ',
                 fg: None,
                 bg,
+                bold: false,
             };
         }
         self.cursor_col += w;
@@ -928,11 +1096,18 @@ impl Terminal {
     fn row_cells_to_spans(
         row: &[Cell],
         force_black_bg: bool,
-    ) -> Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)> {
+    ) -> Vec<(
+        String,
+        Option<crate::theme::Rgba>,
+        Option<crate::theme::Rgba>,
+    )> {
         // Run-group consecutive same-style cells: a typical row collapses from
         // ~200 one-char Strings to a handful of spans (this runs every frame).
-        let mut out: Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)> =
-            Vec::new();
+        let mut out: Vec<(
+            String,
+            Option<crate::theme::Rgba>,
+            Option<crate::theme::Rgba>,
+        )> = Vec::new();
         let mut i = 0;
         while i < row.len() {
             let cell = &row[i];
@@ -955,7 +1130,13 @@ impl Terminal {
 
     pub fn visible_rows(
         &self,
-    ) -> Vec<Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)>> {
+    ) -> Vec<
+        Vec<(
+            String,
+            Option<crate::theme::Rgba>,
+            Option<crate::theme::Rgba>,
+        )>,
+    > {
         self.rows
             .iter()
             .map(|row| Self::row_cells_to_spans(row, false))
@@ -971,7 +1152,13 @@ impl Terminal {
     /// screen back.
     pub fn viewport_rows(
         &self,
-    ) -> Vec<Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)>> {
+    ) -> Vec<
+        Vec<(
+            String,
+            Option<crate::theme::Rgba>,
+            Option<crate::theme::Rgba>,
+        )>,
+    > {
         let offset = self.scroll();
         if offset == 0 {
             return self.visible_rows();
@@ -995,6 +1182,27 @@ impl Terminal {
         out
     }
 
+    /// The rows to draw as raw cells, each flagged when it comes from the
+    /// scrollback (scrollback rows suppress backgrounds — see `viewport_rows`).
+    fn viewport_cell_rows(&self) -> Vec<(Vec<Cell>, bool)> {
+        let offset = self.scroll();
+        if offset == 0 {
+            return self.rows.iter().map(|r| (r.clone(), false)).collect();
+        }
+        let height = self.rows.len();
+        let from_scrollback = offset.min(self.scrollback.len());
+        let start = self.scrollback.len() - from_scrollback;
+        let mut out: Vec<(Vec<Cell>, bool)> = self.scrollback[start..]
+            .iter()
+            .take(height)
+            .map(|r| (r.clone(), true))
+            .collect();
+        // Fill the rest of the window from the top of the live grid.
+        let remaining = height.saturating_sub(out.len());
+        out.extend(self.rows.iter().take(remaining).map(|r| (r.clone(), false)));
+        out
+    }
+
     /// Visible rows re-encoded as truecolor SGR strings.
     ///
     /// The face then parses those escapes back into colours — the panel
@@ -1002,16 +1210,57 @@ impl Terminal {
     /// runs directly would drop an encode and a parse per row per frame; that
     /// is an FFI change, tracked separately in `SUISEI-TUI-RESIDUE.md`.
     pub fn visible_rows_sgr(&self) -> Vec<String> {
-        self.viewport_rows()
+        // The ABI row cap is 1536 bytes in the engine (SUISEI_TERM_LINE):
+        // dense truecolor output spends ~19 bytes per colour change and used
+        // to be hard-truncated there — mid-escape and mid-UTF-8, which the
+        // face rendered as garbage. Stop at the budget and drop the row's
+        // tail; the face's parser is per-row, so an unfinished sequence is
+        // simply ignored rather than misparsed.
+        const ROW_BYTE_BUDGET: usize = 1400;
+        self.viewport_cell_rows()
             .into_iter()
-            .map(|row| {
+            .map(|(row, from_scrollback)| {
                 let mut s = String::new();
                 let mut last_fg: Option<(u8, u8, u8)> = None;
                 let mut last_bg: Option<(u8, u8, u8)> = None;
-                for (frag, fg, bg) in row {
+                let mut last_bold = false;
+                let mut bold_seen = false;
+                let mut i = 0;
+                while i < row.len() {
+                    let cell = &row[i];
+                    let w = UnicodeWidthChar::width(cell.ch).unwrap_or(1).max(1);
+                    // Always resolve so empty cells paint the shell defaults.
+                    let fg = cell.fg.unwrap_or(Color::Default).to_rgba_fg();
+                    // A DEFAULT background emits a reset (`\e[49m`), never an
+                    // explicit RGB. The face fills the whole grid with its own
+                    // terminal background; a per-cell default-bg run would both
+                    // override that with pure black AND, because the face's
+                    // per-run rect stops ~2px short of the row pitch, draw a
+                    // faint rule under every row (the reported "이상한 라인").
+                    // Only a genuinely non-default cell background is painted;
+                    // scrollback always shows on the terminal's own background.
+                    let bg = if from_scrollback {
+                        None
+                    } else {
+                        match cell.bg {
+                            Some(c) if !matches!(c, Color::Default) => c.to_rgba(),
+                            _ => None,
+                        }
+                    };
                     let fgr = fg.map(|c| (c.r, c.g, c.b));
                     let bgr = bg.map(|c| (c.r, c.g, c.b));
+                    if cell.bold != last_bold {
+                        if s.len() + 8 > ROW_BYTE_BUDGET {
+                            break;
+                        }
+                        s.push_str(if cell.bold { "\u{1b}[1m" } else { "\u{1b}[22m" });
+                        last_bold = cell.bold;
+                        bold_seen = bold_seen || cell.bold;
+                    }
                     if fgr != last_fg {
+                        if s.len() + 20 > ROW_BYTE_BUDGET {
+                            break;
+                        }
                         if let Some((r, g, b)) = fgr {
                             s.push_str(&format!("\u{1b}[38;2;{r};{g};{b}m"));
                         } else {
@@ -1020,6 +1269,9 @@ impl Terminal {
                         last_fg = fgr;
                     }
                     if bgr != last_bg {
+                        if s.len() + 20 > ROW_BYTE_BUDGET {
+                            break;
+                        }
                         if let Some((r, g, b)) = bgr {
                             s.push_str(&format!("\u{1b}[48;2;{r};{g};{b}m"));
                         } else {
@@ -1027,9 +1279,13 @@ impl Terminal {
                         }
                         last_bg = bgr;
                     }
-                    s.push_str(&frag);
+                    if s.len() + cell.ch.len_utf8() > ROW_BYTE_BUDGET {
+                        break;
+                    }
+                    s.push(cell.ch);
+                    i += w;
                 }
-                if last_fg.is_some() || last_bg.is_some() {
+                if bold_seen || last_fg.is_some() || last_bg.is_some() {
                     s.push_str("\u{1b}[0m");
                 }
                 let trimmed = s.trim_end().to_string();
@@ -1042,9 +1298,34 @@ impl Terminal {
             .collect()
     }
 
-    /// Inner app (claude/vim/htop…) asked for mouse events — forward wheel.
+    /// Inner app (claude/vim/htop…) asked for mouse events — forward them.
     pub fn wants_mouse(&self) -> bool {
-        self.mouse_reporting
+        self.mouse_mode > 0
+    }
+
+    /// Report a mouse event to the inner app when it requested tracking
+    /// (?1000/1002/1003). Coordinates are 1-based cells. `button`: 0 left,
+    /// 1 middle, 2 right, 64 wheel-up, 65 wheel-down. Motion ORs 32 into the
+    /// code per the protocol; ?1000 (clicks only) drops pure motion.
+    pub fn mouse_report(&mut self, mut button: u8, x: u16, y: u16, pressed: bool, motion: bool) {
+        if self.mouse_mode == 0 || (motion && self.mouse_mode == 1) {
+            return;
+        }
+        if motion {
+            button |= 32;
+        }
+        if self.mouse_sgr {
+            let suffix = if pressed || motion { 'M' } else { 'm' };
+            let report = format!("\x1b[<{button};{x};{y}{suffix}");
+            self.write_input(report.as_bytes());
+            return;
+        }
+        // Legacy X10 encoding: code + 32 as single bytes; coords cap at 223
+        // (255 - 32) — apps that skip SGR accept that limit by convention.
+        let code = if pressed || motion { button + 32 } else { 35 };
+        let xb = (x.min(223) + 32) as u8;
+        let yb = (y.min(223) + 32) as u8;
+        self.write_input(&[0x1b, b'[', b'M', code, xb, yb]);
     }
 
     /// Arrow-key bytes matching the inner app's cursor-key mode (DECCKM).
@@ -1094,7 +1375,13 @@ impl Terminal {
 
     pub fn visible_scrollback(
         &self,
-    ) -> Vec<Vec<(String, Option<crate::theme::Rgba>, Option<crate::theme::Rgba>)>> {
+    ) -> Vec<
+        Vec<(
+            String,
+            Option<crate::theme::Rgba>,
+            Option<crate::theme::Rgba>,
+        )>,
+    > {
         if self.alt_screen {
             return Vec::new();
         }
@@ -1211,7 +1498,6 @@ fn index_to_color(i: i32) -> Color {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1301,6 +1587,169 @@ mod tests {
         );
 
         t.scroll_down(99);
-        assert_eq!(t.visible_rows_sgr(), live, "scrolling back down returns to live");
+        assert_eq!(
+            t.visible_rows_sgr(),
+            live,
+            "scrolling back down returns to live"
+        );
+    }
+
+    /// SGR 1 must survive the cell grid and reach the face's parser — bold
+    /// used to die with the parser run, so `ls --color` rendered flat.
+    #[test]
+    fn bold_reaches_the_sgr_encoding() {
+        let mut t = Terminal::new();
+        t.process_output(b"\x1b[1mBOLD\x1b[0mplain");
+        let row = &t.visible_rows_sgr()[0];
+        assert!(row.contains("\u{1b}[1m"), "bold emitted: {row:?}");
+        assert!(row.contains("BOLD"));
+        assert!(row.contains("plain"));
+    }
+
+    /// A default background emits NO explicit `48;2;…` RGB — that was what
+    /// painted every row pure black and left a faint rule at each row's foot
+    /// (the face's per-run rect stopped short of the row pitch). A genuinely
+    /// coloured background still encodes.
+    #[test]
+    fn default_background_emits_no_explicit_bg() {
+        let mut t = Terminal::new();
+        t.process_output(b"plain default text");
+        let row = &t.visible_rows_sgr()[0];
+        assert!(
+            !row.contains("\u{1b}[48;2;"),
+            "default bg must not paint an explicit RGB: {row:?}"
+        );
+
+        let mut t2 = Terminal::new();
+        t2.process_output(b"\x1b[41mRED\x1b[0m"); // 41 = red background
+        let row2 = &t2.visible_rows_sgr()[0];
+        assert!(
+            row2.contains("\u{1b}[48;2;"),
+            "an explicit background still encodes: {row2:?}"
+        );
+    }
+
+    /// A row whose colour changes every cell spends ~19 bytes of escape per
+    /// character — the encoder must stop at its budget on a char boundary,
+    /// never handing the face a row the 1536-byte ABI cap would truncate.
+    #[test]
+    fn dense_rows_stay_under_the_abi_cap() {
+        let mut t = Terminal::new();
+        let mut line = Vec::new();
+        for i in 0..80u8 {
+            line.extend_from_slice(
+                format!(
+                    "\x1b[38;2;{};{};{}mX",
+                    i,
+                    i.wrapping_mul(2),
+                    i.wrapping_mul(3)
+                )
+                .as_bytes(),
+            );
+        }
+        t.process_output(&line);
+        for row in t.visible_rows_sgr() {
+            assert!(row.len() <= 1536, "row {}B exceeds the ABI cap", row.len());
+        }
+    }
+
+    fn row_text(t: &Terminal, r: usize) -> String {
+        t.rows[r]
+            .iter()
+            .map(|c| c.ch)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    /// DECSTBM: scrolling inside the margins must not shift the rows outside
+    /// them. tmux/screen/vim all repaint through regions; ignoring that
+    /// smeared their output across the whole grid.
+    #[test]
+    fn scroll_region_keeps_rows_outside_it_still() {
+        let mut t = Terminal::new();
+        t.process_output(b"AAAA\nBBBB\nCCCC\nDDDD\nEEEE\x1b[H");
+        // Margins = lines 2..4 (1-based) → rows 1..3 (0-based).
+        t.process_output(b"\x1b[2;4r");
+        // Cursor to the region's top line, then scroll it hard.
+        t.process_output(b"\x1b[2;1H");
+        t.process_output(b"1\n2\n3\n4\n5\n6");
+        assert_eq!(row_text(&t, 0), "AAAA", "row above the region untouched");
+        assert_eq!(row_text(&t, 4), "EEEE", "row below the region untouched");
+    }
+
+    /// RI at the top margin scrolls the region down instead of leaving the
+    /// grid.
+    #[test]
+    fn reverse_index_scrolls_at_the_top_margin() {
+        let mut t = Terminal::new();
+        t.process_output(b"AAAA\nBBBB");
+        t.process_output(b"\x1b[1;1H\x1bM");
+        assert_eq!(row_text(&t, 0), "", "RI inserted a blank at the top");
+        assert_eq!(row_text(&t, 1), "AAAA", "old top row pushed down");
+    }
+
+    /// IND at the bottom margin scrolls up; NEL also resets the column.
+    #[test]
+    fn index_and_next_line_honor_the_bottom_margin() {
+        let mut t = Terminal::new();
+        t.process_output(b"AAAA\nBBBB");
+        // Cursor to the grid's bottom row (the bottom margin, no region).
+        t.process_output(b"\x1b[24;1H\x1bD"); // IND → scroll up
+        assert_eq!(row_text(&t, 0), "BBBB", "grid scrolled up");
+        assert_eq!(row_text(&t, 1), "", "blank row below");
+        t.process_output(b"XX\x1bE"); // NEL → down + col 0
+        assert_eq!(t.cursor_col, 0, "NEL reset the column");
+    }
+
+    /// Resize and CSI r with bad args both reset the region to the full grid.
+    #[test]
+    fn region_resets_on_resize_and_bad_args() {
+        let mut t = Terminal::new();
+        t.process_output(b"\x1b[5;10r");
+        assert!(t.region_active());
+        t.process_output(b"\x1b[r");
+        assert!(!t.region_active(), "CSI r with no args resets");
+        t.process_output(b"\x1b[5;10r");
+        t.resize(80, 30);
+        assert!(!t.region_active(), "resize resets");
+    }
+
+    /// OSC 0/2 set the shell-reported title (BEL and ST terminators); an
+    /// empty title clears it; other OSC codes (7 = cwd) are not titles.
+    #[test]
+    fn osc_0_and_2_set_the_title() {
+        let mut t = Terminal::new();
+        t.process_output(b"\x1b]2;build \xe2\x9c\x93\x07");
+        assert_eq!(t.title.as_deref(), Some("build \u{2713}"), "OSC 2 via BEL");
+        t.process_output(b"\x1b]0;user@host: ~\x1b\\");
+        assert_eq!(t.title.as_deref(), Some("user@host: ~"), "OSC 0 via ST");
+        t.process_output(b"\x1b]7;file:///some/path\x07");
+        assert_eq!(
+            t.title.as_deref(),
+            Some("user@host: ~"),
+            "OSC 7 is not a title"
+        );
+        t.process_output(b"\x1b]2;\x07");
+        assert_eq!(t.title, None, "empty title clears");
+    }
+
+    /// Mouse tracking modes: off → no reports; ?1000 clicks-only; ?1002
+    /// upgrades to button-motion; ?1006 flips on SGR encoding; disable turns
+    /// everything off. (No PTY writer in a unit test, so observe the mode
+    /// state that gates `mouse_report`.)
+    #[test]
+    fn mouse_reports_follow_the_tracking_mode() {
+        let mut t = Terminal::new();
+        assert!(!t.wants_mouse());
+        t.process_output(b"\x1b[?1000h");
+        assert!(t.wants_mouse());
+        assert_eq!(t.mouse_mode, 1);
+        t.process_output(b"\x1b[?1006h");
+        assert!(t.mouse_sgr, "SGR encoding flag");
+        t.process_output(b"\x1b[?1002h");
+        assert_eq!(t.mouse_mode, 2, "1002 upgrades motion tracking");
+        t.process_output(b"\x1b[?1000l");
+        assert!(!t.wants_mouse(), "disable turns tracking off");
     }
 }

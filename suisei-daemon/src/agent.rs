@@ -57,8 +57,10 @@ pub fn supervise_agent() {
     if launch_agent() {
         eprintln!("suisei-daemon: menu-bar agent up");
     }
-    std::thread::spawn(|| loop {
-        std::thread::sleep(SUPERVISE_INTERVAL);
-        let _ = launch_agent();
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(SUPERVISE_INTERVAL);
+            let _ = launch_agent();
+        }
     });
 }

@@ -111,144 +111,158 @@ pub struct Theme {
     pub git_hunk: Rgba,
 }
 
-static THEMES: &[Theme] = &[LIGHT, DARK, OCEAN, MONOKAI, NORD, SOLARIZED, GRUVBOX, EVERFOREST, SAKURA, NEWSPAPER, MONO, MONO_DARK];
+static THEMES: &[Theme] = &[
+    LIGHT, DARK, OCEAN, MONOKAI, NORD, SOLARIZED, GRUVBOX, EVERFOREST, SAKURA, NEWSPAPER, MONO,
+    MONO_DARK,
+];
 
-// ── LIGHT — production default, Xcode "Default (Light)" palette ──
+// ── LIGHT — production default, quiet neutral canvas + Suisei blue ──
+//
+// Pure white plus system-blue selections made every selected row louder than
+// the source text and produced glare across a full editor window. The default
+// now uses a near-white canvas, a restrained cobalt accent, and syntax hues
+// separated by role rather than by maximum saturation.
 pub static LIGHT: Theme = Theme {
     name: "light",
-    bg: rgb(255, 255, 255),
-    fg: rgb(38, 38, 38),
-    keyword: rgb(155, 35, 147),
-    string: rgb(196, 26, 22),
-    comment: rgb(93, 108, 121),
-    number: rgb(28, 0, 207),
-    type_name: rgb(11, 79, 121),
-    function: rgb(50, 109, 116),
-    macro_name: rgb(100, 56, 32),
-    namespace: rgb(11, 79, 121),
-    parameter: rgb(64, 64, 64),
-    property: rgb(54, 89, 108),
-    constant: rgb(28, 0, 207),
-    operator: rgb(38, 38, 38),
-    punctuation: rgb(110, 110, 115),
-    line_no: rgb(172, 172, 178),
-    editor_bg: rgb(255, 255, 255),
-    status_bg: rgb(245, 245, 247),
-    status_fg: rgb(70, 70, 75),
-    border: rgb(224, 224, 228),
-    selection_bg: rgb(179, 215, 255),
-    search_bg: rgb(255, 236, 165),
-    mode_xlc: rgb(0, 122, 255),
-    completion_bg: rgb(250, 250, 252),
-    completion_selected: rgb(0, 122, 255),
-    completion_border: rgb(224, 224, 228),
-    explorer_bg: rgb(245, 245, 247),
-    explorer_fg: rgb(60, 60, 65),
-    explorer_dir: rgb(0, 122, 255),
-    explorer_selected: rgb(179, 215, 255),
-    terminal_bg: rgb(250, 250, 252),
-    terminal_fg: rgb(38, 38, 38),
-    terminal_prompt: rgb(0, 122, 255),
-    xlc_bg: rgb(250, 250, 252),
-    xlc_fg: rgb(38, 38, 38),
-    xlc_prompt: rgb(0, 122, 255),
-    xlc_border: rgb(224, 224, 228),
-    cursor: rgb(0, 122, 255),
-    accent: rgb(0, 122, 255),
+    bg: rgb(246, 248, 251),
+    fg: rgb(35, 40, 47),
+    keyword: rgb(137, 46, 147),
+    string: rgb(177, 45, 36),
+    comment: rgb(91, 103, 116),
+    number: rgb(0, 82, 174),
+    type_name: rgb(0, 94, 112),
+    function: rgb(0, 112, 102),
+    macro_name: rgb(166, 74, 0),
+    namespace: rgb(51, 91, 160),
+    parameter: rgb(73, 80, 87),
+    property: rgb(34, 101, 147),
+    constant: rgb(112, 57, 168),
+    operator: rgb(48, 54, 61),
+    punctuation: rgb(106, 115, 125),
+    line_no: rgb(143, 151, 160),
+    editor_bg: rgb(252, 253, 254),
+    status_bg: rgb(243, 246, 249),
+    status_fg: rgb(75, 82, 90),
+    border: rgb(219, 224, 230),
+    selection_bg: rgb(195, 220, 247),
+    search_bg: rgb(255, 228, 142),
+    mode_xlc: rgb(11, 110, 222),
+    completion_bg: rgb(255, 255, 255),
+    completion_selected: rgb(11, 110, 222),
+    completion_border: rgb(219, 224, 230),
+    explorer_bg: rgb(247, 249, 251),
+    explorer_fg: rgb(64, 70, 78),
+    explorer_dir: rgb(11, 110, 222),
+    explorer_selected: rgb(224, 237, 250),
+    terminal_bg: rgb(248, 250, 252),
+    terminal_fg: rgb(35, 40, 47),
+    terminal_prompt: rgb(11, 110, 222),
+    xlc_bg: rgb(248, 250, 252),
+    xlc_fg: rgb(35, 40, 47),
+    xlc_prompt: rgb(11, 110, 222),
+    xlc_border: rgb(219, 224, 230),
+    cursor: rgb(11, 110, 222),
+    accent: rgb(11, 110, 222),
     accent_fg: rgb(255, 255, 255),
-    muted: rgb(140, 140, 146),
-    success: rgb(52, 152, 89),
-    warning: rgb(255, 149, 0),
-    error: rgb(255, 59, 48),
-    panel_bg: rgb(250, 250, 252),
-    panel_border: rgb(224, 224, 228),
-    panel_sel_bg: rgb(229, 240, 255),
-    panel_sel_fg: rgb(20, 20, 25),
-    mode_git: rgb(52, 152, 89),
-    mode_term: rgb(52, 152, 89),
-    mode_preview: rgb(88, 86, 214),
-    mode_settings: rgb(142, 142, 147),
-    mode_search: rgb(255, 149, 0),
-    mode_find: rgb(0, 122, 255),
-    git_add_bg: rgb(230, 255, 237),
-    git_del_bg: rgb(255, 235, 233),
-    git_hunk: rgb(0, 122, 255),
+    muted: rgb(119, 127, 137),
+    success: rgb(38, 139, 76),
+    warning: rgb(201, 111, 0),
+    error: rgb(210, 45, 42),
+    panel_bg: rgb(255, 255, 255),
+    panel_border: rgb(219, 224, 230),
+    panel_sel_bg: rgb(231, 240, 250),
+    panel_sel_fg: rgb(27, 32, 38),
+    mode_git: rgb(38, 139, 76),
+    mode_term: rgb(38, 139, 76),
+    mode_preview: rgb(91, 79, 196),
+    mode_settings: rgb(119, 127, 137),
+    mode_search: rgb(201, 111, 0),
+    mode_find: rgb(11, 110, 222),
+    git_add_bg: rgb(233, 248, 239),
+    git_del_bg: rgb(253, 237, 235),
+    git_hunk: rgb(11, 110, 222),
 };
 
-// ── DARK — production default, Xcode "Default (Dark)" palette ──
-/// Default dark theme, aligned to macOS 26 dark as measured from AppKit
-/// (`NSAppearance(.darkAqua)`), not to iOS values or to eyeballed greys.
+// ── DARK — production default, warm-neutral near-black, elevation by value ──
+/// Default dark theme: a **warm-neutral near-black** with clearly separated
+/// elevation steps.
 ///
-/// Three elevations instead of one flat colour, because Apple's dark mode
-/// signals height with brightness:
-///   L0 shell   rgb(24,24,24)  window floor, the channel between panels
-///   L1 surface rgb(30,30,30)  editor + sidebars  (= `windowBackground`)
-///   L2 raised  rgb(40,40,40)  popovers, completion, terminal band
-///                             (= `underPageBackground`)
-/// Separators composite (`white α0.10`, = `separatorColor`) rather than baking
-/// an opaque grey that stops matching when the surface behind it changes.
-/// Syntax colours stay in the Xcode-dark family; only the chrome was wrong.
+/// Two earlier problems, both fixed here. First it read *blue* — every surface
+/// had its blue channel highest. Then, neutralised to a flat `rgb(16,16,16)`
+/// it read as one dead pure-black slab, because the floor, editor, sidebar and
+/// terminal all sat within six levels of each other. The fix is a real ramp
+/// with a **faint warm cast** (red ≥ green ≥ blue, by 1–3) so the black reads
+/// expensive rather than grey or cold:
+///   L0 floor   rgb(18,17,16)  window channel · status · terminal grid
+///   nav        rgb(23,22,21)  file explorer
+///   L1 surface rgb(27,26,24)  editor — the hero surface, clearly lifted
+///   L2 raised  rgb(38,37,34)  popovers · completion · panels
+/// Text is crisp neutral near-white (`rgb(233,233,233)`), separators a faint
+/// `white α0.08` hairline, and elevation reads by brightness alone.
+///
+/// Accents/status stay on Apple's dark **system colours** (systemBlue #0A84FF,
+/// systemGreen #30D158, systemOrange #FF9F0A, systemRed #FF453A) — blue lives
+/// only in accents and selection now, never in a surface. Syntax hues unchanged.
 pub static DARK: Theme = Theme {
     name: "dark",
-    bg: rgb(24, 24, 24),
-    fg: rgb(221, 221, 221),
-    keyword: rgb(252, 95, 163),
-    string: rgb(252, 106, 93),
-    comment: rgb(108, 121, 134),
-    number: rgb(208, 191, 105),
-    type_name: rgb(93, 216, 255),
-    function: rgb(103, 183, 164),
-    macro_name: rgb(253, 143, 63),
-    namespace: rgb(158, 241, 221),
-    parameter: rgb(200, 200, 205),
-    property: rgb(120, 195, 180),
-    constant: rgb(208, 191, 105),
-    operator: rgb(221, 221, 221),
-    punctuation: rgb(148, 148, 155),
-    line_no: rgb(122, 122, 127),
-    editor_bg: rgb(30, 30, 30),
-    status_bg: rgb(24, 24, 24),
-    status_fg: rgb(190, 190, 195),
-    border: rgba(255, 255, 255, 26),
-    selection_bg: rgb(63, 99, 139),
-    search_bg: rgb(110, 94, 34),
-    mode_xlc: rgb(0, 145, 255),
-    completion_bg: rgb(40, 40, 40),
-    completion_selected: rgb(0, 145, 255),
-    completion_border: rgba(255, 255, 255, 26),
-    explorer_bg: rgb(30, 30, 30),
-    explorer_fg: rgb(200, 200, 205),
-    explorer_dir: rgb(0, 145, 255),
-    explorer_selected: rgb(63, 99, 139),
-    terminal_bg: rgb(40, 40, 40),
-    terminal_fg: rgb(221, 221, 221),
-    terminal_prompt: rgb(0, 145, 255),
-    xlc_bg: rgb(40, 40, 40),
-    xlc_fg: rgb(221, 221, 221),
-    xlc_prompt: rgb(0, 145, 255),
-    xlc_border: rgba(255, 255, 255, 26),
-    cursor: rgb(0, 145, 255),
-    accent: rgb(0, 145, 255),
+    bg: rgb(18, 17, 16),
+    fg: rgb(233, 233, 233),
+    keyword: rgb(207, 121, 207),
+    string: rgb(219, 143, 121),
+    comment: rgb(119, 119, 119),
+    number: rgb(181, 206, 168),
+    type_name: rgb(78, 201, 176),
+    function: rgb(105, 164, 255),
+    macro_name: rgb(209, 154, 102),
+    namespace: rgb(86, 182, 194),
+    parameter: rgb(207, 207, 207),
+    property: rgb(126, 200, 227),
+    constant: rgb(220, 210, 134),
+    operator: rgb(233, 233, 233),
+    punctuation: rgb(144, 144, 144),
+    line_no: rgb(96, 96, 96),
+    editor_bg: rgb(27, 26, 24),
+    status_bg: rgb(18, 17, 16),
+    status_fg: rgb(164, 164, 164),
+    border: rgba(255, 255, 255, 20),
+    selection_bg: rgb(28, 58, 102),
+    search_bg: rgb(92, 78, 30),
+    mode_xlc: rgb(10, 132, 255),
+    completion_bg: rgb(38, 37, 34),
+    completion_selected: rgb(10, 132, 255),
+    completion_border: rgba(255, 255, 255, 20),
+    explorer_bg: rgb(23, 22, 21),
+    explorer_fg: rgb(191, 191, 191),
+    explorer_dir: rgb(10, 132, 255),
+    explorer_selected: rgb(28, 58, 102),
+    terminal_bg: rgb(18, 17, 16),
+    terminal_fg: rgb(233, 233, 233),
+    terminal_prompt: rgb(10, 132, 255),
+    xlc_bg: rgb(38, 37, 34),
+    xlc_fg: rgb(233, 233, 233),
+    xlc_prompt: rgb(10, 132, 255),
+    xlc_border: rgba(255, 255, 255, 20),
+    cursor: rgb(10, 132, 255),
+    accent: rgb(10, 132, 255),
     accent_fg: rgb(255, 255, 255),
-    muted: rgb(152, 152, 157),
+    muted: rgb(128, 128, 128),
     success: rgb(48, 209, 88),
-    warning: rgb(255, 146, 48),
-    error: rgb(255, 66, 69),
-    panel_bg: rgb(40, 40, 40),
-    panel_border: rgba(255, 255, 255, 26),
-    panel_sel_bg: rgb(63, 99, 139),
-    panel_sel_fg: rgb(235, 235, 240),
+    warning: rgb(255, 159, 10),
+    error: rgb(255, 69, 58),
+    panel_bg: rgb(38, 37, 34),
+    panel_border: rgba(255, 255, 255, 20),
+    panel_sel_bg: rgb(28, 58, 102),
+    panel_sel_fg: rgb(240, 240, 240),
     mode_git: rgb(48, 209, 88),
     mode_term: rgb(48, 209, 88),
-    mode_preview: rgb(109, 124, 255),
-    mode_settings: rgb(152, 152, 157),
-    mode_search: rgb(255, 146, 48),
-    mode_find: rgb(0, 145, 255),
-    git_add_bg: rgb(28, 48, 36),
-    git_del_bg: rgb(58, 34, 36),
-    git_hunk: rgb(0, 145, 255),
+    mode_preview: rgb(94, 92, 230),
+    mode_settings: rgb(142, 144, 150),
+    mode_search: rgb(255, 159, 10),
+    mode_find: rgb(10, 132, 255),
+    git_add_bg: rgb(22, 46, 34),
+    git_del_bg: rgb(54, 32, 36),
+    git_hunk: rgb(10, 132, 255),
 };
-
 
 pub fn all_themes() -> &'static [Theme] {
     THEMES
@@ -881,7 +895,6 @@ pub static MONO_DARK: Theme = Theme {
     git_del_bg: rgb(40, 22, 22),
     git_hunk: rgb(180, 180, 180),
 };
-
 
 /// Resolve a configured theme name against the current system appearance.
 ///

@@ -106,10 +106,7 @@ impl FoldState {
                 }
             }
             if end > i {
-                self.ranges.push(FoldRange {
-                    start: i,
-                    end,
-                });
+                self.ranges.push(FoldRange { start: i, end });
             }
         }
 

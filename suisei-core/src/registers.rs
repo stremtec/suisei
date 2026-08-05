@@ -43,7 +43,10 @@ impl Registers {
         if let Some(sys) = clipboard::paste() {
             if !sys.is_empty() {
                 let linewise = sys.ends_with('\n') || sys.lines().count() > 1;
-                return Some(RegisterValue { text: sys, linewise });
+                return Some(RegisterValue {
+                    text: sys,
+                    linewise,
+                });
             }
         }
         self.last.clone()

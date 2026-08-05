@@ -276,6 +276,14 @@ Confirmed by hand: with a 2-pane split, ⌃⇧T turned the focused pane into a
 Terminal, the other pane kept its file, the tab strip kept the document, and
 the pane count never changed.
 
+**Product invariant — the `Terminal` tab is intentional.** Converting the
+focused pane also creates a `Terminal` entry in the top tab strip. That entry
+is the terminal leaf's stable identity, not an accidental document and not a
+request for a separate macOS window. It must participate in S6 layout groups
+so a layout containing terminal panes can fold, switch away, restore and
+unfold through the same tab model as a document-only layout. Do not “fix” this
+by hiding or suppressing the Terminal tab.
+
 **Not verified: the shell inside the pane is usable.** The PTY starts and the
 engine's snapshot carries the prompt (checked in-process), but the grid paints
 no text in the running app and keystrokes land in the project tree's filter —

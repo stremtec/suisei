@@ -11,7 +11,6 @@ pub struct Viewport {
     /// Glyph cell width in points (column pitch).
     pub cell_w: f32,
     pub dpr: f32,
-    pub editor_rows: u32,
 }
 
 impl Default for Viewport {
@@ -22,7 +21,6 @@ impl Default for Viewport {
             cell_px: 18.0,
             cell_w: 9.0,
             dpr: 2.0,
-            editor_rows: 40,
         }
     }
 }
@@ -62,6 +60,9 @@ pub struct TabScene {
     pub is_layout: bool,
     /// This tab is a terminal — a shell runs in it.
     pub is_terminal: bool,
+    /// The document's file was deleted on disk out from under the open buffer
+    /// — the face marks the chip so editing a vanished file is not silent.
+    pub deleted: bool,
 }
 
 /// Highlight span in visual-column space (tab-expanded coordinates).
@@ -104,6 +105,10 @@ pub struct EditorLineScene {
 #[derive(Debug, Clone)]
 pub struct PaneScene {
     pub tab_index: u32,
+    /// Display title of the pane's actual buffer. This intentionally does not
+    /// come from the visible tab-strip slot: unified layout chips collapse
+    /// several buffer tabs into one strip item.
+    pub title: String,
     /// Total lines in this pane's buffer (for face scrollbar / clamp).
     pub doc_line_count: u32,
     /// Horizontal pan for this pane (wrap off).
@@ -314,12 +319,11 @@ pub struct ChromeScene {
     pub tabs: Vec<TabScene>,
     /// Focused-pane (or single) lines for backwards-compatible consumers.
     pub lines: Vec<EditorLineScene>,
-    /// 0 none, 1 vertical, 2 horizontal
-    pub split_kind: u8,
     /// Unsplit, and the single pane runs a shell. The FFI synthesises pane 0
     /// on that path instead of walking the pane array, so it needs telling.
     pub pane0_is_terminal: bool,
-    pub split_ratio: f32,
+    /// Actual active buffer title, independent from a unified layout chip.
+    pub pane0_title: String,
     pub pane_focus: u8,
     /// Empty when unsplit; when split, one entry per pane (lines packed for FFI).
     pub panes: Vec<PaneScene>,
@@ -384,17 +388,22 @@ pub fn build_editor_band(
     rows: usize,
 ) -> (Vec<EditorLineScene>, u32) {
     // Resolve pane → tab + focus (mirrors build_editor_surfaces).
+    let current = app.current_buffer();
     let (tab, focused) = if !app.split.is_split() {
-        (app.current_buffer, true)
+        (current, true)
     } else {
         let n = app.split.pane_count().max(1);
         let idx = pane.min(n.saturating_sub(1));
         let focus = app.split.focus_index();
         if idx == focus {
-            (app.current_buffer, true)
+            (current, true)
         } else {
             (
-                app.split.panes.get(idx).map(|p| app.pane_tab(p)).unwrap_or(0),
+                app.split
+                    .panes
+                    .get(idx)
+                    .map(|p| app.pane_tab(p))
+                    .unwrap_or(0),
                 false,
             )
         }
@@ -414,12 +423,7 @@ pub fn build_editor_band(
 
 /// Scroll-hot path: rebuild **editor surfaces only**, keep explorer/SCM/outline/theme.
 /// Avoids re-walking the project tree and git workbench on every trackpad tick.
-pub fn patch_chrome_editor_scroll(
-    app: &App,
-    shell: &ShellState,
-    frame_gen: u64,
-    chrome: &mut ChromeScene,
-) {
+pub fn patch_chrome_editor_scroll(app: &App, frame_gen: u64, chrome: &mut ChromeScene) {
     let cursor = app.buffer.cursor();
     let line_count = app.buffer.line_count().max(1);
     let scroll = app.scroll.min(line_count.saturating_sub(1));
@@ -430,11 +434,12 @@ pub fn patch_chrome_editor_scroll(
     };
     // Match compose() welcome rules (never flip to welcome mid-scroll).
     let any_named_tab = app.filename.is_some()
-        || app
-            .buffers
-            .iter()
-            .any(|t| t.filename.as_ref().is_some_and(|p| !p.as_os_str().is_empty()));
-    let multi_tab = app.buffers.len() > 1;
+        || app.tabs.buffers.iter().any(|t| {
+            t.filename
+                .as_ref()
+                .is_some_and(|p| !p.as_os_str().is_empty())
+        });
+    let multi_tab = app.tabs.buffers.len() > 1;
     let project_seeded = !app.explorer.entries.is_empty();
     let welcome = !multi_tab
         && !any_named_tab
@@ -444,7 +449,7 @@ pub fn patch_chrome_editor_scroll(
         && app.buffer.line(0).is_empty();
     // Large overscan so AppKit Responsive Scrolling overdraw stays filled (WWDC 2013-215).
     // Cap to packed-line budget (SUISEI_MAX_LINES ≈ 256).
-    let rows = (shell.viewport.editor_rows.max(8) as usize)
+    let rows = (app.grid_rows().max(8) as usize)
         .saturating_mul(3)
         .saturating_add(48)
         .min(240);
@@ -456,10 +461,12 @@ pub fn patch_chrome_editor_scroll(
     let sel = app.selected_range();
     // Patch path may reuse unfocused pane snapshots (typing hot path in splits).
     let prev_panes = std::mem::take(&mut chrome.panes);
-    let (lines, split_kind, split_ratio, pane_focus, panes) = if welcome {
-        (Vec::new(), 0u8, 0.5f32, 0u8, Vec::new())
+    let (lines, pane_focus, panes) = if welcome {
+        (Vec::new(), 0u8, Vec::new())
     } else {
-        build_editor_surfaces(app, scroll, rows, caret_vcol, sel, prev_panes)
+        // Hot path (per keystroke / scroll): skip the packed lines — the face
+        // pulls its own rows, so these were pure churn every frame.
+        build_editor_surfaces(app, scroll, rows, caret_vcol, sel, prev_panes, false)
     };
 
     chrome.mode_label = mode_label(app).into();
@@ -478,9 +485,12 @@ pub fn patch_chrome_editor_scroll(
     chrome.wrap_lines = u8::from(app.wrap_lines);
     chrome.buffer_version = app.buffer.version();
     chrome.lines = lines;
-    chrome.split_kind = split_kind;
-    chrome.pane0_is_terminal = app.split.panes.first().is_some_and(|p| app.is_terminal_tab(p.buffer));
-    chrome.split_ratio = split_ratio;
+    chrome.pane0_is_terminal = app
+        .split
+        .panes
+        .first()
+        .is_some_and(|p| app.is_terminal_tab(p.buffer));
+    chrome.pane0_title = tab_title(app, app.current_buffer());
     chrome.pane_focus = pane_focus;
     chrome.panes = panes;
     // Terminal PTY can change while scrolling; keep it live. Skip explorer/scm/git/outline/theme.
@@ -489,9 +499,7 @@ pub fn patch_chrome_editor_scroll(
     }
     // Leader (Space) sets no pending_key — gate on visibility itself, and also
     // rebuild when the scene still shows an open popup so it can close.
-    if app.completions.active
-        || !app.completions.suggestions.is_empty()
-        || chrome.completions.open
+    if app.completions.active || !app.completions.suggestions.is_empty() || chrome.completions.open
     {
         chrome.completions = build_completions(app);
     }
@@ -505,12 +513,7 @@ pub fn patch_chrome_editor_scroll(
     let _ = frame_gen;
 }
 
-pub fn compose(
-    app: &App,
-    shell: &ShellState,
-    frame_gen: u64,
-    outline: &[OutlineItemScene],
-) -> FrameDiff {
+pub fn compose(app: &App, frame_gen: u64, outline: &[OutlineItemScene]) -> FrameDiff {
     let filename = app
         .filename
         .as_ref()
@@ -546,11 +549,12 @@ pub fn compose(
     // - `explorer.open` alone must NOT kill welcome (docked tree flag without entries is OK).
     // - Only real project tree entries, named files (incl. Untitled tab), multi-tab, or edits leave welcome.
     let any_named_tab = app.filename.is_some()
-        || app
-            .buffers
-            .iter()
-            .any(|t| t.filename.as_ref().is_some_and(|p| !p.as_os_str().is_empty()));
-    let multi_tab = app.buffers.len() > 1;
+        || app.tabs.buffers.iter().any(|t| {
+            t.filename
+                .as_ref()
+                .is_some_and(|p| !p.as_os_str().is_empty())
+        });
+    let multi_tab = app.tabs.buffers.len() > 1;
     let project_seeded = !app.explorer.entries.is_empty();
     let welcome = !multi_tab
         && !any_named_tab
@@ -566,7 +570,7 @@ pub fn compose(
         outline.to_vec()
     };
     // Match patch_chrome_editor_scroll: fat overscan for smooth NSScrollView overdraw.
-    let rows = (shell.viewport.editor_rows.max(8) as usize)
+    let rows = (app.grid_rows().max(8) as usize)
         .saturating_mul(3)
         .saturating_add(48)
         .min(240);
@@ -576,10 +580,12 @@ pub fn compose(
         visual_col(app.buffer.line(cursor.row), drawn_caret_col(app)) as u32
     };
     let sel = app.selected_range();
-    let (lines, split_kind, split_ratio, pane_focus, panes) = if welcome {
-        (Vec::new(), 0u8, 0.5f32, 0u8, Vec::new())
+    let (lines, pane_focus, panes) = if welcome {
+        (Vec::new(), 0u8, Vec::new())
     } else {
-        build_editor_surfaces(app, scroll, rows, caret_vcol, sel, Vec::new())
+        // Full compose keeps building lines: the TUI face renders from them and
+        // the engine tests assert on them.
+        build_editor_surfaces(app, scroll, rows, caret_vcol, sel, Vec::new(), true)
     };
 
     FrameDiff {
@@ -606,9 +612,12 @@ pub fn compose(
             branch: branch_name(app),
             tabs,
             lines,
-            split_kind,
-            pane0_is_terminal: app.split.panes.first().is_some_and(|p| app.is_terminal_tab(p.buffer)),
-            split_ratio,
+            pane0_is_terminal: app
+                .split
+                .panes
+                .first()
+                .is_some_and(|p| app.is_terminal_tab(p.buffer)),
+            pane0_title: tab_title(app, app.current_buffer()),
             pane_focus,
             panes,
             explorer: build_explorer(app),
@@ -737,7 +746,7 @@ fn preview_style_code(s: suisei_core::preview::PreviewStyle) -> u8 {
 /// Lower rank wins when picking a single style for a multi-span line.
 fn preview_style_rank(code: u8) -> u8 {
     match code {
-        1 => 0,  // H1
+        1 => 0, // H1
         2 => 1,
         3 => 2,
         4 => 3,
@@ -792,8 +801,25 @@ fn build_outline(app: &App) -> Vec<OutlineItemScene> {
             }
         }
         // Rust / Swift / general code symbols
-        if matches!(ext.as_str(), "rs" | "swift" | "go" | "ts" | "tsx" | "js" | "jsx" | "py" | "c" | "h" | "cpp" | "hpp" | "java" | "kt" | "m" | "mm" | "")
-            || ext.is_empty()
+        if matches!(
+            ext.as_str(),
+            "rs" | "swift"
+                | "go"
+                | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "py"
+                | "c"
+                | "h"
+                | "cpp"
+                | "hpp"
+                | "java"
+                | "kt"
+                | "m"
+                | "mm"
+                | ""
+        ) || ext.is_empty()
         {
             if let Some(item) = outline_code_line(trimmed, i) {
                 out.push(item);
@@ -969,9 +995,7 @@ fn build_git_wb(app: &App) -> GitWbScene {
             .message
             .clone()
             .or_else(|| app.git_wb.error.clone())
-            .unwrap_or_else(|| {
-                "Space stage · c commit · Enter open · Tab pane · Esc".into()
-            })
+            .unwrap_or_else(|| "Space stage · c commit · Enter open · Tab pane · Esc".into())
     };
 
     // ── Changes column ──
@@ -980,16 +1004,23 @@ fn build_git_wb(app: &App) -> GitWbScene {
     col_changes.push(format!("▾ Changes  {n_ch}"));
     if !app.git_wb.staged.is_empty() {
         col_changes.push(format!("  Staged ({})", app.git_wb.staged.len()));
-        for e in app.git_wb.staged.iter().take(40) {
-            col_changes.push(format!("  {} {}", e.status.letter(), e.path));
+        for (i, e) in app.git_wb.staged.iter().enumerate().take(40) {
+            let mark = if i == app.git_wb.selected { "›" } else { " " };
+            col_changes.push(format!("{mark} {} {}", e.status.letter(), e.path));
         }
     }
     col_changes.push(format!("  Local Changes ({})", app.git_wb.changes.len()));
     if app.git_wb.changes.is_empty() && app.git_wb.staged.is_empty() {
         col_changes.push("  (clean)".into());
     } else {
-        for e in app.git_wb.changes.iter().take(50) {
-            col_changes.push(format!("  {} {}", e.status.letter(), e.path));
+        let base = app.git_wb.staged.len();
+        for (i, e) in app.git_wb.changes.iter().enumerate().take(50) {
+            let mark = if base + i == app.git_wb.selected {
+                "›"
+            } else {
+                " "
+            };
+            col_changes.push(format!("{mark} {} {}", e.status.letter(), e.path));
         }
     }
     if !app.git_wb.commit_buf.is_empty() || app.git_wb.commit_editing {
@@ -999,12 +1030,15 @@ fn build_git_wb(app: &App) -> GitWbScene {
 
     // ── Log column ──
     let mut col_log = Vec::new();
-    if matches!(app.git_wb.history_view, HistoryView::Graph)
-        && !app.git_wb.history_graph.is_empty()
+    if matches!(app.git_wb.history_view, HistoryView::Graph) && !app.git_wb.history_graph.is_empty()
     {
         col_log.push("▾ Log · graph  (v list)".into());
         for (i, row) in app.git_wb.history_graph.iter().enumerate().take(60) {
-            let mark = if i == app.git_wb.history_sel { "›" } else { " " };
+            let mark = if i == app.git_wb.history_sel {
+                "›"
+            } else {
+                " "
+            };
             let strip: String = row.glyphs.iter().map(|g| g.ch()).collect();
             col_log.push(format!(
                 "{mark}{strip} {} {}",
@@ -1015,7 +1049,11 @@ fn build_git_wb(app: &App) -> GitWbScene {
     } else {
         col_log.push("▾ Log · list  (v graph)".into());
         for (i, c) in app.git_wb.commits.iter().enumerate().take(60) {
-            let mark = if i == app.git_wb.history_sel { "›" } else { " " };
+            let mark = if i == app.git_wb.history_sel {
+                "›"
+            } else {
+                " "
+            };
             col_log.push(format!(
                 "{mark}{}  {}",
                 c.short,
@@ -1031,7 +1069,11 @@ fn build_git_wb(app: &App) -> GitWbScene {
     let mut col_files = Vec::new();
     col_files.push("▾ Files".into());
     if let Some(ref d) = app.git_wb.commit_detail {
-        col_files.push(format!("  {}  {}", d.short, d.subject.chars().take(40).collect::<String>()));
+        col_files.push(format!(
+            "  {}  {}",
+            d.short,
+            d.subject.chars().take(40).collect::<String>()
+        ));
         for (i, f) in d.files.iter().enumerate().take(40) {
             let mark = if i == app.git_wb.commit_file_sel {
                 "›"
@@ -1046,10 +1088,30 @@ fn build_git_wb(app: &App) -> GitWbScene {
 
     // ── Special full-width tabs ──
     let mut special = Vec::new();
+    // Docked primary modes render Diff as their detail pane rather than as a
+    // peer top-level destination. Selection keeps Status/History active.
+    if docked {
+        if let Some(ref path) = app.git_wb.diff_path {
+            special.push(format!("diff · {path}"));
+            for line in app
+                .git_wb
+                .diff_lines
+                .iter()
+                .skip(app.git_wb.diff_scroll)
+                .take(50)
+            {
+                special.push(line.text.clone());
+            }
+        }
+    }
     match app.git_wb.tab {
         GitTab::Branches => {
             for (i, b) in app.git_wb.branches.iter().enumerate().take(50) {
-                let mark = if i == app.git_wb.branch_sel { "›" } else { " " };
+                let mark = if i == app.git_wb.branch_sel {
+                    "›"
+                } else {
+                    " "
+                };
                 let cur = if b.current { "*" } else { " " };
                 special.push(format!("{mark}{cur} {}", b.name));
             }
@@ -1098,7 +1160,14 @@ fn build_git_wb(app: &App) -> GitWbScene {
                 special.push("No open PRs (or not logged in)".into());
                 special.push("Auth tab → gh auth login · then re-open PRs".into());
             }
-            for (i, p) in app.git_wb.prs.iter().enumerate().take(40) {
+            for (i, p) in app
+                .git_wb
+                .pr_filtered
+                .iter()
+                .filter_map(|&index| app.git_wb.prs.get(index))
+                .enumerate()
+                .take(40)
+            {
                 let mark = if i == app.git_wb.pr_sel { "›" } else { " " };
                 let draft = if p.is_draft { " [draft]" } else { "" };
                 special.push(format!(
@@ -1135,8 +1204,19 @@ fn build_git_wb(app: &App) -> GitWbScene {
                 special.push("No open issues (or not logged in)".into());
                 special.push("Auth tab → check login · then re-open Issues".into());
             }
-            for (i, iss) in app.git_wb.issues.iter().enumerate().take(40) {
-                let mark = if i == app.git_wb.issue_sel { "›" } else { " " };
+            for (i, iss) in app
+                .git_wb
+                .issue_filtered
+                .iter()
+                .filter_map(|&index| app.git_wb.issues.get(index))
+                .enumerate()
+                .take(40)
+            {
+                let mark = if i == app.git_wb.issue_sel {
+                    "›"
+                } else {
+                    " "
+                };
                 special.push(format!(
                     "{mark}#{:<5} {}  · {}",
                     iss.number,
@@ -1171,7 +1251,11 @@ fn build_git_wb(app: &App) -> GitWbScene {
         }
         GitTab::Stash => {
             for (i, s) in app.git_wb.stashes.iter().enumerate().take(40) {
-                let mark = if i == app.git_wb.stash_sel { "›" } else { " " };
+                let mark = if i == app.git_wb.stash_sel {
+                    "›"
+                } else {
+                    " "
+                };
                 special.push(format!("{mark}{s}"));
             }
             if special.is_empty() {
@@ -1340,7 +1424,7 @@ fn build_theme(app: &App) -> ThemeScene {
 }
 
 fn build_settings(app: &App) -> SettingsScene {
-    use suisei_core::settings::{help_entries, SettingRow, SettingsPage};
+    use suisei_core::settings::{SettingRow, SettingsPage, help_entries};
     use suisei_core::theme;
 
     // Face Settings window paints whenever panel is open (Mode may lag UI).
@@ -1357,7 +1441,10 @@ fn build_settings(app: &App) -> SettingsScene {
         };
     }
 
-    let tabs: Vec<String> = SettingsPage::all().iter().map(|p| p.label().into()).collect();
+    let tabs: Vec<String> = SettingsPage::all()
+        .iter()
+        .map(|p| p.label().into())
+        .collect();
     let page_index = SettingsPage::all()
         .iter()
         .position(|p| *p == app.settings.page)
@@ -1398,7 +1485,6 @@ fn build_settings(app: &App) -> SettingsScene {
             });
         }
         // Drop TUI key-chord junk from status when painting for the face.
-
         SettingsPage::Setting => {
             let draft = &app.settings.draft;
             let themes = theme::all_themes();
@@ -1416,10 +1502,14 @@ fn build_settings(app: &App) -> SettingsScene {
                         (format!("{mark} {name}"), "Enter to apply".into(), false)
                     }
                     SettingRow::EditorHeader => ("Editor".into(), String::new(), true),
-                    SettingRow::TabWidth => ("Tab width".into(), format!("{}", draft.tab_width), false),
-                    SettingRow::RelativeNumber => {
-                        ("Relative number".into(), on_off(draft.relative_number), false)
+                    SettingRow::TabWidth => {
+                        ("Tab width".into(), format!("{}", draft.tab_width), false)
                     }
+                    SettingRow::RelativeNumber => (
+                        "Relative number".into(),
+                        on_off(draft.relative_number),
+                        false,
+                    ),
                     SettingRow::WrapLines => ("Wrap lines".into(), on_off(draft.wrap_lines), false),
                     SettingRow::UndoCaching => {
                         ("Undo caching".into(), on_off(draft.undo_caching), false)
@@ -1441,10 +1531,7 @@ fn build_settings(app: &App) -> SettingsScene {
                     }
                     SettingRow::LspLang(li) => {
                         let catalog = suisei_core::config::lsp_lang_catalog();
-                        let (key, label, _) = catalog
-                            .get(li)
-                            .copied()
-                            .unwrap_or(("?", "?", "?"));
+                        let (key, label, _) = catalog.get(li).copied().unwrap_or(("?", "?", "?"));
                         let state = match draft.lsp_servers.get(key).map(|s| s.as_str()) {
                             None => "default",
                             Some("") => "off",
@@ -1457,43 +1544,11 @@ fn build_settings(app: &App) -> SettingsScene {
                         ("Open Git workbench".into(), "Enter".into(), false)
                     }
                     SettingRow::OpenScm => ("Open SCM panel".into(), "Enter".into(), false),
-                    _ => continue,
                 };
                 rows.push(SettingsRowScene {
                     label,
                     value,
                     is_header,
-                    selected,
-                });
-            }
-        }
-        SettingsPage::Pet => {
-            let draft = &app.settings.draft;
-            for (i, row) in app.settings.pet_rows().into_iter().enumerate() {
-                let selected = i == app.settings.selected;
-                let (label, value) = match row {
-                    SettingRow::PetEnabled => ("Enabled".into(), on_off(draft.pet_enabled)),
-                    SettingRow::PetPath => (
-                        "Path".into(),
-                        if draft.pet_path.is_empty() {
-                            "(none · :pet file.gif)".into()
-                        } else {
-                            draft.pet_path.clone()
-                        },
-                    ),
-                    SettingRow::PetX => ("X".into(), format!("{}", draft.pet_x)),
-                    SettingRow::PetY => ("Y".into(), format!("{}", draft.pet_y)),
-                    SettingRow::PetWidth => {
-                        ("Width cells".into(), format!("{}", draft.pet_width_cells))
-                    }
-                    SettingRow::PetSpeed => ("Speed %".into(), format!("{}", draft.pet_speed)),
-                    SettingRow::PetReload => ("Reload pet".into(), "Enter".into()),
-                    _ => continue,
-                };
-                rows.push(SettingsRowScene {
-                    label,
-                    value,
-                    is_header: false,
                     selected,
                 });
             }
@@ -1544,11 +1599,7 @@ fn build_settings(app: &App) -> SettingsScene {
 }
 
 fn on_off(v: bool) -> String {
-    if v {
-        "on".into()
-    } else {
-        "off".into()
-    }
+    if v { "on".into() } else { "off".into() }
 }
 
 fn branch_name(app: &App) -> String {
@@ -1560,7 +1611,6 @@ fn branch_name(app: &App) -> String {
     }
     String::new()
 }
-
 
 fn build_completions(app: &App) -> CompletionsScene {
     if !app.completions.active || app.completions.suggestions.is_empty() {
@@ -1643,7 +1693,6 @@ fn build_explorer(app: &App) -> ExplorerScene {
     }
 }
 
-
 fn build_palette(app: &App) -> PaletteScene {
     let open = app.palette.open || matches!(app.mode, Mode::Palette);
     if !open {
@@ -1693,15 +1742,15 @@ fn build_search(app: &App) -> SearchScene {
     let open = matches!(app.mode, Mode::Search);
     SearchScene {
         open,
-        forward: app.search_forward,
+        forward: app.search.forward,
         input: if open {
-            app.search_input.clone()
+            app.search.input.clone()
         } else {
             String::new()
         },
-        match_count: app.search_matches.len() as u32,
-        match_index: if open && !app.search_matches.is_empty() {
-            app.search_current as u32
+        match_count: app.search.matches.len() as u32,
+        match_index: if open && !app.search.matches.is_empty() {
+            app.search.current as u32
         } else {
             0
         },
@@ -1709,24 +1758,15 @@ fn build_search(app: &App) -> SearchScene {
 }
 
 fn build_tabs(app: &App) -> Vec<TabScene> {
-    let mut out = Vec::with_capacity(app.buffers.len().max(1));
-    for (i, tab) in app.buffers.iter().enumerate() {
-        let is_current = i == app.current_buffer;
+    let mut out = Vec::with_capacity(app.tabs.buffers.len().max(1));
+    // Unified layouts whose chip has already been emitted at a member's
+    // position — the remaining members are skipped.
+    let mut unified_done: Vec<u64> = Vec::new();
+    let current = app.current_buffer();
+    for (i, tab) in app.tabs.buffers.iter().enumerate() {
+        let is_current = i == current;
         let is_term = tab.terminal.is_some();
-        let filename = if is_current {
-            app.filename.as_ref()
-        } else {
-            tab.filename.as_ref()
-        };
-        let title = if is_term {
-            "Terminal".to_string()
-        } else {
-            filename
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("[No Name]")
-                .to_string()
-        };
+        let title = tab_title(app, i);
         let dirty = if is_current {
             app.modified
         } else {
@@ -1739,6 +1779,25 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
             .map(|l| (l.id, l.style))
             .unwrap_or((0, crate::LayoutStyleAlias::Grouped));
         if group.0 != 0 && group.1 == crate::LayoutStyleAlias::Unified {
+            // The unified chip sits at its FIRST member's strip position —
+            // the merge animation morphs container ⇄ chip in place instead of
+            // flying the chip across the whole strip. Later members vanish
+            // into it.
+            if !unified_done.contains(&group.0) {
+                unified_done.push(group.0);
+                if let Some(l) = app.layouts.iter().find(|l| l.id == group.0) {
+                    out.push(TabScene {
+                        id: l.id,
+                        title: l.name.clone(),
+                        dirty: false,
+                        active: app.active_layout == Some(l.id),
+                        group: l.id,
+                        is_layout: true,
+                        is_terminal: false,
+                        deleted: false,
+                    });
+                }
+            }
             continue;
         }
         out.push(TabScene {
@@ -1749,12 +1808,24 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
             group: group.0,
             is_layout: false,
             is_terminal: is_term,
+            // Dirty vanished tabs remain recoverable even while inactive; the
+            // path check keeps their warning stable across tab switches.
+            deleted: if is_current {
+                app.file_deleted
+            } else {
+                tab.file_mtime.is_some()
+                    && tab
+                        .filename
+                        .as_ref()
+                        .is_some_and(|path| std::fs::metadata(path).is_err())
+            },
         });
     }
-    // Unified layouts get one chip of their own, appended after the loose
-    // documents. Grouped layouts need no chip — their documents are the chips.
+    // Grouped layouts need no chip — their documents are the chips. A unified
+    // layout with no member on the strip (cannot happen while the <2-document
+    // dissolve holds, but stay honest) still gets its chip, at the end.
     for l in &app.layouts {
-        if l.style == crate::LayoutStyleAlias::Unified {
+        if l.style == crate::LayoutStyleAlias::Unified && !unified_done.contains(&l.id) {
             out.push(TabScene {
                 id: l.id,
                 title: l.name.clone(),
@@ -1763,6 +1834,7 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
                 group: l.id,
                 is_layout: true,
                 is_terminal: false,
+                deleted: false,
             });
         }
     }
@@ -1775,9 +1847,34 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
             group: 0,
             is_layout: false,
             is_terminal: false,
+            deleted: false,
         });
     }
     out
+}
+
+fn tab_title(app: &App, tab_index: usize) -> String {
+    let Some(tab) = app.tabs.buffers.get(tab_index) else {
+        return "[No Name]".into();
+    };
+    if let Some(terminal) = tab.terminal {
+        // The shell's own title (OSC 0/2) when it has reported one —
+        // `make`, `vim file`, an ssh session each name their tab.
+        return app
+            .terminal_title(terminal)
+            .map(str::to_string)
+            .unwrap_or_else(|| "Terminal".to_string());
+    }
+    let filename = if tab_index == app.current_buffer() {
+        app.filename.as_ref()
+    } else {
+        tab.filename.as_ref()
+    };
+    filename
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("[No Name]")
+        .to_string()
 }
 
 /// Single editor or multi-pane split surfaces for the Swift face.
@@ -1790,23 +1887,31 @@ fn build_editor_surfaces(
     caret_vcol: u32,
     sel: Option<(Position, Position)>,
     prev_panes: Vec<PaneScene>,
-) -> (Vec<EditorLineScene>, u8, f32, u8, Vec<PaneScene>) {
-
+    // Build the packed visible-line stream, or leave it empty. The GUI face is
+    // a PULL renderer: every canvas fetches its own rows via `build_editor_band`
+    // (and terminals / preview / minimap pull their own separate snapshots), so
+    // NOTHING reads these lines on the native path. The TUI still needs them, so
+    // full `compose()` passes `true`; the per-keystroke scroll/edit hot path
+    // passes `false` and skips ~240 line clones × pane count every keystroke.
+    build_lines: bool,
+) -> (Vec<EditorLineScene>, u8, Vec<PaneScene>) {
     if !app.split.is_split() {
-        let lines = build_visible_lines_from_buffer(
-            app,
-            app.current_buffer,
-            scroll,
-            rows,
-            Some(caret_vcol),
-            sel,
-            true,
-        );
-        return (lines, 0, 0.5, 0, Vec::new());
+        let lines = if build_lines {
+            build_visible_lines_from_buffer(
+                app,
+                app.current_buffer(),
+                scroll,
+                rows,
+                Some(caret_vcol),
+                sel,
+                true,
+            )
+        } else {
+            Vec::new()
+        };
+        return (lines, 0, Vec::new());
     }
 
-    // `kind` is now just "is there a split" — the shape lives in the rects.
-    let kind = 1u8;
     let n = app.split.pane_count().max(1);
     // Reserve ~2 rows for per-pane path bar chrome in the face.
     const PATH_BAR_ROWS: usize = 2;
@@ -1817,7 +1922,10 @@ fn build_editor_surfaces(
     // a vertical split, rows/n for a horizontal one. A tree can have both at
     // once, so a single number cannot describe it.
     let rows_for = |i: usize| -> usize {
-        let h = rects.get(i).map(|r: &suisei_core::split::Rect| r.h).unwrap_or(1.0);
+        let h = rects
+            .get(i)
+            .map(|r: &suisei_core::split::Rect| r.h)
+            .unwrap_or(1.0);
         let share = ((rows as f32) * h) as usize;
         share
             .saturating_sub(PATH_BAR_ROWS)
@@ -1831,13 +1939,17 @@ fn build_editor_surfaces(
 
     // Persist active buffer into focused pane snapshot for accurate paint.
     let mut prev_panes = prev_panes;
+    let current = app.current_buffer();
     for (i, pane) in app.split.panes.iter().take(n).enumerate() {
         let focused = i == focus;
         let rows_each = rows_for(i);
-        let rect = rects.get(i).copied().unwrap_or(suisei_core::split::Rect::FULL);
+        let rect = rects
+            .get(i)
+            .copied()
+            .unwrap_or(suisei_core::split::Rect::FULL);
         let (tab, pane_scroll, pane_hscroll, pane_cursor) = if focused {
             (
-                app.current_buffer,
+                current,
                 scroll,
                 app.hscroll,
                 (app.buffer.cursor.row, app.buffer.cursor.col),
@@ -1846,14 +1958,20 @@ fn build_editor_surfaces(
             (app.pane_tab(pane), pane.scroll, pane.hscroll, pane.cursor)
         };
         let buf = buffer_for_tab(app, tab);
+        let title = tab_title(app, tab);
         let doc_line_count = buf.line_count() as u32;
         let doc_version = buf.version();
-        let eff_hscroll = if app.wrap_lines { 0 } else { pane_hscroll as u32 };
+        let eff_hscroll = if app.wrap_lines {
+            0
+        } else {
+            pane_hscroll as u32
+        };
         // Unfocused + identical inputs → move the previous snapshot over.
         if !focused {
             if let Some(idx) = prev_panes.iter().position(|p| {
                 !p.focused
                     && p.tab_index == tab as u32
+                    && p.title == title
                     && p.scroll == pane_scroll as u32
                     && p.hscroll == eff_hscroll
                     && p.doc_version == doc_version
@@ -1873,20 +1991,25 @@ fn build_editor_surfaces(
             Some(visual_col(line, pane_cursor.1) as u32)
         };
         let pane_sel = if focused { sel } else { None };
-        let lines = build_visible_lines_from_buffer(
-            app,
-            tab,
-            pane_scroll,
-            rows_each,
-            caret,
-            pane_sel,
-            focused,
-        );
+        let lines = if build_lines {
+            build_visible_lines_from_buffer(
+                app,
+                tab,
+                pane_scroll,
+                rows_each,
+                caret,
+                pane_sel,
+                focused,
+            )
+        } else {
+            Vec::new()
+        };
         if focused {
             focused_lines = lines.clone();
         }
         panes.push(PaneScene {
             tab_index: tab as u32,
+            title,
             doc_line_count,
             hscroll: eff_hscroll,
             scroll: pane_scroll as u32,
@@ -1899,13 +2022,13 @@ fn build_editor_surfaces(
         });
     }
 
-    (focused_lines, kind, 0.5, focus as u8, panes)
+    (focused_lines, focus as u8, panes)
 }
 
 fn buffer_for_tab(app: &App, tab: usize) -> &suisei_core::buffer::Buffer {
-    if tab == app.current_buffer {
+    if tab == app.current_buffer() {
         &app.buffer
-    } else if let Some(t) = app.buffers.get(tab) {
+    } else if let Some(t) = app.tabs.buffers.get(tab) {
         &t.buffer
     } else {
         &app.buffer
@@ -1951,7 +2074,8 @@ fn build_lines_at(
 ) -> Vec<EditorLineScene> {
     let buf = buffer_for_tab(app, tab);
     let total = buf.line_count();
-    let cursor_row = if tab == app.current_buffer {
+    let is_current = tab == app.current_buffer();
+    let cursor_row = if is_current {
         app.buffer.cursor().row
     } else if let Some(p) = app
         .split
@@ -1968,13 +2092,14 @@ fn build_lines_at(
     };
     let wrap = app.wrap_lines;
     let text_width = if wrap {
-        app.viewport.width.saturating_sub(5).max(20) as usize
+        app.grid_cols().saturating_sub(5).max(20) as usize
     } else {
         usize::MAX
     };
     // Resolve breakpoint path **once** — never canonicalize per row on the scroll hot path.
-    let bp_lines: Option<std::collections::HashSet<usize>> = if tab == app.current_buffer {
+    let bp_lines: Option<std::collections::HashSet<usize>> = if is_current {
         let path_str = app
+            .tabs
             .buffers
             .get(tab)
             .and_then(|t| t.filename.as_ref())
@@ -1999,17 +2124,16 @@ fn build_lines_at(
     } else {
         None
     };
-    let multi_active = tab == app.current_buffer && app.multi.is_active();
-    // GUI multi-cursor: every caret in `app.sel` except the primary (the primary
-    // is painted through caret_*/sel_*). Resolved once for the whole band, not
-    // per row/chunk. Empty in the single-cursor case, so the hot path pays
-    // nothing. Distinct from the dormant vim `app.multi` above.
-    let gui_secondaries: Vec<Position> = if tab == app.current_buffer && app.sel.is_multi() {
+    // GUI multi-cursor: every caret in `app.sel` except the primary (the
+    // primary is painted through caret_*/sel_*). Resolved once for the whole
+    // band, not per row/chunk. Empty in the single-cursor case, so the hot
+    // path pays nothing.
+    let gui_secondaries: Vec<Position> = if is_current && app.sel.is_multi() {
         app.secondary_caret_positions()
     } else {
         Vec::new()
     };
-    let diags_active = tab == app.current_buffer && !app.lsp.diagnostics.is_empty();
+    let diags_active = is_current && !app.lsp.diagnostics.is_empty();
 
     // Visual row origin for first buffer line in this window (approx: 1:1 before scroll).
     let mut visual_row = band_start as u32;
@@ -2037,20 +2161,21 @@ fn build_lines_at(
         // Xcode-style bracket hint: moving across a closer points out its
         // opener. Kind 254 is a marker span; the FACE owns the ~1s flash, so
         // the core stays stateless and the timing lives with the renderer.
-        let bracket_match = if caret_vcol.is_some() && use_live_syntax && tab == app.current_buffer {
+        let bracket_match = if caret_vcol.is_some() && use_live_syntax && is_current {
             app.buffer.matching_bracket_before_cursor()
         } else {
             None
         };
-        let (sel_v0, sel_v1) = if use_live_syntax && tab == app.current_buffer {
+        let (sel_v0, sel_v1) = if use_live_syntax && is_current {
             selection_on_line(app, row, &text, sel)
         } else {
             (None, None)
         };
-        let full_spans = if use_live_syntax && tab == app.current_buffer {
+        let mut full_spans = if use_live_syntax && is_current {
             syntax_spans_for_row(app, row, raw)
         } else {
             let ext = app
+                .tabs
                 .buffers
                 .get(tab)
                 .and_then(|t| t.filename.as_ref())
@@ -2071,7 +2196,30 @@ fn build_lines_at(
                 })
                 .collect::<Vec<_>>()
         };
-        let git_sign = if tab == app.current_buffer {
+        // Find overlays are renderer spans too: 248 = another match, 249 =
+        // the current match. They stay in display-column coordinates like
+        // syntax spans; the AppKit face resolves those columns through the
+        // drawn CoreText line so CJK/emoji widths remain exact.
+        if is_current {
+            if let Some(pattern) = app.active_search_pattern() {
+                let pattern_len = pattern.chars().count();
+                if pattern_len > 0 {
+                    let (base, matches) = app.search_matches_row_slice(row);
+                    for (offset, m) in matches.iter().enumerate() {
+                        let start = visual_col(raw, m.col) as u32;
+                        let end = visual_col(raw, m.col.saturating_add(pattern_len)) as u32;
+                        if end > start {
+                            full_spans.push(SpanScene {
+                                start,
+                                end,
+                                kind: if base + offset == app.search.current { 249 } else { 248 },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let git_sign = if is_current {
             git_sign_for_row(app, row)
         } else {
             0
@@ -2136,31 +2284,23 @@ fn build_lines_at(
                 if m.row == row && !wrap_cont {
                     let u0: u32 = raw.chars().take(m.col).map(|c| c.len_utf16() as u32).sum();
                     let u1 = u0
-                        + raw.chars().nth(m.col).map(|c| c.len_utf16() as u32).unwrap_or(1);
-                    spans.push(SpanScene { start: u0, end: u1, kind: 254 });
+                        + raw
+                            .chars()
+                            .nth(m.col)
+                            .map(|c| c.len_utf16() as u32)
+                            .unwrap_or(1);
+                    spans.push(SpanScene {
+                        start: u0,
+                        end: u1,
+                        kind: 254,
+                    });
                 }
             }
-            if multi_active {
-                for p in &app.multi.extras {
-                    if p.row != row {
-                        continue;
-                    }
-                    let vc = visual_col(raw, p.col) as u32;
-                    if vc >= base_col && vc < end_col.max(base_col + 1) {
-                        let rel = vc.saturating_sub(base_col);
-                        spans.push(SpanScene {
-                            start: rel,
-                            end: rel.saturating_add(1),
-                            kind: 250,
-                        });
-                    }
-                }
-            }
-            // GUI multi-cursor extras. Unlike kind-250 above (cell columns), these
-            // carry UTF-16 offsets — the face positions them with CoreText so an
-            // extra caret tracks CJK the same way the primary does. The head is an
-            // exclusive between-character column, i.e. already the drawn column.
-            // (Secondary SELECTION fills are a separate kind, to add with ⌘-D.)
+            // Multi-cursor extras carry UTF-16 offsets — the face positions
+            // them with CoreText so an extra caret tracks CJK the same way
+            // the primary does. The head is an exclusive between-character
+            // column, i.e. already the drawn column. (Secondary SELECTION
+            // fills are a separate kind, to add with ⌘-D.)
             for head in &gui_secondaries {
                 if head.row != row {
                     continue;
@@ -2203,8 +2343,20 @@ fn build_lines_at(
                     }
                 }
             }
-            if spans.len() > 32 {
-                spans.truncate(32);
+            // Cap at the FFI limit (SUISEI_MAX_SPANS = 24), markers first:
+            // kinds >= 248 are find / caret / diagnostics / bracket overlays —
+            // a plain truncate let busy syntax push the caret span off the
+            // line, so syntax spans yield before markers do.
+            if spans.len() > 24 {
+                let markers: Vec<SpanScene> =
+                    spans.iter().filter(|s| s.kind >= 248).copied().collect();
+                let keep = 24usize.saturating_sub(markers.len());
+                let syntax: Vec<SpanScene> = spans
+                    .into_iter()
+                    .filter(|s| s.kind < 248)
+                    .take(keep)
+                    .collect();
+                spans = syntax.into_iter().chain(markers).collect();
             }
             let caret_utf16 = if caret_here {
                 utf16_offset_for_vcol(&chunk, caret_abs.saturating_sub(base_col))
@@ -2248,7 +2400,7 @@ fn wrap_visual_chunks(text: &str, width: usize) -> Vec<(u32, String)> {
     let mut seg = String::new();
     let mut seg_w = 0usize;
     for ch in text.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
         if seg_w > 0 && seg_w + w > width {
             out.push((seg_start_col, seg));
             seg = String::new();
@@ -2273,10 +2425,14 @@ fn utf16_offset_for_vcol(s: &str, vcol: u32) -> u32 {
     let mut cells = 0usize;
     let mut utf16 = 0usize;
     for ch in s.chars() {
-        if cells >= vcol as usize {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+        // Once the requested cell boundary is reached, still absorb trailing
+        // zero-width scalars belonging to the same drawn grapheme. Otherwise
+        // CoreText receives an index inside decomposed Hangul/accent clusters.
+        if cells >= vcol as usize && w > 0 {
             break;
         }
-        cells += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        cells += w;
         utf16 += ch.len_utf16();
     }
     utf16 as u32
@@ -2284,7 +2440,7 @@ fn utf16_offset_for_vcol(s: &str, vcol: u32) -> u32 {
 
 fn visual_width_str(s: &str) -> usize {
     s.chars()
-        .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1))
+        .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1))
         .sum()
 }
 
@@ -2386,7 +2542,11 @@ pub(crate) fn selection_on_line(
         return (None, None);
     }
     let raw = app.buffer.line(row);
-    let line_len = expanded.chars().count() as u32;
+    // Selection coordinates below are DISPLAY columns. Counting Unicode
+    // scalars here clamps a CJK selection to half its real width (한 == two
+    // display cells), which in turn produces the wrong UTF-16 range for
+    // CoreText. Clamp against display width, then convert to UTF-16 once.
+    let line_len = visual_width_str(expanded) as u32;
     let v0 = if row == start.row {
         visual_col(raw, start.col) as u32
     } else {
@@ -2459,5 +2619,43 @@ fn mode_label(app: &App) -> &'static str {
         Mode::WorkspaceSearch => "FIND",
         Mode::Debug => "DEBUG",
         Mode::CallHierarchy => "CALLS",
+    }
+}
+
+#[cfg(test)]
+mod unicode_overlay_tests {
+    use super::*;
+    use suisei_core::buffer::Buffer;
+
+    #[test]
+    fn cjk_selection_uses_display_width_before_utf16_conversion() {
+        let mut app = App::new();
+        app.buffer = Buffer::from_string("a한글b");
+        let span = Some((Position::new(0, 1), Position::new(0, 2)));
+        assert_eq!(selection_on_line(&app, 0, "a한글b", span), (Some(1), Some(5)));
+    }
+
+    #[test]
+    fn find_results_emit_yellow_overlay_spans_and_current_marker() {
+        let mut app = App::new();
+        app.buffer = Buffer::from_string("한글 한글");
+        app.mode = Mode::Search;
+        app.search.input = "한글".into();
+        app.recompute_search("한글", false);
+        app.search.current = 1;
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true);
+        let kinds: Vec<u8> = lines[0]
+            .spans
+            .iter()
+            .filter(|span| matches!(span.kind, 248 | 249))
+            .map(|span| span.kind)
+            .collect();
+        assert_eq!(kinds, vec![248, 249]);
+    }
+
+    #[test]
+    fn display_to_utf16_mapping_keeps_combining_cluster_whole() {
+        assert_eq!(visual_width_str("e\u{301}x"), 2);
+        assert_eq!(utf16_offset_for_vcol("e\u{301}x", 1), 2);
     }
 }

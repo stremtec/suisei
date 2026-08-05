@@ -31,6 +31,11 @@ pub struct LspClient {
     pending: HashMap<u64, PendingReq>,
     doc_version: i64,
     pub diagnostics: Vec<Diagnostic>,
+    /// Bumped whenever the published diagnostic payload changes, including a
+    /// same-count message/range update. The GUI cannot infer this from
+    /// `Vec::len()`—doing so left its Issue navigator frozen after the first
+    /// snapshot.
+    pub diagnostics_revision: u64,
     pub server_running: bool,
     pub server_name: String,
     pub server_lang: String,
@@ -168,7 +173,7 @@ struct RawMsg {
     body: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Diagnostic {
     pub row: usize,
     pub col_start: usize,
@@ -208,6 +213,7 @@ impl Default for LspClient {
             pending: HashMap::new(),
             doc_version: 1,
             diagnostics: Vec::new(),
+            diagnostics_revision: 0,
             server_running: false,
             server_name: String::new(),
             server_lang: String::new(),
@@ -332,7 +338,7 @@ impl LspClient {
         self.error = None;
         self.soft_error = None;
         self.stderr_tail.clear();
-        self.diagnostics.clear();
+        self.clear_diagnostics();
         self.pending.clear();
         self.opened_uri.clear();
 
@@ -344,12 +350,7 @@ impl LspClient {
             .unwrap_or("workspace");
         // Build initialize carefully — a single malformed brace kills the server
         // and surfaces as sticky LSP:err (disconnected).
-        let init = build_initialize_request(
-            id,
-            pid,
-            &self.root_uri,
-            folder_name,
-        );
+        let init = build_initialize_request(id, pid, &self.root_uri, folder_name);
         self.send_raw(&init);
 
         let text = text_override
@@ -357,11 +358,7 @@ impl LspClient {
             .unwrap_or_else(|| std::fs::read_to_string(&abs_file).unwrap_or_default());
         let lang = lang_id(&abs_file);
         self.semantic_doc_text = text.clone();
-        self.pending_didopen = Some((
-            abs_file.clone(),
-            lang.to_string(),
-            escape_json(&text),
-        ));
+        self.pending_didopen = Some((abs_file.clone(), lang.to_string(), escape_json(&text)));
     }
 
     pub fn auto_start(&mut self, file_path: &str) {
@@ -404,7 +401,7 @@ impl LspClient {
 
         let Some(cmd) = self.resolve_server_cmd(&ext) else {
             // No server for this file type — clear paint state, keep soft notes.
-            self.diagnostics.clear();
+            self.clear_diagnostics();
             self.semantic_tokens.clear();
             self.inlay_hints.clear();
             // Don't keep hard err from previous language when browsing md/txt
@@ -459,7 +456,7 @@ impl LspClient {
         self.current_uri = new_uri.clone();
         self.opened_uri = new_uri;
         self.doc_version = 1;
-        self.diagnostics.clear();
+        self.clear_diagnostics();
         self.semantic_tokens.clear();
         self.inlay_hints.clear();
         self.code_lenses.clear();
@@ -491,6 +488,40 @@ impl LspClient {
             escape_json(&uri),
             self.doc_version,
             escape_json(text)
+        );
+        self.send_raw(&msg);
+        self.semantic_dirty = true;
+        self.maybe_request_semantic_tokens();
+        self.inlay_dirty = true;
+        self.code_lens_dirty = true;
+    }
+
+    /// Incremental didChange: range-based content changes (UTF-16 positions,
+    /// as negotiated in initialize) instead of re-sending the whole document
+    /// on every sync. `full_text` still refreshes the semantic-token copy.
+    /// Falls back to a full sync when given no changes.
+    pub fn notify_change_incremental(
+        &mut self,
+        path: &str,
+        full_text: &str,
+        changes: &[LspTextChange],
+    ) {
+        if !self.server_running {
+            return;
+        }
+        if changes.is_empty() {
+            self.notify_change(path, full_text);
+            return;
+        }
+        let uri = path_to_uri(&abs_path(path));
+        self.current_uri = uri.clone();
+        self.doc_version = self.doc_version.saturating_add(1);
+        self.semantic_doc_text = full_text.to_string();
+        let msg = format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"{}","version":{}}},"contentChanges":[{}]}}}}"#,
+            escape_json(&uri),
+            self.doc_version,
+            content_changes_json(changes)
         );
         self.send_raw(&msg);
         self.semantic_dirty = true;
@@ -532,12 +563,24 @@ impl LspClient {
 
     pub fn request_definition(&mut self, path: &str, row: usize, col: usize) {
         self.definition_as_peek = false;
-        self.request_position(PendingReq::Definition, "textDocument/definition", path, row, col);
+        self.request_position(
+            PendingReq::Definition,
+            "textDocument/definition",
+            path,
+            row,
+            col,
+        );
     }
 
     pub fn request_peek_definition(&mut self, path: &str, row: usize, col: usize) {
         self.definition_as_peek = true;
-        self.request_position(PendingReq::Definition, "textDocument/definition", path, row, col);
+        self.request_position(
+            PendingReq::Definition,
+            "textDocument/definition",
+            path,
+            row,
+            col,
+        );
     }
 
     pub fn request_document_symbols(&mut self, path: &str) {
@@ -627,7 +670,13 @@ impl LspClient {
     }
 
     pub fn request_completion(&mut self, path: &str, row: usize, col: usize) {
-        self.request_position(PendingReq::Completion, "textDocument/completion", path, row, col);
+        self.request_position(
+            PendingReq::Completion,
+            "textDocument/completion",
+            path,
+            row,
+            col,
+        );
     }
 
     pub fn request_hover(&mut self, path: &str, row: usize, col: usize) {
@@ -843,11 +892,7 @@ impl LspClient {
 
     /// Editor char column → LSP UTF-16 code units for `row`.
     fn char_col_to_utf16(&self, row: usize, col: usize) -> usize {
-        let line = self
-            .semantic_doc_text
-            .split('\n')
-            .nth(row)
-            .unwrap_or("");
+        let line = self.semantic_doc_text.split('\n').nth(row).unwrap_or("");
         char_to_utf16_col(line, col)
     }
 
@@ -996,7 +1041,10 @@ impl LspClient {
                 if uri.is_empty() || uris_match(&uri, &self.current_uri) {
                     // Keep row-sorted so `diagnostics_for_row` can binary-search.
                     diags.sort_by_key(|d| d.row);
-                    self.diagnostics = diags; // empty clears
+                    if self.diagnostics != diags {
+                        self.diagnostics = diags; // empty clears
+                        self.diagnostics_revision = self.diagnostics_revision.wrapping_add(1);
+                    }
                 }
                 return;
             }
@@ -1032,8 +1080,8 @@ impl LspClient {
 
         // Error response — only Initialize is a hard sticky status error.
         if is_jsonrpc_error(&msg.body) {
-            let m = extract_str(&msg.body, "\"message\":\"")
-                .unwrap_or_else(|| "request failed".into());
+            let m =
+                extract_str(&msg.body, "\"message\":\"").unwrap_or_else(|| "request failed".into());
             match kind {
                 PendingReq::Initialize => {
                     self.error = Some(format!("LSP init: {m}"));
@@ -1088,16 +1136,13 @@ impl LspClient {
                 self.references_ready = true;
             }
             PendingReq::Rename => {
-                let edits = parse_workspace_edit_ctx(
-                    &msg.body,
-                    &self.current_uri,
-                    &self.semantic_doc_text,
-                );
+                let edits =
+                    parse_workspace_edit_ctx(&msg.body, &self.current_uri, &self.semantic_doc_text);
                 if edits.is_empty() {
-                    self.pending_workspace_edit =
-                        Some(parse_rename_message(&msg.body).unwrap_or_else(|| {
-                            "Rename: no changes".into()
-                        }));
+                    self.pending_workspace_edit = Some(
+                        parse_rename_message(&msg.body)
+                            .unwrap_or_else(|| "Rename: no changes".into()),
+                    );
                 } else {
                     self.pending_edits = edits;
                 }
@@ -1108,28 +1153,21 @@ impl LspClient {
                 {
                     let path = uri_to_path(&self.current_uri);
                     self.pending_edits = vec![FileEdit { path, text: edit }];
-                } else if msg.body.contains("\"result\":null")
-                    || msg.body.contains("\"result\":[]")
+                } else if msg.body.contains("\"result\":null") || msg.body.contains("\"result\":[]")
                 {
                     self.soft_error = Some("Format: nothing to change".into());
                 }
             }
             PendingReq::CodeAction => {
-                self.pending_code_actions = parse_code_actions_ctx(
-                    &msg.body,
-                    &self.current_uri,
-                    &self.semantic_doc_text,
-                );
+                self.pending_code_actions =
+                    parse_code_actions_ctx(&msg.body, &self.current_uri, &self.semantic_doc_text);
                 if self.pending_code_actions.is_empty() {
                     self.soft_error = Some("No code actions".into());
                 }
             }
             PendingReq::ExecuteCommand => {
-                let edits = parse_workspace_edit_ctx(
-                    &msg.body,
-                    &self.current_uri,
-                    &self.semantic_doc_text,
-                );
+                let edits =
+                    parse_workspace_edit_ctx(&msg.body, &self.current_uri, &self.semantic_doc_text);
                 if !edits.is_empty() {
                     self.pending_edits = edits;
                 } else {
@@ -1242,7 +1280,7 @@ impl LspClient {
         self.pending.clear();
         self.pending_didopen = None;
         self.progress_open.clear();
-        self.diagnostics.clear();
+        self.clear_diagnostics();
         self.semantic_tokens.clear();
         self.semantic_token_types.clear();
         self.semantic_tokens_supported = false;
@@ -1257,6 +1295,14 @@ impl LspClient {
         self.definition_as_peek = false;
         self.opened_uri.clear();
         self.soft_error = None;
+    }
+
+    pub fn clear_diagnostics(&mut self) {
+        if self.diagnostics.is_empty() {
+            return;
+        }
+        self.diagnostics.clear();
+        self.diagnostics_revision = self.diagnostics_revision.wrapping_add(1);
     }
 
     /// Status label for the TUI: running server, soft miss, or hard error.
@@ -1592,8 +1638,7 @@ fn parse_hover(text: &str) -> Option<String> {
 
 /// Extract semanticTokensProvider legend.tokenTypes from initialize result.
 fn parse_semantic_legend(body: &str) -> (Vec<String>, bool) {
-    let supported = body.contains("semanticTokensProvider")
-        || body.contains("\"semanticTokens\"");
+    let supported = body.contains("semanticTokensProvider") || body.contains("\"semanticTokens\"");
     // Find tokenTypes array inside semanticTokensProvider if possible
     let search_from = body
         .find("semanticTokensProvider")
@@ -1601,11 +1646,25 @@ fn parse_semantic_legend(body: &str) -> (Vec<String>, bool) {
         .unwrap_or(0);
     let region = &body[search_from..];
     let Some(arr_start_rel) = region.find("\"tokenTypes\"") else {
-        return (if supported { default_semantic_types() } else { Vec::new() }, supported);
+        return (
+            if supported {
+                default_semantic_types()
+            } else {
+                Vec::new()
+            },
+            supported,
+        );
     };
     let after = &region[arr_start_rel..];
     let Some(bracket) = after.find('[') else {
-        return (if supported { default_semantic_types() } else { Vec::new() }, supported);
+        return (
+            if supported {
+                default_semantic_types()
+            } else {
+                Vec::new()
+            },
+            supported,
+        );
     };
     let rest = &after[bracket + 1..];
     let Some(end) = rest.find(']') else {
@@ -1614,11 +1673,7 @@ fn parse_semantic_legend(body: &str) -> (Vec<String>, bool) {
     let arr = &rest[..end];
     let mut types = Vec::new();
     for part in arr.split(',') {
-        let t = part
-            .trim()
-            .trim_matches('"')
-            .trim()
-            .to_string();
+        let t = part.trim().trim_matches('"').trim().to_string();
         if !t.is_empty() && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             types.push(t);
         }
@@ -1691,11 +1746,7 @@ fn parse_semantic_data(body: &str) -> Vec<u32> {
 }
 
 /// Decode LSP relative semantic tokens into char-column spans.
-fn decode_semantic_tokens(
-    data: &[u32],
-    legend: &[String],
-    lines: &[&str],
-) -> Vec<SemanticToken> {
+fn decode_semantic_tokens(data: &[u32], legend: &[String], lines: &[&str]) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
     if data.len() < 5 || legend.is_empty() {
         return tokens;
@@ -1973,12 +2024,12 @@ fn parse_workspace_edit_ctx(body: &str, current_uri: &str, current_text: &str) -
         if path.is_empty() {
             continue;
         }
-        let original = if !current_path.is_empty() && path == current_path && !current_text.is_empty()
-        {
-            current_text.to_string()
-        } else {
-            std::fs::read_to_string(&path).unwrap_or_default()
-        };
+        let original =
+            if !current_path.is_empty() && path == current_path && !current_text.is_empty() {
+                current_text.to_string()
+            } else {
+                std::fs::read_to_string(&path).unwrap_or_default()
+            };
         let text = apply_raw_text_edits(&original, &mut edits);
         out.push(FileEdit { path, text });
     }
@@ -2000,12 +2051,7 @@ fn parse_text_edit_list(chunk: &str) -> Vec<RawTextEdit> {
         let (r0, c0, r1, c1) = extract_range_lines_chars(range_chunk);
         let new_text = extract_str(range_chunk, "\"newText\":\"").unwrap_or_else(|| {
             // newText may appear as next field after range object
-            unescape_json_string_prefix(
-                range_chunk
-                    .split("\"newText\":\"")
-                    .nth(1)
-                    .unwrap_or(""),
-            )
+            unescape_json_string_prefix(range_chunk.split("\"newText\":\"").nth(1).unwrap_or(""))
         });
         if new_text.is_empty() && r0 == r1 && c0 == c1 {
             // pure delete still valid — keep
@@ -2318,10 +2364,7 @@ fn extract_str(text: &str, prefix: &str) -> Option<String> {
                 Some('/') => out.push('/'),
                 Some('u') => {
                     let hex: String = chars.by_ref().take(4).collect();
-                    if let Some(ch) = u32::from_str_radix(&hex, 16)
-                        .ok()
-                        .and_then(char::from_u32)
-                    {
+                    if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
                         out.push(ch);
                     }
                 }
@@ -2341,9 +2384,8 @@ fn extract_str(text: &str, prefix: &str) -> Option<String> {
 /// A `$/progress` token is `string | integer` in the spec; normalise both to one
 /// key so `begin` and `end` match whichever form the server chose.
 fn progress_token(body: &str) -> Option<String> {
-    extract_str(body, "\"token\":\"").or_else(|| {
-        extract_int(body, "\"token\":").map(|n| n.to_string())
-    })
+    extract_str(body, "\"token\":\"")
+        .or_else(|| extract_int(body, "\"token\":").map(|n| n.to_string()))
 }
 
 fn extract_int(text: &str, prefix: &str) -> Option<i64> {
@@ -2375,6 +2417,35 @@ fn escape_json(s: &str) -> String {
     out
 }
 
+/// One incremental didChange entry: replace the UTF-16 range
+/// `[start_line/start_col, end_line/end_col)` with `text`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LspTextChange {
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub text: String,
+}
+
+/// The `contentChanges` array body for an incremental didChange.
+pub(crate) fn content_changes_json(changes: &[LspTextChange]) -> String {
+    changes
+        .iter()
+        .map(|c| {
+            format!(
+                r#"{{"range":{{"start":{{"line":{},"character":{}}},"end":{{"line":{},"character":{}}}}},"text":"{}"}}"#,
+                c.start_line,
+                c.start_col,
+                c.end_line,
+                c.end_col,
+                escape_json(&c.text)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn abs_path(path: &str) -> String {
     let p = PathBuf::from(path);
     if p.is_absolute() {
@@ -2401,9 +2472,7 @@ fn path_to_uri(path: &str) -> String {
         match c {
             ' ' => encoded.push_str("%20"),
             '\\' => encoded.push('/'),
-            c if c.is_ascii_alphanumeric()
-                || matches!(c, '/' | ':' | '-' | '_' | '.' | '~') =>
-            {
+            c if c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '-' | '_' | '.' | '~') => {
                 encoded.push(c);
             }
             c => {
@@ -2540,14 +2609,9 @@ fn call_item_from_json(item: &serde_json::Value) -> Option<crate::call_hierarchy
         .to_string();
     let kind_n = item.get("kind").and_then(|k| k.as_u64()).unwrap_or(12);
     let kind = symbol_kind_name(kind_n as i64).to_string();
-    let uri = item
-        .get("uri")
-        .and_then(|u| u.as_str())
-        .unwrap_or("");
+    let uri = item.get("uri").and_then(|u| u.as_str()).unwrap_or("");
     let path = uri_to_path(uri);
-    let range = item
-        .get("selectionRange")
-        .or_else(|| item.get("range"));
+    let range = item.get("selectionRange").or_else(|| item.get("range"));
     let row = range
         .and_then(|r| r.get("start"))
         .and_then(|s| s.get("line"))
@@ -2816,7 +2880,10 @@ mod tests {
             assert!(running(), "stand-in server should be alive before drop");
         } // drop → Drop → shutdown_quiet → kill + wait
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!running(), "child must be reaped when the client is dropped");
+        assert!(
+            !running(),
+            "child must be reaped when the client is dropped"
+        );
     }
 
     /// The bug this guards: `initialized` + `didOpen` are sent from `poll()`,
@@ -3033,10 +3100,7 @@ mod tests {
         assert_eq!(resolved[0].row, 3);
         assert_eq!(resolved[0].title, "2 references · run test");
         assert_eq!(unresolved.len(), 1);
-        assert_eq!(
-            unresolved[0]["range"]["start"]["line"].as_u64(),
-            Some(9)
-        );
+        assert_eq!(unresolved[0]["range"]["start"]["line"].as_u64(), Some(9));
     }
 
     #[test]
@@ -3093,6 +3157,42 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_revision_tracks_same_count_payload_changes_and_clear() {
+        let mut lsp = LspClient::new();
+        lsp.current_uri = "file:///a.rs".into();
+        let publish = |message: &str| RawMsg {
+            id: None,
+            method: Some("textDocument/publishDiagnostics".into()),
+            body: format!(
+                r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"file:///a.rs","diagnostics":[{{"range":{{"start":{{"line":1,"character":2}},"end":{{"line":1,"character":3}}}},"severity":1,"message":"{message}"}}]}}}}"#
+            ),
+        };
+
+        lsp.handle_raw(publish("first"));
+        assert_eq!(lsp.diagnostics.len(), 1);
+        let first_revision = lsp.diagnostics_revision;
+        assert!(first_revision > 0);
+
+        // Same count, different message still invalidates the Issue navigator.
+        lsp.handle_raw(publish("second"));
+        assert_eq!(lsp.diagnostics.len(), 1);
+        assert!(lsp.diagnostics_revision > first_revision);
+        let second_revision = lsp.diagnostics_revision;
+
+        // Identical republish is a no-op.
+        lsp.handle_raw(publish("second"));
+        assert_eq!(lsp.diagnostics_revision, second_revision);
+
+        lsp.handle_raw(RawMsg {
+            id: None,
+            method: Some("textDocument/publishDiagnostics".into()),
+            body: r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///a.rs","diagnostics":[]}}"#.into(),
+        });
+        assert!(lsp.diagnostics.is_empty());
+        assert!(lsp.diagnostics_revision > second_revision);
+    }
+
+    #[test]
     fn server_map_known() {
         assert!(server_for_ext("rs").is_some());
         assert!(server_for_ext("zig").is_some());
@@ -3116,8 +3216,16 @@ mod tests {
         // line 0: "fn main" — keyword at 0 len 2, function at 3 len 4
         // data: [dLine, dStart, len, type, mods]
         let data = vec![
-            0, 0, 2, keyword_idx, 0, // "fn"
-            0, 3, 4, function_idx, 0, // "main" (delta start 3 from 0)
+            0,
+            0,
+            2,
+            keyword_idx,
+            0, // "fn"
+            0,
+            3,
+            4,
+            function_idx,
+            0, // "main" (delta start 3 from 0)
         ];
         let lines = ["fn main() {}"];
         let toks = decode_semantic_tokens(&data, &legend, &lines);
@@ -3147,6 +3255,38 @@ mod tests {
         let h = install_hint("rust-analyzer");
         assert!(h.contains("rust-analyzer"));
         assert!(h.contains("install"));
+    }
+
+    #[test]
+    fn content_changes_json_is_valid_json() {
+        let changes = vec![
+            LspTextChange {
+                start_line: 1,
+                start_col: 0,
+                end_line: 2,
+                end_col: 1,
+                text: "x\ny".into(),
+            },
+            LspTextChange {
+                start_line: 5,
+                start_col: 3,
+                end_line: 5,
+                end_col: 3,
+                text: "quote\"back\\slash\nnl".into(),
+            },
+        ];
+        let body = content_changes_json(&changes);
+        let arr = format!("[{body}]");
+        let v: serde_json::Value = serde_json::from_str(&arr).expect("valid JSON");
+        let items = v.as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["range"]["start"]["line"], 1);
+        assert_eq!(items[0]["range"]["end"]["character"], 1);
+        assert_eq!(items[0]["text"], "x\ny");
+        assert_eq!(
+            items[1]["text"], "quote\"back\\slash\nnl",
+            "escaping round-trips"
+        );
     }
 
     #[test]
@@ -3208,9 +3348,8 @@ mod tests {
                         let header = std::str::from_utf8(&buf[..pos]).unwrap_or("");
                         let mut len = 0usize;
                         for line in header.lines() {
-                            if let Some(rest) = line
-                                .to_ascii_lowercase()
-                                .strip_prefix("content-length:")
+                            if let Some(rest) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
                             {
                                 len = rest.trim().parse().unwrap_or(0);
                             }
@@ -3223,10 +3362,7 @@ mod tests {
                                 body.contains("\"result\"") || body.contains("capabilities"),
                                 "unexpected RA response: {body}"
                             );
-                            assert!(
-                                !is_jsonrpc_error(body),
-                                "init should not be error: {body}"
-                            );
+                            assert!(!is_jsonrpc_error(body), "init should not be error: {body}");
                             let _ = child.kill();
                             return;
                         }

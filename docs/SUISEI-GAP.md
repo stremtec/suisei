@@ -57,15 +57,17 @@
 - `suisei-core` is a **fork** of `xei-core`, not a currently shared crate. Keep
   parity intentional; do not describe changes as automatically shared.
 - `Buffer` remains `Vec<String>` and `buffer.text()` rebuilds the document.
-  Parser/highlight work still has synchronous paths, so large-file typing has
-  a structural latency risk.
+  Parse/highlight work now runs in a version-gated background worker, but
+  snapshot cloning, full-text joins and linear offset conversion remain a
+  structural large-file cost until the rope/line-index storage phase.
 - The FFI uses fixed-size C structs (for example, packed editor rows and
   string/span limits). The canvas mitigates this with exact-range pull bands,
   but ABI evolution requires coordinated Rust, C header, and Swift decoder
   changes.
 - CoreText is the current glyph renderer. Metal is a possible replacement, not
   a shipped requirement.
-- A GUI crash can lose unsaved work. The daemon/WAL design is not implemented.
+- The shadow WAL recovers dirty named buffers after a GUI crash. Untitled
+  buffers are not journalled, and the daemon still does not own live documents.
 
 ## Verification baseline
 

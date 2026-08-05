@@ -14,12 +14,12 @@ use std::thread;
 use std::time::Instant;
 
 use crate::gh::{
-    self, filter_issues, filter_prs, AuthLoginSession, GhAuthInfo, GhAuthState, IssueListState,
-    IssueSummary, PrListState, PrSummary,
+    self, AuthLoginSession, GhAuthInfo, GhAuthState, IssueListState, IssueSummary, PrListState,
+    PrSummary, filter_issues, filter_prs,
 };
 use crate::git_graph::{self, GraphRow};
 use crate::git_ops::{self, BranchInfo, CommitDetail, CommitSummary, DiffLine};
-use crate::scm::{parse_porcelain_entries, ScmEntry};
+use crate::scm::{ScmEntry, parse_porcelain_entries};
 
 /// Background load target (network / gh / slow git).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,7 +220,9 @@ pub enum GitPane {
 pub enum InputMode {
     NewBranch,
     /// Confirm discard of selected file path
-    ConfirmDiscard { path: String },
+    ConfirmDiscard {
+        path: String,
+    },
 }
 
 /// First History load size (was 120 + full graph — made open feel frozen).
@@ -485,9 +487,7 @@ impl GitWorkbench {
                 GitLoadTarget::PullRequests => {
                     let gh_ok = gh::gh_installed();
                     if !gh_ok {
-                        let _ = tx.send(GitLoadResult::Prs(Err(
-                            "gh CLI not installed".into(),
-                        )));
+                        let _ = tx.send(GitLoadResult::Prs(Err("gh CLI not installed".into())));
                         return;
                     }
                     let auth = gh::auth_status();
@@ -515,9 +515,7 @@ impl GitWorkbench {
                 GitLoadTarget::Issues => {
                     let gh_ok = gh::gh_installed();
                     if !gh_ok {
-                        let _ = tx.send(GitLoadResult::Issues(Err(
-                            "gh CLI not installed".into(),
-                        )));
+                        let _ = tx.send(GitLoadResult::Issues(Err("gh CLI not installed".into())));
                         return;
                     }
                     let auth = gh::auth_status();
@@ -712,10 +710,7 @@ impl GitWorkbench {
         match item {
             GitCtxItem::ShowFiles => {
                 self.focus_files_pane()?;
-                Ok(self
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "Files".into()))
+                Ok(self.message.clone().unwrap_or_else(|| "Files".into()))
             }
             GitCtxItem::CherryPick => {
                 self.cherry_pick_selected()?;
@@ -940,9 +935,7 @@ impl GitWorkbench {
         let session = gh::auth_login_web_start()?;
         // Eagerly open the device page so the user isn't waiting on gh's delay.
         let _ = gh::open_in_browser("https://github.com/login/device");
-        self.message = Some(
-            "Browser opened · waiting for one-time code (will auto-copy)…".into(),
-        );
+        self.message = Some("Browser opened · waiting for one-time code (will auto-copy)…".into());
         self.error = None;
         self.auth_login = Some(session);
         Ok(())
@@ -957,10 +950,7 @@ impl GitWorkbench {
 
     pub fn move_sel(&mut self, delta: isize) {
         // Docked 3-pane view: j/k follow active column
-        if matches!(
-            self.tab,
-            GitTab::Status | GitTab::History | GitTab::Commit
-        ) {
+        if matches!(self.tab, GitTab::Status | GitTab::History | GitTab::Commit) {
             match self.pane {
                 GitPane::Changes => {
                     let n = self.total_files();
@@ -1422,11 +1412,7 @@ impl GitWorkbench {
         }
         .ok_or_else(|| "No commit selected".to_string())?;
         // Skip reload if already showing this commit
-        if self
-            .commit_detail
-            .as_ref()
-            .is_some_and(|d| d.hash == hash)
-        {
+        if self.commit_detail.as_ref().is_some_and(|d| d.hash == hash) {
             return Ok(());
         }
         let root = self.root.clone().ok_or_else(|| "No git root".to_string())?;
@@ -1540,6 +1526,80 @@ impl GitWorkbench {
             .cloned()
             .ok_or_else(|| "No file selected".to_string())?;
         self.load_diff(&e.path, e.staged)
+    }
+
+    /// Mouse selection for the GUI Changes master list. Load the diff detail
+    /// without turning Diff into a peer top-level mode.
+    pub fn select_change_preview(&mut self, index: usize) -> Result<(), String> {
+        let count = self.total_files();
+        if count == 0 {
+            return Err("No changed file".into());
+        }
+        self.selected = index.min(count - 1);
+        self.open_selected_diff()?;
+        self.tab = GitTab::Status;
+        self.pane = GitPane::Changes;
+        self.focus = GitFocus::List;
+        Ok(())
+    }
+
+    /// Mouse selection for the History master list. Commit metadata populates
+    /// the context pane; a file click then populates the central diff.
+    pub fn select_history_preview(&mut self, index: usize) -> Result<(), String> {
+        self.ensure_history();
+        let count = self.commits.len().max(self.history_graph.len());
+        if count == 0 {
+            return Err("No commit selected".into());
+        }
+        self.history_sel = index.min(count - 1);
+        self.load_selected_commit_detail()?;
+        self.diff_path = None;
+        self.diff_lines.clear();
+        self.diff_origin = None;
+        self.tab = GitTab::History;
+        self.pane = GitPane::Log;
+        self.focus = GitFocus::List;
+        Ok(())
+    }
+
+    /// Mouse selection for the changed-files context list. Keep History as the
+    /// primary mode while displaying the chosen file's diff in the detail.
+    pub fn select_commit_file_preview(&mut self, index: usize) -> Result<(), String> {
+        let count = self
+            .commit_detail
+            .as_ref()
+            .map(|detail| detail.files.len())
+            .unwrap_or(0);
+        if count == 0 {
+            return Err("No file selected".into());
+        }
+        self.commit_file_sel = index.min(count - 1);
+        self.open_selected_commit_file_diff()?;
+        self.tab = GitTab::History;
+        self.pane = GitPane::Files;
+        self.focus = GitFocus::List;
+        Ok(())
+    }
+
+    /// Mouse selection for the full-width list modes. This is deliberately
+    /// non-mutating: checkout/apply/merge remain explicit secondary actions.
+    pub fn select_special_row(&mut self, index: usize) {
+        match self.tab {
+            GitTab::Branches if !self.branches.is_empty() => {
+                self.branch_sel = index.min(self.branches.len() - 1);
+            }
+            GitTab::PullRequests if !self.pr_filtered.is_empty() => {
+                self.pr_sel = index.min(self.pr_filtered.len() - 1);
+            }
+            GitTab::Issues if !self.issue_filtered.is_empty() => {
+                self.issue_sel = index.min(self.issue_filtered.len() - 1);
+            }
+            GitTab::Stash if !self.stashes.is_empty() => {
+                self.stash_sel = index.min(self.stashes.len() - 1);
+            }
+            _ => {}
+        }
+        self.focus = GitFocus::List;
     }
 
     pub fn stage_selected(&mut self) -> Result<(), String> {
@@ -2031,7 +2091,10 @@ impl GitWorkbench {
             .map(|c| c.subject.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("Update {}", self.branch));
-        let body = format!("Created from xei Git workbench on branch `{}`.", self.branch);
+        let body = format!(
+            "Created from xei Git workbench on branch `{}`.",
+            self.branch
+        );
         let msg = gh::pr_create(&root, &title, &body)?;
         self.message = Some(msg);
         self.prs_loaded = false;

@@ -10,9 +10,8 @@
 
 use std::ffi::c_char;
 use suisei_engine::ffi::{
-    suisei_engine_recovery_accept, suisei_engine_recovery_count,
+    SuiseiEngine, suisei_engine_recovery_accept, suisei_engine_recovery_count,
     suisei_engine_recovery_discard, suisei_engine_recovery_path,
-    SuiseiEngine,
 };
 use suisei_engine::runtime::Engine;
 
@@ -31,7 +30,14 @@ fn engine_with_journal(dir: &std::path::Path) -> Engine {
 }
 
 /// Simulate a crash: write a WAL entry, then drop the engine.
-fn simulate_crash(dir: &std::path::Path, file_path: &str, text: &str, row: usize, col: usize, scroll: usize) {
+fn simulate_crash(
+    dir: &std::path::Path,
+    file_path: &str,
+    text: &str,
+    row: usize,
+    col: usize,
+    scroll: usize,
+) {
     let mut engine = engine_with_journal(dir);
     engine.app.filename = Some(std::path::PathBuf::from(file_path));
     engine.app.modified = true;
@@ -59,12 +65,22 @@ fn recovery_count_zero_on_clean_start() {
 #[test]
 fn recovery_count_after_crash() {
     let dir = tmp_wal_dir("crash");
-    simulate_crash(&dir, "/tmp/recovery_test.rs", "unsaved code\nline 2\n", 0, 0, 0);
+    simulate_crash(
+        &dir,
+        "/tmp/recovery_test.rs",
+        "unsaved code\nline 2\n",
+        0,
+        0,
+        0,
+    );
     // Engine is dropped (crash). Fresh engine scans the same dir.
     let engine = engine_with_journal(&dir);
     let ptr = &engine as *const _ as *const SuiseiEngine;
     let count = suisei_engine_recovery_count(ptr);
-    assert!(count >= 1, "at least one WAL entry after simulated crash, got {count}");
+    assert!(
+        count >= 1,
+        "at least one WAL entry after simulated crash, got {count}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -81,8 +97,14 @@ fn recovery_roundtrips_cursor_and_scroll() {
         .journal
         .recovery_entry(0)
         .expect("one recovery entry after crash");
-    assert_eq!(entry.cursor_row, 4, "cursor row round-trips through the WAL");
-    assert_eq!(entry.cursor_col, 1, "cursor col round-trips through the WAL");
+    assert_eq!(
+        entry.cursor_row, 4,
+        "cursor row round-trips through the WAL"
+    );
+    assert_eq!(
+        entry.cursor_col, 1,
+        "cursor col round-trips through the WAL"
+    );
     assert_eq!(entry.scroll, 2, "scroll round-trips through the WAL");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -115,7 +137,14 @@ fn recovery_path_returns_filepath() {
 #[test]
 fn recovery_accept_restores_buffer_and_clears_entry() {
     let dir = tmp_wal_dir("accept");
-    simulate_crash(&dir, "/tmp/accept_test.rs", "recovered text\nsecond line\n", 1, 6, 3);
+    simulate_crash(
+        &dir,
+        "/tmp/accept_test.rs",
+        "recovered text\nsecond line\n",
+        1,
+        6,
+        3,
+    );
 
     let mut engine = engine_with_journal(&dir);
     let cptr = &engine as *const _ as *const SuiseiEngine;
@@ -131,14 +160,24 @@ fn recovery_accept_restores_buffer_and_clears_entry() {
         text.contains("recovered text"),
         "buffer should contain recovered text after accept, got: {text}"
     );
-    assert!(engine.app.modified, "buffer should be marked modified after recovery");
-    assert_eq!(engine.app.buffer.cursor.row, 1, "cursor row should be restored");
-    assert_eq!(engine.app.buffer.cursor.col, 6, "cursor col should be restored");
+    assert!(
+        engine.app.modified,
+        "buffer should be marked modified after recovery"
+    );
+    assert_eq!(
+        engine.app.buffer.cursor.row, 1,
+        "cursor row should be restored"
+    );
+    assert_eq!(
+        engine.app.buffer.cursor.col, 6,
+        "cursor col should be restored"
+    );
 
     let cptr = &engine as *const _ as *const SuiseiEngine;
     let count_after = suisei_engine_recovery_count(cptr);
     assert_eq!(
-        count_after, count_before - 1,
+        count_after,
+        count_before - 1,
         "recovery count should decrease by 1 after accept"
     );
 
@@ -161,7 +200,12 @@ fn recovery_accept_clamps_cursor_col_past_line_end() {
     let mut engine = engine_with_journal(&dir);
     let mptr = &mut engine as *mut _ as *mut SuiseiEngine;
     assert_eq!(suisei_engine_recovery_accept(mptr, 0), 1);
-    let len = engine.app.buffer.line(engine.app.buffer.cursor.row).chars().count();
+    let len = engine
+        .app
+        .buffer
+        .line(engine.app.buffer.cursor.row)
+        .chars()
+        .count();
     assert!(
         engine.app.buffer.cursor.col <= len,
         "col {} must clamp to line length {len}",
@@ -185,7 +229,11 @@ fn recovery_discard_deletes_wal_and_clears_entry() {
 
     let cptr = &engine as *const _ as *const SuiseiEngine;
     let count_after = suisei_engine_recovery_count(cptr);
-    assert_eq!(count_after, count - 1, "count should decrease after discard");
+    assert_eq!(
+        count_after,
+        count - 1,
+        "count should decrease after discard"
+    );
 
     let wal_count = std::fs::read_dir(&dir)
         .unwrap()
@@ -202,7 +250,8 @@ fn recovery_path_out_of_range_returns_zero() {
     let engine = engine_with_journal(&dir);
     let ptr = &engine as *const _ as *const SuiseiEngine;
     let mut buf = [0u8; 64];
-    let ok = suisei_engine_recovery_path(ptr, 999, buf.as_mut_ptr() as *mut c_char, buf.len() as u32);
+    let ok =
+        suisei_engine_recovery_path(ptr, 999, buf.as_mut_ptr() as *mut c_char, buf.len() as u32);
     assert_eq!(ok, 0, "out-of-range idx should return 0");
     let _ = std::fs::remove_dir_all(&dir);
 }

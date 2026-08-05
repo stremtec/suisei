@@ -66,9 +66,7 @@ pub fn paste() -> Option<String> {
         return Some(s);
     }
     if cfg!(windows) {
-        if let Some(s) =
-            run_stdout(&["powershell", "-NoProfile", "-Command", "Get-Clipboard"])
-        {
+        if let Some(s) = run_stdout(&["powershell", "-NoProfile", "-Command", "Get-Clipboard"]) {
             return Some(s);
         }
     }
@@ -151,6 +149,14 @@ fn pipe_to(cmd: &[&str], text: &str) -> bool {
     }
     let mut child = match Command::new(cmd[0])
         .args(&cmd[1..])
+        // `pbcopy` decodes stdin with the locale's encoding. A GUI app launched
+        // from Finder inherits no `LANG`/`LC_CTYPE`, so pbcopy falls back to a
+        // legacy encoding and turns UTF-8 CJK (한글/日本語/中文) into `?` — the
+        // copy looks fine in-app (that reads our own register) but pastes as
+        // garbage anywhere else. Forcing a UTF-8 ctype makes the bytes we write
+        // round-trip verbatim. Harmless for `wl-copy`, which is already UTF-8.
+        .env("LC_ALL", "en_US.UTF-8")
+        .env("LC_CTYPE", "UTF-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -210,7 +216,9 @@ fn run_capture_to_file(cmd: &[&str], path: &Path) -> bool {
 }
 
 fn file_nonempty(path: &Path) -> bool {
-    std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
 }
 
 fn run_stdout(cmd: &[&str]) -> Option<String> {
@@ -219,6 +227,12 @@ fn run_stdout(cmd: &[&str]) -> Option<String> {
     }
     let output = Command::new(cmd[0])
         .args(&cmd[1..])
+        // Same reason as `pipe_to`: `pbpaste` ENCODES its output with the
+        // locale's encoding, so without a UTF-8 ctype the CJK we get back is a
+        // legacy encoding that `from_utf8_lossy` below turns into replacement
+        // characters. Force UTF-8 so the round trip stays byte-exact.
+        .env("LC_ALL", "en_US.UTF-8")
+        .env("LC_CTYPE", "UTF-8")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()

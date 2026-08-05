@@ -11,14 +11,12 @@ import SwiftUI
 // canvas is a dumb, always-consistent blitter. Responsive-scrolling overdraw
 // works for free (prepareContent just draws a larger rect).
 struct EditorHost: NSViewRepresentable {
-    var hScroll: UInt32
     var wrapLines: Bool
-    var docScroll: UInt32
-    var docLineCount: UInt32
-    /// Bumped by the engine on every content/paint change (frame gen).
-    var contentGen: UInt64
-    /// Why Core last moved the scroll (0 none, 1 restore, 2 navigate, 3 caret).
-    var scrollIntent: UInt8
+    /// Per-keystroke caret/scroll comes through THIS, observed independently of
+    /// the enclosing view tree — so a keystroke updates only this pane's clip
+    /// (`updateNSView`), never the split container or tab strip. hScroll,
+    /// docScroll, docLineCount, contentGen and scrollIntent all read from it.
+    @ObservedObject var editorTick: EditorTickStore
     var editorBg: Color
     var fg: Color
     var dim: Color
@@ -31,6 +29,62 @@ struct EditorHost: NSViewRepresentable {
     var engine: EngineBridge
     var paneIndex: Int
     var showFocusRing: Bool
+
+    /// Last resolved palette, keyed by the SwiftUI colours it came from.
+    ///
+    /// `NSColor(Color)` measures 0.37–0.65 µs and this builds 21 of them. Every
+    /// pane's `EditorHost` observes the SHARED `EditorTickStore`, so one tick
+    /// updates all of them: 4 panes × 21 = 84 conversions, ~30 µs, twenty times
+    /// a second — to re-derive a palette that only changes when the theme does.
+    ///
+    /// One slot is enough: every pane in a window resolves the same palette, so
+    /// the panes after the first are all hits.
+    private struct PaletteKey: Equatable {
+        var editorBg: Color, fg: Color, dim: Color, accent: Color, selBg: Color
+        var caretColor: Color, gutterFg: Color, cursorLineBg: Color
+        var theme: ThemeSnap
+    }
+    nonisolated(unsafe) private static var paletteKey: PaletteKey?
+    nonisolated(unsafe) private static var paletteValue: EditorCanvasView.Colors?
+
+    @MainActor
+    private static func resolvedColors(
+        editorBg: Color, fg: Color, dim: Color, accent: Color, selBg: Color,
+        caretColor: Color, gutterFg: Color, cursorLineBg: Color, theme: ThemeSnap
+    ) -> EditorCanvasView.Colors {
+        let key = PaletteKey(
+            editorBg: editorBg, fg: fg, dim: dim, accent: accent, selBg: selBg,
+            caretColor: caretColor, gutterFg: gutterFg, cursorLineBg: cursorLineBg,
+            theme: theme
+        )
+        if key == paletteKey, let cached = paletteValue { return cached }
+        let colors = EditorCanvasView.Colors(
+            bg: NSColor(editorBg),
+            fg: NSColor(fg),
+            dim: NSColor(dim),
+            accent: NSColor(accent),
+            sel: NSColor(selBg),
+            caret: NSColor(caretColor),
+            gutter: NSColor(gutterFg),
+            cursorLine: NSColor(cursorLineBg),
+            keyword: NSColor(theme.color(theme.keyword)),
+            string: NSColor(theme.color(theme.string)),
+            comment: NSColor(theme.color(theme.comment)),
+            number: NSColor(theme.color(theme.number)),
+            typeName: NSColor(theme.color(theme.typeName)),
+            function: NSColor(theme.color(theme.function)),
+            macroName: NSColor(theme.color(theme.macroName)),
+            namespace: NSColor(theme.color(theme.namespace)),
+            parameter: NSColor(theme.color(theme.parameter)),
+            property: NSColor(theme.color(theme.property)),
+            constant: NSColor(theme.color(theme.constant)),
+            operatorColor: NSColor(theme.color(theme.operatorColor)),
+            punctuation: NSColor(theme.color(theme.punctuation))
+        )
+        paletteKey = key
+        paletteValue = colors
+        return colors
+    }
 
     func makeNSView(context: Context) -> EditorScrollView {
         let v = EditorScrollView()
@@ -46,37 +100,21 @@ struct EditorHost: NSViewRepresentable {
     func updateNSView(_ view: EditorScrollView, context: Context) {
         view.engine = engine
         view.paneIndex = paneIndex
+        let colors = Self.resolvedColors(
+            editorBg: editorBg, fg: fg, dim: dim, accent: accent, selBg: selBg,
+            caretColor: caretColor, gutterFg: gutterFg, cursorLineBg: cursorLineBg,
+            theme: theme
+        )
+        let tick = editorTick.tick(for: paneIndex)
         view.apply(
-            hScroll: hScroll,
+            hScroll: tick.hscroll,
             wrapLines: wrapLines,
-            docScroll: docScroll,
-            docLineCount: docLineCount,
-            contentGen: contentGen,
-            scrollIntent: scrollIntent,
+            docScroll: tick.scroll,
+            docLineCount: tick.docLineCount,
+            contentGen: editorTick.gen,
+            scrollIntent: editorTick.scrollIntent,
             showFocusRing: showFocusRing,
-            colors: EditorCanvasView.Colors(
-                bg: NSColor(editorBg),
-                fg: NSColor(fg),
-                dim: NSColor(dim),
-                accent: NSColor(accent),
-                sel: NSColor(selBg),
-                caret: NSColor(caretColor),
-                gutter: NSColor(gutterFg),
-                cursorLine: NSColor(cursorLineBg),
-                keyword: NSColor(theme.color(theme.keyword)),
-                string: NSColor(theme.color(theme.string)),
-                comment: NSColor(theme.color(theme.comment)),
-                number: NSColor(theme.color(theme.number)),
-                typeName: NSColor(theme.color(theme.typeName)),
-                function: NSColor(theme.color(theme.function)),
-                macroName: NSColor(theme.color(theme.macroName)),
-                namespace: NSColor(theme.color(theme.namespace)),
-                parameter: NSColor(theme.color(theme.parameter)),
-                property: NSColor(theme.color(theme.property)),
-                constant: NSColor(theme.color(theme.constant)),
-                operatorColor: NSColor(theme.color(theme.operatorColor)),
-                punctuation: NSColor(theme.color(theme.punctuation))
-            )
+            colors: colors
         )
     }
 }
@@ -247,9 +285,29 @@ final class EditorScrollView: NSScrollView {
         showFocusRing: Bool,
         colors: EditorCanvasView.Colors
     ) {
+        let _applyT0 = DispatchTime.now().uptimeNanoseconds
+        defer {
+            PerfProbe.record(
+                "apply(pane) updateNSView",
+                Double(DispatchTime.now().uptimeNanoseconds - _applyT0) / 1_000_000
+            )
+        }
         let lineH = EditorMetrics.lineHeight
-        let cell = EditorMetrics.cellWidth
-        let count = max(1, Int(docLineCount))
+
+        // Keep the AppKit first responder on the ENGINE-focused pane. Focus can
+        // move by keyboard (⌃W) or a SwiftUI overlay tap — paths that call
+        // `focusPane` but never reassign the responder — which left IME marked
+        // text landing in a stale pane's canvas (usually pane 0, the leftmost:
+        // the composing글자 flickered there instead of where you were typing).
+        // Reclaim ONLY from another editor canvas, never from a text field
+        // (the find bar / project filter), and never when already correct.
+        if let win = window, let engine,
+           engine.editorSplit.isSplit,
+           paneIndex == engine.editorSplit.focus,
+           win.firstResponder is EditorCanvasView,
+           win.firstResponder !== canvas {
+            win.makeFirstResponder(canvas)
+        }
 
         hasHorizontalScroller = !wrapLines
         horizontalScrollElasticity = wrapLines ? .none : .allowed
@@ -285,7 +343,14 @@ final class EditorScrollView: NSScrollView {
             switch scrollIntent {
             case 2:  // navigate — outline, goto, search hit
                 if coreLine != clipLine { scrollToLineAnimated(coreLine, center: false) }
-            default: // restore / caret — be where you belong at once
+            case 3:  // caret — reveal it with the MINIMUM scroll, judged against
+                     // the pane's real clip bounds. Core only guarantees the
+                     // caret line is IN the snapshot (rough follow + overscan);
+                     // the exact placement is done here so it is right in any
+                     // split pane size, on both axes, glyph-accurate and
+                     // immediate — no cell-grid estimate, no hscroll round trip.
+                revealCaret()
+            default: // restore — place the saved tab position exactly, at once.
                 if coreLine != clipLine {
                     setClipTo(line: coreLine, hCols: wrapLines ? 0 : Int(hScroll))
                 }
@@ -317,6 +382,44 @@ final class EditorScrollView: NSScrollView {
             name: .suiseiEditorScrolled, object: nil,
             userInfo: ["line": max(0, line)]
         )
+    }
+
+    /// Scroll the minimum amount to reveal the caret, measured against the
+    /// pane's ACTUAL clip bounds — the native `scrollToVisible` contract. This
+    /// replaced a core-estimated cell-grid follow that broke on unequal split
+    /// panes (the estimate never matched the real pane) and lagged horizontally
+    /// (every column change round-tripped through core's `hscroll`).
+    ///
+    /// `y` is exact from the caret row. `x` is the glyph-accurate caret x from
+    /// the last paint (≤ one frame stale on the same line — the padding covers
+    /// it); on a fresh row a cell estimate is enough to bring the row on screen,
+    /// and the next paint refines it. Focused pane only — the caret is its own.
+    private func revealCaret() {
+        if let engine, engine.editorSplit.isSplit, paneIndex != engine.editorSplit.focus {
+            return
+        }
+        guard let engine else { return }
+        let lineH = EditorMetrics.lineHeight
+        let cell = max(1, EditorMetrics.cellWidth)
+        let row = max(0, Int(engine.chrome.cursorRow) - 1)  // cursorRow is 1-based
+        let y = CGFloat(row) * lineH
+        // Real-time glyph x from the CURRENT snapshot (not last paint). Falls
+        // back to a cell estimate only if the caret line can't be fetched.
+        let x: CGFloat = canvas.liveCaretGlyphX()
+            ?? (EditorMetrics.gutter + CGFloat(engine.chrome.caretVCol) * cell)
+        // A couple of columns of horizontal lead and half a line above/below so
+        // the caret never sits flush against an edge.
+        let rect = CGRect(
+            x: max(0, x - cell * 2),
+            y: y - lineH * 0.5,
+            width: cell * 4,
+            height: lineH * 2
+        )
+        canvas.scrollToVisible(rect)
+        // Core paints the visible-line window from `app.scroll`; tell it where
+        // the clip actually landed so the snapshot keeps containing the caret
+        // line and the next keystroke follows from the right base.
+        syncCorePosition(force: true)
     }
 
     /// Smooth ease-in-out glide to a buffer line (outline / minimap / goto).
@@ -396,8 +499,64 @@ extension Notification.Name {
 
 // MARK: - Document canvas (pull renderer)
 
+/// LRU with batched eviction. Replaces the old all-or-nothing caches: those
+/// dropped EVERY entry once a cap was crossed, so scrolling a long file past
+/// the cap re-shaped every visible line on each pass — measured thrash. The
+/// batched eviction drops the oldest eighth at a time, amortized O(1) per
+/// insert, and the working set survives the cap.
+final class LRUCache<Key: Hashable, Value> {
+    private let capacity: Int
+    private var entries: [Key: (value: Value, stamp: UInt64)] = [:]
+    private var clock: UInt64 = 0
+
+    var count: Int { entries.count }
+
+    init(capacity: Int) {
+        self.capacity = capacity
+    }
+
+    subscript(key: Key) -> Value? {
+        get {
+            guard let e = entries[key] else { return nil }
+            clock &+= 1
+            entries[key] = (e.value, clock)
+            return e.value
+        }
+        set {
+            clock &+= 1
+            if let v = newValue {
+                entries[key] = (v, clock)
+                if entries.count > capacity { evictOldest() }
+            } else {
+                entries.removeValue(forKey: key)
+            }
+        }
+    }
+
+    func removeAll(keepingCapacity: Bool = true) {
+        entries.removeAll(keepingCapacity: keepingCapacity)
+    }
+
+    private func evictOldest() {
+        let keep = capacity - max(1, capacity / 8)
+        guard entries.count > keep else { return }
+        let oldest = entries
+            .sorted { $0.value.stamp < $1.value.stamp }
+            .prefix(entries.count - keep)
+            .map { $0.key }
+        for key in oldest {
+            entries.removeValue(forKey: key)
+        }
+    }
+}
+
 final class EditorCanvasView: NSView {
-    struct Colors {
+    /// Equatable so a theme change to ANY token invalidates the CTLine cache.
+    /// The hand-written comparison this replaced stopped at `function`, so
+    /// recoloring only macroName/namespace/parameter/property/constant/
+    /// operator/punctuation left stale glyphs on screen until something else
+    /// bumped the cache.
+    struct Colors: Equatable {
         var bg: NSColor
         var fg: NSColor
         var dim: NSColor
@@ -462,9 +621,41 @@ final class EditorCanvasView: NSView {
     private static let bracketFlashDuration: CFTimeInterval = 0.9
     private static let bracketFadeTail: CFTimeInterval = 0.35
     private static let bracketPopDuration: CFTimeInterval = 0.26
-    private var ctCache: [String: CTLine] = [:]
-    private var ctCacheFontSize: CGFloat = 0
-    private var colorGen: UInt64 = 0
+    // Shaped-line caches, shared by EVERY canvas in the process.
+    //
+    // They used to be per-instance, and panes do not have private content:
+    // splitting a window shows the SAME document in two or three panes, and
+    // each one shaped every visible line from scratch into its own 800-entry
+    // cache. Measured in the packaged app with three panes on one file, the
+    // `ctLine` miss rate was **26%** — a quarter of all CoreText shaping was
+    // re-deriving what the pane next door had already computed.
+    //
+    // Sharing is only correct because the key covers everything that varies:
+    // line text, spans, and the palette generation below. All panes in a
+    // window resolve the same palette (`EditorHost.resolvedColors`), so the
+    // generation is shared too — a per-instance counter would have given the
+    // same colours different keys and defeated the whole thing.
+    //
+    // Main-thread only: `draw(_:)` and `apply(...)` are both AppKit callbacks.
+    nonisolated(unsafe) private static let ctCache =
+        LRUCache<UInt64, CTLine>(capacity: 2400)
+    /// Visual-column → UTF-16 offset maps, keyed by a hash of the line text.
+    ///
+    /// Building one costs a `rangeOfComposedCharacterSequence` per character,
+    /// and the draw needs it twice per line (once for find spans, once for
+    /// syntax colouring). Scrolling redraws the same text over and over, so
+    /// this is a near-100% hit rate for the cost of one string hash.
+    nonisolated(unsafe) private static let vmapCache =
+        LRUCache<UInt64, [Int]>(capacity: 2400)
+    /// Palette identity behind the shared cache, and the colours that produced
+    /// it. Bumped once per real theme change, by whichever canvas notices first.
+    nonisolated(unsafe) private static var sharedColors: Colors?
+    nonisolated(unsafe) private static var sharedColorGen: UInt64 = 0
+    nonisolated(unsafe) private static var sharedFontSize: CGFloat = 0
+
+    private var ctCache: LRUCache<UInt64, CTLine> { Self.ctCache }
+    private var vmapCache: LRUCache<UInt64, [Int]> { Self.vmapCache }
+    private var colorGen: UInt64 { Self.sharedColorGen }
 
     /// Row cache: contiguous band pulled from the engine (0-based start).
     private var bandStart: Int = 0
@@ -488,6 +679,12 @@ final class EditorCanvasView: NSView {
     /// In-progress input-method text. Lives ONLY here: composing text is not
     /// part of the document until the input method commits it.
     var markedText: String = ""
+    /// Selection inside the marked string, in UTF-16 units. Korean IMEs move
+    /// this range while recomposing a syllable; always reporting "at end" made
+    /// AppKit replace the wrong portion when composition happened mid-line.
+    private var markedSelectionRange = NSRange(location: 0, length: 0)
+    /// Absolute UTF-16 document offset where this composition began.
+    private var markedAnchorUTF16 = 0
     /// Caret rect in view coords, captured while drawing — the input method
     /// needs it in screen coords to place the candidate window.
     var lastCaretRect: CGRect = .zero
@@ -499,6 +696,11 @@ final class EditorCanvasView: NSView {
     /// applies it twice — Enter confirming a candidate AND inserting a
     /// newline, which is what made the caret jump after Japanese input.
     fileprivate var inputHandledKey = false
+    /// `discardMarkedText()` calls back through `NSTextInputClient` on some
+    /// input methods. While a document action resolves the visible
+    /// composition itself, suppress those callbacks so the same syllable
+    /// cannot be inserted twice.
+    private var resolvingMarkedTextForDocumentAction = false
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -526,7 +728,34 @@ final class EditorCanvasView: NSView {
     /// picker, pasted runs — go in verbatim.
     fileprivate func commitText(_ text: String) {
         guard !text.isEmpty, let engine else { return }
+        // A new edit is a new bracket encounter. Fade-timer repaints do not
+        // pass here, so a visible match still pulses exactly once.
+        bracketKey = ""
         markedText = ""
+        markedSelectionRange = NSRange(location: 0, length: 0)
+        markedAnchorUTF16 = 0
+        // Option dead keys can be cancelled before a base letter arrives. In
+        // that state AppKit may hand us only a zero-width combining scalar;
+        // inserting it creates an invisible source character and diagnostics
+        // such as an unexplained Unicode code at an apparently empty column.
+        // A real composed character contains a base scalar and is preserved.
+        let scalarsForValidation = Array(text.unicodeScalars)
+        let orphanedMark = scalarsForValidation.allSatisfy { scalar in
+            switch scalar.properties.generalCategory {
+            case .nonspacingMark, .spacingMark, .enclosingMark: return true
+            default: return false
+            }
+        }
+        let forbiddenControl = scalarsForValidation.contains { scalar in
+            scalar.properties.generalCategory == .control
+                && scalar.value != 0x09
+                && scalar.value != 0x0A
+                && scalar.value != 0x0D
+        }
+        guard !orphanedMark, !forbiddenControl else {
+            needsDisplay = true
+            return
+        }
         // Count SCALARS, not graphemes: one grapheme can be several scalars
         // (decomposed Hangul, ZWJ emoji), and sending only `.first` silently
         // dropped the rest — that is what mangled Korean input. Anything that
@@ -548,8 +777,31 @@ final class EditorCanvasView: NSView {
         needsDisplay = true
     }
 
+    /// Make the text currently visible at the IME caret part of the document
+    /// before Save / Save As snapshots Core.
+    ///
+    /// Marked text intentionally lives only in this AppKit view while the IME
+    /// owns it. A menu command can therefore reach `suisei_engine_save`
+    /// without the final Hangul/Japanese composition ever entering Core. The
+    /// disk then trails the screen by one syllable. Resolve the input context,
+    /// insert the exact visible marked string once, and only then let the
+    /// document action continue.
+    @discardableResult
+    func commitMarkedTextForDocumentAction() -> Bool {
+        guard !markedText.isEmpty, engine != nil else { return false }
+        let pending = markedText
+        resolvingMarkedTextForDocumentAction = true
+        inputContext?.discardMarkedText()
+        resolvingMarkedTextForDocumentAction = false
+        markedText = ""
+        commitText(pending)
+        noteContentChanged()
+        return true
+    }
+
     fileprivate func fallbackToLegacyKeyPath() {
         guard let e = currentKeyEvent else { return }
+        bracketKey = ""
         engine?.handleNSEvent(e)
         // Caret-only moves (arrows, Home/End) do not change the document, so
         // nothing else drops the cached row band — the canvas would keep
@@ -581,11 +833,19 @@ final class EditorCanvasView: NSView {
         docLineCount: UInt32
     ) {
         var repaint = false
+        // Per-instance: THIS canvas needs a repaint and a fresh bookmark image.
         if !Self.colorsEqual(self.colors, colors) {
-            colorGen &+= 1
-            ctCache.removeAll(keepingCapacity: true)
             bookmarkImage = nil
             repaint = true
+        }
+        // Process-wide: the shared cache turns over once per real theme change,
+        // not once per pane. Whichever canvas sees the new palette first bumps
+        // the generation; the others then compare equal and leave it alone —
+        // otherwise pane 2 would flush what pane 1 had just repopulated.
+        if Self.sharedColors == nil || !Self.colorsEqual(Self.sharedColors!, colors) {
+            Self.sharedColors = colors
+            Self.sharedColorGen &+= 1
+            Self.ctCache.removeAll(keepingCapacity: true)
         }
         if self.showFocusRing != showFocusRing { repaint = true }
         self.showFocusRing = showFocusRing
@@ -593,9 +853,11 @@ final class EditorCanvasView: NSView {
         self.wrapLines = wrapLines
         self.docLineCount = max(1, docLineCount)
         let fontSize = EditorMetrics.fontSize
-        if fontSize != ctCacheFontSize {
-            ctCacheFontSize = fontSize
-            ctCache.removeAll(keepingCapacity: true)
+        if fontSize != Self.sharedFontSize {
+            Self.sharedFontSize = fontSize
+            Self.ctCache.removeAll(keepingCapacity: true)
+            // The visual→UTF-16 map is tab-expansion and character width only,
+            // so it survives a font-size change. The shaped lines do not.
             repaint = true
         }
         if repaint { noteContentChanged() }
@@ -637,12 +899,29 @@ final class EditorCanvasView: NSView {
         return bandRows[lo..<hi]
     }
 
+    /// Real-time glyph x of the caret in canvas coordinates, from the CURRENT
+    /// snapshot — not the last paint. It lays the caret against the SAME CTLine
+    /// the draw uses (real glyph advances, so CJK is exact and never drifts off
+    /// the cell grid), a cache hit whenever the line was just painted, so the
+    /// caret reveal never lags a frame. Nil when the caret's line can't be
+    /// fetched — the caller then falls back to a cell estimate to bring the row
+    /// on screen and the next pass refines it.
+    func liveCaretGlyphX() -> CGFloat? {
+        guard engine != nil else { return nil }
+        let row = max(0, Int(engine!.chrome.cursorRow) - 1)
+        let band = rows(row, row)
+        guard let line = band.first(where: { Int($0.lineNo) - 1 == row && $0.isCursor })
+            ?? band.first(where: { Int($0.lineNo) - 1 == row })
+        else { return nil }
+        let font = EditorMetrics.monospaced(EditorMetrics.fontSize, weight: .regular)
+        let ct = ctLine(for: line, font: font)
+        let maxIdx = (line.text as NSString).length
+        let idx = CFIndex(min(max(0, Int(line.caretUTF16)), maxIdx))
+        return EditorMetrics.gutter + CTLineGetOffsetForStringIndex(ct, idx, nil)
+    }
+
     private static func colorsEqual(_ a: Colors, _ b: Colors) -> Bool {
-        a.bg == b.bg && a.fg == b.fg && a.dim == b.dim && a.accent == b.accent
-            && a.sel == b.sel && a.caret == b.caret && a.gutter == b.gutter
-            && a.cursorLine == b.cursorLine && a.keyword == b.keyword
-            && a.string == b.string && a.comment == b.comment && a.number == b.number
-            && a.typeName == b.typeName && a.function == b.function
+        a == b
     }
 
     /// Line numbers, laid out once each.
@@ -658,7 +937,7 @@ final class EditorCanvasView: NSView {
         let isCursor: Bool
         let colorGen: UInt64
     }
-    private var gutterCache: [GutterKey: (line: CTLine, width: CGFloat)] = [:]
+    private let gutterCache = LRUCache<GutterKey, (line: CTLine, width: CGFloat)>(capacity: 4000)
 
     private func gutterLine(_ number: UInt32, isCursor: Bool, font: NSFont)
         -> (line: CTLine, width: CGFloat)
@@ -674,21 +953,34 @@ final class EditorCanvasView: NSView {
             NSAttributedString(string: "\(number)", attributes: attrs)
         )
         let width = CGFloat(CTLineGetTypographicBounds(ct, nil, nil, nil))
-        // A document can be long; cap the cache the same way the text one is.
-        if gutterCache.count > 4000 {
-            gutterCache.removeAll(keepingCapacity: true)
-        }
         let entry = (line: ct, width: width)
         gutterCache[key] = entry
         return entry
     }
 
-    private func cacheKey(for line: EditorLine) -> String {
-        var sp = "\(line.lineNo)|\(line.text.count)|\(line.text.hashValue)|\(colorGen)"
+    /// Cache identity for one rendered line, as a 64-bit hash.
+    ///
+    /// This used to build a `String`: interpolate lineNo / length / text hash /
+    /// colorGen, then `+=` a fragment for every span, and use THAT as the
+    /// dictionary key. Several heap allocations per visible line per repaint —
+    /// to look up a cache whose entire job is to avoid work. Hashing allocates
+    /// nothing.
+    ///
+    /// No weaker than what it replaces: the old key already carried
+    /// `text.hashValue` rather than the text, so its collision domain was the
+    /// same. `ctCache` is cleared outright on a colour or font-size change, so
+    /// `colorGen` here is belt-and-braces.
+    private func cacheKey(for line: EditorLine) -> UInt64 {
+        var h = Hasher()
+        h.combine(line.lineNo)
+        h.combine(line.text)
+        h.combine(colorGen)
         for s in line.spans {
-            sp += "|\(s.start)-\(s.end):\(s.kind)"
+            h.combine(s.start)
+            h.combine(s.end)
+            h.combine(s.kind)
         }
-        return sp
+        return UInt64(bitPattern: Int64(h.finalize()))
     }
 
     // MARK: - Draw
@@ -768,6 +1060,58 @@ final class EditorCanvasView: NSView {
             // are positioned by measuring THIS line, not the core's cell grid.
             let textY = y + (lineH - fontSize) * 0.5 - 1
             let ct = PerfProbe.measure("   ctLine total") { ctLine(for: line, font: font) }
+            var displayCT = ct
+            var compositionCaretUTF16: Int?
+            if line.isCursor, !markedText.isEmpty {
+                // Insert the provisional composition into a display-only
+                // attributed line. Painting it over the existing suffix made
+                // mid-line Hangul look corrupted because both glyph runs
+                // occupied the same pixels; this shifts the suffix exactly as
+                // a native text editor does without mutating Core prematurely.
+                let composed = NSMutableAttributedString(
+                    attributedString: attributedLine(line, font: font)
+                )
+                let at = min(max(0, Int(line.caretUTF16)), composed.length)
+                composed.insert(
+                    NSAttributedString(
+                        string: markedText,
+                        attributes: [
+                            .font: font,
+                            .foregroundColor: colors.fg,
+                            .underlineStyle: NSUnderlineStyle.single.rawValue,
+                        ]
+                    ),
+                    at: at
+                )
+                displayCT = CTLineCreateWithAttributedString(composed)
+                compositionCaretUTF16 = at + markedText.utf16.count
+            }
+
+            // Find results: a quiet yellow wash for every match and a stronger
+            // wash + hairline for the current one. These spans are display
+            // columns, so resolve through the same visual→UTF-16 map used by
+            // syntax before asking CoreText for real glyph positions.
+            let visualMap = visualToUTF16Map(line.text)
+            for sp in line.spans where sp.kind == 248 || sp.kind == 249 {
+                let v0 = Int(sp.start)
+                let v1 = Int(sp.end)
+                guard v1 > v0, v0 < visualMap.count else { continue }
+                let u0 = visualMap[v0]
+                let u1 = v1 < visualMap.count ? visualMap[v1] : (line.text as NSString).length
+                guard u1 > u0 else { continue }
+                let x0 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(u0), nil)
+                let x1 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(u1), nil)
+                let box = CGRect(x: x0, y: y + 1, width: max(1, x1 - x0), height: lineH - 2)
+                let current = sp.kind == 249
+                NSColor.systemYellow.withAlphaComponent(current ? 0.52 : 0.24).setFill()
+                NSBezierPath(roundedRect: box, xRadius: 2, yRadius: 2).fill()
+                if current {
+                    NSColor.systemOrange.withAlphaComponent(0.75).setStroke()
+                    let outline = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 2, yRadius: 2)
+                    outline.lineWidth = 1
+                    outline.stroke()
+                }
+            }
 
             if line.hasSelection {
                 // Same reason as the caret: measure against the drawn line so
@@ -784,7 +1128,7 @@ final class EditorCanvasView: NSView {
                 cg.textMatrix = .identity
                 cg.translateBy(x: gutter, y: textY + ascent)
                 cg.scaleBy(x: 1, y: -1)
-                CTLineDraw(ct, cg)
+                CTLineDraw(displayCT, cg)
                 cg.restoreGState()
             }
 
@@ -809,25 +1153,10 @@ final class EditorCanvasView: NSView {
                 // lays glyphs out by their real advances, so `vcol * cell` sat
                 // far right of the text on Hangul/Japanese lines (and dragged
                 // the IME composition along with it).
-                let cx = gutter + CTLineGetOffsetForStringIndex(
-                    ct, CFIndex(line.caretUTF16), nil
+                let caretIndex = compositionCaretUTF16 ?? Int(line.caretUTF16)
+                let caretX = gutter + CTLineGetOffsetForStringIndex(
+                    displayCT, CFIndex(caretIndex), nil
                 )
-                var caretX = cx
-
-                // Composing text (Hangul jamo mid-syllable, dead keys) is drawn
-                // at the caret with the standard underline until the input
-                // method commits it — the caret then sits AFTER it, the way
-                // every native text view behaves.
-                if !markedText.isEmpty {
-                    let mAttrs: [NSAttributedString.Key: Any] = [
-                        .font: font,
-                        .foregroundColor: colors.fg,
-                        .underlineStyle: NSUnderlineStyle.single.rawValue,
-                    ]
-                    let s = markedText as NSString
-                    s.draw(at: CGPoint(x: cx, y: textY), withAttributes: mAttrs)
-                    caretX = cx + s.size(withAttributes: mAttrs).width
-                }
 
                 // Span the band the LETTERS occupy — cap height down to the
                 // descender — not the full em box. `ascender` carries accent
@@ -846,8 +1175,14 @@ final class EditorCanvasView: NSView {
                 // method places its candidate window against this.
                 lastCaretRect = caretRect
                 // …and hand it to SwiftUI (top-left origin) so caret-anchored
-                // overlays like the completion popup can find it.
-                if let win = window {
+                // overlays like the completion popup can find it. ONLY the
+                // focused pane may publish this: under a split every pane draws
+                // its own caret, and the last one to draw used to win, so the
+                // completion popup jumped to whichever pane repainted last
+                // instead of the one being typed in.
+                if let win = window,
+                   engine?.editorSplit.isSplit != true
+                    || paneIndex == engine?.editorSplit.focus {
                     let inWindow = convert(caretRect, to: nil)
                     let h = win.contentView?.bounds.height ?? win.frame.height
                     engine?.caretFrameInWindow = CGRect(
@@ -859,13 +1194,15 @@ final class EditorCanvasView: NSView {
                 caretRect.fill()
             }
             for sp in line.spans where sp.kind == 254 {
-                // Matching bracket: flash, then fade out and stop drawing.
+                // Matching bracket: a visible match flashes once. If CoreText
+                // is drawing an off-viewport row during responsive-scroll
+                // prefetch, keep the old pulse loop alive so the hint is still
+                // breathing when that distant match enters the user's view.
                 let key = "\(line.lineNo):\(sp.start)"
-                // Retrigger on the SAME pair once its previous flash is over —
-                // keying on position alone meant a pair could only ever animate
-                // once per session.
+                let targetVisible = (scrollView?.documentVisibleRect ?? visibleRect)
+                    .intersects(rowRect)
                 let expired = CACurrentMediaTime() - bracketShownAt >= Self.bracketFlashDuration
-                if key != bracketKey || expired {
+                if key != bracketKey || (!targetVisible && expired) {
                     bracketKey = key
                     bracketShownAt = CACurrentMediaTime()
                     startBracketFade()
@@ -958,11 +1295,12 @@ final class EditorCanvasView: NSView {
             cg.restoreGState()
         }
 
-        if showFocusRing {
-            colors.accent.withAlphaComponent(0.22).setStroke()
-            cg.setLineWidth(1)
-            cg.stroke(bounds.insetBy(dx: 0.5, dy: 0.5))
-        }
+        // Do not draw a full rectangular focus ring around a pane. Split
+        // dividers already define its bounds, while the focused pane header
+        // carries an accent rule, icon tint and semibold title. The additional
+        // blue rectangle made the editor read like a selected web card and
+        // doubled into a thick band where it met a divider.
+        _ = showFocusRing
     }
 
     /// Bookmark-style breakpoint marker in the gutter (SF Symbol, accent tint).
@@ -1001,10 +1339,6 @@ final class EditorCanvasView: NSView {
         let attr = attributedLine(line, font: font)
         let ct = CTLineCreateWithAttributedString(attr)
         ctCache[key] = ct
-        if ctCache.count > 800 {
-            ctCache.removeAll(keepingCapacity: true)
-            ctCache[key] = ct
-        }
         return ct
     }
 
@@ -1016,7 +1350,7 @@ final class EditorCanvasView: NSView {
             attributes: [.font: font, .foregroundColor: colors.fg]
         )
         let map = visualToUTF16Map(raw)
-        for sp in line.spans where sp.kind < 250 {
+        for sp in line.spans where sp.kind < 248 {
             let v0 = Int(sp.start)
             let v1 = Int(sp.end)
             guard v1 > v0, v0 < map.count else { continue }
@@ -1030,19 +1364,44 @@ final class EditorCanvasView: NSView {
         return out
     }
 
+    /// Visual column → UTF-16 offset, memoized on the line's text.
+    ///
+    /// The core reports spans in visual columns (tab-expanded, CJK counted as
+    /// two cells); CoreText wants UTF-16 offsets. This is the bridge, and the
+    /// draw needs it for every visible line.
+    ///
+    /// It used to allocate a Swift `String` PER CHARACTER — `ns.substring(with:
+    /// r)`, purely to look at that character's first scalar — and it ran twice
+    /// per line per repaint. On a 60-row viewport of 100-column code that is
+    /// ~12,000 string allocations for a single frame.
     private func visualToUTF16Map(_ s: String) -> [Int] {
-        var map: [Int] = []
+        var h = Hasher()
+        h.combine(s)
+        let key = UInt64(bitPattern: Int64(h.finalize()))
+        if let cached = vmapCache[key] { return cached }
+        let map = buildVisualToUTF16Map(s)
+        vmapCache[key] = map
+        return map
+    }
+
+    private func buildVisualToUTF16Map(_ s: String) -> [Int] {
         let ns = s as NSString
+        var map: [Int] = []
+        map.reserveCapacity(ns.length + 1)
         var i = 0
         var col = 0
         while i < ns.length {
             while map.count <= col { map.append(i) }
             let r = ns.rangeOfComposedCharacterSequence(at: i)
-            let ch = ns.substring(with: r)
+            // Width decided from the sequence's FIRST UTF-16 unit, which is
+            // exactly what the substring version asked for — and identical for
+            // astral characters too: every high surrogate (0xD800…0xDBFF) is
+            // above the 0x2E80 wide threshold, so an emoji still measures 2.
+            let unit = ns.character(at: i)
             let w: Int
-            if ch == "\t" {
+            if unit == 0x09 {
                 w = 4 - (col % 4)
-            } else if let scalar = ch.unicodeScalars.first, scalar.value > 0x2E80 {
+            } else if unit > 0x2E80 {
                 w = 2
             } else {
                 w = 1
@@ -1110,6 +1469,12 @@ final class EditorCanvasView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        bracketKey = ""
+        // Commit any in-progress composition BEFORE the click moves the caret.
+        // Otherwise the uncommitted marked text (e.g. Hangul just typed after a
+        // ')') stays live and re-anchors to the new caret — it appears to
+        // "follow the click" instead of staying where it was composed.
+        commitMarkedTextForDocumentAction()
         window?.makeFirstResponder(self)
         guard let engine else { return }
         let p = convert(event.locationInWindow, from: nil)
@@ -1431,19 +1796,56 @@ extension EditorCanvasView: NSTextInputClient {
     }
 
     func insertText(_ string: Any, replacementRange: NSRange) {
+        guard !resolvingMarkedTextForDocumentAction else { return }
         inputHandledKey = true
         commitText(asString(string))
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        guard !resolvingMarkedTextForDocumentAction else { return }
         inputHandledKey = true
+        let beginningComposition = markedText.isEmpty
+        if beginningComposition {
+            markedAnchorUTF16 = replacementRange.location == NSNotFound
+                ? (engine?.caretUTF16Offset() ?? 0)
+                : replacementRange.location
+        }
         markedText = asString(string)
-        needsDisplay = true
+        let count = markedText.utf16.count
+        let location = min(max(0, selectedRange.location), count)
+        let length = min(max(0, selectedRange.length), count - location)
+        markedSelectionRange = NSRange(location: location, length: length)
+        // Repaint ONLY the caret line, not the whole view. A Korean syllable
+        // fires several `setMarkedText` calls (one per jamo), and a full
+        // `needsDisplay` repainted the entire visible band (~40 rows) each time
+        // — that per-jamo full repaint is why CJK input felt laggy next to
+        // English (one commit, one repaint). The composition only ever affects
+        // the caret's own line (its suffix shifts); clearing the whole line
+        // width also erases a longer previous composition when it shrinks.
+        let lineH = EditorMetrics.lineHeight
+        let row = max(0, Int(engine?.chrome.cursorRow ?? 1) - 1)
+        let band = wrapLines ? lineH * 6 : lineH * 2
+        setNeedsDisplay(CGRect(
+            x: 0, y: max(0, CGFloat(row) * lineH - 1),
+            width: bounds.width, height: band + 2
+        ))
     }
 
     func unmarkText() {
+        guard !markedText.isEmpty else { return }
+        let pending = markedText
         markedText = ""
-        needsDisplay = true
+        markedSelectionRange = NSRange(location: 0, length: 0)
+        markedAnchorUTF16 = 0
+        if resolvingMarkedTextForDocumentAction {
+            needsDisplay = true
+            return
+        }
+        // NSTextInputClient's unmark means "accept this composition". Because
+        // marked text is drawn provisionally rather than inserted into Core,
+        // clearing it without this commit silently loses the last syllable.
+        commitText(pending)
+        noteContentChanged()
     }
 
     func hasMarkedText() -> Bool { !markedText.isEmpty }
@@ -1454,11 +1856,16 @@ extension EditorCanvasView: NSTextInputClient {
     func markedRange() -> NSRange {
         markedText.isEmpty
             ? NSRange(location: NSNotFound, length: 0)
-            : NSRange(location: 0, length: markedText.utf16.count)
+            : NSRange(location: markedAnchorUTF16, length: markedText.utf16.count)
     }
 
     func selectedRange() -> NSRange {
-        NSRange(location: markedText.utf16.count, length: 0)
+        markedText.isEmpty
+            ? NSRange(location: engine?.caretUTF16Offset() ?? 0, length: 0)
+            : NSRange(
+                location: markedAnchorUTF16 + markedSelectionRange.location,
+                length: markedSelectionRange.length
+            )
     }
 
     func attributedSubstring(
@@ -1484,6 +1891,15 @@ extension EditorCanvasView: NSTextInputClient {
         // The input method already turned this key into text or composition;
         // replaying the raw event would apply it a second time.
         if inputHandledKey { return }
+        if !markedText.isEmpty {
+            // Navigation/Return after composition applies after the composed
+            // text, never underneath a floating marked string.
+            let pending = markedText
+            markedText = ""
+            markedSelectionRange = NSRange(location: 0, length: 0)
+            markedAnchorUTF16 = 0
+            commitText(pending)
+        }
         fallbackToLegacyKeyPath()
     }
 }

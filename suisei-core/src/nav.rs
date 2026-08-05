@@ -3,9 +3,6 @@
 use crate::buffer::Position;
 use std::path::PathBuf;
 
-
-
-
 #[derive(Clone, Debug)]
 pub struct Jump {
     pub pos: Position,
@@ -63,7 +60,12 @@ impl JumpList {
         }
         // If we're at the tip, save current as the "now" entry
         if self.index + 1 >= self.entries.len() {
-            if self.entries.last().map(|j| j.pos != current.pos).unwrap_or(true) {
+            if self
+                .entries
+                .last()
+                .map(|j| j.pos != current.pos)
+                .unwrap_or(true)
+            {
                 self.entries.push(current);
                 self.index = self.entries.len() - 1;
             }
@@ -87,9 +89,6 @@ impl JumpList {
         self.entries.len()
     }
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -118,5 +117,4 @@ mod tests {
         let fwd = jl.forward().unwrap();
         assert_eq!(fwd.pos.row, 20);
     }
-
 }

@@ -1,0 +1,119 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "srgb:0.97255,0.98039,0.99608,1.00000",
+      "srgb:0.82053,0.93638,0.97205,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "image-name" : "제목을 입력해주세요. (12).png",
+          "name" : "제목을 입력해주세요. (12)",
+          "position" : {
+            "scale" : 0.22,
+            "translation-in-points" : [
+              -235.22125,
+              111.03694341734877
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+          },
+          "glass" : false,
+          "image-name" : "제목을 입력해주세요. (11).png",
+          "name" : "제목을 입력해주세요. (11)",
+          "position" : {
+            "scale" : 0.57,
+            "translation-in-points" : [
+              -42.75,
+              -136.71710903672874
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:0.96863,0.97647,1.00000,1.00000"
+          },
+          "hidden" : true,
+          "image-name" : "suisei-pane-knot-core.svg",
+          "name" : "suisei-pane-knot-core"
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:0.00000,0.00000,0.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "suisei-pane-knot-left.svg",
+          "name" : "suisei-pane-knot-left"
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:0.21545,0.35910,1.00000,0.64714"
+          },
+          "glass" : true,
+          "image-name" : "suisei-pane-knot-right.svg",
+          "name" : "suisei-pane-knot-right"
+        },
+        {
+          "fill" : {
+            "solid" : "srgb:0.01680,0.19835,1.00000,1.00000"
+          },
+          "image-name" : "suisei-pane-knot-back.svg",
+          "name" : "suisei-pane-knot-back"
+        }
+      ],
+      "name" : "Pane Knot",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

@@ -161,7 +161,11 @@ impl Buffer {
             if i >= buf_col {
                 return visual;
             }
-            visual += if ch == '\t' { 4 - (visual % 4) } else { ch.width().unwrap_or(1) };
+            visual += if ch == '\t' {
+                4 - (visual % 4)
+            } else {
+                ch.width().unwrap_or(1)
+            };
         }
         visual
     }
@@ -763,6 +767,7 @@ impl Buffer {
         BufferSnapshot {
             lines: self.lines.clone(),
             cursor: self.cursor,
+            version: self.version,
         }
     }
 
@@ -770,6 +775,102 @@ impl Buffer {
         self.touch();
         self.lines = snapshot.lines.clone();
         self.cursor = snapshot.cursor;
+    }
+
+    // ── Document offsets (phase-1 Edit/Delta support) ──────────────────
+
+    /// Absolute char offset from document start → position. Offsets past
+    /// the end clamp to the document end. O(lines): the line index replaces
+    /// this scan in the phase-2 document rewrite.
+    pub fn offset_to_position(&self, offset: usize) -> Position {
+        let mut remaining = offset;
+        for (row, line) in self.lines.iter().enumerate() {
+            let chars = line.chars().count();
+            if remaining <= chars {
+                return Position {
+                    row,
+                    col: remaining,
+                };
+            }
+            remaining -= chars + 1; // +1: the line break
+        }
+        let row = self.lines.len().saturating_sub(1);
+        Position {
+            row,
+            col: self.lines[row].chars().count(),
+        }
+    }
+
+    /// Position → absolute char offset from document start (col clamped to
+    /// the line length).
+    pub fn position_to_offset(&self, pos: Position) -> usize {
+        let mut off = 0;
+        for (row, line) in self.lines.iter().enumerate() {
+            if row == pos.row {
+                return off + pos.col.min(line.chars().count());
+            }
+            off += line.chars().count() + 1;
+        }
+        off
+    }
+
+    /// Total document length in chars, line breaks included.
+    pub fn len_chars(&self) -> usize {
+        self.lines
+            .iter()
+            .map(|l| l.chars().count() + 1)
+            .sum::<usize>()
+            .saturating_sub(1)
+    }
+
+    /// Apply an edit atomically and return the delta between versions.
+    /// Changes carry offsets in the CURRENT version and are applied
+    /// back-to-front (largest offset first) so earlier offsets stay valid;
+    /// the returned delta lists them in ascending document order with the
+    /// ACTUAL removed text. The cursor is preserved — callers move it
+    /// themselves. An empty edit does not bump the version.
+    pub fn apply_edit(&mut self, edit: &crate::edit::Edit) -> crate::edit::Delta {
+        use crate::edit::{Change, Delta};
+        let version_before = self.version;
+        if edit.changes.is_empty() {
+            return Delta {
+                version_before,
+                version_after: version_before,
+                changes: Vec::new(),
+                cursor_before: self.cursor,
+                cursor_after: self.cursor,
+            };
+        }
+        let saved_cursor = self.cursor;
+        let mut applied: Vec<Change> = Vec::with_capacity(edit.changes.len());
+        let mut order: Vec<&Change> = edit.changes.iter().collect();
+        order.sort_by(|a, b| b.start.cmp(&a.start));
+        for c in order {
+            let start = self.offset_to_position(c.start);
+            let end = self.offset_to_position(c.start + c.old_len());
+            let old = self.delete_range(start, end); // cursor lands at `start`
+            if !c.new.is_empty() {
+                self.insert_str(&c.new); // inserts at the cursor (= start)
+            }
+            applied.push(Change {
+                start: c.start,
+                old,
+                new: c.new.clone(),
+            });
+        }
+        applied.sort_by_key(|c| c.start);
+        self.cursor = saved_cursor;
+        // The primitives touch per change; one edit is one version.
+        self.touch();
+        Delta {
+            version_before,
+            version_after: self.version,
+            changes: applied,
+            // apply_edit preserves the cursor; callers that move it record
+            // the pair through the undo stack's checkpoint diff instead.
+            cursor_before: saved_cursor,
+            cursor_after: saved_cursor,
+        }
     }
 
     // ── In-line character search (char indices, UTF-8 safe) ──
@@ -892,7 +993,10 @@ impl Buffer {
 
     pub fn move_to_first_non_blank(&mut self) {
         let line = self.line(self.cursor.row);
-        self.cursor.col = line.chars().position(|c| c != ' ' && c != '\t').unwrap_or(0);
+        self.cursor.col = line
+            .chars()
+            .position(|c| c != ' ' && c != '\t')
+            .unwrap_or(0);
     }
 }
 
@@ -917,6 +1021,9 @@ fn char_class(c: char) -> CharClass {
 pub struct BufferSnapshot {
     lines: Vec<String>,
     cursor: Position,
+    /// The document version this snapshot captured — consumers tag their
+    /// derived results with it and drop anything stale.
+    version: u64,
 }
 
 impl BufferSnapshot {
@@ -926,8 +1033,15 @@ impl BufferSnapshot {
     pub fn cursor(&self) -> Position {
         self.cursor
     }
+    pub fn version(&self) -> u64 {
+        self.version
+    }
     pub fn from_parts(lines: Vec<String>, cursor: Position) -> Self {
-        Self { lines, cursor }
+        Self {
+            lines,
+            cursor,
+            version: next_version(),
+        }
     }
 }
 
@@ -1328,7 +1442,11 @@ mod tests {
         assert_eq!(b.line(0), "fn main() {");
         assert_eq!(b.line(1), "    ");
         assert_eq!(b.line(2), "}");
-        assert_eq!(b.cursor(), Position::new(1, 4), "caret sits on the blank line");
+        assert_eq!(
+            b.cursor(),
+            Position::new(1, 4),
+            "caret sits on the blank line"
+        );
     }
 
     #[test]
@@ -1365,23 +1483,36 @@ mod tests {
     fn finds_matching_opener_across_nesting() {
         let mut b = Buffer::from_string("foo(bar(baz))");
         b.cursor = Position::new(0, 12); // just after the inner ')'
-        assert_eq!(b.matching_bracket_before_cursor(), Some(Position::new(0, 7)));
+        assert_eq!(
+            b.matching_bracket_before_cursor(),
+            Some(Position::new(0, 7))
+        );
         b.cursor = Position::new(0, 13); // just after the outer ')'
-        assert_eq!(b.matching_bracket_before_cursor(), Some(Position::new(0, 3)));
+        assert_eq!(
+            b.matching_bracket_before_cursor(),
+            Some(Position::new(0, 3))
+        );
     }
 
     #[test]
     fn finds_matching_opener_across_lines() {
         let mut b = Buffer::from_string("fn a() {\n    x;\n}");
         b.cursor = Position::new(2, 1); // just after the '}'
-        assert_eq!(b.matching_bracket_before_cursor(), Some(Position::new(0, 7)));
+        assert_eq!(
+            b.matching_bracket_before_cursor(),
+            Some(Position::new(0, 7))
+        );
     }
 
     #[test]
     fn no_match_when_unbalanced_or_not_a_closer() {
         let mut b = Buffer::from_string("value)");
         b.cursor = Position::new(0, 6);
-        assert_eq!(b.matching_bracket_before_cursor(), None, "no opener to find");
+        assert_eq!(
+            b.matching_bracket_before_cursor(),
+            None,
+            "no opener to find"
+        );
 
         let mut b2 = Buffer::from_string("value");
         b2.cursor = Position::new(0, 5);
@@ -1393,13 +1524,22 @@ mod tests {
         // Xcode highlights the other half from EITHER side.
         let mut b = Buffer::from_string("fn a() {\n    x;\n}");
         b.cursor = Position::new(0, 8); // just after the '{'
-        assert_eq!(b.matching_bracket_before_cursor(), Some(Position::new(2, 0)));
+        assert_eq!(
+            b.matching_bracket_before_cursor(),
+            Some(Position::new(2, 0))
+        );
 
         let mut c = Buffer::from_string("foo(bar(baz))");
         c.cursor = Position::new(0, 4); // just after the outer '('
-        assert_eq!(c.matching_bracket_before_cursor(), Some(Position::new(0, 12)));
+        assert_eq!(
+            c.matching_bracket_before_cursor(),
+            Some(Position::new(0, 12))
+        );
         c.cursor = Position::new(0, 8); // just after the inner '('
-        assert_eq!(c.matching_bracket_before_cursor(), Some(Position::new(0, 11)));
+        assert_eq!(
+            c.matching_bracket_before_cursor(),
+            Some(Position::new(0, 11))
+        );
     }
 
     #[test]
@@ -1445,7 +1585,10 @@ mod tests {
         }
         assert_eq!(b.cursor.col, 0);
         // At least Hangul + emoji + letter should produce several stops.
-        assert!(seen.len() >= 5, "expected multiple grapheme stops, got {seen:?}");
+        assert!(
+            seen.len() >= 5,
+            "expected multiple grapheme stops, got {seen:?}"
+        );
     }
 
     #[test]
@@ -1458,7 +1601,11 @@ mod tests {
         }
         assert_eq!(b.char_after_cursor(), Some('y'));
         b.backspace();
-        assert_eq!(b.line(0), "xy", "one backspace must remove the whole family emoji");
+        assert_eq!(
+            b.line(0),
+            "xy",
+            "one backspace must remove the whole family emoji"
+        );
     }
 
     #[test]

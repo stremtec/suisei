@@ -29,9 +29,54 @@ impl Completions {
     }
 
     pub fn activate(&mut self, prefix: &str, ext: Option<&str>) {
+        self.activate_with(prefix, ext, &[]);
+    }
+
+    /// Activate with the symbols that are in scope at the caret.
+    ///
+    /// `symbols` comes from `crate::scope::visible_at`, which has already
+    /// applied lexical visibility — a binding inside another function is not in
+    /// the list at all. This does no further filtering by scope; it only
+    /// orders and de-duplicates.
+    ///
+    /// Buffer symbols lead, keywords follow. Someone typing `sc` in a file that
+    /// defines `scale` wants the binding, not `self`; keywords are the fallback
+    /// when nothing local matches. Within the symbols, nearer scopes come
+    /// first, which is also the shadowing order.
+    pub fn activate_with(
+        &mut self,
+        prefix: &str,
+        ext: Option<&str>,
+        symbols: &[crate::scope::ScopeSymbol],
+    ) {
         self.prefix = prefix.to_string();
         self.selected = 0;
-        self.suggestions = get_suggestions(prefix, ext);
+
+        let lower = prefix.to_lowercase();
+        let mut ranked: Vec<&crate::scope::ScopeSymbol> = symbols
+            .iter()
+            .filter(|s| s.name.to_lowercase().starts_with(&lower))
+            // The identifier being typed is not a useful suggestion for itself.
+            .filter(|s| s.name != prefix)
+            .collect();
+        ranked.sort_by_key(|s| (s.depth, s.name.clone()));
+
+        let mut out: Vec<Suggestion> = Vec::with_capacity(ranked.len() + 8);
+        for s in ranked {
+            out.push(Suggestion {
+                insert_text: s.name.clone(),
+                label: s.name.clone(),
+                detail: s.kind.detail().to_string(),
+            });
+        }
+        for kw in get_suggestions(prefix, ext) {
+            if out.iter().any(|s| s.label == kw.label) {
+                continue;
+            }
+            out.push(kw);
+        }
+
+        self.suggestions = out;
         self.active = !self.suggestions.is_empty();
     }
 
@@ -66,7 +111,8 @@ impl Completions {
         self.prefix = prefix.to_string();
         let prefix_lower = prefix.to_lowercase();
         let prev_count = self.suggestions.len();
-        self.suggestions.retain(|s| s.label.to_lowercase().starts_with(&prefix_lower));
+        self.suggestions
+            .retain(|s| s.label.to_lowercase().starts_with(&prefix_lower));
         if self.suggestions.len() < prev_count {
             self.selected = 0;
         }
@@ -436,11 +482,7 @@ fn css_keywords() -> Vec<(&'static str, &'static str)> {
 }
 
 fn json_keywords() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("true", "boolean"),
-        ("false", "boolean"),
-        ("null", "null"),
-    ]
+    vec![("true", "boolean"), ("false", "boolean"), ("null", "null")]
 }
 
 fn toml_keywords() -> Vec<(&'static str, &'static str)> {

@@ -23,7 +23,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Panel slide-up duration.
 pub const DAP_PANEL_ANIM_MS: u64 = 200;
@@ -334,8 +334,7 @@ impl DapClient {
     // ── Console ────────────────────────────────────────────────────────
 
     pub fn log(&mut self, msg: impl Into<String>) {
-        let was_tail =
-            self.pane == DebugPane::Console && self.focus_row + 1 >= self.console.len();
+        let was_tail = self.pane == DebugPane::Console && self.focus_row + 1 >= self.console.len();
         self.console.push(msg.into());
         if self.console.len() > 400 {
             let drop_n = self.console.len() - 300;
@@ -392,12 +391,7 @@ impl DapClient {
     }
 
     /// Set / clear a condition on an existing BP (0-based line). Creates BP if missing.
-    pub fn set_breakpoint_condition(
-        &mut self,
-        path: &str,
-        line: usize,
-        condition: Option<String>,
-    ) {
+    pub fn set_breakpoint_condition(&mut self, path: &str, line: usize, condition: Option<String>) {
         let path = self.canon(path);
         let entry = self.breakpoints.entry(path.clone()).or_default();
         if let Some(b) = entry.iter_mut().find(|b| b.line == line) {
@@ -419,12 +413,7 @@ impl DapClient {
     }
 
     /// Set / clear a logpoint message.
-    pub fn set_breakpoint_log(
-        &mut self,
-        path: &str,
-        line: usize,
-        log_message: Option<String>,
-    ) {
+    pub fn set_breakpoint_log(&mut self, path: &str, line: usize, log_message: Option<String>) {
         let path = self.canon(path);
         let entry = self.breakpoints.entry(path.clone()).or_default();
         if let Some(b) = entry.iter_mut().find(|b| b.line == line) {
@@ -625,8 +614,8 @@ impl DapClient {
         self.canon_cache.clear();
 
         let program_path = PathBuf::from(program);
-        let abs_prog = std::fs::canonicalize(&program_path)
-            .unwrap_or_else(|_| program_path.clone());
+        let abs_prog =
+            std::fs::canonicalize(&program_path).unwrap_or_else(|_| program_path.clone());
         let cwd = cwd
             .map(Path::to_path_buf)
             .or_else(|| abs_prog.parent().map(|p| p.to_path_buf()))
@@ -998,8 +987,8 @@ impl DapClient {
         }
         self.finish_shutdown();
         let program_path = PathBuf::from(program);
-        let abs_prog = std::fs::canonicalize(&program_path)
-            .unwrap_or_else(|_| program_path.clone());
+        let abs_prog =
+            std::fs::canonicalize(&program_path).unwrap_or_else(|_| program_path.clone());
         let cwd = cwd
             .map(Path::to_path_buf)
             .or_else(|| abs_prog.parent().map(|p| p.to_path_buf()))
@@ -1034,7 +1023,8 @@ impl DapClient {
         args: Vec<String>,
         attach_tag: Option<String>,
     ) -> Result<(), String> {
-        let port = free_localhost_port().ok_or_else(|| "No free TCP port for js-debug".to_string())?;
+        let port =
+            free_localhost_port().ok_or_else(|| "No free TCP port for js-debug".to_string())?;
         let adapter_cmd = if command_exists("js-debug-adapter") {
             "js-debug-adapter".to_string()
         } else if command_exists("node") {
@@ -1087,9 +1077,7 @@ impl DapClient {
             let _ = child.kill();
             e
         })?;
-        let reader = stream
-            .try_clone()
-            .map_err(|e| format!("tcp clone: {e}"))?;
+        let reader = stream.try_clone().map_err(|e| format!("tcp clone: {e}"))?;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || read_loop(reader, tx));
 
@@ -1304,9 +1292,7 @@ impl DapClient {
                     if Path::new(&bin).is_file() {
                         let _ = tx.send(Ok((bin, cwd_b, lang_c, args_c)));
                     } else {
-                        let _ = tx.send(Err(format!(
-                            "cargo build ok but binary not found: {bin}"
-                        )));
+                        let _ = tx.send(Err(format!("cargo build ok but binary not found: {bin}")));
                     }
                 }
                 Ok(o) => {
@@ -1673,8 +1659,7 @@ impl DapClient {
                                 .as_deref()
                                 .map(install_hint)
                                 .unwrap_or_default();
-                            self.error =
-                                Some(format!("Debug adapter exited at startup. {hint}"));
+                            self.error = Some(format!("Debug adapter exited at startup. {hint}"));
                             self.log("adapter exited at startup");
                         } else if self.is_session() {
                             self.error = Some("Debug adapter disconnected".into());
@@ -2071,10 +2056,7 @@ impl DapClient {
                     .get("result")
                     .and_then(|r| r.as_str())
                     .unwrap_or("(no result)");
-                let typ = body
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
+                let typ = body.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if typ.is_empty() {
                     self.log(format!("= {result}"));
                 } else {
@@ -2272,13 +2254,12 @@ fn pick_adapter(
                 .find(|c| command_exists(c))
                 .ok_or_else(|| install_hint(lang))?;
             // For rust source files, try cargo target/debug/<name>
-            let program_bin = if lang == "rust"
-                && program.extension().and_then(|e| e.to_str()) == Some("rs")
-            {
-                resolve_rust_bin(cwd, program).unwrap_or_else(|| prog_s.clone())
-            } else {
-                prog_s.clone()
-            };
+            let program_bin =
+                if lang == "rust" && program.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    resolve_rust_bin(cwd, program).unwrap_or_else(|| prog_s.clone())
+                } else {
+                    prog_s.clone()
+                };
             // Missing binary is handled in `start()` via async cargo build.
             Ok((
                 adapter.into(),
@@ -2368,10 +2349,10 @@ fn parse_cargo_name(toml: &str) -> Option<String> {
 fn install_hint(lang: &str) -> String {
     match lang {
         "python" => "No Python DAP adapter. Install: pip install debugpy".into(),
-        "go" => "No Go DAP adapter. Install: go install github.com/go-delve/delve/cmd/dlv@latest".into(),
-        "rust" | "cpp" | "c" => {
-            "No native DAP adapter. Install lldb-dap (LLVM) or CodeLLDB".into()
+        "go" => {
+            "No Go DAP adapter. Install: go install github.com/go-delve/delve/cmd/dlv@latest".into()
         }
+        "rust" | "cpp" | "c" => "No native DAP adapter. Install lldb-dap (LLVM) or CodeLLDB".into(),
         "node" => "No Node DAP adapter (js-debug-adapter) found".into(),
         _ => format!(
             "No DAP adapter for `{lang}`. Install debugpy / dlv / lldb-dap for your language"
@@ -2569,9 +2550,7 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
         let cwd = c
             .get("cwd")
             .and_then(|p| p.as_str())
-            .map(|s| {
-                s.replace("${workspaceFolder}", &workspace.display().to_string())
-            });
+            .map(|s| s.replace("${workspaceFolder}", &workspace.display().to_string()));
         let mut env = Vec::new();
         if let Some(obj) = c.get("env").and_then(|e| e.as_object()) {
             for (k, v) in obj {
@@ -2666,7 +2645,13 @@ mod tests {
         d.set_breakpoint_condition("/tmp/a.py", 5, Some("x > 0".into()));
         d.set_breakpoint_log("/tmp/a.py", 5, Some("hit".into()));
         let path = d.canon("/tmp/a.py");
-        let b = d.breakpoints.get(&path).unwrap().iter().find(|b| b.line == 5).unwrap();
+        let b = d
+            .breakpoints
+            .get(&path)
+            .unwrap()
+            .iter()
+            .find(|b| b.line == 5)
+            .unwrap();
         assert_eq!(b.condition.as_deref(), Some("x > 0"));
         assert_eq!(b.log_message.as_deref(), Some("hit"));
     }
@@ -2737,14 +2722,18 @@ mod tests {
         d.test_session(json!({"program": "/tmp/x.py"}));
 
         // initialize response → launch must go out (and nothing config-ish yet)
-        d.handle_msg(response(1, "initialize", json!({
-            "supportsConfigurationDoneRequest": true,
-            "supportsTerminateRequest": true,
-            "exceptionBreakpointFilters": [
-                {"filter": "raised", "label": "Raised", "default": false},
-                {"filter": "uncaught", "label": "Uncaught", "default": true}
-            ]
-        })));
+        d.handle_msg(response(
+            1,
+            "initialize",
+            json!({
+                "supportsConfigurationDoneRequest": true,
+                "supportsTerminateRequest": true,
+                "exceptionBreakpointFilters": [
+                    {"filter": "raised", "label": "Raised", "default": false},
+                    {"filter": "uncaught", "label": "Uncaught", "default": true}
+                ]
+            }),
+        ));
         // pending id for initialize isn't registered in test_session; drive via
         // the real alloc path instead: simulate full start bookkeeping.
         // (init response with unknown request_seq is a no-op — assert that.)
@@ -2752,13 +2741,17 @@ mod tests {
 
         // Register initialize as pending and retry.
         let init_id = d.alloc(PendingKind::Initialize);
-        d.handle_msg(response(init_id, "initialize", json!({
-            "supportsConfigurationDoneRequest": true,
-            "supportsTerminateRequest": true,
-            "exceptionBreakpointFilters": [
-                {"filter": "uncaught", "label": "Uncaught", "default": true}
-            ]
-        })));
+        d.handle_msg(response(
+            init_id,
+            "initialize",
+            json!({
+                "supportsConfigurationDoneRequest": true,
+                "supportsTerminateRequest": true,
+                "exceptionBreakpointFilters": [
+                    {"filter": "uncaught", "label": "Uncaught", "default": true}
+                ]
+            }),
+        ));
         assert_eq!(d.sent_commands(), vec!["launch"]);
         assert!(d.launch_sent_at.is_some());
         assert!(!d.config_sent);
@@ -2819,34 +2812,46 @@ mod tests {
 
         d.request_stack();
         let sseq = seq_of(&d, "stackTrace");
-        d.handle_msg(response(sseq, "stackTrace", json!({
-            "stackFrames": [
-                {"id": 100, "name": "main", "line": 12, "column": 1,
-                 "source": {"path": "/tmp/x.py"}}
-            ]
-        })));
+        d.handle_msg(response(
+            sseq,
+            "stackTrace",
+            json!({
+                "stackFrames": [
+                    {"id": 100, "name": "main", "line": 12, "column": 1,
+                     "source": {"path": "/tmp/x.py"}}
+                ]
+            }),
+        ));
         assert_eq!(d.stack.len(), 1);
         assert_eq!(d.current_line, Some(11));
         assert!(d.location_dirty);
 
         let scseq = seq_of(&d, "scopes");
-        d.handle_msg(response(scseq, "scopes", json!({
-            "scopes": [
-                {"name": "Locals", "variablesReference": 200, "expensive": false},
-                {"name": "Globals", "variablesReference": 300, "expensive": true}
-            ]
-        })));
+        d.handle_msg(response(
+            scseq,
+            "scopes",
+            json!({
+                "scopes": [
+                    {"name": "Locals", "variablesReference": 200, "expensive": false},
+                    {"name": "Globals", "variablesReference": 300, "expensive": true}
+                ]
+            }),
+        ));
         // Scope roots present, first auto-expanding.
         assert_eq!(d.vars.len(), 2);
         assert!(d.vars[0].is_scope && d.vars[0].expanded);
 
         let vseq = seq_of(&d, "variables");
-        d.handle_msg(response(vseq, "variables", json!({
-            "variables": [
-                {"name": "x", "value": "1", "type": "int", "variablesReference": 0},
-                {"name": "items", "value": "[…]", "type": "list", "variablesReference": 400}
-            ]
-        })));
+        d.handle_msg(response(
+            vseq,
+            "variables",
+            json!({
+                "variables": [
+                    {"name": "x", "value": "1", "type": "int", "variablesReference": 0},
+                    {"name": "items", "value": "[…]", "type": "list", "variablesReference": 400}
+                ]
+            }),
+        ));
         assert_eq!(d.vars.len(), 4);
         assert_eq!(d.vars[1].name, "x");
         assert_eq!(d.vars[1].depth, 1);
@@ -2887,10 +2892,13 @@ mod tests {
         let mut d = DapClient::new();
         d.toggle_breakpoint("/tmp/x.py", 5);
         assert!(!d.flat_bps()[0].2);
-        d.handle_msg(event("breakpoint", json!({
-            "reason": "changed",
-            "breakpoint": { "line": 6, "verified": true }
-        })));
+        d.handle_msg(event(
+            "breakpoint",
+            json!({
+                "reason": "changed",
+                "breakpoint": { "line": 6, "verified": true }
+            }),
+        ));
         assert!(d.flat_bps()[0].2);
     }
 
@@ -2900,9 +2908,13 @@ mod tests {
         d.toggle_breakpoint("/tmp/x.py", 4); // 0-based 4 → sent as line 5
         let path = d.breakpoints.keys().next().unwrap().clone();
         let id = d.alloc(PendingKind::SetBreakpoints(path.clone()));
-        d.handle_msg(response(id, "setBreakpoints", json!({
-            "breakpoints": [ {"verified": true, "line": 7} ]
-        })));
+        d.handle_msg(response(
+            id,
+            "setBreakpoints",
+            json!({
+                "breakpoints": [ {"verified": true, "line": 7} ]
+            }),
+        ));
         let list = &d.breakpoints[&path];
         assert_eq!(list[0].line, 6); // adapter moved it to line 7 (1-based)
         assert!(list[0].verified);

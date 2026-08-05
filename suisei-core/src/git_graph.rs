@@ -121,7 +121,11 @@ pub(crate) fn parse_log_output(text: &str) -> Vec<RawCommit> {
         if hash.len() < 7 {
             continue;
         }
-        let short = parts.get(1).copied().unwrap_or(&hash[..7.min(hash.len())]).to_string();
+        let short = parts
+            .get(1)
+            .copied()
+            .unwrap_or(&hash[..7.min(hash.len())])
+            .to_string();
         let parents: Vec<String> = parts
             .get(2)
             .copied()
@@ -377,7 +381,10 @@ aaa0000000000000000000000000000000000000\0aaa0000\0\0\0first\0A\03 hours ago\n";
         let rows = build_graph(&text);
         assert_eq!(rows.len(), 3);
         // At least one row should use a non-zero lane or we still have nodes
-        assert!(rows.iter().any(|r| r.glyphs.iter().any(|g| matches!(g, GraphGlyph::Node(_)))));
+        assert!(
+            rows.iter()
+                .any(|r| r.glyphs.iter().any(|g| matches!(g, GraphGlyph::Node(_))))
+        );
     }
 
     #[test]

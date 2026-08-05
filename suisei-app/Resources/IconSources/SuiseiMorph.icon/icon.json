@@ -1,0 +1,130 @@
+{
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.12549,0.20000,0.61569,1.00000",
+          "srgb:0.35294,0.15686,0.63529,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.1,
+            "y" : 0.15
+          },
+          "stop" : {
+            "x" : 0.9,
+            "y" : 0.85
+          }
+        }
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.03922,0.07059,0.25882,1.00000",
+          "srgb:0.12157,0.03922,0.25882,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.1,
+            "y" : 0.15
+          },
+          "stop" : {
+            "x" : 0.9,
+            "y" : 0.85
+          }
+        }
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:0.94118,0.42353,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:1.00000,0.56863,0.98431,1.00000"
+              }
+            }
+          ],
+          "image-name" : "suisei-morph-orb.svg",
+          "name" : "Glass Orb"
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:0.68627,0.94902,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:0.77647,0.96863,1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "suisei-morph-top.svg",
+          "name" : "Light Planes"
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:0.19216,0.36863,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:0.32157,0.49804,1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "suisei-morph-right.svg",
+          "name" : "Blue Planes"
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "srgb:0.52941,0.27059,0.94902,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:0.65882,0.39608,1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "suisei-morph-left.svg",
+          "name" : "Violet Planes"
+        }
+      ],
+      "name" : "Suisei Morph",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.36
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.28
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

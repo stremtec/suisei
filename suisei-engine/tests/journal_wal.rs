@@ -37,7 +37,10 @@ fn wal_write_and_scan() {
     // Verify WAL format.
     let content = std::fs::read_to_string(wal_files[0].path()).unwrap();
     assert!(content.starts_with("SUISEI-WAL v1\n"), "WAL magic header");
-    assert!(content.contains(&format!("path: {path}\n")), "WAL path field");
+    assert!(
+        content.contains(&format!("path: {path}\n")),
+        "WAL path field"
+    );
     assert!(content.contains("cursor_row: 5\n"), "WAL cursor_row");
     assert!(content.contains("cursor_col: 3\n"), "WAL cursor_col");
     assert!(content.contains("scroll: 10\n"), "WAL scroll");
@@ -154,7 +157,15 @@ fn clean_buffer_not_journaled() {
     let mut journal = Journal::with_dir(dir.clone());
 
     // dirty=false → no WAL write.
-    journal.on_tick("/tmp/clean.rs", || "clean text".to_string(), 1, 0, 0, 0, false);
+    journal.on_tick(
+        "/tmp/clean.rs",
+        || "clean text".to_string(),
+        1,
+        0,
+        0,
+        0,
+        false,
+    );
 
     let wal_count = std::fs::read_dir(&dir)
         .unwrap()
@@ -205,7 +216,10 @@ fn a_tick_that_will_not_flush_never_builds_the_document() {
         0,
         false, // clean
     );
-    assert_eq!(builds, 0, "a clean buffer must not pay for a document build");
+    assert_eq!(
+        builds, 0,
+        "a clean buffer must not pay for a document build"
+    );
 
     // Dirty, but the first tick only establishes the version baseline and the
     // 250 ms debounce has not elapsed — still nothing to write.
@@ -221,5 +235,8 @@ fn a_tick_that_will_not_flush_never_builds_the_document() {
         0,
         true,
     );
-    assert_eq!(builds, 0, "a tick inside the debounce must not build it either");
+    assert_eq!(
+        builds, 0,
+        "a tick inside the debounce must not build it either"
+    );
 }

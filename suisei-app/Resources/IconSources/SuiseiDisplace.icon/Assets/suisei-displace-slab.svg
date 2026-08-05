@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="translate(512 512) scale(1.25) translate(-512 -512)">
+    <path fill="#FFFFFF" fill-rule="evenodd" clip-rule="evenodd" d="M338 246c72-44 169-20 213 48 39 60 23 137-35 178l-109 78c-60 42-144 19-176-50-35-76-2-167 73-222 11-8 22-21 34-32ZM363 319c42-25 98-11 124 28 23 35 14 80-20 104l-64 45c-35 24-84 11-102-29-21-44-2-97 42-129 6-5 13-13 20-19Z"/>
+  </g>
+</svg>
