@@ -60,6 +60,13 @@ struct ContentView: View {
     /// pointing it at `navW` while `SplitColumnWidthReporter` writes `navW`
     /// from the splitter is a loop, with the drag on one side of it.
     @State private var navIdealWidth: CGFloat = 280
+    /// The sidebar column's width RIGHT NOW, 0 while it is collapsed.
+    ///
+    /// Distinct from both of the above: `navW` is what to persist and
+    /// `navIdealWidth` is what to launch with, while this one tracks the live
+    /// splitter, mid-drag and mid-collapse. `topBar` uses it to keep the tab
+    /// strip on the window's centreline rather than the detail column's.
+    @State private var navLiveWidth: CGFloat = 280
     @State private var termW: Double = 400
     @State private var debugAreaH: Double = 200
     @State private var inspectorW: Double = 240
@@ -994,6 +1001,13 @@ struct ContentView: View {
         )
         .background(
             SplitColumnWidthReporter { width in
+                // Two different consumers, two different filters. `navLiveWidth`
+                // wants every value including 0 (the tab strip rides it every
+                // frame of a collapse); `navW` is the width to persist, so it
+                // ignores 0 and anything below the column's own floor.
+                if abs(width - Double(navLiveWidth)) > 0.5 {
+                    navLiveWidth = CGFloat(width)
+                }
                 guard width >= 240, abs(width - navW) > 0.5 else { return }
                 navW = width
                 persistPanelSizes()
@@ -1885,15 +1899,32 @@ struct ContentView: View {
             // Switching between a symmetric "fits" width and an overflow
             // width while a layout merged changed the strip by 135pt in the
             // first frame, independently of the chip animation.
-            // Symmetric, and a constant. It used to widen with the navigator
-            // (`navW + 16`) because this row spanned the whole window and the
-            // tabs had to clear a panel in a different subtree. The row is the
-            // detail column's own now, so the reserve is just the trailing
-            // control cluster's width mirrored — which is what centres the
-            // tabs on the editor.
-            let leftReserve: CGFloat = 150
-            let rightTight: CGFloat = 150
-            let wideCap = max(60, geo.size.width - leftReserve - rightTight) - 22
+            // The tabs sit on the WINDOW's centreline, not the detail column's.
+            //
+            // This row is a window-wide band whose other occupants are pinned
+            // to the window's two edges — the traffic lights at the far left,
+            // over the sidebar, and the toolbar platter at the far right. Tabs
+            // centred on the detail leave a much larger gap on the left than on
+            // the right, and that imbalance is what reads as "shifted right"
+            // once the sidebar is open. Centred on the window, the three groups
+            // are a row again.
+            //
+            // The band cannot span the window — it belongs to the detail column
+            // now, so the sidebar's live width is the one thing it has to know.
+            // `navLiveWidth` comes from the splitter itself, every frame,
+            // including the frames of a collapse, so the strip slides with the
+            // sidebar instead of jumping when the flag flips.
+            let sidebar = navLiveWidth
+            // Window centre, expressed in this column's coordinates.
+            let centre = (geo.size.width - sidebar) / 2
+            // Clamped by both neighbours: the splitter on one side, the toolbar
+            // cluster on the other. Whichever is nearer sets the half-width, so
+            // the strip stays symmetric about `centre` and can never slide
+            // under the sidebar or under the toolbar.
+            let leftLimit: CGFloat = 8
+            let rightLimit = geo.size.width - 150
+            let half = max(30, min(centre - leftLimit, rightLimit - centre))
+            let wideCap = max(60, half * 2) - 22
 
             ZStack {
                 // Empty areas drag the window; double-click zooms (titlebar
@@ -1927,9 +1958,9 @@ struct ContentView: View {
                 // and stays hit-testable at all times: yanking hit-testing
                 // off a Menu mid-tracking wedges the app's event loop.
                 HStack(spacing: 0) {
-                    Spacer().frame(width: leftReserve)
+                    Spacer().frame(width: max(0, centre - half))
                     documentTabStrip(maxWidth: wideCap)
-                    Spacer(minLength: rightTight - 22)
+                    Spacer(minLength: 0)
                 }
 
             // Nothing else in this row. The trailing controls are real toolbar
@@ -8079,9 +8110,15 @@ struct SplitColumnWidthReporter: NSViewRepresentable {
                     queue: .main
                 ) { [weak self] _ in
                     guard let self,
-                          let first = self.splitView?.arrangedSubviews.first
+                          let split = self.splitView,
+                          let first = split.arrangedSubviews.first
                     else { return }
-                    self.report?(Double(first.frame.width))
+                    // A collapsed pane keeps its old frame width, so the width
+                    // alone cannot say "the sidebar is shut". Ask the split
+                    // view — the tab strip centres on the window and needs the
+                    // sidebar's LIVE width, zero included.
+                    let collapsed = split.isSubviewCollapsed(first) || first.isHidden
+                    self.report?(collapsed ? 0 : Double(first.frame.width))
                 }
             }
         }
