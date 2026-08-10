@@ -424,13 +424,8 @@ struct ContentView: View {
         // this row needs: Source Control wants its title visible, and this
         // window has a tab strip running through that space.
         .navigationTitle("")
-        // `.toolbar(removing: .sidebarToggle)` used to be here and is gone: it
-        // does nothing in this app. The inventory the app writes shows
-        // `com.apple.SwiftUI.navigationSplitView.toggleSidebar` still present
-        // and still at the x it occupied before ours existed. An inert
-        // declaration that reads as if it worked is what let two toggles ship
-        // twice, so the removal lives where it actually happens — see
-        // `EditorWindowChrome.normalizeToolbar`.
+        // No `.toolbar(removing: .sidebarToggle)`: it does nothing in this
+        // app, and the item it claims to remove is now the toggle we keep.
         .toolbar { editorToolbar }
         .frame(minWidth: 640, minHeight: 400)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1015,48 +1010,25 @@ struct ContentView: View {
         .navigationSplitViewColumnWidth(
             min: 240, ideal: navIdealWidth, max: 460
         )
-        // The navigator toggle, in Xcode's glyph rather than the system's.
+        // No toolbar item of ours here, and no removal of the system's.
         //
-        // Declared on the COLUMN, not on the split view, and that is the whole
-        // trick: a toolbar item declared here joins the sidebar's own toolbar
-        // section and lands at x≈92 — over the sidebar, just past the traffic
-        // lights, where Xcode puts it. The same item at `.navigation` placement
-        // on the split view lands at x≈312, past the splitter, in the detail
-        // area (measured, `scripts/navitem_probe.swift`). Placement names do
-        // not decide the section; where the modifier is attached does.
+        // A `list.bullet` button was added on this column to get Xcode's glyph,
+        // and `.toolbar(removing: .sidebarToggle)` was supposed to take the
+        // system's away. It does nothing — the app's own toolbar inventory
+        // shows `com.apple.SwiftUI.navigationSplitView.toggleSidebar` still
+        // present — so there were two. Removing it from AppKit each update did
+        // not hold either: SwiftUI re-adds it on the next reconciliation, and
+        // that is a loop, not a fix.
         //
-        // `.toolbar(removing: .sidebarToggle)` on the split view takes the
-        // system's `sidebar.left` item away, so this is one control for one
-        // state rather than a second one beside it.
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    let visible = !engine.uiNavVisible
-                    // Content first, animation second — the 13 ms recompose on
-                    // the opening frame is what used to make the panel hitch.
-                    if visible { applyNavMode(navMode) }
-                    engine.animatingPanels { engine.uiNavVisible = visible }
-                    focused = true
-                } label: {
-                    Image(systemName: "list.bullet")
-                }
-                .help(engine.uiNavVisible ? "Hide Navigator · ⌘0" : "Show Navigator · ⌘0")
-            }
-        }
-        .background(
-            SplitColumnWidthReporter { width in
-                // Two different consumers, two different filters. `navLiveWidth`
-                // wants every value including 0 (the tab strip rides it every
-                // frame of a collapse); `navW` is the width to persist, so it
-                // ignores 0 and anything below the column's own floor.
-                if abs(width - Double(navLiveWidth)) > 0.5 {
-                    navLiveWidth = CGFloat(width)
-                }
-                guard width >= 240, abs(width - navW) > 0.5 else { return }
-                navW = width
-                persistPanelSizes()
-            }
-        )
+        // Declaring a toolbar on the column also introduced an
+        // `NSToolbarFlexibleSpaceItem` at index 0 spanning x 92…250, which
+        // right-aligned the whole sidebar section — our button at 254, the
+        // system's at 298, both far from the traffic lights.
+        //
+        // So the system's toggle is the toggle. It is one control, it sits
+        // where AppKit puts it, and nothing has to be undone every frame. The
+        // glyph is `sidebar.left` rather than Xcode's list, which is a
+        // cosmetic loss and the only one.
     }
 
     /// Detail column: editor stage (+ outline card) + status line.
@@ -8216,80 +8188,6 @@ private struct JumpBarSegmentButton: View {
 /// Guarded, like everything else that touches window style here: re-assigning
 /// identical values on reactivation rebuilds the window's view bridge and kills
 /// NSHostingView hit-testing.
-/// TEMPORARY. Writes the editor window's real toolbar inventory to a file.
-///
-/// Two toolbar facts have now measured one way in a probe and behaved another
-/// way in the app — `ToolbarSpacer(.flexible)`, and
-/// `.toolbar(removing: .sidebarToggle)`, which leaves the system's toggle on
-/// screen beside ours. Both were fixable from AppKit once the real items were
-/// known, and guessing at a screenshot has cost six rounds. So the app says
-/// what it has: identifiers, classes and window-space frames, once per launch.
-///
-/// Delete this and its call site as soon as the duplicate toggle is gone.
-private enum ToolbarInventory {
-    static let path = NSString(string: "~/Library/Logs/suisei-toolbar-inventory.txt")
-        .expandingTildeInPath
-    static var written = false
-}
-
-extension EditorWindowChrome {
-    static func dumpToolbarInventoryOnce(_ window: NSWindow) {
-        guard !ToolbarInventory.written, let toolbar = window.toolbar,
-              !toolbar.items.isEmpty else { return }
-        ToolbarInventory.written = true
-
-        var lines: [String] = [
-            "window \(Int(window.frame.width)) x \(Int(window.frame.height))",
-            "toolbar identifier: \(toolbar.identifier)",
-            "items (\(toolbar.items.count)):",
-        ]
-        for (i, item) in toolbar.items.enumerated() {
-            var line = "  [\(i)] \(item.itemIdentifier.rawValue)"
-            line += "  class=\(String(describing: type(of: item)))"
-            if let v = item.view {
-                let f = v.convert(v.bounds, to: nil)
-                line += String(format: "  view=%@ x %.0f … %.0f",
-                               String(describing: type(of: v)), f.minX, f.maxX)
-            }
-            if let label = item.label.isEmpty ? nil : item.label { line += "  label=\(label)" }
-            lines.append(line)
-        }
-        // Frames again from the view tree, since a toolbar item can render
-        // through a hosting view it does not own.
-        lines.append("toolbar item views in the titlebar:")
-        if let frame = window.contentView?.superview {
-            var found: [String] = []
-            walk(frame, into: &found)
-            lines.append(contentsOf: found)
-        }
-        try? lines.joined(separator: "\n").write(
-            toFile: ToolbarInventory.path, atomically: true, encoding: .utf8
-        )
-    }
-
-    private static func walk(_ view: NSView, into out: inout [String]) {
-        let n = String(describing: type(of: view))
-        if n == "NSToolbarItemViewer" || n == "NSToolbarPlatterView" {
-            let f = view.convert(view.bounds, to: nil)
-            var s = String(format: "  %-22@ x %.0f … %.0f", n as NSString, f.minX, f.maxX)
-            if let img = firstSymbol(in: view) { s += "  symbol=\(img)" }
-            out.append(s)
-        }
-        for sub in view.subviews { walk(sub, into: &out) }
-    }
-
-    /// The SF Symbol a toolbar item is drawing, when it can be recovered — the
-    /// one thing that says which button is which.
-    private static func firstSymbol(in view: NSView) -> String? {
-        if let b = view as? NSButton, let name = b.image?.name() { return name }
-        if let iv = view as? NSImageView, let name = iv.image?.name() { return name }
-        for sub in view.subviews {
-            if let n = firstSymbol(in: sub) { return n }
-        }
-        return nil
-    }
-}
-
 private struct EditorWindowChrome: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -8315,8 +8213,6 @@ private struct EditorWindowChrome: NSViewRepresentable {
         if window.tabbingMode != .disallowed {
             window.tabbingMode = .disallowed
         }
-        Self.dumpToolbarInventoryOnce(window)
-        normalizeToolbar(window)
         // No `titleVisibility = .hidden` here, deliberately. It hides the title
         // by removing the toolbar's title ITEM, and that item is what anchors
         // the `.primaryAction` group to the trailing edge — hiding it moved the
@@ -8329,45 +8225,6 @@ private struct EditorWindowChrome: NSViewRepresentable {
         // out to be this line.
     }
 
-    /// Take two items out of SwiftUI's toolbar that it will not take out itself.
-    ///
-    /// Both were found by making the app write its own inventory rather than by
-    /// reading a screenshot, after six rounds of the latter:
-    ///
-    ///     [0] NSToolbarFlexibleSpaceItem                      x  92 … 250
-    ///     [1] <uuid>                       (our list.bullet)  x 254 … 290
-    ///     [2] com.apple.SwiftUI.navigationSplitView.toggleSidebar
-    ///                                      label "Hide Sidebar"  x 298 … 337
-    ///     [3] com.apple.SwiftUI.splitViewSeparator-0
-    ///     [4…6] the three primaryAction items                x 1158 … 1270
-    ///
-    /// So there were two toggles because `.toolbar(removing: .sidebarToggle)`
-    /// is inert here — item [2] is exactly where it sat before ours existed —
-    /// and ours was nowhere near the traffic lights because the flexible space
-    /// at [0] right-aligns the whole sidebar section. One insertion nobody
-    /// asked for, one removal that did not happen.
-    ///
-    /// Removing them by identifier is the same route that worked for the
-    /// trailing placement: the declarative form measured right and did nothing,
-    /// the AppKit form does what it says. Idempotent — after the first pass
-    /// neither condition matches, so the re-run on every SwiftUI update is a
-    /// no-op, and if SwiftUI rebuilds the toolbar the next update cleans it
-    /// again.
-    private func normalizeToolbar(_ window: NSWindow) {
-        guard let toolbar = window.toolbar else { return }
-        if let i = toolbar.items.firstIndex(where: {
-            $0.itemIdentifier.rawValue == Self.swiftUISidebarToggle
-        }) {
-            toolbar.removeItem(at: i)
-        }
-        // Leading only. A flexible space anywhere else is doing a job.
-        if toolbar.items.first?.itemIdentifier == .flexibleSpace {
-            toolbar.removeItem(at: 0)
-        }
-    }
-
-    private static let swiftUISidebarToggle =
-        "com.apple.SwiftUI.navigationSplitView.toggleSidebar"
 }
 
 /// The sidebar's dragged width, reported back so it survives relaunch.

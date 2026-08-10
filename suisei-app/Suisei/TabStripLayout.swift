@@ -46,7 +46,7 @@ struct TabStripLayout: Equatable {
     /// Its own number, not the inter-chip `gap`. The button is not another
     /// chip — it reads as crowded at the 4pt that separates two tabs, and it is
     /// the last thing before the toolbar cluster.
-    static let plusGap: CGFloat = 15
+    static let plusGap: CGFloat = 18
 
     let chips: [Chip]
     /// Total width of the chip run, excluding any trailing gap.
@@ -152,25 +152,33 @@ struct TabStripLayout: Equatable {
     }
 
     /// Slot whose close glyph is under `p`.
+    ///
+    /// The target is the glyph's OWN box plus 3pt, and no more.
+    ///
+    /// It was 22x26 reaching 6pt past the glyph on the right and 2pt on the
+    /// left, on the theory that a small control deserves a generous target.
+    /// That theory is right for a control you can see; this one is drawn only
+    /// while its chip is hovered, so every point of slack is a point where the
+    /// pointer is over blank chip and a click closes the tab anyway — the
+    /// reported "I clicked well left of the x and it still closed".
+    ///
+    /// Reaching the glyph is a HOVER problem, and hover is solved where hover
+    /// lives: the catcher's tracking area now spans the whole titlebar band, so
+    /// the glyph stays put while the pointer travels to it. The click target
+    /// can then be honest about where the ink is.
+    ///
+    /// Geometry, from `ToolbarTabChip`: the chip is
+    /// `HStack(spacing: 5) { icon; title; trailing(14) }.padding(.horizontal, 10)`,
+    /// so the 14pt trailing slot occupies `maxX - 24 … maxX - 10`.
     func closeSlot(at p: CGPoint, rowHeight: CGFloat) -> Int? {
         let local = CGPoint(x: p.x - originX, y: p.y)
         for chip in chips {
-            // The glyph is 14pt; the TARGET is 22x26, and deliberately not
-            // symmetric about it. A close button only as big as its ink is one
-            // you have to aim at, and this one appears on hover — so a miss
-            // takes the hover with it and the button disappears mid-approach.
-            //
-            // Grown mostly RIGHT and vertically, into the chip's trailing
-            // padding and the band above and below the row, where there is
-            // nothing to steal from. Only 2pt to the left, because that
-            // direction is the title, and a click on a filename should open
-            // the file rather than close it.
             let glyph = CGRect(
-                x: chip.maxX - 26,
-                y: rowHeight / 2 - 13,
-                width: 22,
-                height: 26
-            )
+                x: chip.maxX - 24,
+                y: rowHeight / 2 - 7,
+                width: 14,
+                height: 14
+            ).insetBy(dx: -3, dy: -3)
             if glyph.contains(local) { return chip.slot }
         }
         return nil
