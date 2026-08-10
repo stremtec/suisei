@@ -60,15 +60,22 @@ struct SuiseiApp: App {
             EditorSceneRoot(engine: engine)
         }
         .defaultSize(width: 1280, height: 820)
-        // .hiddenTitleBar (NOT .titleBar): with .titleBar there is always a
-        // system titlebar STRIP above the content — the navigator card can only
-        // start below it, so the traffic lights + toggle float in a bare band
-        // above the card instead of inside its top (the round-9 complaint).
-        // Verified: .titleBar also re-asserts titlebarAppearsTransparent=false
-        // behind AppKit's back, painting an opaque 32pt band over risen content.
-        // .hiddenTitleBar keeps the lights, drops the strip, and lets the card
-        // rise to the window edge and swallow them — Xcode 26 anatomy.
-        .windowStyle(.hiddenTitleBar)
+        // No `.windowStyle` — the default `.titleBar`, exactly like the Source
+        // Control window above.
+        //
+        // This used to be `.hiddenTitleBar`, justified by "with .titleBar there
+        // is always a system titlebar STRIP above the content, so the navigator
+        // can only start below it and the traffic lights float in a bare band".
+        // That is true of a hand-drawn navigator, and false of a real one: a
+        // `NavigationSplitView` sidebar is an AppKit split-view item with
+        // `.sidebar` behavior, and AppKit runs it up THROUGH the titlebar with
+        // the lights floating over it. Source Control has done exactly that in
+        // this app all along, on the default `.titleBar`.
+        //
+        // The other half of the old note — ".titleBar re-asserts
+        // titlebarAppearsTransparent=false behind AppKit's back" — is handled
+        // where Source Control handles it: `ThemedWindowChrome` re-applies on
+        // every SwiftUI update, so AppKit cannot keep an opaque band.
         .windowResizability(.contentMinSize)
         // Don't open an empty editor until the user leaves Welcome.
         .defaultLaunchBehavior(.suppressed)

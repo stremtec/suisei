@@ -53,6 +53,13 @@ struct ContentView: View {
     // Live panel sizes (@State). @AppStorage on every drag frame caused shake/ghosting.
     // Persist only when a resize gesture ends (see `persistPanelSizes`).
     @State private var navW: Double = 280
+    /// The navigator width handed to the split view, frozen at launch.
+    ///
+    /// Separate from `navW` on purpose. `.navigationSplitViewColumnWidth` takes
+    /// a value, not a binding, and re-reads it whenever that value changes — so
+    /// pointing it at `navW` while `SplitColumnWidthReporter` writes `navW`
+    /// from the splitter is a loop, with the drag on one side of it.
+    @State private var navIdealWidth: CGFloat = 280
     @State private var termW: Double = 400
     @State private var debugAreaH: Double = 200
     @State private var inspectorW: Double = 240
@@ -288,7 +295,14 @@ struct ContentView: View {
     }
 
     private static func resolve(_ color: NSColor, light: Bool) -> NSColor {
-        let appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        // Through `themedAppearanceName`, so a resolved surface still tracks
+        // Increase Contrast. Naming `.aqua`/`.darkAqua` here froze every
+        // resolved colour at its normal-contrast value — which would have made
+        // "we use semantic colours so they follow the accessibility settings"
+        // untrue of the surfaces that go through this function.
+        let appearance = NSAppearance(
+            named: WindowChrome.themedAppearanceName(light: light)
+        )
         var out = color
         appearance?.performAsCurrentDrawingAppearance {
             out = color.usingColorSpace(.sRGB) ?? color
@@ -343,19 +357,106 @@ struct ContentView: View {
         // Welcome is its own Window scene (SuiseiApp) with system chrome.
         // This view is the editor shell only.
         //
-        // Xcode 26 anatomy: the navigator is a floating rounded card — same
-        // language as the outline card, but full height, and tall enough that
-        // the traffic lights + our toggle sit INSIDE its empty top area. The
-        // card is hand-drawn: NavigationSplitView also renders a floating card
-        // on this OS, but pins it below the titlebar safe area no matter what,
-        // which strands the lights + toggle in a bare strip ABOVE the card
-        // (the round-9/10 complaint). The scene's .hiddenTitleBar keeps the
-        // lights while letting our card rise to the true window top.
+        // Source Control's structure, adopted for a measured reason rather than
+        // an aesthetic one.
+        //
+        // On macOS 26 the sidebar's material is produced by
+        // `NavigationSplitView` itself. Dumping the AppKit tree of a live split
+        // view (probe, 2026-08-10) shows the first column wrapped in a
+        // `BackdropView` backed by a `CABackdropLayer`, and inside that an
+        // `NSContainerConcentricGlassEffectView` inset 8pt on every side. The
+        // system already draws the floating, rounded, inset card this file used
+        // to draw by hand — and only the system's copy sits on the backdrop.
+        //
+        // So the hand-drawn card was never an alternative to the split view. It
+        // was an opaque `.background(editorBg)` painted directly over the one
+        // surface the material lives on, which is why four attempts to give it
+        // the workbench's material failed: each added a material in FRONT of
+        // the thing that was covering it.
+        //
+        // The same probe retires the other half of the old story. The backdrop
+        // appears with a plain `ScrollView` sidebar exactly as it does with
+        // `List(.listStyle(.sidebar))` — that list style governs row metrics,
+        // not the surface. `ProjectTreeView` keeps its custom rows and still
+        // gets the material.
+        NavigationSplitView(columnVisibility: navigatorVisibility) {
+            sidebarColumn
+        } detail: {
+            detailStack
+        }
+        // `.balanced`, as in Source Control: the detail keeps its own width and
+        // the sidebar displaces it rather than floating over it.
+        // `.prominentDetail` is the overlay idiom, which is what the previous
+        // hand-drawn navigator was imitating.
+        //
+        // The navigator's show/hide spring goes with the offset that needed it.
+        // A split view column animates its own collapse, and driving an
+        // `offset` alongside it would be two authorities for one motion — the
+        // defect five earlier attempts at that animation were all instances of.
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 640, minHeight: 400)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .foregroundStyle(.primary)
+        .tint(accent)
+        // Chrome UI uses a fixed size — Cmd+/- only zooms the editor canvas (EditorMetrics).
+        .font(.system(size: 13, weight: .regular))
+        .preferredColorScheme(isLightTheme ? .light : .dark)
+        // Keys route through the NSEvent monitor (EngineBridge); a container-level
+        // .focusable()/.onKeyPress here double-captured input and stole focus
+        // from native text fields (the tree Filter couldn't be typed into).
+        .focused($focused)
+        // ONE backing surface for the entire window, at the root — which is
+        // also what the sidebar's `CABackdropLayer` samples. Source Control
+        // does exactly this; a second base colour anywhere shows up as a seam,
+        // and one placed BEHIND the sidebar would be the seam.
+        .background(shellBase.ignoresSafeArea())
+        // Source Control's chrome, verbatim. It re-applies on every SwiftUI
+        // update, which is what stops AppKit from quietly restoring an opaque
+        // titlebar band, and it un-hides the REAL traffic lights — the split
+        // view runs the sidebar up under them.
+        .background(
+            ThemedWindowChrome(
+                background: .windowBackgroundColor,
+                light: isLightTheme,
+                identifier: WindowChrome.editorIdentifier,
+                opaque: true
+            )
+        )
+    }
+
+    /// One authority for "is the navigator showing" — Core's flag — restated in
+    /// the split view's own vocabulary. A second, SwiftUI-owned visibility
+    /// state that could disagree with `uiNavVisible` is exactly the shape of
+    /// defect this file keeps hitting, so there isn't one.
+    private var navigatorVisibility: Binding<NavigationSplitViewVisibility> {
+        Binding(
+            get: { engine.uiNavVisible ? .all : .detailOnly },
+            set: { visibility in
+                let visible = visibility != .detailOnly
+                guard visible != engine.uiNavVisible else { return }
+                // Same suppression every other panel toggle uses, so dragging
+                // the column shut doesn't recompose the editor per frame.
+                engine.animatingPanels { engine.uiNavVisible = visible }
+            }
+        )
+    }
+
+    /// Everything right of the navigator: the titlebar row, the editor island,
+    /// the inspector, the status bar, and the overlays that must centre on the
+    /// EDITOR rather than on the window.
+    ///
+    /// Centring is why the overlays live here. The palette used to hang off the
+    /// window and correct itself by `(navReserved - inspectorReserved) / 2`,
+    /// hand-measured against both panels. Inside the detail column that
+    /// arithmetic is just the column's geometry, so only the inspector — still
+    /// ours, still inside this column — needs compensating.
+    private var detailStack: some View {
         ZStack(alignment: .top) {
-            // Bottom z-layer: the status bar spans the FULL window width. The
-            // sidebar card (full height, drawn above) overlaps its left part,
-            // so the bar's top line visibly passes UNDER the widget instead of
-            // stopping at an arbitrary x (the recurring "라인이 끊김").
+            // Bottom z-layer: the status bar spans the detail column edge to
+            // edge and the inspector's opaque column covers its right end, so
+            // the bar reads as one unbroken floor (the recurring "라인이 끊김").
+            // It stops at the sidebar because the sidebar is a real column now
+            // — Xcode's does the same.
             VStack(spacing: 0) {
                 Spacer()
                 statusLine
@@ -363,10 +464,6 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    // No sidebar here: the navigator is not a column any
-                    // more. The island spans from the window's left edge and
-                    // the widget FLOATS over it (see the layer after this
-                    // VStack) — only the editor's content steps aside for it.
                     detailColumn
                     // Hoisted OUT of `detailColumn` on purpose. Nested there it
                     // sat between that column's top band and its status-bar
@@ -403,118 +500,28 @@ struct ContentView: View {
                 .animation(nil, value: inspectorW)
             }
 
-            // ── Floating navigator ──────────────────────────────────────────
-            // The island passes cleanly beneath the widget and the widget
-            // floats on that one continuous surface, separated by nothing but
-            // its own shadow. This is also why the terminal↔sidebar metaball
-            // bridge is gone: there is no shell channel left to bridge — the
-            // ground between the two IS the island now.
-            // ALWAYS PRESENT, moved by `offset`. Not `if` + `.transition`.
-            //
-            // The conditional-with-transition form would not animate its
-            // REMOVAL, and five measured attempts failed to make it: explicit
-            // `withAnimation` vs implicit `.animation(_:value:)`, the animation
-            // on the outer container vs on the panel's own, adding `.zIndex`,
-            // applying the transition before the full-width stretch instead of
-            // after, and dropping the `windowLiveResizing` publish that lands
-            // in the same update. Every one of them measured open ≈ 5–8 frames
-            // of motion against close = 1 frame, i.e. the panel snapped shut.
-            //
-            // An offset is a plain animatable property, so both directions are
-            // the same interpolation running in opposite senses and cannot
-            // diverge. Keeping the panel mounted also means opening it no
-            // longer re-runs `ProjectTreeView`'s `onAppear` rebuild.
-            sidebarColumn
-                .frame(width: CGFloat(navW))
-                .frame(maxHeight: .infinity)
-                .background(editorBg)
-                .clipShape(RoundedRectangle(
-                    cornerRadius: ContentView.panelCornerRadius, style: .continuous
-                ))
-                .overlay(
-                    RoundedRectangle(
-                        cornerRadius: ContentView.panelCornerRadius, style: .continuous
-                    )
-                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
-                )
-                // The resize grip rides the widget's own trailing edge now
-                // that the sidebar owns no slot in the layout.
-                // (240 floor: five modes plus the detached toggle need the
-                // room — see `navStripIcon`.)
-                .overlay(alignment: .trailing) {
-                    PanelResizeGrip(
-                        size: $navW, minS: 240, maxS: 460,
-                        axis: .horizontal, invert: false,
-                        fg: fg,
-                        onBegan: beginPanelLiveResize,
-                        onEnded: endPanelLiveResize
-                    )
-                }
-                .shadow(
-                    color: .black.opacity(isLightTheme ? 0.07 : 0.30),
-                    radius: 9, y: 2
-                )
-                .padding(.leading, ContentView.panelGap)
-                .padding(.vertical, ContentView.panelGap)
-                // Far enough left to clear its own shadow as well as the card.
-                .offset(x: navigatorPresented ? 0 : -(CGFloat(navW) + 40))
-                .opacity(navigatorPresented ? 1 : 0)
-                // Hidden means untouchable — an off-screen panel must not eat
-                // clicks meant for the editor beneath it.
-                .allowsHitTesting(navigatorPresented)
-                .frame(
-                    maxWidth: .infinity, maxHeight: .infinity,
-                    alignment: .leading
-                )
-                // Below `topBar` (2) so the sidebar toggle is never covered by
-                // the panel it toggles.
-                .zIndex(1)
-
-            // Custom titlebar row: full window width → tabs stay WINDOW-centered
-            // regardless of the sidebar, and everything here is SwiftUI content
-            // (blurable, coverable — impossible with NSToolbar).
+            // Custom titlebar row. It spans the DETAIL column now, not the
+            // window: AppKit puts the traffic lights over the sidebar, so this
+            // row no longer reserves a lights zone, and the tabs centre on the
+            // editor instead of on the window. Everything in it is still
+            // SwiftUI content (blurable, coverable — impossible with an
+            // NSToolbar), which is why it is a row here and not `.toolbar`.
             topBar
-                // Above the navigator (1) so the sidebar toggle is never
-                // covered by the panel it toggles.
                 .zIndex(2)
         }
-        // THE INSPECTOR'S ANIMATION, verbatim — `.snappy(duration: 0.25)`
-        // keyed on the visibility value, plus `nil` for the width so dragging a
-        // resize grip never animates. The navigator was driven by an explicit
-        // `withAnimation` transaction instead, which is what differed and what
-        // stuttered.
-        //
-        // It sits HERE, on the container above both, rather than on the panel:
-        // the navigator is a floating overlay, so the editor does not resize
-        // around it — its content steps aside via `editorCard`'s leading
-        // padding, in a different subtree. Only a modifier above both moves
-        // them as one.
-        //
-        // The inspector's `.zIndex(2)` is deliberately NOT copied: it is
-        // positional, not part of the animation, and in this ZStack it raised
-        // the navigator above `topBar` and hid the sidebar toggle behind it.
-        // `.snappy` is a spring WITH bounce (≈0.15). On the inspector's narrow
-        // column that wobble is invisible; on a full-height panel it is not.
-        // Explicit `bounce: 0` rather than `.smooth`, so the intent is in the
-        // code and not in a preset that might change.
-        .animation(.spring(duration: 0.25, bounce: 0), value: navigatorPresented)
-        // Everything starts at the true window top (no reserved titlebar strip):
-        // the navigator card swallows the traffic lights + toggle, the top bar
-        // row shares that height over the detail side.
+        // The row starts at the true window top. The titlebar is transparent
+        // and its only occupant — the traffic lights — sits over the sidebar.
         .ignoresSafeArea(.container, edges: .top)
         .overlay {
             // Settings is a separate Window — not an in-app overlay.
             if engine.chrome.palette.open {
                 paletteOverlay
-                    // Centre on the EDITOR, not the window. The overlay hangs
-                    // off the root, so it centred on the window — and the two
-                    // panels flanking the editor are not the same width, so
-                    // window-centred is never editor-centred. Measured with
-                    // both open: navigator edge at x=318, editor edge at
-                    // x=1696, editor centre 1007 against a window centre of
-                    // 1023.5 — the palette sat 16.5px right, which is exactly
-                    // what it looked like.
-                    .offset(x: (navReserved - inspectorReserved) / 2)
+                    // Compensate for the inspector only. The navigator is a
+                    // real column now and is already outside this coordinate
+                    // space, so the old hand-measured
+                    // `(navReserved - inspectorReserved) / 2` correction is
+                    // half arithmetic the layout does for us.
+                    .offset(x: -inspectorReserved / 2)
                     .zIndex(100)
                     // Removal is IMMEDIATE (.identity): the animated removal
                     // could wedge mid-transition, leaving an invisible view
@@ -559,11 +566,11 @@ struct ContentView: View {
             guard engine.windowLiveResizing else { return }
             ResizeHudWindow.shared.update(over: w)
         }
-        // Ensure the fixed overlay exists when a restored/secondary editor
-        // becomes key. This never writes a standard button frame.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
             guard let w = note.object as? NSWindow, isEditorWindow(w) else { return }
-            ContentView.applyTrafficLightInset(w)
+            // Nothing to re-place: the traffic lights are AppKit's own, in
+            // AppKit's own position, exactly as in Source Control.
+            //
             // The Git model may stay open in its own window. Returning to an
             // editor window must nevertheless return keyboard ownership to the
             // editor instead of leaving Core in GitWorkbench mode.
@@ -575,25 +582,8 @@ struct ContentView: View {
             ResizeHudWindow.shared.hide()
             engine.settleEditorResize()
         }
-        // ONE backing surface for the entire window (Xcode: cards float on a
-        // uniform base — any second base color shows up as a hard seam).
-        .background(shellBase)
-        .background(
-            WindowIdentityProbe(identifier: WindowChrome.editorIdentifier) { _ in
-                applyWindowAppearance()
-            }
-        )
-        .foregroundStyle(.primary)
-        .tint(accent)
-        // Chrome UI uses a fixed size — Cmd+/- only zooms the editor canvas (EditorMetrics).
-        .font(.system(size: 13, weight: .regular))
-        .preferredColorScheme(isLightTheme ? .light : .dark)
-        .frame(minWidth: 640, minHeight: 400)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Keys route through the NSEvent monitor (EngineBridge); a container-level
-        // .focusable()/.onKeyPress here double-captured input and stole focus
-        // from native text fields (the tree Filter couldn't be typed into).
-        .focused($focused)
+        // Environment, sizing and the window surfaces all live on the root, so
+        // the SIDEBAR inherits them too — see `body`.
         .onAppear {
             loadPanelSizes()
             focused = true
@@ -616,6 +606,19 @@ struct ContentView: View {
         // into +[NSApplication _crashOnException:] (the "switch to Dark →
         // instant crash"). .default doesn't run until tracking ends.
         .onChange(of: isLightTheme) { _, _ in
+            RunLoop.main.perform(inModes: [.default]) {
+                applyWindowAppearance()
+            }
+        }
+        // Increase Contrast / Reduce Transparency change which appearance the
+        // windows should carry, and this app pins that appearance rather than
+        // inheriting it — so nothing else would notice. Same deferral as the
+        // theme flip, for the same reason.
+        .onReceive(
+            NSWorkspace.shared.notificationCenter.publisher(
+                for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification
+            )
+        ) { _ in
             RunLoop.main.perform(inModes: [.default]) {
                 applyWindowAppearance()
             }
@@ -730,18 +733,11 @@ struct ContentView: View {
         }
     }
 
-    /// Width the navigator takes out of the window, 0 when hidden. Overlays
-    /// that want to sit in the middle of the EDITOR offset by the difference
-    /// between this and `inspectorReserved`.
-    private var navigatorPresented: Bool {
-        engine.uiNavVisible
-    }
-
-    private var navReserved: CGFloat {
-        navigatorPresented ? CGFloat(navW) + ContentView.panelGap : 0
-    }
-
-    /// The inspector's equivalent.
+    /// Width the inspector takes out of the detail column, 0 when hidden.
+    ///
+    /// The navigator's counterpart is gone: it is a split view column now, so
+    /// nothing inside the detail has to know how wide it is, or whether it is
+    /// there at all.
     private var inspectorReserved: CGFloat {
         outlineVisible ? CGFloat(inspectorW) + ContentView.panelGap : 0
     }
@@ -795,12 +791,14 @@ struct ContentView: View {
             }
             d.set(navW, forKey: "suisei.panel.navW")
         } else {
-            // Floor matches `SidebarResizeStrip`'s minS — a width persisted
-            // under the old 200 floor would otherwise load back and clip the
-            // navigator strip.
+            // Floor matches the split view column's own `min:` — a width
+            // persisted under the old 200 floor would otherwise load back and
+            // clip the navigator strip.
             let v = d.double(forKey: "suisei.panel.navW")
             if v >= 240 { navW = v }
         }
+        // Read once, here, and never again: see `navIdealWidth`.
+        navIdealWidth = CGFloat(navW)
         let t = d.double(forKey: "suisei.panel.termW")
         if t >= 200 { termW = t }
         // Key keeps its old name so a saved height survives the XLC removal.
@@ -841,9 +839,18 @@ struct ContentView: View {
     }
 
     /// Sidebar column — navigator strip on top, flat content below.
-    /// NavigationSplitView hosts it full height into the titlebar (Xcode style):
-    /// no background override here — the system sidebar material must run all
-    /// the way to the top, with the traffic lights floating over it.
+    ///
+    /// **It must not paint a background.** The split view has already put a
+    /// `CABackdropLayer` behind this column and an inset concentric-glass
+    /// container around it; any opaque fill here covers both, which is what the
+    /// hand-drawn card did for months. `dockedNavigator` and its rows follow
+    /// the same rule — colour comes from `Color.primary` washes, never a second
+    /// base.
+    ///
+    /// No `NSVisualEffectView` either, in any blending mode. Two were tried and
+    /// both landed IN FRONT of the surface they were meant to be: a material
+    /// added inside a column that already has one is the confused-hierarchy
+    /// case the Liquid Glass guidance names.
     private var sidebarColumn: some View {
         PerfProbe.measure("  body.sidebarColumn") { sidebarColumnBody }
     }
@@ -851,29 +858,31 @@ struct ContentView: View {
     @ViewBuilder
     private var sidebarColumnBody: some View {
         VStack(spacing: 0) {
-            // The system titlebar controls occupy the native 28pt first row.
-            // Leave one compact 7pt beat before the 40pt navigator mode strip;
-            // this restores the original screenshot's y≈55 pill centre
-            // without moving the traffic lights themselves.
+            // AppKit's own traffic lights sit in the native titlebar row above
+            // the mode strip, over this column. 35pt clears them and puts the
+            // pill centre back at y≈55, where the original screenshot had it.
             Spacer().frame(height: 35)
             navigatorModeStrip
             dockedNavigator
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // The Git workbench's sidebar is a `List(.listStyle(.sidebar))`, and
-        // THAT is where its material comes from — not from `NavigationSplitView`,
-        // which gives the column geometry and nothing else. This navigator is a
-        // plain `ScrollView` (800 lines of custom rows, rename, drag-drop,
-        // expansion state), so it had no material at all.
-        //
-        // No effect view here. An `NSVisualEffectView` put at this level sits
-        // in FRONT of the card's own opaque `.background(editorBg)` and inside
-        // its `clipShape`, so a behind-window material has nothing to sample
-        // and a within-window one is just a flat tint — both were tried.
-        //
-        // The workbench's sidebar material does not come from an effect view
-        // either; it comes from `List(.listStyle(.sidebar))`. That is applied
-        // where this navigator's list actually is — `ProjectTreeView`.
+        // Ideal, not a binding: `.navigationSplitViewColumnWidth` is consulted
+        // when the column is first laid out, so feeding it a value the user is
+        // actively dragging would fight the splitter. `navIdealWidth` is
+        // therefore frozen at launch and `SplitColumnWidthReporter` writes the
+        // dragged width back to `navW` for the NEXT launch.
+        // (240 floor: five modes plus the detached toggle need the room —
+        // see `navStripIcon`.)
+        .navigationSplitViewColumnWidth(
+            min: 240, ideal: navIdealWidth, max: 460
+        )
+        .background(
+            SplitColumnWidthReporter { width in
+                guard width >= 240, abs(width - navW) > 0.5 else { return }
+                navW = width
+                persistPanelSizes()
+            }
+        )
     }
 
     /// Detail column: editor stage (+ outline card) + status line.
@@ -938,32 +947,21 @@ struct ContentView: View {
         let shape = RoundedRectangle(
             cornerRadius: ContentView.panelCornerRadius, style: .continuous
         )
-        // The island starts at the WINDOW edge and passes beneath the floating
-        // navigator; only the CONTENT steps aside.
-        //
-        // No extra breathing room beyond the panel's own width. The `+ 7` that
-        // used to be here was SwiftUI PADDING, i.e. outside the editor canvas —
-        // so the canvas could not paint it, and the cursor-line highlight
-        // stopped 7pt short of the sidebar with bare card background showing
-        // through (measured: sidebar border ends at x=316, highlight starts at
-        // x=324). The navigator is a floating card with its own shadow; that
-        // shadow is the separation, and it falls on content that now reaches.
-        // Workbench hides the floating navigator without mutating the user's
-        // saved visibility. The editor content must follow the *presented*
-        // state too; keying this off uiNavVisible left a navigator-wide blank
-        // gutter down the entire left side of Git Workbench.
-        let contentInset = navigatorPresented ? CGFloat(navW) : 0
+        // No leading inset any more. The island used to start at the WINDOW
+        // edge and pass beneath a floating navigator, so its CONTENT had to
+        // step aside by the navigator's width — an inset that had to know
+        // another panel's geometry, and got it wrong twice (a 7pt padding the
+        // canvas could not paint, then a navigator-wide blank gutter down the
+        // left of Git Workbench because it read the saved flag rather than the
+        // presented state). The split view gives the island a column that is
+        // already the right width, so there is nothing left to compensate for.
         return editorIsolatedStage
-            .padding(.leading, contentInset)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
                 ZStack(alignment: .bottom) {
                     editorBg
                     // The terminal's tint band lives on the CARD, spanning the
-                    // full island — under the navigator too. Painted on the
-                    // inset content it stopped at the content's left edge, a
-                    // vertical cut mid-surface. Its left fillet hides beneath
-                    // the widget; the right one still sweeps the island wall.
+                    // full island, so both its fillets sweep the island walls.
                     if engine.uiDebugVisible {
                         dockedTerminalShape
                             .fill(terminalDockFill)
@@ -1767,7 +1765,13 @@ struct ContentView: View {
             // Switching between a symmetric "fits" width and an overflow
             // width while a layout merged changed the strip by 135pt in the
             // first frame, independently of the chip animation.
-            let leftReserve: CGFloat = engine.uiNavVisible ? CGFloat(navW) + 16 : 150
+            // Symmetric, and a constant. It used to widen with the navigator
+            // (`navW + 16`) because this row spanned the whole window and the
+            // tabs had to clear a panel in a different subtree. The row is the
+            // detail column's own now, so the reserve is just the trailing
+            // control cluster's width mirrored — which is what centres the
+            // tabs on the editor.
+            let leftReserve: CGFloat = 150
             let rightTight: CGFloat = 150
             let wideCap = max(60, geo.size.width - leftReserve - rightTight) - 22
 
@@ -1809,9 +1813,11 @@ struct ContentView: View {
                 }
 
             HStack(spacing: 2) {
-                // Toggle sits right AFTER the traffic lights (Xcode row 1) —
-                // pinned to the card's top-right it crowded the corner.
-                Spacer().frame(width: 86)
+                // The 86pt lights zone that used to open this row is gone with
+                // the cloned lights: AppKit's own sit over the sidebar column,
+                // outside this view entirely. The toggle now leads the detail
+                // column, which is where Xcode 26 puts its sidebar controls.
+                Spacer().frame(width: 10)
                 ToolbarPlainIcon(
                     systemImage: "sidebar.left",
                     help: engine.uiNavVisible ? "Hide Navigator · ⌘0" : "Show Navigator · ⌘0",
@@ -2906,9 +2912,10 @@ struct ContentView: View {
         }
     }
 
-    /// Push theme appearance into AppKit windows so title bar / materials follow the theme.
-    /// Editor windows drop the system titlebar entirely (custom top bar draws it):
-    /// full-size content + hidden title = sidebar material up to the traffic lights.
+    /// Push theme appearance into AppKit windows so titlebar / materials follow
+    /// the theme. Editor windows keep the system titlebar — transparent, title
+    /// hidden — and the split view's sidebar runs up through it with AppKit's
+    /// own traffic lights floating over it, exactly as Source Control does.
     ///
     /// MUST stay idempotent — every assignment is guarded by a "changed?"
     /// check. Re-ASSIGNING NSApp.appearance / window styling with the same
@@ -2918,43 +2925,29 @@ struct ContentView: View {
     /// it is safe to call from didBecomeActive, which is what keeps late-born
     /// windows (session restore, second editor window) in sync with the theme.
     private func applyWindowAppearance() {
-        let name: NSAppearance.Name = isLightTheme ? .aqua : .darkAqua
+        let name = WindowChrome.themedAppearanceName(light: isLightTheme)
         let appearance = NSAppearance(named: name)
         if NSApp.appearance?.name != name {
             NSApp.appearance = appearance
         }
-        let bg = NSColor(shellBase)
-        // Appearance is safe to push at any window; background and movability
-        // are not — restyling an open panel or a popover is both wrong and, for
-        // the titlebar work below, fatal. See `isEditorWindow`.
+        // Appearance is safe to push at any window; window styling is not —
+        // restyling an open panel or a popover is both wrong and, for titlebar
+        // work, fatal. See `isEditorWindow`.
+        //
+        // Everything the editor window needs beyond appearance — background,
+        // opacity, transparent titlebar, separator style, movability, visible
+        // standard buttons — is `ThemedWindowChrome`'s job, exactly as in
+        // Source Control, and it re-applies on every SwiftUI update rather than
+        // once per theme change. The only thing left here is the window title,
+        // which this window has no place to draw.
         for window in NSApp.windows where window.title != "Welcome" {
             if window.appearance?.name != name {
                 window.appearance = appearance
             }
             guard isEditorWindow(window) else { continue }
-            if window.backgroundColor != bg {
-                window.backgroundColor = bg
-            }
-            // NOT opaque. A `.behindWindow` effect view samples what is behind
-            // the WINDOW, which is the whole point of a sidebar material — the
-            // workbench's sidebar visibly takes a cast from the wallpaper. An
-            // opaque window has nothing behind it to sample, so forcing one
-            // here (tried, 2026-08-10) flattened the sidebar into the shell
-            // colour and made the two windows look less alike, not more.
-            window.isMovableByWindowBackground = false
-            if !window.styleMask.contains(.fullSizeContentView) {
-                window.styleMask.insert(.fullSizeContentView)
-            }
             if window.titleVisibility != .hidden {
                 window.titleVisibility = .hidden
             }
-            if !window.titlebarAppearsTransparent {
-                window.titlebarAppearsTransparent = true
-            }
-            if window.titlebarSeparatorStyle != .none {
-                window.titlebarSeparatorStyle = .none
-            }
-            ContentView.styleTrafficLights(window)
         }
     }
 
@@ -2985,57 +2978,36 @@ struct ContentView: View {
     /// Gap between a panel and the window edge.
     static let panelGap: CGFloat = 6
 
-    /// The editor island starts below this band. Standard window buttons and
-    /// custom document controls share its 24pt optical centreline.
+    /// The editor island starts below this band, and the document controls
+    /// share its 24pt optical centreline.
+    ///
+    /// It no longer has to hold the traffic lights: they are AppKit's own, in
+    /// AppKit's own titlebar row, over the sidebar column. This band is purely
+    /// the detail column's document row.
     static let topBandHeight: CGFloat = 48
 
-    /// How far the whole titlebar row sits below that centreline.
-    ///
-    /// One constant for all three groups — traffic lights, tab strip, trailing
-    /// icons — because they read as one row and any drift between them is
-    /// immediately visible. The lights are AppKit views positioned in an
-    /// unflipped coordinate space, so `StableTrafficLightOverlay` SUBTRACTS
-    /// this where SwiftUI adds it.
+    /// How far the titlebar row sits below that centreline. One constant for
+    /// the tab strip and the trailing icons, because they read as one row and
+    /// any drift between them is immediately visible.
     static let titlebarDrop: CGFloat = 2
 
     /// Fixed status-bar height — it renders as the root's bottom z-layer and
     /// the detail column reserves exactly this much.
     static let statusBarHeight: CGFloat = 24
 
-    /// Install one fixed AppKit overlay containing genuine standard-window
-    /// button cells. The actual titlebar buttons stay hidden and, critically,
-    /// NO AppKit-owned button or private titlebar-container frame is ever
-    /// written. Auto Layout pins the overlay to the frame view's top-left, so
-    /// resize/focus/titlebar passes have nothing to fight and cannot make the
-    /// lights jump.
-    /// - Parameters:
-    ///   - bandHeight: the row the lights are centred in. Their centre lands at
-    ///     `bandHeight / 2` from the window's top edge, so this is how the
-    ///     caller states where its chrome wants them.
-    ///   - drop: extra downward nudge, in the titlebar row's own units.
-    ///
-    /// Both are parameters because the editor and Settings are different
-    /// windows with different chrome. Settings was calling this with the
-    /// EDITOR's 48pt band, which centres the lights ~27pt down; a Mac settings
-    /// window puts them at ~15pt, so they sat visibly low and out of step with
-    /// the sidebar beside them.
-    static func styleTrafficLights(
-        _ window: NSWindow,
-        bandHeight: CGFloat = topBandHeight,
-        drop: CGFloat = titlebarDrop
-    ) {
-        guard window.styleMask.contains(.titled) else { return }
-        for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            guard let button = window.standardWindowButton(kind) else { continue }
-            button.isHidden = true
-        }
-        StableTrafficLightOverlay.install(in: window, bandHeight: bandHeight, drop: drop)
-    }
-
-    /// Compatibility entry point used by window activation.
-    static func applyTrafficLightInset(_ window: NSWindow) {
-        styleTrafficLights(window)
-    }
+    // The editor's traffic lights are AppKit's own now.
+    //
+    // `styleTrafficLights` / `applyTrafficLightInset` / the whole
+    // `StableTrafficLightOverlay` — hidden standard buttons, cloned button
+    // cells, an Auto-Layout host pinned to the frame view, a `drop` that had to
+    // SUBTRACT where SwiftUI adds, and a re-install on every window activation
+    // — all existed to put lights inside a hand-drawn card. A
+    // `NavigationSplitView` sidebar rises under the real titlebar on its own,
+    // so the real buttons land over the sidebar with no help, which is what
+    // Source Control has always done.
+    //
+    // Nothing replaces them: `ThemedWindowChrome` un-hides the standard
+    // buttons and AppKit owns their geometry.
 
     /// Call at the start of any panel resize drag so the window never moves with the cursor.
     static func lockWindowBackgroundDrag() {
@@ -3217,10 +3189,11 @@ struct ContentView: View {
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(
-            Color(nsColor: .windowBackgroundColor)
-                .opacity(isLightTheme ? 0.72 : 0.42)
-        )
+        // Full opacity. A semantic colour made translucent is no longer the
+        // semantic colour — it is that colour mixed with whatever happens to be
+        // behind it, so it stops tracking appearance and Increase Contrast.
+        // Depth here comes from the `Color.primary` washes on the rows.
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func gitWorkbenchSourceSection(_ title: String) -> some View {
@@ -4364,7 +4337,11 @@ struct ContentView: View {
                                 .foregroundStyle(.tertiary)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
-                                .background(Capsule().fill(Color.white.opacity(0.08)))
+                                // `primary` (= labelColor), not raw white: it
+                                // resolves per appearance and moves with
+                                // Increase Contrast. White reads as a wash in
+                                // dark and as nothing at all in light.
+                                .background(Capsule().fill(Color.primary.opacity(0.08)))
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 14)
@@ -4399,7 +4376,7 @@ struct ContentView: View {
                         }
 
                         Rectangle()
-                            .fill(Color.white.opacity(0.08))
+                            .fill(Color(nsColor: .separatorColor))
                             .frame(height: 1)
 
                         ScrollView {
@@ -5950,15 +5927,10 @@ struct ContentView: View {
             .trailing,
             outlineVisible ? CGFloat(inspectorW) + 12 : 12
         )
-        // The BAR spans the full window and slides under the sidebar card —
-        // but its CONTENT must start where the card ends or the filename
-        // hides behind the widget.
-        .padding(
-            .leading,
-            engine.uiNavVisible
-                ? CGFloat(navW) + ContentView.panelGap + 7 + 12
-                : 12
-        )
+        // A plain inset. The bar used to span the whole window and slide under
+        // the floating navigator, so its CONTENT had to be pushed past a panel
+        // it could not see. It stops at the sidebar column now, like Xcode's.
+        .padding(.leading, 12)
         .frame(height: ContentView.statusBarHeight)
         .frame(maxWidth: .infinity)
         // Shell tone, not `windowBackgroundColor` — the AppKit dynamic is a
@@ -7922,231 +7894,65 @@ private struct JumpBarSegmentButton: View {
     }
 }
 
-/// Stable traffic lights for the full-size-content editor window.
+/// The sidebar's dragged width, reported back so it survives relaunch.
 ///
-/// `standardWindowButton(_:)` returns views owned and repeatedly laid out by
-/// AppKit. Moving those views to fit a custom 48pt band causes a layout race:
-/// our event handler writes one frame and AppKit's next titlebar pass restores
-/// another. This overlay instead creates standard AppKit button *cells* for
-/// the requested style, pins their host once, and forwards actions to the
-/// containing window. It preserves native drawing/hover behavior without
-/// mutating any AppKit-owned geometry.
-private final class StableTrafficLightOverlay: NSView {
-    private static let overlayID =
-        NSUserInterfaceItemIdentifier("suisei.stable-traffic-lights")
-    private static let leading: CGFloat = 20
-    private static let groupWidth: CGFloat = 60
-    private static let buttonStep: CGFloat = 23
+/// The split view owns the navigator's width now, and `PanelResizeGrip` — which
+/// used to own it and wrote straight into `navW` — went with the floating card.
+/// Without this the column would silently reset to its `ideal:` on every
+/// launch: a capability the editor had, quietly lost.
+///
+/// It only reads. It walks up to the enclosing `NSSplitView` and reports the
+/// first pane's width whenever AppKit finishes laying the split out. Nothing
+/// here writes AppKit geometry, so there is no frame to race — which is the
+/// whole reason the traffic-light overlay it replaced had to exist.
+struct SplitColumnWidthReporter: NSViewRepresentable {
+    var onWidth: (Double) -> Void
 
-    private let closeControl: NSButton
-    private let minimizeControl: NSButton
-    private let zoomControl: NSButton
-    /// Downward nudge, set by whichever window installed this.
-    private var drop: CGFloat = 0
-
-    static func install(in window: NSWindow, bandHeight: CGFloat, drop: CGFloat) {
-        guard let frameView = window.contentView?.superview else { return }
-        if let existing = frameView.subviews.first(where: { $0.identifier == overlayID }) {
-            // Bring to front every install — SwiftUI/AppKit can re-order
-            // siblings after focus changes and bury the lights under content.
-            frameView.addSubview(existing, positioned: .above, relativeTo: nil)
-            existing.needsLayout = true
-            return
-        }
-
-        guard
-            let close = NSWindow.standardWindowButton(
-                .closeButton,
-                for: [.titled, .closable, .miniaturizable, .resizable]
-            ),
-            let minimize = NSWindow.standardWindowButton(
-                .miniaturizeButton,
-                for: [.titled, .closable, .miniaturizable, .resizable]
-            ),
-            let zoom = NSWindow.standardWindowButton(
-                .zoomButton,
-                for: [.titled, .closable, .miniaturizable, .resizable]
-            )
-        else { return }
-
-        let overlay = StableTrafficLightOverlay(
-            close: close,
-            minimize: minimize,
-            zoom: zoom
-        )
-        overlay.drop = drop
-        overlay.identifier = overlayID
-        overlay.translatesAutoresizingMaskIntoConstraints = false
-        frameView.addSubview(overlay, positioned: .above, relativeTo: nil)
-        NSLayoutConstraint.activate([
-            overlay.leadingAnchor.constraint(
-                equalTo: frameView.leadingAnchor,
-                constant: leading
-            ),
-            overlay.topAnchor.constraint(equalTo: frameView.topAnchor),
-            overlay.widthAnchor.constraint(equalToConstant: groupWidth),
-            overlay.heightAnchor.constraint(equalToConstant: bandHeight),
-        ])
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.isHidden = true
+        context.coordinator.attach(to: view, report: onWidth)
+        return view
     }
 
-    private init(close: NSButton, minimize: NSButton, zoom: NSButton) {
-        closeControl = close
-        minimizeControl = minimize
-        zoomControl = zoom
-        super.init(frame: .zero)
-        // Titlebar region: without this AppKit can treat presses as window
-        // drags and never deliver them to the synthetic buttons.
-        wantsLayer = true
-
-        configure(
-            closeControl,
-            identifier: "suisei.window.close",
-            label: "Close",
-            action: #selector(closeWindow(_:))
-        )
-        configure(
-            minimizeControl,
-            identifier: "suisei.window.minimize",
-            label: "Minimize",
-            action: #selector(minimizeWindow(_:))
-        )
-        configure(
-            zoomControl,
-            identifier: "suisei.window.zoom",
-            label: "Enter Full Screen",
-            action: #selector(zoomWindow(_:))
-        )
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.attach(to: nsView, report: onWidth)
     }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
-    /// Must not move the window — we sit in the titlebar drag zone.
-    override var mouseDownCanMoveWindow: Bool { false }
+    final class Coordinator {
+        private weak var splitView: NSSplitView?
+        private var report: ((Double) -> Void)?
+        private var observer: NSObjectProtocol?
 
-    /// Click the lights without focusing the window first.
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    // MARK: - Hover glyphs
-    //
-    // The ×, − and + only appear when the pointer is over the GROUP, and a
-    // traffic light does not decide that for itself: each cell asks its
-    // superview, and for real lights the answer comes from AppKit's own
-    // titlebar view, which does the tracking.
-    //
-    // These buttons are detached — built by the `NSWindow` class method rather
-    // than taken from a window — so that superview is this overlay, and nothing
-    // was answering. The lights drew as three bare circles and never showed
-    // their symbols, while clicking still worked because the actions were wired
-    // independently. That is exactly the reported "작동은 함" shape.
-
-    /// Whether the pointer is inside the group, which is what the cells draw on.
-    private var mouseInGroup = false
-
-    /// The callback each button cell makes on its superview. Implementing it is
-    /// answering AppKit's question, not calling into it.
-    @objc(_mouseInGroup:)
-    func _mouseInGroup(_ button: NSButton) -> Bool { mouseInGroup }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        // `.activeAlways`, not `.activeInKeyWindow`: the lights show their
-        // symbols on hover even while the window is inactive, and matching that
-        // is the whole point of using the real controls.
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self
-        ))
-    }
-
-    override func mouseEntered(with event: NSEvent) { setGroupHover(true) }
-    override func mouseExited(with event: NSEvent) { setGroupHover(false) }
-
-    private func setGroupHover(_ inside: Bool) {
-        guard mouseInGroup != inside else { return }
-        mouseInGroup = inside
-        // The cells cache the answer; they have to be asked to redraw.
-        for button in [closeControl, minimizeControl, zoomControl] {
-            button.needsDisplay = true
-        }
-    }
-
-    private func configure(
-        _ button: NSButton,
-        identifier: String,
-        label: String,
-        action: Selector
-    ) {
-        button.identifier = NSUserInterfaceItemIdentifier(identifier)
-        button.target = self
-        button.action = action
-        button.isHidden = false
-        button.isEnabled = true
-        button.refusesFirstResponder = true
-        button.setAccessibilityLabel(label)
-        addSubview(button)
-    }
-
-    override func layout() {
-        super.layout()
-        let controls = [closeControl, minimizeControl, zoomControl]
-        for (index, button) in controls.enumerated() {
-            // Raster audit (1×): circles painted at y=59...72 while the
-            // sidebar-toggle ink painted at y=60...73. In this unflipped
-            // AppKit host, subtracting moves the controls DOWN on screen.
-            // The final half-point is the residual optical correction observed
-            // after both frame centres matched.
-            let size = button.fittingSize
-            let w = max(size.width, 14)
-            let h = max(size.height, 16)
-            // Unflipped: subtracting moves DOWN, so the shared drop is
-            // subtracted here and added on the SwiftUI side.
-            let y = floor((bounds.height - h) / 2) - 1.5 - drop
-            button.frame = NSRect(
-                x: CGFloat(index) * Self.buttonStep,
-                y: y,
-                width: w,
-                height: h
-            )
-        }
-    }
-
-    /// Only the three circles take input. Transparent parts of this 60×48 host
-    /// pass through to the SwiftUI titlebar's drag surface.
-    ///
-    /// `hitTest(_:)` receives a point in the **superview's** coordinate system.
-    /// The previous code converted as if the point were already local, so
-    /// `bounds.contains` almost never hit a button — the lights painted but
-    /// never received clicks.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let local = convert(point, from: superview)
-        // Slightly expanded hit targets — 14pt circles are easy to miss.
-        for button in [closeControl, minimizeControl, zoomControl].reversed() {
-            if button.frame.insetBy(dx: -3, dy: -3).contains(local) {
-                return button
+        func attach(to view: NSView, report: @escaping (Double) -> Void) {
+            self.report = report
+            guard splitView == nil else { return }
+            // Deferred: at `makeNSView` time the view has no ancestors to walk.
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self, let view, self.splitView == nil else { return }
+                var candidate: NSView? = view.superview
+                while let next = candidate, !(next is NSSplitView) {
+                    candidate = next.superview
+                }
+                guard let split = candidate as? NSSplitView else { return }
+                self.splitView = split
+                self.observer = NotificationCenter.default.addObserver(
+                    forName: NSSplitView.didResizeSubviewsNotification,
+                    object: split,
+                    queue: .main
+                ) { [weak self] _ in
+                    guard let self,
+                          let first = self.splitView?.arrangedSubviews.first
+                    else { return }
+                    self.report?(Double(first.frame.width))
+                }
             }
         }
-        return nil
-    }
 
-    @objc private func closeWindow(_ sender: Any?) {
-        window?.performClose(sender)
-    }
-
-    @objc private func minimizeWindow(_ sender: Any?) {
-        window?.miniaturize(sender)
-    }
-
-    @objc private func zoomWindow(_ sender: Any?) {
-        guard let window else { return }
-        if NSEvent.modifierFlags.contains(.option) {
-            window.performZoom(sender)
-        } else {
-            window.toggleFullScreen(sender)
+        deinit {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
         }
     }
 }

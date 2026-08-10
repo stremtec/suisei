@@ -54,10 +54,12 @@ The same audit finds, besides the semantic colours it does use:
 | `Color.white.opacity(0.08)` | ContentView:4367, 4402 — raw white, not `labelColor` |
 | `terminalGridBg` | theme-authored |
 
-Structure: **no `NavigationSplitView` anywhere** — it appears only in comments.
-The navigator is a hand-drawn floating card: `.background(editorBg)` +
-`clipShape` + 1pt `separatorColor` stroke + shadow + offset-driven show/hide +
-a manual resize grip. Its list is a `ScrollView` + `VStack`, not a `List`.
+Structure, *as audited*: **no `NavigationSplitView` anywhere** — it appeared
+only in comments. The navigator was a hand-drawn floating card:
+`.background(editorBg)` + `clipShape` + 1pt `separatorColor` stroke + shadow +
+offset-driven show/hide + a manual resize grip.
+
+That is what §5 Stage 1 replaced; the inventory above is the *before*.
 
 ---
 
@@ -102,29 +104,51 @@ layers `labelColor` at 1.8–4.5% instead.
 
 ## 3. Where the sidebar material actually comes from
 
-This is the fact four attempts got wrong, so it is stated plainly:
+**`NavigationSplitView` itself.** Measured, not inferred — an earlier revision
+of this section said `List(.listStyle(.sidebar))`, reasoning from an Apple
+forum thread rather than from the running app. That was wrong.
 
-**`List(.listStyle(.sidebar))`.** Not `NavigationSplitView`, which only makes
-`.sidebar` the *default* list style for its first column.
+The probe: five sidebar shapes, one `NavigationSplitView` each, hosted in an
+off-screen `NSWindow`, then the whole AppKit view tree dumped with class names,
+frames, layer classes and every `NSVisualEffectView`'s material and blending
+mode. What every case produces, identically:
 
-The evidence is an Apple developer-forum thread asking the opposite question —
-how to *remove* the sidebar material. The answer is to change the list style;
-and when the asker replies that their sidebar is "a `ScrollView` with a `VStack`"
-rather than a List, the thread concludes there is no API for it, and
-`.scrollContentBackground(.hidden)` does not apply.
+```
+_NSSplitViewItemViewWrapper (0,0 302x568)
+    BackdropView (0,0 302x568)                 layer=CABackdropLayer filters=1
+  NSContainerConcentricGlassEffectView (8,8 294x528)
+        NSHostingView<ColumnView + NavigationPaneModifier<SidebarStyleContext>>
+```
 
-`ProjectTreeView` is that `ScrollView` + `VStack`. That, and nothing else, is
-why the editor's navigator has no material.
+Three facts fall out of that:
 
-Two corollaries, both measured here:
+1. The material is a **`CABackdropLayer` behind the whole column**, installed by
+   the split view's first item. There is no `NSVisualEffectView` in the sidebar
+   at all on macOS 26.
+2. It appears with a plain `ScrollView` + `VStack` sidebar exactly as it does
+   with `List(.listStyle(.sidebar))`, and exactly as it does with the
+   workbench's `VStack { rail; Divider; List }`. **The list style governs row
+   metrics, not the surface.** `ProjectTreeView` can keep its 800 lines of
+   custom rows.
+3. The system already insets the column's content by **8pt on every side** and
+   rounds it concentrically — `NSContainerConcentricGlassEffectView`. The
+   editor's hand-drawn floating card (6pt gap, derived corner radius, 1pt
+   `separatorColor` stroke, shadow) was a reimplementation of something the OS
+   now draws, and only the OS's copy sits on the backdrop.
 
-* An `NSVisualEffectView` added *around* the navigator cannot substitute. It
-  lands in front of the card's own opaque `.background(editorBg)` and inside its
-  `clipShape`, so `.behindWindow` has nothing to sample and `.withinWindow` is a
-  flat tint. Both were tried.
-* Forcing the editor window opaque makes it worse, not better: `.behindWindow`
-  needs a window that is not opaque. The workbench is opaque *and* translucent
-  where it matters because the effect view punches through for its own region.
+So the card was never an alternative to the split view. It was an opaque
+`.background(editorBg)` painted directly over the one surface the material lives
+on — which is why all four attempts to add a material to it failed. Each added
+a material *in front of* the thing that was covering it.
+
+Corollary, also measured: an `NSVisualEffectView` added around the navigator
+cannot substitute in either blending mode. It lands in front of the card's own
+fill and inside its `clipShape`, so `.behindWindow` has nothing to sample and
+`.withinWindow` is a flat tint. And window opacity is a red herring: the
+workbench is `opaque: true` and has the material, because a `CABackdropLayer`
+samples the layer tree, not the desktop.
+
+Probe source: `sidebar_probe.swift` / `sidebar_probe2.swift`, run 2026-08-10.
 
 ---
 
@@ -146,38 +170,62 @@ is chasing.
 
 ---
 
-## 5. The gap, as work
+## 5. The work
 
-Ordered so each stage is buildable on its own.
+**Stage 1 — window and root. Done.**
 
-**Stage 1 — window and root.** Drop `.windowStyle(.hiddenTitleBar)`. Apply
-`ThemedWindowChrome(background: .windowBackgroundColor, light:, identifier:
-.editorIdentifier, opaque: true)`. Replace the `ZStack`/`HStack` root with
-`NavigationSplitView { sidebarColumn } detail: { detailColumn }`. Remove the
-card treatment — background, clip, stroke, shadow, offset show/hide, manual
-resize grip — for `.navigationSplitViewColumnWidth` and a
-`NavigationSplitViewVisibility` binding. Move `topBar` into the detail column.
+* `SuiseiApp`: `.windowStyle(.hiddenTitleBar)` dropped. The premise in §4 is
+  retired in the code, with the reason written where the old comment was.
+* `ContentView.body`: `NavigationSplitView { sidebarColumn } detail:
+  { detailStack }`, `.balanced`, chrome via `ThemedWindowChrome(background:
+  .windowBackgroundColor, opaque: true)` — Source Control's, verbatim.
+* The card treatment is gone: background, `clipShape`, stroke, shadow, the
+  offset show/hide and its spring, and the manual `PanelResizeGrip`. Width is
+  `.navigationSplitViewColumnWidth(min: 240, ideal:, max: 460)`; visibility is a
+  `NavigationSplitViewVisibility` binding that reads and writes Core's
+  `uiNavVisible`, so there is still exactly one authority for it.
+* The traffic lights are AppKit's own. `StableTrafficLightOverlay` (cloned
+  button cells, an Auto-Layout host on the frame view, a `drop` that subtracted
+  where SwiftUI added, a re-install on every activation) is deleted along with
+  `styleTrafficLights` and `applyTrafficLightInset`. So is
+  `WindowIdentityProbe` — `ThemedWindowChrome` already tags the window.
+* Three insets that existed only to route around a floating panel are gone:
+  `editorCard`'s leading `contentInset`, `topBar`'s `navW + 16` reserve and its
+  86pt lights zone, and `statusLine`'s `navW + panelGap + 7 + 12` padding. The
+  palette's hand-measured `(navReserved - inspectorReserved) / 2` becomes
+  `-inspectorReserved / 2`, because it now hangs off the detail column.
+* New: `SplitColumnWidthReporter`, so a width dragged on the system splitter
+  still survives relaunch. It only reads — it observes
+  `NSSplitView.didResizeSubviewsNotification` and writes `navW`; the column's
+  `ideal:` is frozen at launch (`navIdealWidth`) so the two cannot fight.
 
-This stage carries the risk. `ContentView.body` lines 342–580 also host the
-palette's editor-centred offset (measured: navigator edge 318, editor edge 1696,
-editor centre 1007 vs window centre 1023.5), the panel spring documented as five
-failed alternatives, the live-resize HUD, and focus reclamation. All of it has
-to move with the structure.
+Net −231 lines.
 
-**Stage 2 — sidebar content.** `ProjectTreeView`'s `ScrollView` + `TreeRowStack`
-becomes a `List` with `.listStyle(.sidebar)` and
-`.scrollContentBackground(.hidden)`. This is the stage that delivers the
-material. The custom row transitions do not survive a List unchanged.
+**Stage 2 — sidebar content.** Now optional for the material (see §3), so it is
+a row-conventions change, not a surface one: `ProjectTreeView`'s `ScrollView` +
+`TreeRowStack` → `List` + `.listStyle(.sidebar)` +
+`.scrollContentBackground(.hidden)` would buy standard sidebar row metrics,
+inset selection capsules and system disclosure behaviour. The custom row
+transitions, rename field and drag-and-drop do not survive a `List` unchanged,
+which is the whole cost. Not started.
 
-**Stage 3 — the remaining rule breaks.** `Color.white.opacity` → `Color.primary`
-(= `labelColor`); the translucent `.windowBackgroundColor` at 3222 → full
-opacity; `terminalGridBg` → semantic, unless terminal palettes are deliberately
-theme-owned (they are: leave it, and say so here).
+**Stage 3 — the remaining rule breaks. Done.** `Color.white.opacity` →
+`Color.primary` / `separatorColor` in the palette; the translucent
+`.windowBackgroundColor` → full opacity. `terminalGridBg` **stays**: terminal
+palettes are deliberately theme-owned, and the grid is dark in both themes
+because Core paints its default foreground as `rgb(200,200,200)` — a semantic
+background would make a light theme's terminal a 1.35:1 contrast ratio.
 
-Already done: the white glass tints are gone (`4373153`), and the effect view
-that could not work has been removed.
+**Also fixed, found while doing the above.** `resolve(_:light:)` and
+`applyThemedTitlebar` both named `.aqua`/`.darkAqua` directly. Those are two of
+four appearance names: naming the plain one pins every semantic colour inside
+that window to its normal-contrast value, which silently opts the whole app out
+of Increase Contrast — and "semantic colours move with the accessibility
+settings" is §2's own argument for using them. Both now go through
+`WindowChrome.themedAppearanceName(light:)`, and a
+`accessibilityDisplayOptionsDidChangeNotification` observer re-applies.
 
-**Restore point:** `08658cd`.
+**Restore point:** `5d5ff51`.
 
 ---
 

@@ -30,6 +30,29 @@ enum WindowChrome {
     /// exists to stop. 16 is what the pixels say.
     static let windowCornerRadius: CGFloat = 16
 
+    /// The appearance name a themed window should carry.
+    ///
+    /// There are FOUR of these, not two. `.aqua` / `.darkAqua` alone silently
+    /// opt a window out of Increase Contrast, because the high-contrast
+    /// variants are separate appearance names — name the plain one and every
+    /// semantic colour resolved inside that window is pinned to its
+    /// normal-contrast value for as long as the app runs.
+    ///
+    /// That matters here more than in a normal app: Suisei forces an appearance
+    /// on every window (the chrome's light/dark is the THEME's, not the
+    /// system's), so it does not get the system's choice by default and has to
+    /// make the right one itself. Respecting the setting is a HIG requirement,
+    /// and "semantic colours move with Increase Contrast" is the reason this
+    /// app uses them at all.
+    static func themedAppearanceName(light: Bool) -> NSAppearance.Name {
+        let highContrast = NSWorkspace.shared
+            .accessibilityDisplayShouldIncreaseContrast
+        if light {
+            return highContrast ? .accessibilityHighContrastAqua : .aqua
+        }
+        return highContrast ? .accessibilityHighContrastDarkAqua : .darkAqua
+    }
+
     /// Apply appearance only. SwiftUI owns the Settings titlebar geometry.
     ///
     /// Moving or cloning the standard window buttons is appropriate for the
@@ -42,7 +65,7 @@ enum WindowChrome {
         light: Bool,
         opaque: Bool = false
     ) {
-        window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        window.appearance = NSAppearance(named: themedAppearanceName(light: light))
         // The detail view paints its own semantic background. Keeping the
         // window itself transparent is what lets NavigationSplitView's native
         // sidebar material continue through the titlebar and blend like System
@@ -95,31 +118,10 @@ struct ThemedWindowChrome: NSViewRepresentable {
     }
 }
 
-/// Tags a SwiftUI window without applying titlebar policy. The editor and
-/// Settings deliberately use different chrome, so title strings and broad
-/// `NSApp.windows` heuristics are not safe window-role identifiers.
-struct WindowIdentityProbe: NSViewRepresentable {
-    var identifier: NSUserInterfaceItemIdentifier
-    var onResolved: (NSWindow) -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        view.isHidden = true
-        DispatchQueue.main.async { resolve(view) }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        guard nsView.window?.identifier != identifier else { return }
-        DispatchQueue.main.async { resolve(nsView) }
-    }
-
-    private func resolve(_ view: NSView) {
-        guard let window = view.window else { return }
-        window.identifier = identifier
-        onResolved(window)
-    }
-}
+// `WindowIdentityProbe` is gone: it tagged a window WITHOUT applying titlebar
+// policy, which was only needed while the editor styled its own chrome by hand.
+// All three windows go through `ThemedWindowChrome` now, and that already sets
+// the identifier — so there is one way to tag a window, not two.
 
 
 // MARK: - Resize HUD (child window — covers the entire frame, lights included)
