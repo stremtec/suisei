@@ -401,6 +401,7 @@ struct ContentView: View {
         // leading tab should be. Source Control wants its title there; this
         // window has a tab strip in that row.
         .toolbar(removing: .title)
+        .toolbar { editorToolbar }
         .frame(minWidth: 640, minHeight: 400)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .foregroundStyle(.primary)
@@ -430,6 +431,73 @@ struct ContentView: View {
             )
         )
         .background(EditorWindowChrome())
+    }
+
+    /// The document controls, as real toolbar items — Source Control's toolbar,
+    /// same shape: plain `Button { Image(systemName:) }` with a `.help`, and no
+    /// styling of our own anywhere.
+    ///
+    /// That absence is the point. These three were hand-drawn `ToolbarPlainIcon`
+    /// buttons in the titlebar row, and they could not look like the workbench's
+    /// because the workbench's look is not something it draws — macOS 26 wraps
+    /// toolbar items in an `NSToolbarPlatterView` holding an `NSGlassEffectView`
+    /// and groups them into one capsule. Measured
+    /// (`scripts/sidebar_probe4.swift`): a 112×36 platter for three items.
+    /// Nothing short of being a toolbar item gets that.
+    ///
+    /// Three things had to be true before this was safe to adopt, and all three
+    /// were measured rather than assumed (`sidebar_probe5/6.swift`):
+    ///
+    /// * the toolbar does NOT swallow clicks over the tab strip — `hitTest` at
+    ///   the strip's centre reaches the SwiftUI content view with the toolbar
+    ///   present, exactly as without it;
+    /// * it does not move `topBar`, which stays at 0–48 either way;
+    /// * it moves the traffic lights from 16pt to 26pt below the window top —
+    ///   which is `topBandHeight / 2 + titlebarDrop`, i.e. the tab row's own
+    ///   optical centreline. The lights and the tabs now share a line for the
+    ///   first time without anyone positioning them.
+    ///
+    /// The tab strip itself stays SwiftUI content, for the reason it always
+    /// has: it must be blurable and coverable, which a toolbar item is not.
+    @ToolbarContentBuilder
+    private var editorToolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                engine.openFilePalette()
+            } label: {
+                Image(systemName: "magnifyingglass")
+            }
+            .help("Go to File · ⌘P")
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                engine.openSettings()
+                openWindow(id: "settings")
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .help("Settings · ⌘,")
+        }
+
+        // A Toggle, not a Button: "is the inspector showing" is a state, and
+        // the system draws a toolbar toggle's selected appearance itself. The
+        // old icon carried an `active:` flag and painted its own highlight,
+        // which is the same imitation the platter above replaces.
+        ToolbarItem(placement: .primaryAction) {
+            Toggle(isOn: Binding(
+                get: { engine.uiInspectorVisible },
+                set: { on in
+                    guard on != engine.uiInspectorVisible else { return }
+                    animatePanels { engine.uiInspectorVisible = on }
+                    focused = true
+                }
+            )) {
+                Image(systemName: "sidebar.right")
+            }
+            .toggleStyle(.button)
+            .help("Outline · ⌥⌘0")
+        }
     }
 
     /// One authority for "is the navigator showing" — Core's flag — restated in
@@ -880,11 +948,12 @@ struct ContentView: View {
             // live there — and the strip carries its own 5pt beat below that.
             //
             // MEASURED (`scripts/sidebar_probe3.swift`, four configurations, in
-            // a window styled exactly like this one): the lights centre 16pt
-            // from the window top, and sidebar content with no spacer starts at
-            // 42pt. The 35pt spacer that used to be here — carried over from
-            // the hand-drawn card, which had no safe area to inherit — pushed
-            // the strip to 77pt and left the gap visible in the first build.
+            // a window styled exactly like this one): sidebar content with no
+            // spacer starts at 42pt, and at 52pt once the window carries a
+            // toolbar (`sidebar_probe6.swift`) — the safe area tracks the
+            // titlebar row's real height on its own. The 35pt spacer that used
+            // to be here came from the hand-drawn card, which had no safe area
+            // to inherit; it pushed the strip to 77pt in the first build.
             navigatorModeStrip
             dockedNavigator
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1835,38 +1904,10 @@ struct ContentView: View {
                     Spacer(minLength: rightTight - 22)
                 }
 
-            HStack(spacing: 2) {
-                // No sidebar toggle here. `NavigationSplitView` already puts
-                // one in the sidebar's own titlebar row, which is where macOS
-                // puts it — ours made two controls for one state, on opposite
-                // sides of the splitter. The 86pt traffic-light zone that used
-                // to open this row went with the cloned lights.
-                Spacer()
-                ToolbarPlainIcon(
-                    systemImage: "magnifyingglass", help: "Go to File · ⌘P",
-                    accent: Color.accentColor, dim: Color.secondary
-                ) { engine.openFilePalette() }
-                // No terminal toggle here — it lives detached at the trailing
-                // end of the navigator strip. Two visible copies of one switch
-                // is the thing that framing was meant to fix.
-                ToolbarPlainIcon(
-                    systemImage: "gearshape", help: "Settings · ⌘,",
-                    accent: Color.accentColor, dim: Color.secondary
-                ) {
-                    engine.openSettings()
-                    openWindow(id: "settings")
-                }
-                ToolbarPlainIcon(
-                    systemImage: "sidebar.right", help: "Outline · ⌥⌘0",
-                    active: engine.uiInspectorVisible,
-                    accent: Color.accentColor, dim: Color.secondary,
-                    opticalNudgeX: -0.6
-                ) {
-                    animatePanels { engine.uiInspectorVisible.toggle() }
-                    focused = true
-                }
-            }
-            .padding(.trailing, 10)
+            // Nothing else in this row. The trailing controls are real toolbar
+            // items now — see `editorToolbar`. The sidebar toggle went to the
+            // split view's own, and the traffic-light zone went with the cloned
+            // lights, so the tab strip is all that is left here.
             }
             // The entire titlebar row uses the 48pt Swiss-grid band. Compressing
             // this to AppKit's 28pt default moved every control centre from
@@ -2983,12 +3024,15 @@ struct ContentView: View {
     /// Gap between a panel and the window edge.
     static let panelGap: CGFloat = 6
 
-    /// The editor island starts below this band, and the document controls
-    /// share its 24pt optical centreline.
+    /// The editor island starts below this band, and the tab strip sits on its
+    /// 24pt optical centreline.
     ///
-    /// It no longer has to hold the traffic lights: they are AppKit's own, in
-    /// AppKit's own titlebar row, over the sidebar column. This band is purely
-    /// the detail column's document row.
+    /// It no longer positions anything but the tabs. The traffic lights and the
+    /// document controls are AppKit's own, in AppKit's own titlebar row over
+    /// the sidebar column — and with a toolbar present AppKit puts the lights
+    /// at 26pt from the window top, which is `topBandHeight / 2 + titlebarDrop`
+    /// exactly. The row that used to be aligned by hand now agrees with the
+    /// system by arithmetic (measured, `scripts/sidebar_probe6.swift`).
     static let topBandHeight: CGFloat = 48
 
     /// How far the titlebar row sits below that centreline. One constant for
