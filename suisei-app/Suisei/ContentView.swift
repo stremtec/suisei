@@ -866,24 +866,14 @@ struct ContentView: View {
         // plain `ScrollView` (800 lines of custom rows, rename, drag-drop,
         // expansion state), so it had no material at all.
         //
-        // `behindWindow: true` is the load-bearing part. A real Mac sidebar
-        // samples what is behind the WINDOW, not the window's own content —
-        // which is why the workbench's sidebar visibly takes a cast from the
-        // wallpaper. `.withinWindow` cannot do that and reads as a flat tint;
-        // this file's own `WithinWindowBlur` doc says so, measured against
-        // Xcode, and it was written for exactly this call site and then never
-        // wired up.
+        // No effect view here. An `NSVisualEffectView` put at this level sits
+        // in FRONT of the card's own opaque `.background(editorBg)` and inside
+        // its `clipShape`, so a behind-window material has nothing to sample
+        // and a within-window one is just a flat tint — both were tried.
         //
-        // `light:` pins the material to the THEME, so a dark theme under a
-        // light system does not paint a white column.
-        .background(
-            WithinWindowBlur(
-                material: .sidebar,
-                light: isLightTheme,
-                behindWindow: true
-            )
-            .ignoresSafeArea()
-        )
+        // The workbench's sidebar material does not come from an effect view
+        // either; it comes from `List(.listStyle(.sidebar))`. That is applied
+        // where this navigator's list actually is — `ProjectTreeView`.
     }
 
     /// Detail column: editor stage (+ outline card) + status line.
