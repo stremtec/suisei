@@ -394,13 +394,21 @@ struct ContentView: View {
         // `offset` alongside it would be two authorities for one motion — the
         // defect five earlier attempts at that animation were all instances of.
         .navigationSplitViewStyle(.balanced)
-        // The window keeps its title (the Window menu needs one) but does not
-        // DRAW it. `titleVisibility = .hidden` is not enough on its own: a
-        // split view puts the navigation title in the toolbar, which is a
-        // different item — that is why "Suisei" was still sitting where the
-        // leading tab should be. Source Control wants its title there; this
-        // window has a tab strip in that row.
-        .toolbar(removing: .title)
+        // An EMPTY title, not a removed one. This is the whole reason the
+        // toolbar items sit at the trailing edge — see `editorToolbar`.
+        //
+        // The title item is what anchors a split view's `.primaryAction` group
+        // to the right. Take it away and the group collapses leftward. Both
+        // ways of taking it away do it: `.toolbar(removing: .title)` and
+        // `window.titleVisibility = .hidden` each move the glass platter from
+        // x 878…1270 to x 98…490 in a 1280pt window, measured one factor at a
+        // time against Source Control's exact declaration
+        // (`scripts/sidebar_probe10.swift`). This file had BOTH.
+        //
+        // An empty string keeps the anchor and draws nothing, which is what
+        // this row needs: Source Control wants its title visible, and this
+        // window has a tab strip running through that space.
+        .navigationTitle("")
         .toolbar { editorToolbar }
         .frame(minWidth: 640, minHeight: 400)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -461,24 +469,19 @@ struct ContentView: View {
     /// has: it must be blurable and coverable, which a toolbar item is not.
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
-        // These land at the top RIGHT, but not from anything declared here —
-        // see `EditorWindowChrome`, which inserts the flexible space into the
-        // NSToolbar itself.
+        // Nothing here places these at the trailing edge, and nothing needs to.
+        // `.navigationTitle("")` on the split view does it, by keeping the
+        // title item that anchors the `.primaryAction` group — see there.
         //
-        // `.primaryAction` does not mean trailing in a `NavigationSplitView`:
-        // measured in a 1280pt window (`scripts/sidebar_probe7.swift`), the
-        // glass platter sits at x 298…410 — packed against the sidebar — under
-        // `.primaryAction`, `.confirmationAction` and `ToolbarItemGroup` alike,
-        // with or without a navigation title. A leading
-        // `ToolbarSpacer(.flexible)` moved it to x 1158…1270 in two probes,
-        // including one mirroring this view's entire modifier chain
-        // (`sidebar_probe8.swift`) — and did not move it in the app. Measured
-        // right twice, wrong on screen twice, so the declarative form is not
-        // used here at all.
-        //
-        // Source Control leaves its items packed left, which is right for a
-        // window whose titlebar row is otherwise empty. This row is not: the
-        // tab strip runs through the middle of it.
+        // Four earlier attempts assumed the placement had to be declared, and
+        // all four were wrong in the same way: `.primaryAction`,
+        // `.confirmationAction` and `ToolbarItemGroup` all landed at x 298…410
+        // in a 1280pt window, and `ToolbarSpacer(.flexible)` measured correct
+        // twice (x 1158…1270, once in a probe mirroring this view's whole
+        // modifier chain) while doing nothing at all in the app. None of that
+        // was a placement problem. The items were packed left because the
+        // window had lost its title item, and this file had removed it twice
+        // over — `.toolbar(removing: .title)` and `titleVisibility = .hidden`.
         ToolbarItem(placement: .primaryAction) {
             Button {
                 engine.openFilePalette()
@@ -7998,34 +8001,16 @@ private struct EditorWindowChrome: NSViewRepresentable {
         if !window.styleMask.contains(.fullSizeContentView) {
             window.styleMask.insert(.fullSizeContentView)
         }
-        if window.titleVisibility != .hidden {
-            window.titleVisibility = .hidden
-        }
-        pushToolbarItemsTrailing(window)
-    }
-
-    /// Put a flexible space in front of SwiftUI's toolbar items, so they sit at
-    /// the top RIGHT instead of packed against the sidebar.
-    ///
-    /// This is an AppKit edit to the real `NSToolbar` rather than the
-    /// declarative `ToolbarSpacer(.flexible)`, and the difference is not taste.
-    /// The declarative form measured correct twice — the platter moves from
-    /// x 298…410 to x 1158…1270 in a 1280pt window, in a probe mirroring this
-    /// view's entire modifier chain — and did not move anything in the running
-    /// app, twice. `scripts/sidebar_probe9.swift` measures this route instead:
-    /// insert `NSToolbarFlexibleSpaceItem` at index 0 and the platter lands at
-    /// x 1158…1270, ten points off the right edge.
-    ///
-    /// Guarded on the FIRST item's identifier, not on a flag. SwiftUI names its
-    /// items with fresh UUIDs whenever it rebuilds the toolbar, and a rebuild
-    /// drops anything we inserted — so this has to be re-checked on every
-    /// update, and must be a no-op on all the ones where nothing changed.
-    private func pushToolbarItemsTrailing(_ window: NSWindow) {
-        guard let toolbar = window.toolbar,
-              let first = toolbar.items.first?.itemIdentifier,
-              first != .flexibleSpace
-        else { return }
-        toolbar.insertItem(withItemIdentifier: .flexibleSpace, at: 0)
+        // No `titleVisibility = .hidden` here, deliberately. It hides the title
+        // by removing the toolbar's title ITEM, and that item is what anchors
+        // the `.primaryAction` group to the trailing edge — hiding it moved the
+        // controls to x 98…490 in a 1280pt window
+        // (`scripts/sidebar_probe10.swift`). `.navigationTitle("")` on the
+        // split view draws nothing and keeps the anchor.
+        //
+        // The flexible space this used to insert into SwiftUI's NSToolbar is
+        // gone with it: it was a workaround for a placement problem that turned
+        // out to be this line.
     }
 }
 
