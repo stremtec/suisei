@@ -8079,6 +8079,80 @@ private struct JumpBarSegmentButton: View {
 /// Guarded, like everything else that touches window style here: re-assigning
 /// identical values on reactivation rebuilds the window's view bridge and kills
 /// NSHostingView hit-testing.
+/// TEMPORARY. Writes the editor window's real toolbar inventory to a file.
+///
+/// Two toolbar facts have now measured one way in a probe and behaved another
+/// way in the app — `ToolbarSpacer(.flexible)`, and
+/// `.toolbar(removing: .sidebarToggle)`, which leaves the system's toggle on
+/// screen beside ours. Both were fixable from AppKit once the real items were
+/// known, and guessing at a screenshot has cost six rounds. So the app says
+/// what it has: identifiers, classes and window-space frames, once per launch.
+///
+/// Delete this and its call site as soon as the duplicate toggle is gone.
+private enum ToolbarInventory {
+    static let path = NSString(string: "~/Library/Logs/suisei-toolbar-inventory.txt")
+        .expandingTildeInPath
+    static var written = false
+}
+
+extension EditorWindowChrome {
+    static func dumpToolbarInventoryOnce(_ window: NSWindow) {
+        guard !ToolbarInventory.written, let toolbar = window.toolbar,
+              !toolbar.items.isEmpty else { return }
+        ToolbarInventory.written = true
+
+        var lines: [String] = [
+            "window \(Int(window.frame.width)) x \(Int(window.frame.height))",
+            "toolbar identifier: \(toolbar.identifier)",
+            "items (\(toolbar.items.count)):",
+        ]
+        for (i, item) in toolbar.items.enumerated() {
+            var line = "  [\(i)] \(item.itemIdentifier.rawValue)"
+            line += "  class=\(String(describing: type(of: item)))"
+            if let v = item.view {
+                let f = v.convert(v.bounds, to: nil)
+                line += String(format: "  view=%@ x %.0f … %.0f",
+                               String(describing: type(of: v)), f.minX, f.maxX)
+            }
+            if let label = item.label.isEmpty ? nil : item.label { line += "  label=\(label)" }
+            lines.append(line)
+        }
+        // Frames again from the view tree, since a toolbar item can render
+        // through a hosting view it does not own.
+        lines.append("toolbar item views in the titlebar:")
+        if let frame = window.contentView?.superview {
+            var found: [String] = []
+            walk(frame, into: &found)
+            lines.append(contentsOf: found)
+        }
+        try? lines.joined(separator: "\n").write(
+            toFile: ToolbarInventory.path, atomically: true, encoding: .utf8
+        )
+    }
+
+    private static func walk(_ view: NSView, into out: inout [String]) {
+        let n = String(describing: type(of: view))
+        if n == "NSToolbarItemViewer" || n == "NSToolbarPlatterView" {
+            let f = view.convert(view.bounds, to: nil)
+            var s = String(format: "  %-22@ x %.0f … %.0f", n as NSString, f.minX, f.maxX)
+            if let img = firstSymbol(in: view) { s += "  symbol=\(img)" }
+            out.append(s)
+        }
+        for sub in view.subviews { walk(sub, into: &out) }
+    }
+
+    /// The SF Symbol a toolbar item is drawing, when it can be recovered — the
+    /// one thing that says which button is which.
+    private static func firstSymbol(in view: NSView) -> String? {
+        if let b = view as? NSButton, let name = b.image?.name() { return name }
+        if let iv = view as? NSImageView, let name = iv.image?.name() { return name }
+        for sub in view.subviews {
+            if let n = firstSymbol(in: sub) { return n }
+        }
+        return nil
+    }
+}
+
 private struct EditorWindowChrome: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -8104,6 +8178,7 @@ private struct EditorWindowChrome: NSViewRepresentable {
         if window.tabbingMode != .disallowed {
             window.tabbingMode = .disallowed
         }
+        Self.dumpToolbarInventoryOnce(window)
         // No `titleVisibility = .hidden` here, deliberately. It hides the title
         // by removing the toolbar's title ITEM, and that item is what anchors
         // the `.primaryAction` group to the trailing edge — hiding it moved the
