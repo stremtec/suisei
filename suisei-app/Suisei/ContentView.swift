@@ -461,6 +461,19 @@ struct ContentView: View {
     /// has: it must be blurable and coverable, which a toolbar item is not.
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
+        // The spacer is what puts these at the top RIGHT, and it is not
+        // optional. `.primaryAction` does not mean trailing here: measured in a
+        // 1000pt window (`scripts/sidebar_probe7.swift`), the platter lands at
+        // x 298…410 — packed against the sidebar — under `.primaryAction`,
+        // `.confirmationAction` and `ToolbarItemGroup` alike, with or without a
+        // navigation title. Only a leading `ToolbarSpacer(.flexible)` moves it,
+        // to x 878…990.
+        //
+        // Source Control leaves its items packed left, which is right for a
+        // window whose titlebar row is otherwise empty. This row is not: the
+        // tab strip runs through the middle of it.
+        ToolbarSpacer(.flexible)
+
         ToolbarItem(placement: .primaryAction) {
             Button {
                 engine.openFilePalette()
