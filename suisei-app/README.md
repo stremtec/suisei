@@ -40,4 +40,6 @@ Engine-only:
 
 - Do **not** keep a document buffer in Swift.
 - Do **not** implement Vim keys in Swift — only map `NSEvent` → `suisei_engine_dispatch_key`.
-- Editor glyph blit (Metal) lands in S2; S1 is chrome snapshot only.
+- Editor text uses CoreText by default so AppKit owns shaping, responsive
+  scrolling and text overlays. The experimental atlas renderer is available
+  only with `SUISEI_RENDERER=metal` for profiling and renderer development.

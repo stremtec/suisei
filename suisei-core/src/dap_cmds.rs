@@ -45,13 +45,17 @@ impl App {
                     .as_ref()
                     .and_then(|p| p.parent().map(|d| d.to_path_buf()));
                 let ext = self.file_extension();
-                let lang = ext.as_deref().map(|e| match e {
-                    "py" | "pyw" => "python",
-                    "rs" => "rust",
-                    "go" => "go",
-                    "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" => "cpp",
-                    "js" | "mjs" | "cjs" | "ts" | "tsx" => "node",
-                    _ => "unknown",
+                // Same normalisation as `dap::detect_lang`: `.c++` and `.hxx`
+                // must reach the same adapter as `.cpp`.
+                let lang = ext.as_deref().map(|e| {
+                    match crate::lang::Lang::from_ext(e).map(|l| l.extensions()[0]).unwrap_or(e) {
+                        "py" | "pyw" => "python",
+                        "rs" => "rust",
+                        "go" => "go",
+                        "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" => "cpp",
+                        "js" | "mjs" | "cjs" | "ts" | "tsx" => "node",
+                        _ => "unknown",
+                    }
                 });
                 let was_closed = !self.dap.panel_open;
                 match self.dap.start(&path, cwd.as_deref(), lang, &[]) {

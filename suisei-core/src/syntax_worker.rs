@@ -12,8 +12,13 @@
 //! The pre-warm cache lives here too: the indexer's trees sit next to the
 //! parser that reuses them, and the main thread only ever sees tokens.
 
+use crate::lang::Lang;
 use crate::syntax::{HlToken, SyntaxEngine};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender};
 
 /// Work for the syntax worker. A burst coalesces: every `Parse` but the
@@ -49,6 +54,24 @@ pub enum SyntaxFrame {
         window: Range<usize>,
         tokens: Vec<HlToken>,
         active: bool,
+        /// The parse itself, handed to the main thread with the tokens.
+        ///
+        /// Highlighting only ever needed the tokens, so the tree used to stay
+        /// on this thread and `apply_frame` set `self.tree = None`. That made
+        /// `live_tree()` permanently `None` in the GUI — and scope-aware
+        /// completion, which is defined against the live tree, silently
+        /// returned nothing for every keystroke. It worked in tests only
+        /// because those call `syntax.parse()` directly, which is the TUI path.
+        ///
+        /// `Tree` is `Send`, and the snapshot text already crosses in the other
+        /// direction every keystroke, so carrying both back is the same trade
+        /// the request side already makes.
+        tree: Option<tree_sitter::Tree>,
+        /// Text the tree was parsed from. Byte offsets are meaningless without
+        /// it, so it travels with the tree or not at all.
+        text: String,
+        /// Extension the tree was parsed as, for language lookup.
+        ext: String,
     },
     /// The worker's pre-parse cache size — mirrors into the FFI diagnostic.
     Cached { count: usize },
@@ -57,27 +80,44 @@ pub enum SyntaxFrame {
 /// Handle to the worker thread. Dropping it closes the request channel,
 /// which is what tells the worker to exit.
 pub struct SyntaxWorker {
-    tx: Option<SyncSender<SyntaxRequest>>,
+    tx: Vec<SyncSender<SyntaxRequest>>,
     rx: Receiver<SyntaxFrame>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl SyntaxWorker {
     pub fn start() -> Self {
-        // Bounded so a slow worker can never stall a typing run: `try_send`
-        // drops instead of blocking the keystroke path, and the worker drains
-        // to the newest snapshot anyway.
-        let (tx, rx): (SyncSender<SyntaxRequest>, Receiver<SyntaxRequest>) =
-            std::sync::mpsc::sync_channel(4);
+        // Tree-sitter itself parses one document serially. Parallelism belongs
+        // between documents: project prewarms and independent open buffers can
+        // then use otherwise idle cores without violating one buffer's version
+        // order. Keep two logical CPUs free for AppKit/Metal and the engine.
+        let worker_count = syntax_worker_count();
         let (frame_tx, frame_rx) = std::sync::mpsc::channel();
-        let thread = std::thread::Builder::new()
-            .name("suisei-syntax".into())
-            .spawn(move || worker_loop(rx, frame_tx))
-            .expect("syntax worker thread");
+        let cache_counts = Arc::new(
+            (0..worker_count)
+                .map(|_| AtomicUsize::new(0))
+                .collect::<Vec<_>>(),
+        );
+        let mut tx = Vec::with_capacity(worker_count);
+        let mut threads = Vec::with_capacity(worker_count);
+        for index in 0..worker_count {
+            // Bounded per lane: `try_send` never stalls the keystroke path, and
+            // a busy language cannot fill every other language's queue.
+            let (lane_tx, lane_rx): (SyncSender<SyntaxRequest>, Receiver<SyntaxRequest>) =
+                std::sync::mpsc::sync_channel(4);
+            let out = frame_tx.clone();
+            let counts = Arc::clone(&cache_counts);
+            let thread = std::thread::Builder::new()
+                .name(format!("suisei-syntax-{index}"))
+                .spawn(move || worker_loop(index, lane_rx, out, counts))
+                .expect("syntax worker thread");
+            tx.push(lane_tx);
+            threads.push(thread);
+        }
         Self {
-            tx: Some(tx),
+            tx,
             rx: frame_rx,
-            thread: Some(thread),
+            threads,
         }
     }
 
@@ -85,10 +125,25 @@ impl SyntaxWorker {
     /// the worker already holds older requests, and the caller retries on the
     /// next recompose.
     pub fn request(&self, req: SyntaxRequest) -> bool {
-        self.tx
-            .as_ref()
-            .map(|tx| tx.try_send(req).is_ok())
-            .unwrap_or(false)
+        if self.tx.is_empty() {
+            return false;
+        }
+        match &req {
+            // Eagerly compiling every grammar in every lane multiplies memory
+            // by the CPU count. One lane owns the boot warm; other lanes become
+            // warm naturally as project prewarms are distributed to them.
+            SyntaxRequest::WarmGrammars => self.tx[0].try_send(req).is_ok(),
+            SyntaxRequest::Parse { path, .. } | SyntaxRequest::Prewarm { path, .. } => {
+                let lane = lane_for(path, self.tx.len());
+                self.tx[lane].try_send(req).is_ok()
+            }
+        }
+    }
+
+    /// Number of independent parser lanes. Exposed for diagnostics and tests;
+    /// one document still stays on exactly one lane for incremental correctness.
+    pub fn worker_count(&self) -> usize {
+        self.tx.len()
     }
 
     /// Finished frames, drained with `try_recv` at every recompose and tick.
@@ -99,22 +154,68 @@ impl SyntaxWorker {
 
 impl Drop for SyntaxWorker {
     fn drop(&mut self) {
-        // Close the channel FIRST, then join: `recv` fails and the worker
-        // exits. Without the `take`, the sender would outlive the join and
-        // deadlock it.
-        self.tx.take();
-        if let Some(h) = self.thread.take() {
+        // Close every lane FIRST, then join: `recv` fails and each worker exits.
+        self.tx.clear();
+        for h in self.threads.drain(..) {
             let _ = h.join();
         }
     }
 }
 
-fn worker_loop(rx: Receiver<SyntaxRequest>, out: Sender<SyntaxFrame>) {
+fn syntax_worker_count() -> usize {
+    if let Ok(raw) = std::env::var("SUISEI_SYNTAX_WORKERS")
+        && let Ok(requested) = raw.parse::<usize>()
+    {
+        return requested.clamp(1, 16);
+    }
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .saturating_sub(2)
+        .clamp(1, 8)
+}
+
+fn lane_for(path: &str, lanes: usize) -> usize {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish() as usize % lanes.max(1)
+}
+
+fn worker_loop(
+    index: usize,
+    rx: Receiver<SyntaxRequest>,
+    out: Sender<SyntaxFrame>,
+    cache_counts: Arc<Vec<AtomicUsize>>,
+) {
     let mut engine = SyntaxEngine::new();
+    // Grammars still to build, drained ONE per idle turn. Warming all of them
+    // in a single call took 780 ms once the table reached 29 languages —
+    // Haskell alone is 186 ms — and it ran before the first parse, so the
+    // first file opened would have waited the whole time for its colours.
+    // Draining it a grammar at a time bounds that wait to one build, and only
+    // when nothing else is queued.
+    let mut to_warm: Vec<Lang> = Vec::new();
     loop {
-        let first = match rx.recv() {
-            Ok(req) => req,
-            Err(_) => return, // request channel closed — the engine is gone
+        // Only block when there is no warming left to do; otherwise take what
+        // is waiting and fall through to build one grammar.
+        let first = if to_warm.is_empty() {
+            match rx.recv() {
+                Ok(req) => Some(req),
+                Err(_) => return, // request channel closed — the engine is gone
+            }
+        } else {
+            match rx.try_recv() {
+                Ok(req) => Some(req),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            }
+        };
+        let Some(first) = first else {
+            // Idle: spend the turn on the next grammar.
+            if let Some(lang) = to_warm.pop() {
+                engine.warm_one(lang);
+            }
+            continue;
         };
         // Coalesce the burst: a keystroke queues one snapshot per edit, and
         // only the newest is worth parsing. Prewarms are all honoured.
@@ -133,10 +234,12 @@ fn worker_loop(rx: Receiver<SyntaxRequest>, out: Sender<SyntaxFrame>) {
                 SyntaxRequest::WarmGrammars => warm = true,
             }
         }
-        // Warm before parsing: a Parse coalesced into the same burst then finds
-        // its grammar already built instead of paying for it inline.
-        if warm {
-            engine.warm_all();
+        // Queue the warm-up rather than doing it here. A Parse coalesced into
+        // this same burst builds the one grammar it needs lazily — which is
+        // the only grammar that can make the first paint late — and the other
+        // twenty-eight are built on later idle turns.
+        if warm && to_warm.is_empty() {
+            to_warm = Lang::ALL.to_vec();
         }
         let mut cached = false;
         for req in prewarms {
@@ -157,17 +260,27 @@ fn worker_loop(rx: Receiver<SyntaxRequest>, out: Sender<SyntaxFrame>) {
             // the outgoing one, exactly like the old in-thread path did.
             engine.parse_path(&path, &text, ext.as_deref(), Some(window.clone()));
             cached = true;
+            // The tree is cloned rather than moved: this engine keeps its own
+            // for the next incremental reparse.
+            let tree = engine.live_tree().map(|(t, _)| t.clone());
             let _ = out.send(SyntaxFrame::Tokens {
                 tokens: engine.tokens.clone(),
                 active: engine.active,
                 path,
                 version,
                 window,
+                tree,
+                ext: ext.clone().unwrap_or_default(),
+                text,
             });
         }
         if cached {
+            cache_counts[index].store(engine.cached_count(), Ordering::Relaxed);
             let _ = out.send(SyntaxFrame::Cached {
-                count: engine.cached_count(),
+                count: cache_counts
+                    .iter()
+                    .map(|count| count.load(Ordering::Relaxed))
+                    .sum(),
             });
         }
     }
@@ -180,6 +293,7 @@ mod tests {
     #[test]
     fn parses_a_snapshot_and_answers_with_tokens() {
         let worker = SyntaxWorker::start();
+        assert!(worker.worker_count() >= 1);
         assert!(worker.request(SyntaxRequest::Parse {
             path: "/tmp/suisei_worker_test.rs".to_string(),
             ext: Some("rs".to_string()),
@@ -259,5 +373,15 @@ mod tests {
             seen.windows(2).all(|w| w[0] < w[1]),
             "answers arrive in order: {seen:?}"
         );
+    }
+
+    #[test]
+    fn the_same_path_always_uses_the_same_lane() {
+        for lanes in 1..=8 {
+            let a = lane_for("/tmp/project/src/main.rs", lanes);
+            let b = lane_for("/tmp/project/src/main.rs", lanes);
+            assert_eq!(a, b);
+            assert!(a < lanes);
+        }
     }
 }

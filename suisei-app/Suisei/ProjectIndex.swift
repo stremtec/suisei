@@ -6,12 +6,21 @@ import SwiftUI
 
 /// Source files only. Binaries, images, archives and media have nothing to
 /// parse, and walking them would just burn IO.
+/// Kept in step with `suisei-core/src/lang.rs`, which is the authority on what
+/// the parser can build a tree for. A file that is not listed here is not
+/// pre-parsed, so the first time it is opened it pays a cold parse the indexer
+/// could have absorbed — invisible until the file is long.
 private let _codeExtensions: Set<String> = [
-    "swift", "rs", "c", "h", "cpp", "hpp", "cc", "cxx", "hh", "hxx", "m", "mm",
-    "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "py", "pyi", "go",
-    "rb", "java", "kt", "kts", "scala", "cs", "php", "sh", "bash", "zsh",
+    "swift", "rs", "c", "h", "cpp", "hpp", "cc", "cxx", "hh", "hxx",
+    "c++", "h++", "ipp", "tpp", "inl", "m", "mm",
+    "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "py", "pyi", "pyw",
+    "go", "rb", "rake", "gemspec", "ru", "java", "kt", "kts",
+    "scala", "sc", "sbt", "cs", "csx", "php", "phtml",
+    "sh", "bash", "zsh", "ksh",
     "lua", "dart", "zig", "nim", "ex", "exs", "hs", "sql", "json", "jsonc",
-    "toml", "yaml", "yml", "md",
+    "toml", "yaml", "yml", "md", "markdown",
+    "html", "htm", "xhtml", "css", "xml", "xsd", "xsl", "xslt", "plist",
+    "cmake",
 ]
 
 /// Directories that are never worth indexing.

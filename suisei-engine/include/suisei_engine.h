@@ -257,6 +257,8 @@ void suisei_engine_save_as(SuiseiEngine *ptr, const char *path);
 void suisei_engine_undo(SuiseiEngine *ptr);
 void suisei_engine_redo(SuiseiEngine *ptr);
 void suisei_engine_set_system_appearance(SuiseiEngine *ptr, uint8_t is_dark);
+/* 0 = clear Liquid Glass, 1 = tinted Liquid Glass. */
+uint8_t suisei_engine_glass_style(const SuiseiEngine *ptr);
 uint32_t suisei_engine_path_moved(SuiseiEngine *ptr, const char *old_path, const char *new_path);
 void suisei_engine_select_all(SuiseiEngine *ptr);
 
@@ -282,6 +284,8 @@ void suisei_engine_gui_ensure_insert(SuiseiEngine *ptr);
 void suisei_engine_find_open(SuiseiEngine *ptr);
 void suisei_engine_find_step(SuiseiEngine *ptr, uint8_t forward);
 void suisei_engine_find_set_input(SuiseiEngine *ptr, const char *input);
+void suisei_engine_find_accept(SuiseiEngine *ptr);
+void suisei_engine_find_cancel(SuiseiEngine *ptr);
 void suisei_engine_palette_set_query(SuiseiEngine *ptr, const char *query);
 void suisei_engine_paste_text(SuiseiEngine *ptr, const char *text);
 void suisei_engine_terminal_resize(SuiseiEngine *ptr, uint32_t cols, uint32_t rows);
@@ -422,6 +426,9 @@ typedef struct SuiseiStatusExtra {
 #define SUISEI_MAX_SETTINGS_ROWS 48
 #define SUISEI_SETTINGS_LABEL 96
 #define SUISEI_SETTINGS_VALUE 64
+#define SUISEI_SETTINGS_GROUP 48
+#define SUISEI_SETTINGS_DETAIL 192
+#define SUISEI_SETTINGS_OPTIONS 96
 #define SUISEI_MAX_SETTINGS_TABS 8
 
 typedef struct SuiseiSettingsSnapshot {
@@ -435,6 +442,19 @@ typedef struct SuiseiSettingsSnapshot {
   char tabs[SUISEI_MAX_SETTINGS_TABS][24];
   uint8_t row_header[SUISEI_MAX_SETTINGS_ROWS];
   uint8_t row_selected[SUISEI_MAX_SETTINGS_ROWS];
+  /* What each row IS (SettingRow::kind) — the face branches on this instead of
+     matching display labels. 0 = prose row with no setting behind it. */
+  uint32_t row_kind[SUISEI_MAX_SETTINGS_ROWS];
+  /* Which theme / which language, for the indexed kinds. */
+  uint32_t row_payload[SUISEI_MAX_SETTINGS_ROWS];
+  /* Native Settings layout and control semantics supplied by Core. */
+  uint32_t row_page[SUISEI_MAX_SETTINGS_ROWS];
+  uint32_t row_control[SUISEI_MAX_SETTINGS_ROWS];
+  uint32_t row_value_index[SUISEI_MAX_SETTINGS_ROWS];
+  uint8_t row_advanced[SUISEI_MAX_SETTINGS_ROWS];
+  char row_groups[SUISEI_MAX_SETTINGS_ROWS][SUISEI_SETTINGS_GROUP];
+  char row_details[SUISEI_MAX_SETTINGS_ROWS][SUISEI_SETTINGS_DETAIL];
+  char row_options[SUISEI_MAX_SETTINGS_ROWS][SUISEI_SETTINGS_OPTIONS];
   char row_labels[SUISEI_MAX_SETTINGS_ROWS][SUISEI_SETTINGS_LABEL];
   char row_values[SUISEI_MAX_SETTINGS_ROWS][SUISEI_SETTINGS_VALUE];
 } SuiseiSettingsSnapshot;
@@ -476,6 +496,8 @@ uint8_t suisei_engine_settings(const SuiseiEngine *ptr, SuiseiSettingsSnapshot *
 uint8_t suisei_engine_theme(const SuiseiEngine *ptr, SuiseiThemeSnapshot *out);
 void suisei_engine_settings_select(SuiseiEngine *ptr, uint32_t row);
 void suisei_engine_settings_activate(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_settings_set_value(SuiseiEngine *ptr, uint32_t row, uint32_t value);
+void suisei_engine_settings_set_highlight_color(SuiseiEngine *ptr, const char *value);
 void suisei_engine_settings_goto_page(SuiseiEngine *ptr, uint32_t page);
 void suisei_engine_settings_save(SuiseiEngine *ptr);
 
@@ -506,6 +528,16 @@ typedef struct SuiseiScmSnapshot {
 
 #define SUISEI_MAX_GIT_CHIPS 9
 #define SUISEI_MAX_GIT_COL 64
+#define SUISEI_MAX_GIT_WORKTREE 160
+#define SUISEI_MAX_GIT_HISTORY 80
+#define SUISEI_MAX_GIT_BRANCHES 160
+#define SUISEI_MAX_GIT_FILES 160
+#define SUISEI_MAX_GIT_STASHES 40
+#define SUISEI_MAX_GIT_REMOTES 24
+#define SUISEI_GIT_PATH 320
+#define SUISEI_GIT_SUBJECT 240
+#define SUISEI_GIT_AUTHOR 96
+#define SUISEI_GIT_EMAIL 160
 
 typedef struct SuiseiGitWbSnapshot {
   uint8_t open;
@@ -526,6 +558,49 @@ typedef struct SuiseiGitWbSnapshot {
   char col_log[SUISEI_MAX_GIT_COL][SUISEI_GIT_WB_LINE];
   char col_files[SUISEI_MAX_GIT_COL][SUISEI_GIT_WB_LINE];
   char special[SUISEI_MAX_GIT_COL][SUISEI_GIT_WB_LINE];
+  uint32_t selected_change;
+  uint32_t worktree_count;
+  uint32_t history_count;
+  uint32_t history_selected;
+  uint32_t branch_count;
+  uint32_t branch_selected;
+  uint32_t commit_file_count;
+  uint32_t commit_file_selected;
+  uint32_t stash_count;
+  uint32_t remote_count;
+  uint8_t commit_detail_valid;
+  char root_path[SUISEI_PATH_CAP];
+  char repository_name[SUISEI_GIT_AUTHOR];
+  char author_name[SUISEI_GIT_AUTHOR];
+  char author_email[SUISEI_GIT_EMAIL];
+  uint8_t worktree_staged[SUISEI_MAX_GIT_WORKTREE];
+  char worktree_status[SUISEI_MAX_GIT_WORKTREE];
+  char worktree_paths[SUISEI_MAX_GIT_WORKTREE][SUISEI_GIT_PATH];
+  char history_hashes[SUISEI_MAX_GIT_HISTORY][48];
+  char history_shorts[SUISEI_MAX_GIT_HISTORY][16];
+  char history_subjects[SUISEI_MAX_GIT_HISTORY][SUISEI_GIT_SUBJECT];
+  char history_authors[SUISEI_MAX_GIT_HISTORY][SUISEI_GIT_AUTHOR];
+  char history_whens[SUISEI_MAX_GIT_HISTORY][64];
+  uint8_t branch_current[SUISEI_MAX_GIT_BRANCHES];
+  uint8_t branch_remote[SUISEI_MAX_GIT_BRANCHES];
+  char branch_names[SUISEI_MAX_GIT_BRANCHES][SUISEI_GIT_PATH];
+  char branch_upstreams[SUISEI_MAX_GIT_BRANCHES][SUISEI_GIT_PATH];
+  char commit_file_status[SUISEI_MAX_GIT_FILES];
+  uint32_t commit_file_insertions[SUISEI_MAX_GIT_FILES];
+  uint32_t commit_file_deletions[SUISEI_MAX_GIT_FILES];
+  char commit_file_paths[SUISEI_MAX_GIT_FILES][SUISEI_GIT_PATH];
+  char detail_hash[48];
+  char detail_short[16];
+  char detail_subject[SUISEI_GIT_SUBJECT];
+  char detail_author[SUISEI_GIT_AUTHOR];
+  char detail_email[SUISEI_GIT_EMAIL];
+  char detail_date[64];
+  char detail_body[512];
+  uint32_t detail_insertions;
+  uint32_t detail_deletions;
+  char stashes[SUISEI_MAX_GIT_STASHES][SUISEI_GIT_WB_LINE];
+  char remote_names[SUISEI_MAX_GIT_REMOTES][SUISEI_GIT_AUTHOR];
+  char remote_urls[SUISEI_MAX_GIT_REMOTES][SUISEI_GIT_PATH];
 } SuiseiGitWbSnapshot;
 
 uint8_t suisei_engine_scm(const SuiseiEngine *ptr, SuiseiScmSnapshot *out);
@@ -533,12 +608,32 @@ void suisei_engine_scm_select(SuiseiEngine *ptr, uint32_t row);
 void suisei_engine_scm_activate(SuiseiEngine *ptr, uint32_t row);
 void suisei_engine_scm_toggle_stage(SuiseiEngine *ptr, uint32_t row);
 uint8_t suisei_engine_git_wb(const SuiseiEngine *ptr, SuiseiGitWbSnapshot *out);
+uint64_t suisei_engine_git_wb_generation(const SuiseiEngine *ptr);
+uint64_t suisei_engine_git_wb_diff_generation(const SuiseiEngine *ptr);
+uint64_t suisei_engine_git_wb_diff_byte_count(const SuiseiEngine *ptr);
+uint64_t suisei_engine_git_wb_diff_copy(const SuiseiEngine *ptr, char *out,
+                                        uint64_t capacity);
 /* key 1..=9 maps to xei toolbar chips */
 void suisei_engine_git_wb_set_tab(SuiseiEngine *ptr, uint32_t key);
 void suisei_engine_git_wb_select_change(SuiseiEngine *ptr, uint32_t row);
 void suisei_engine_git_wb_select_history(SuiseiEngine *ptr, uint32_t row);
 void suisei_engine_git_wb_select_commit_file(SuiseiEngine *ptr, uint32_t row);
 void suisei_engine_git_wb_select_special(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_git_wb_select_branch_history(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_git_wb_refresh_window(SuiseiEngine *ptr);
+void suisei_engine_git_wb_toggle_stage(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_git_wb_stage_all(SuiseiEngine *ptr);
+void suisei_engine_git_wb_unstage_all(SuiseiEngine *ptr);
+void suisei_engine_git_wb_commit(SuiseiEngine *ptr, const char *message,
+                                 uint8_t amend);
+void suisei_engine_git_wb_stash(SuiseiEngine *ptr);
+void suisei_engine_git_wb_discard_change(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_git_wb_open_window(SuiseiEngine *ptr);
+void suisei_engine_git_wb_focus_window(SuiseiEngine *ptr);
+void suisei_engine_git_wb_close_window(SuiseiEngine *ptr);
+void suisei_engine_git_wb_checkout_selected_branch(SuiseiEngine *ptr);
+void suisei_engine_git_wb_create_branch(SuiseiEngine *ptr, const char *name);
+void suisei_engine_git_wb_delete_selected_branch(SuiseiEngine *ptr);
 
 /* Breakpoints navigator (replaces Find in the icon rail). */
 #define SUISEI_MAX_BREAKPOINTS 128

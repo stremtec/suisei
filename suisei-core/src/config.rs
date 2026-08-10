@@ -7,6 +7,13 @@ use std::path::PathBuf;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub theme: String,
+    /// Liquid Glass density used by native floating chrome.
+    /// `"clear"` preserves more of the content behind it; `"tinted"` adds
+    /// a quiet theme-aware wash for stronger separation.
+    pub glass_style: String,
+    /// Optional six-digit sRGB override for selection/accent highlights.
+    /// `"default"` keeps the palette's own carefully tuned highlight.
+    pub highlight_color: String,
     /// Spaces per tab / indent
     pub tab_width: usize,
     /// Mirror yanks to system clipboard (unnamedplus-style)
@@ -40,6 +47,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "system".into(),
+            glass_style: "clear".into(),
+            highlight_color: "default".into(),
             tab_width: 4,
             clipboard_sync: true,
             relative_number: false,
@@ -82,6 +91,30 @@ pub fn lsp_lang_catalog() -> &'static [(&'static str, &'static str, &'static str
         ("markdown", "Markdown", "marksman server"),
         ("bash", "Bash", "bash-language-server start"),
         ("zig", "Zig", "zls"),
+        // This list is what Settings shows, so anything missing from it cannot
+        // be configured at all. It held fourteen entries while
+        // `lsp::default_server_for_ext` knew twenty-eight — Ruby, PHP, C# and
+        // the rest started a server that the user could then neither see nor
+        // change. Kept in step by `tests/language_tables_agree.rs`; the command
+        // must match the fallback exactly, because this table is consulted
+        // FIRST and would otherwise silently override it.
+        ("csharp", "C#", "csharp-ls"),
+        ("ruby", "Ruby", "solargraph stdio"),
+        ("php", "PHP", "intelephense --stdio"),
+        ("swift", "Swift", "sourcekit-lsp"),
+        ("kotlin", "Kotlin", "kotlin-language-server"),
+        ("objective-c", "Objective-C", "clangd"),
+        ("dart", "Dart", "dart language-server"),
+        ("scala", "Scala", "metals"),
+        ("haskell", "Haskell", "haskell-language-server-wrapper --lsp"),
+        ("elixir", "Elixir", "elixir-ls"),
+        ("nim", "Nim", "nimlsp"),
+        ("html", "HTML", "vscode-html-language-server --stdio"),
+        ("css", "CSS", "vscode-css-language-server --stdio"),
+        ("xml", "XML", "lemminx"),
+        ("vue", "Vue", "vue-language-server --stdio"),
+        ("svelte", "Svelte", "svelteserver --stdio"),
+        ("cmake", "CMake", "cmake-language-server"),
     ]
 }
 
@@ -148,6 +181,24 @@ pub fn load() -> Config {
                     cfg.theme = v.to_string();
                 }
             }
+            "glass_style" => {
+                if matches!(v, "clear" | "tinted") {
+                    cfg.glass_style = v.to_string();
+                }
+            }
+            "highlight_color" | "accent_color" => {
+                let candidate = v.trim();
+                let hex = candidate.strip_prefix('#').unwrap_or(candidate);
+                if candidate.eq_ignore_ascii_case("default")
+                    || (hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+                {
+                    cfg.highlight_color = if candidate.eq_ignore_ascii_case("default") {
+                        "default".into()
+                    } else {
+                        format!("#{}", hex.to_ascii_uppercase())
+                    };
+                }
+            }
             "tab_width" | "tabstop" => {
                 if let Ok(n) = v.parse::<usize>() {
                     if n > 0 && n <= 16 {
@@ -207,8 +258,10 @@ pub fn load() -> Config {
 
 pub fn save(cfg: &Config) {
     let mut content = format!(
-        "# xei config\ntheme = \"{}\"\ntab_width = {}\nclipboard_sync = {}\nrelative_number = {}\nwrap_lines = {}\nupdate_check = {}\nundo_caching = {}\ngpu_graphics = {}\ngpu_hyperlinks = {}\ngpu_acc = {}\nkey_hints = {}\nlsp_enabled = {}\n",
+        "# suisei config\ntheme = \"{}\"\nglass_style = \"{}\"\nhighlight_color = \"{}\"\ntab_width = {}\nclipboard_sync = {}\nrelative_number = {}\nwrap_lines = {}\nupdate_check = {}\nundo_caching = {}\ngpu_graphics = {}\ngpu_hyperlinks = {}\ngpu_acc = {}\nkey_hints = {}\nlsp_enabled = {}\n",
         cfg.theme,
+        cfg.glass_style,
+        cfg.highlight_color,
         cfg.tab_width,
         cfg.clipboard_sync,
         cfg.relative_number,

@@ -340,6 +340,60 @@ struct GitWbChipItem: Equatable, Identifiable {
     var key: Int
 }
 
+struct GitWorktreeItem: Equatable, Identifiable {
+    var id: Int
+    var path: String
+    var status: String
+    var staged: Bool
+    var selected: Bool
+}
+
+struct GitHistoryItem: Equatable, Identifiable {
+    var id: Int
+    var hash: String
+    var shortHash: String
+    var subject: String
+    var author: String
+    var when: String
+    var selected: Bool
+}
+
+struct GitBranchItem: Equatable, Identifiable {
+    var id: Int
+    var name: String
+    var upstream: String
+    var current: Bool
+    var remote: Bool
+    var selected: Bool
+}
+
+struct GitCommitFileItem: Equatable, Identifiable {
+    var id: Int
+    var path: String
+    var status: String
+    var insertions: Int
+    var deletions: Int
+    var selected: Bool
+}
+
+struct GitCommitDetailSnap: Equatable {
+    var hash: String
+    var shortHash: String
+    var subject: String
+    var author: String
+    var email: String
+    var date: String
+    var body: String
+    var insertions: Int
+    var deletions: Int
+}
+
+struct GitRemoteItem: Equatable, Identifiable {
+    var id: Int
+    var name: String
+    var url: String
+}
+
 struct GitWbSnap: Equatable {
     var open: Bool
     var docked: Bool
@@ -352,11 +406,101 @@ struct GitWbSnap: Equatable {
     var colLog: [String]
     var colFiles: [String]
     var special: [String]
+    var rootPath: String
+    var repositoryName: String
+    var authorName: String
+    var authorEmail: String
+    var worktree: [GitWorktreeItem]
+    var history: [GitHistoryItem]
+    var branches: [GitBranchItem]
+    var commitFiles: [GitCommitFileItem]
+    var commitDetail: GitCommitDetailSnap?
+    var stashes: [String]
+    var remotes: [GitRemoteItem]
     static let empty = GitWbSnap(
         open: false, docked: false, loading: false, tabIndex: 0,
         branch: "", message: "", chips: [],
-        colChanges: [], colLog: [], colFiles: [], special: []
+        colChanges: [], colLog: [], colFiles: [], special: [],
+        rootPath: "", repositoryName: "", authorName: "", authorEmail: "",
+        worktree: [], history: [], branches: [], commitFiles: [],
+        commitDetail: nil, stashes: [], remotes: []
     )
+}
+
+/// Independent publication domain for the native Source Control window.
+///
+/// The editor shell and workbench used to observe the same `EngineBridge`.
+/// A diff/status update therefore rebuilt both large SwiftUI trees, while an
+/// unrelated editor/LSP frame copied and decoded the workbench snapshot. Keep
+/// the native window on its own object so each surface invalidates only itself.
+final class GitWorkbenchStore: ObservableObject {
+    @Published private(set) var snapshot: GitWbSnap = .empty
+    @Published private(set) var theme: ThemeSnap = .empty
+
+    func publish(snapshot next: GitWbSnap) {
+        if next != snapshot { snapshot = next }
+    }
+
+    func publish(theme next: ThemeSnap) {
+        if next != theme { theme = next }
+    }
+}
+
+/// What a settings row IS, carried from Core rather than guessed from its text.
+///
+/// Every control in Settings used to be recovered by matching the DISPLAY
+/// LABEL — `label == "LSP enabled"`, `label.hasPrefix("LSP ·")`,
+/// `label.contains("●")`, a hard-coded list of five toggle names. Core has had
+/// this type all along (`SettingRow`); it was flattened to strings at the FFI
+/// boundary and reconstructed here by pattern-matching, so renaming a label
+/// silently broke a control and three rows were never listed at all.
+///
+/// Raw values are ABI — they match `SettingRow::kind`. Append only.
+enum SettingKind: UInt32 {
+    /// Prose with no setting behind it (About, Extensions, Shortcuts rows).
+    case none = 0
+    case themeHeader = 1
+    case theme = 2
+    case editorHeader = 3
+    case tabWidth = 4
+    case relativeNumber = 5
+    case wrapLines = 6
+    case undoCaching = 7
+    case clipboardSync = 8
+    case gpuAcc = 9
+    case gpuGraphics = 10
+    case gpuHyperlinks = 11
+    case keyHints = 12
+    case lspHeader = 13
+    case lspEnabled = 14
+    case lspLang = 15
+    case gitHeader = 16
+    case openWorkbench = 17
+    case openScm = 18
+    case highlightColor = 19
+    case updateCheck = 20
+    case appearanceMode = 21
+    case glassStyle = 22
+}
+
+/// Native layout metadata supplied by Core. Raw values are the append-only ABI
+/// in `SettingSurfacePage::code` and `SettingControl::code`.
+enum SettingSurfacePage: UInt32 {
+    case none = 0
+    case general = 1
+    case appearance = 2
+    case editor = 3
+    case languageServers = 4
+    case sourceControl = 5
+}
+
+enum SettingControlKind: UInt32 {
+    case none = 0
+    case toggle = 1
+    case menu = 2
+    case segmented = 3
+    case action = 4
+    case color = 5
 }
 
 struct SettingsRowItem: Equatable, Identifiable {
@@ -365,6 +509,17 @@ struct SettingsRowItem: Equatable, Identifiable {
     var value: String
     var isHeader: Bool
     var selected: Bool
+    /// Identity from Core. `.none` for prose rows.
+    var kind: SettingKind = .none
+    /// Which theme / which language, for the indexed kinds.
+    var payload: Int = 0
+    var page: SettingSurfacePage = .none
+    var group: String = ""
+    var control: SettingControlKind = .none
+    var detail: String = ""
+    var options: [String] = []
+    var valueIndex: Int = 0
+    var advanced = false
 }
 
 struct SettingsSnap: Equatable {
@@ -584,6 +739,10 @@ enum EditorMetrics {
 
 final class EngineBridge: ObservableObject {
     @Published private(set) var chrome: ChromeSnapshot = .empty
+    let gitWorkbenchStore = GitWorkbenchStore()
+    /// Lightweight bridge used only to present/dismiss the independent Window
+    /// scene. Workbench rows themselves live in `gitWorkbenchStore`.
+    @Published private(set) var gitWorkbenchWindowOpen = false
     /// Per-keystroke caret/scroll, on a SEPARATE object so publishing it does
     /// not re-evaluate the whole ContentView tree (the split container reads
     /// only structural `editorSplit`; each pane's canvas observes THIS). See
@@ -683,6 +842,12 @@ final class EngineBridge: ObservableObject {
     private var lastEditorSize: CGSize = .zero
 
     private var engine: OpaquePointer?
+    /// The full diff is intentionally outside the fixed chrome snapshot. Keep
+    /// one decoded copy and refresh it only when Core's generation changes.
+    private var gitDiffGeneration = UInt64.max
+    private var gitDiffLinesCache: [String] = []
+    /// Independent Core generation for the structured workbench model.
+    private var gitWbGeneration = UInt64.max
     private var keyMonitor: Any?
     /// Debounced catch-up refresh scheduled by the typing fast path.
     private var chromeSettleWork: DispatchWorkItem?
@@ -935,14 +1100,50 @@ final class EngineBridge: ObservableObject {
         recoveryEntries = fresh
     }
 
+    /// Milliseconds for the engine, clamped.
+    ///
+    /// A tick after the app was suspended reports an enormous gap; the engine
+    /// should see a plausible frame rather than an hour. (`ContentView` has a
+    /// `clamped(to:)` of its own but it is fileprivate to that file.)
+    private static func clampedMs(_ v: Double) -> UInt32 {
+        UInt32(min(max(v.rounded(), 1), 250))
+    }
+
+    /// Heartbeat interval.
+    ///
+    /// Was 50 ms — a 20 Hz update loop on a 60–120 Hz display. That is the
+    /// single biggest reason the app can feel a beat behind while using about a
+    /// tenth of one core: it is not slow, it is mostly asleep, and every visible
+    /// change is quantised to 50 ms whatever the display can do.
+    ///
+    /// Raising it is affordable because the tick is gated, not because it is
+    /// cheap to do more work: `suisei_engine_tick` measures under a microsecond
+    /// even at 64 tabs, and the SwiftUI publish below still only runs when
+    /// `frame_gen` actually advanced. An idle app at 120 Hz does 120 sub-
+    /// microsecond FFI calls a second and publishes nothing.
+    static let tickInterval: TimeInterval = 1.0 / 120.0
+
     private func startTick() {
         tickTimer?.invalidate()
-        // 50ms is enough for PTY drain; face only paints when frame_gen advances.
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        var lastTickAt = CACurrentMediaTime()
+        tickTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.tickInterval, repeats: true
+        ) { [weak self] _ in
             guard let self, let engine = self.engine else { return }
-            let gen = suisei_engine_tick(engine, 50)
+            // Real elapsed time, not the nominal interval. The engine uses this
+            // to drive time-based work, and handing it a constant 50 while
+            // firing at another rate would make every duration it computes
+            // wrong by that ratio.
+            let now = CACurrentMediaTime()
+            let dt = Self.clampedMs((now - lastTickAt) * 1000)
+            lastTickAt = now
+            let gen = suisei_engine_tick(engine, dt)
             // Pick up an async references reply (one publish, then it stops).
             self.pollReferencesIfNeeded()
+            // Source Control has its own generation and ObservableObject. This
+            // cheap probe is safe at display cadence and performs no snapshot
+            // copy when Git state did not change.
+            self.refreshGitWorkbenchIfNeeded()
             // Never publish SwiftUI editor updates mid-gesture — the canvas
             // already merges paint windows itself; publishing re-enters
             // updateNSView while AppKit scrolls and shows as jitter.
@@ -960,7 +1161,7 @@ final class EngineBridge: ObservableObject {
             if self.tabStructuralMotionActive { return }
             if gen != self.lastFrameGen {
                 // Terminal / LSP noise: prefer light paint; full shell every ~0.5s max via gen.
-                if self.chrome.terminal.open || self.chrome.gitWb.open {
+                if self.chrome.terminal.open {
                     self.refreshChrome()
                 } else {
                     self.refreshEditorPaintOnly()
@@ -2145,36 +2346,128 @@ final class EngineBridge: ObservableObject {
         var m = SuiseiMod.control
         m.insert(.shift)
         dispatch(code: .char_, ch: UInt32(UnicodeScalar("g").value), mods: m)
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func openGitWorkbenchWindow() {
+        guard let engine else { return }
+        cancelPointerSession()
+        if gitWorkbenchStore.snapshot.open {
+            suisei_engine_git_wb_focus_window(engine)
+        } else {
+            suisei_engine_git_wb_open_window(engine)
+        }
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func focusGitWorkbenchWindow() {
+        guard let engine else { return }
+        suisei_engine_git_wb_focus_window(engine)
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func closeGitWorkbenchWindow() {
+        guard let engine else { return }
+        suisei_engine_git_wb_close_window(engine)
+        refreshGitWorkbenchIfNeeded()
     }
 
     func gitWbSetTab(_ index: Int) {
         guard let engine else { return }
         suisei_engine_git_wb_set_tab(engine, UInt32(index))
-        refreshChrome()
+        refreshGitWorkbenchIfNeeded()
     }
 
     func gitWbSelectChange(_ row: Int) {
         guard let engine else { return }
         suisei_engine_git_wb_select_change(engine, UInt32(row))
-        refreshChrome()
+        refreshGitWorkbenchIfNeeded()
     }
 
     func gitWbSelectHistory(_ row: Int) {
         guard let engine else { return }
         suisei_engine_git_wb_select_history(engine, UInt32(row))
-        refreshChrome()
+        refreshGitWorkbenchIfNeeded()
     }
 
     func gitWbSelectCommitFile(_ row: Int) {
         guard let engine else { return }
         suisei_engine_git_wb_select_commit_file(engine, UInt32(row))
-        refreshChrome()
+        refreshGitWorkbenchIfNeeded()
     }
 
     func gitWbSelectSpecial(_ row: Int) {
         guard let engine else { return }
         suisei_engine_git_wb_select_special(engine, UInt32(row))
-        refreshChrome()
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbSelectBranchHistory(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_git_wb_select_branch_history(engine, UInt32(row))
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbRefreshWindow() {
+        guard let engine else { return }
+        suisei_engine_git_wb_refresh_window(engine)
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbToggleStage(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_git_wb_toggle_stage(engine, UInt32(row))
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbStageAll() {
+        guard let engine else { return }
+        suisei_engine_git_wb_stage_all(engine)
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbUnstageAll() {
+        guard let engine else { return }
+        suisei_engine_git_wb_unstage_all(engine)
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbCommit(message: String, amend: Bool) {
+        guard let engine else { return }
+        message.withCString {
+            suisei_engine_git_wb_commit(engine, $0, amend ? 1 : 0)
+        }
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbStash() {
+        guard let engine else { return }
+        suisei_engine_git_wb_stash(engine)
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbDiscardChange(_ row: Int) {
+        guard let engine else { return }
+        suisei_engine_git_wb_discard_change(engine, UInt32(row))
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbCheckoutSelectedBranch() {
+        guard let engine else { return }
+        suisei_engine_git_wb_checkout_selected_branch(engine)
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbCreateBranch(_ name: String) {
+        guard let engine else { return }
+        name.withCString { suisei_engine_git_wb_create_branch(engine, $0) }
+        refreshGitWorkbenchIfNeeded()
+    }
+
+    func gitWbDeleteSelectedBranch() {
+        guard let engine else { return }
+        suisei_engine_git_wb_delete_selected_branch(engine)
+        refreshGitWorkbenchIfNeeded()
     }
 
     func pointerDouble(at point: CGPoint) {
@@ -2408,9 +2701,22 @@ final class EngineBridge: ObservableObject {
 
     /// Close the find bar keeping the caret at the current match.
     func closeFind() {
-        guard chrome.search.open else { return }
-        dispatchRaw(code: .enter)
+        guard let engine, chrome.search.open else { return }
+        // Commit BEFORE releasing the native field's first-responder. The old
+        // order let the editor cancel Search during SwiftUI focus propagation,
+        // then delivered this Return to the document as a newline.
+        suisei_engine_find_accept(engine)
         refreshChrome()
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        ensureEditorFocus()
+    }
+
+    /// Cancel the find bar and restore its opening caret/scroll position.
+    func cancelFind() {
+        guard let engine, chrome.search.open else { return }
+        suisei_engine_find_cancel(engine)
+        refreshChrome()
+        NSApp.keyWindow?.makeFirstResponder(nil)
         ensureEditorFocus()
     }
 
@@ -2504,12 +2810,18 @@ final class EngineBridge: ObservableObject {
     }
 
     private var minimapCacheVersion: UInt64 = .max
+    private var minimapCacheTabIndex: Int = -1
     private var minimapCache: MinimapData?
 
     /// Downsampled document overview (cached per buffer version).
     func minimapData() -> MinimapData? {
         guard let engine else { return nil }
-        if chrome.bufferVersion == minimapCacheVersion, let cached = minimapCache {
+        let focusedTab = editorSplit.panes.indices.contains(editorSplit.focus)
+            ? editorSplit.panes[editorSplit.focus].tabIndex
+            : chrome.tabs.first(where: \.active)?.id ?? -1
+        if chrome.bufferVersion == minimapCacheVersion,
+           focusedTab == minimapCacheTabIndex,
+           let cached = minimapCache {
             return cached
         }
         let t0 = DispatchTime.now().uptimeNanoseconds
@@ -2541,6 +2853,7 @@ final class EngineBridge: ObservableObject {
             flags: flags
         )
         minimapCacheVersion = chrome.bufferVersion
+        minimapCacheTabIndex = focusedTab
         minimapCache = data
         return data
     }
@@ -2759,9 +3072,17 @@ final class EngineBridge: ObservableObject {
     ///
     /// Distinct from "some chip has a non-zero group": a parked layout still
     /// tags its members, but the desk is free until the layout is activated.
-    var isLayoutDeskActive: Bool {
-        guard let engine else { return false }
-        return suisei_engine_active_layout_id(engine) != 0
+    var isLayoutDeskActive: Bool { activeLayoutId != 0 }
+
+    /// WHICH layout owns the desk, or 0 for none.
+    ///
+    /// The id, not just the fact. "Some layout is active" is not enough to
+    /// decide what a click on a grouped member means — the member may belong to
+    /// a DIFFERENT layout than the one on screen, and then focusing in place
+    /// leaves the arrangement it asked for uninstalled.
+    var activeLayoutId: UInt64 {
+        guard let engine else { return 0 }
+        return suisei_engine_active_layout_id(engine)
     }
 
     /// Whether a folded layout is currently on screen (desk-active or a
@@ -3438,7 +3759,12 @@ final class EngineBridge: ObservableObject {
         if NSApp.modalWindow != nil { return false }
         guard let key = NSApp.keyWindow else { return true }
         if key is NSPanel { return false }
-        if key.title == "Settings" || key.title == "Welcome" { return false }
+        if key.identifier == WindowChrome.settingsIdentifier
+            || key.title == "Settings" || key.title == "Welcome"
+        {
+            return false
+        }
+        if key.identifier == WindowChrome.gitWorkbenchIdentifier { return false }
         if let responder = key.firstResponder,
            // Our own canvas is an NSTextInputClient now — it must stay
            // "editor-owned" so the ⌘-chords below still reach the engine.
@@ -3487,6 +3813,18 @@ final class EngineBridge: ObservableObject {
                 && !flags.contains(.control)
                 && !flags.contains(.option)
 
+            // The full workbench is a native auxiliary window now. Intercept
+            // its global chord before Core can replace the editor with the old
+            // docked mode; the editor scene owns `openWindow` and brings the
+            // existing window forward when it is already open.
+            if flags.contains(.control), flags.contains(.shift),
+               !flags.contains(.command), !flags.contains(.option),
+               event.charactersIgnoringModifiers?.lowercased() == "g"
+            {
+                NotificationCenter.default.post(name: .suiseiOpenGitWorkbenchWindow, object: nil)
+                return nil
+            }
+
             // Find and Palette use native text fields so IME, selection and
             // editing shortcuts are AppKit-owned. Their navigation keys still
             // belong to the surrounding transient surface.
@@ -3519,14 +3857,10 @@ final class EngineBridge: ObservableObject {
             {
                 switch event.keyCode {
                 case 53:
-                    NSApp.keyWindow?.makeFirstResponder(nil)
-                    self.dispatch(code: .esc)
-                    self.ensureEditorFocus()
+                    self.cancelFind()
                     return nil
                 case 36, 76:
-                    NSApp.keyWindow?.makeFirstResponder(nil)
-                    self.dispatch(code: .enter)
-                    self.ensureEditorFocus()
+                    self.closeFind()
                     return nil
                 case 125:
                     self.findStep(forward: true)
@@ -3537,18 +3871,6 @@ final class EngineBridge: ObservableObject {
                 default:
                     break
                 }
-            }
-            // The Workbench advertises "Esc back" globally. If the persistent
-            // Project Filter happens to own first responder, the normal editor
-            // monitor stands down and AppKit otherwise consumes Esc inside the
-            // field. Close the visible surface first, irrespective of that
-            // unrelated field focus.
-            if event.keyCode == 53, self.chrome.gitWb.open,
-               self.nativeTextControlHasFocus
-            {
-                NSApp.keyWindow?.makeFirstResponder(nil)
-                self.dispatch(code: .esc)
-                return nil
             }
             // Swallowing keys during a modal (clone-URL alert, save panel) made
             // those text fields untypable — pass through anything non-editor.
@@ -3667,6 +3989,23 @@ final class EngineBridge: ObservableObject {
         guard let engine else { return }
         suisei_engine_settings_activate(engine, UInt32(row))
         refreshChrome()
+    }
+
+    func settingsSetValue(_ row: Int, value: Int) {
+        guard let engine else { return }
+        suisei_engine_settings_set_value(engine, UInt32(row), UInt32(max(0, value)))
+        refreshChrome()
+    }
+
+    func settingsSetHighlightColor(_ value: String) {
+        guard let engine else { return }
+        value.withCString { suisei_engine_settings_set_highlight_color(engine, $0) }
+        refreshChrome()
+    }
+
+    var glassStyle: SuiseiGlassStyle {
+        guard let engine else { return .clear }
+        return SuiseiGlassStyle(rawValue: suisei_engine_glass_style(engine)) ?? .clear
     }
 
     func settingsGotoPage(_ page: Int) {
@@ -4168,11 +4507,9 @@ final class EngineBridge: ObservableObject {
         let scmOut = open(SUISEI_PANEL_SCM)
             ? PerfProbe.measure("  loadScm") { loadScm(engine) }
             : ScmSnap.empty
-        let gitWbOut = open(SUISEI_PANEL_GIT_WB)
-            ? PerfProbe.measure("  loadGitWb") { loadGitWb(engine) }
-            : GitWbSnap.empty
         // Theme is 112 bytes and every surface reads it — always.
         let theme = PerfProbe.measure("  loadTheme") { loadTheme(engine) }
+        gitWorkbenchStore.publish(theme: theme)
         let outline = open(SUISEI_PANEL_OUTLINE)
             ? PerfProbe.measure("  loadOutline") { loadOutline(engine) }
             : []
@@ -4212,7 +4549,10 @@ final class EngineBridge: ObservableObject {
             settings: settingsOut,
             theme: theme,
             scm: scmOut,
-            gitWb: gitWbOut,
+            // The independent native workbench has its own publication store.
+            // Keeping this empty prevents a full editor-shell refresh from
+            // comparing/copying Git arrays that the shell never renders.
+            gitWb: .empty,
             outline: outline
         )
         // Equatable skip avoids SwiftUI thrash when nothing visual changed.
@@ -4288,6 +4628,25 @@ final class EngineBridge: ObservableObject {
         )
     }
 
+    /// Pull the native Source Control model only when Core says that model
+    /// changed. This is intentionally separate from `refreshChrome()`: the
+    /// workbench window is independent and neither editor paint nor LSP noise
+    /// should copy its large snapshot or invalidate its SwiftUI tree.
+    private func refreshGitWorkbenchIfNeeded() {
+        guard let engine else { return }
+        let generation = suisei_engine_git_wb_generation(engine)
+        guard generation != gitWbGeneration else { return }
+        gitWbGeneration = generation
+
+        let next = PerfProbe.measure("loadGitWb (dedicated generation)") {
+            loadGitWb(engine)
+        }
+        gitWorkbenchStore.publish(snapshot: next)
+        if gitWorkbenchWindowOpen != next.open {
+            gitWorkbenchWindowOpen = next.open
+        }
+    }
+
     private func loadGitWb(_ engine: OpaquePointer) -> GitWbSnap {
         var snap = SuiseiGitWbSnapshot()
         guard suisei_engine_git_wb(engine, &snap) != 0, snap.open != 0 else { return .empty }
@@ -4335,6 +4694,172 @@ final class EngineBridge: ObservableObject {
         withUnsafeBytes(of: snap.special) { raw in
             special = loadCol(snap.special_count, raw.baseAddress!)
         }
+
+        if let header = special.first(where: { $0.hasPrefix("diff ·") }) {
+            let generation = suisei_engine_git_wb_diff_generation(engine)
+            if generation != gitDiffGeneration {
+                gitDiffGeneration = generation
+                gitDiffLinesCache.removeAll(keepingCapacity: true)
+
+                let byteCount = suisei_engine_git_wb_diff_byte_count(engine)
+                if byteCount > 0, byteCount <= UInt64(Int.max) {
+                    var bytes = [CChar](repeating: 0, count: Int(byteCount))
+                    let copied = bytes.withUnsafeMutableBufferPointer { buffer in
+                        suisei_engine_git_wb_diff_copy(engine, buffer.baseAddress, byteCount)
+                    }
+                    if copied == byteCount {
+                        var start = 0
+                        let end = Int(copied)
+                        while start < end {
+                            var stop = start
+                            while stop < end, bytes[stop] != 0 { stop += 1 }
+                            let line = bytes[start..<stop].map { UInt8(bitPattern: $0) }
+                            gitDiffLinesCache.append(String(decoding: line, as: UTF8.self))
+                            start = stop + 1
+                        }
+                    }
+                }
+            }
+            special = [header] + gitDiffLinesCache
+        }
+
+        func loadFixedStrings(
+            _ count: Int,
+            _ field: UnsafeRawBufferPointer,
+            stride: Int
+        ) -> [String] {
+            guard let base = field.baseAddress else { return [] }
+            return (0..<count).map { index in
+                String(cString: base.advanced(by: index * stride).assumingMemoryBound(to: CChar.self))
+            }
+        }
+
+        let worktreeCount = min(Int(snap.worktree_count), Int(SUISEI_MAX_GIT_WORKTREE))
+        let worktreePaths = withUnsafeBytes(of: snap.worktree_paths) {
+            loadFixedStrings(worktreeCount, $0, stride: Int(SUISEI_GIT_PATH))
+        }
+        let worktreeStages = withUnsafeBytes(of: snap.worktree_staged) {
+            Array($0.prefix(worktreeCount))
+        }
+        let worktreeStatuses = withUnsafeBytes(of: snap.worktree_status) {
+            Array($0.prefix(worktreeCount))
+        }
+        let worktree = (0..<worktreeCount).map { index in
+            let byte = worktreeStatuses[index]
+            return GitWorktreeItem(
+                id: index,
+                path: worktreePaths[index],
+                status: byte == 0 ? "?" : String(UnicodeScalar(byte)),
+                staged: worktreeStages[index] != 0,
+                selected: index == Int(snap.selected_change)
+            )
+        }
+
+        let historyCount = min(Int(snap.history_count), Int(SUISEI_MAX_GIT_HISTORY))
+        let historyHashes = withUnsafeBytes(of: snap.history_hashes) {
+            loadFixedStrings(historyCount, $0, stride: 48)
+        }
+        let historyShorts = withUnsafeBytes(of: snap.history_shorts) {
+            loadFixedStrings(historyCount, $0, stride: 16)
+        }
+        let historySubjects = withUnsafeBytes(of: snap.history_subjects) {
+            loadFixedStrings(historyCount, $0, stride: Int(SUISEI_GIT_SUBJECT))
+        }
+        let historyAuthors = withUnsafeBytes(of: snap.history_authors) {
+            loadFixedStrings(historyCount, $0, stride: Int(SUISEI_GIT_AUTHOR))
+        }
+        let historyWhens = withUnsafeBytes(of: snap.history_whens) {
+            loadFixedStrings(historyCount, $0, stride: 64)
+        }
+        let history = (0..<historyCount).map { index in
+            GitHistoryItem(
+                id: index,
+                hash: historyHashes[index],
+                shortHash: historyShorts[index],
+                subject: historySubjects[index],
+                author: historyAuthors[index],
+                when: historyWhens[index],
+                selected: index == Int(snap.history_selected)
+            )
+        }
+
+        let branchCount = min(Int(snap.branch_count), Int(SUISEI_MAX_GIT_BRANCHES))
+        let branchNames = withUnsafeBytes(of: snap.branch_names) {
+            loadFixedStrings(branchCount, $0, stride: Int(SUISEI_GIT_PATH))
+        }
+        let branchUpstreams = withUnsafeBytes(of: snap.branch_upstreams) {
+            loadFixedStrings(branchCount, $0, stride: Int(SUISEI_GIT_PATH))
+        }
+        let branchCurrent = withUnsafeBytes(of: snap.branch_current) {
+            Array($0.prefix(branchCount))
+        }
+        let branchRemote = withUnsafeBytes(of: snap.branch_remote) {
+            Array($0.prefix(branchCount))
+        }
+        let branches = (0..<branchCount).map { index in
+            GitBranchItem(
+                id: index,
+                name: branchNames[index],
+                upstream: branchUpstreams[index],
+                current: branchCurrent[index] != 0,
+                remote: branchRemote[index] != 0,
+                selected: index == Int(snap.branch_selected)
+            )
+        }
+
+        let commitFileCount = min(Int(snap.commit_file_count), Int(SUISEI_MAX_GIT_FILES))
+        let commitFilePaths = withUnsafeBytes(of: snap.commit_file_paths) {
+            loadFixedStrings(commitFileCount, $0, stride: Int(SUISEI_GIT_PATH))
+        }
+        let commitFileStatuses = withUnsafeBytes(of: snap.commit_file_status) {
+            Array($0.prefix(commitFileCount))
+        }
+        let commitFileInsertions = withUnsafeBytes(of: snap.commit_file_insertions) {
+            Array($0.bindMemory(to: UInt32.self).prefix(commitFileCount))
+        }
+        let commitFileDeletions = withUnsafeBytes(of: snap.commit_file_deletions) {
+            Array($0.bindMemory(to: UInt32.self).prefix(commitFileCount))
+        }
+        let commitFiles = (0..<commitFileCount).map { index in
+            let byte = commitFileStatuses[index]
+            return GitCommitFileItem(
+                id: index,
+                path: commitFilePaths[index],
+                status: byte == 0 ? "?" : String(UnicodeScalar(byte)),
+                insertions: Int(commitFileInsertions[index]),
+                deletions: Int(commitFileDeletions[index]),
+                selected: index == Int(snap.commit_file_selected)
+            )
+        }
+
+        let commitDetail: GitCommitDetailSnap? = snap.commit_detail_valid == 0 ? nil :
+            GitCommitDetailSnap(
+                hash: cStringField(snap.detail_hash),
+                shortHash: cStringField(snap.detail_short),
+                subject: cStringField(snap.detail_subject),
+                author: cStringField(snap.detail_author),
+                email: cStringField(snap.detail_email),
+                date: cStringField(snap.detail_date),
+                body: cStringField(snap.detail_body),
+                insertions: Int(snap.detail_insertions),
+                deletions: Int(snap.detail_deletions)
+            )
+
+        let stashCount = min(Int(snap.stash_count), Int(SUISEI_MAX_GIT_STASHES))
+        let stashes = withUnsafeBytes(of: snap.stashes) {
+            loadFixedStrings(stashCount, $0, stride: Int(SUISEI_GIT_WB_LINE))
+        }
+        let remoteCount = min(Int(snap.remote_count), Int(SUISEI_MAX_GIT_REMOTES))
+        let remoteNames = withUnsafeBytes(of: snap.remote_names) {
+            loadFixedStrings(remoteCount, $0, stride: Int(SUISEI_GIT_AUTHOR))
+        }
+        let remoteURLs = withUnsafeBytes(of: snap.remote_urls) {
+            loadFixedStrings(remoteCount, $0, stride: Int(SUISEI_GIT_PATH))
+        }
+        let remotes = (0..<remoteCount).map { index in
+            GitRemoteItem(id: index, name: remoteNames[index], url: remoteURLs[index])
+        }
+
         return GitWbSnap(
             open: true,
             docked: snap.docked != 0,
@@ -4346,7 +4871,18 @@ final class EngineBridge: ObservableObject {
             colChanges: colChanges,
             colLog: colLog,
             colFiles: colFiles,
-            special: special
+            special: special,
+            rootPath: cStringField(snap.root_path),
+            repositoryName: cStringField(snap.repository_name),
+            authorName: cStringField(snap.author_name),
+            authorEmail: cStringField(snap.author_email),
+            worktree: worktree,
+            history: history,
+            branches: branches,
+            commitFiles: commitFiles,
+            commitDetail: commitDetail,
+            stashes: stashes,
+            remotes: remotes
         )
     }
 
@@ -4362,27 +4898,48 @@ final class EngineBridge: ObservableObject {
             }
         }
         var rows: [SettingsRowItem] = []
-        let rn = Int(snap.row_count)
-        withUnsafeBytes(of: snap.row_labels) { labRaw in
-            withUnsafeBytes(of: snap.row_values) { valRaw in
-                withUnsafeBytes(of: snap.row_header) { hdrRaw in
-                    withUnsafeBytes(of: snap.row_selected) { selRaw in
-                        let lCap = Int(SUISEI_SETTINGS_LABEL)
-                        let vCap = Int(SUISEI_SETTINGS_VALUE)
-                        for i in 0..<min(rn, Int(SUISEI_MAX_SETTINGS_ROWS)) {
-                            let lb = labRaw.baseAddress!.advanced(by: i * lCap)
-                            let vb = valRaw.baseAddress!.advanced(by: i * vCap)
-                            rows.append(SettingsRowItem(
-                                id: i,
-                                label: String(cString: lb.assumingMemoryBound(to: CChar.self)),
-                                value: String(cString: vb.assumingMemoryBound(to: CChar.self)),
-                                isHeader: hdrRaw[i] != 0,
-                                selected: selRaw[i] != 0
-                            ))
-                        }
-                    }
-                }
-            }
+        let rn = min(Int(snap.row_count), Int(SUISEI_MAX_SETTINGS_ROWS))
+        let labels = withUnsafeBytes(of: snap.row_labels) { raw in
+            (0..<rn).map { readCString(at: raw.baseAddress!, offset: $0 * Int(SUISEI_SETTINGS_LABEL), cap: Int(SUISEI_SETTINGS_LABEL)) }
+        }
+        let values = withUnsafeBytes(of: snap.row_values) { raw in
+            (0..<rn).map { readCString(at: raw.baseAddress!, offset: $0 * Int(SUISEI_SETTINGS_VALUE), cap: Int(SUISEI_SETTINGS_VALUE)) }
+        }
+        let groups = withUnsafeBytes(of: snap.row_groups) { raw in
+            (0..<rn).map { readCString(at: raw.baseAddress!, offset: $0 * Int(SUISEI_SETTINGS_GROUP), cap: Int(SUISEI_SETTINGS_GROUP)) }
+        }
+        let details = withUnsafeBytes(of: snap.row_details) { raw in
+            (0..<rn).map { readCString(at: raw.baseAddress!, offset: $0 * Int(SUISEI_SETTINGS_DETAIL), cap: Int(SUISEI_SETTINGS_DETAIL)) }
+        }
+        let optionStrings = withUnsafeBytes(of: snap.row_options) { raw in
+            (0..<rn).map { readCString(at: raw.baseAddress!, offset: $0 * Int(SUISEI_SETTINGS_OPTIONS), cap: Int(SUISEI_SETTINGS_OPTIONS)) }
+        }
+        let kinds = withUnsafeBytes(of: snap.row_kind) { Array($0.bindMemory(to: UInt32.self)) }
+        let payloads = withUnsafeBytes(of: snap.row_payload) { Array($0.bindMemory(to: UInt32.self)) }
+        let pages = withUnsafeBytes(of: snap.row_page) { Array($0.bindMemory(to: UInt32.self)) }
+        let controls = withUnsafeBytes(of: snap.row_control) { Array($0.bindMemory(to: UInt32.self)) }
+        let valueIndices = withUnsafeBytes(of: snap.row_value_index) { Array($0.bindMemory(to: UInt32.self)) }
+        let headers = withUnsafeBytes(of: snap.row_header) { Array($0.bindMemory(to: UInt8.self)) }
+        let selected = withUnsafeBytes(of: snap.row_selected) { Array($0.bindMemory(to: UInt8.self)) }
+        let advanced = withUnsafeBytes(of: snap.row_advanced) { Array($0.bindMemory(to: UInt8.self)) }
+
+        for i in 0..<rn {
+            rows.append(SettingsRowItem(
+                id: i,
+                label: labels[i],
+                value: values[i],
+                isHeader: headers[i] != 0,
+                selected: selected[i] != 0,
+                kind: SettingKind(rawValue: kinds[i]) ?? .none,
+                payload: Int(payloads[i]),
+                page: SettingSurfacePage(rawValue: pages[i]) ?? .none,
+                group: groups[i],
+                control: SettingControlKind(rawValue: controls[i]) ?? .none,
+                detail: details[i],
+                options: optionStrings[i].split(separator: "|").map(String.init),
+                valueIndex: Int(valueIndices[i]),
+                advanced: advanced[i] != 0
+            ))
         }
         return SettingsSnap(
             open: snap.open != 0,

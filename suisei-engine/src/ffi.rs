@@ -568,7 +568,10 @@ pub extern "C" fn suisei_engine_chrome(
         let mut packed = 0usize;
         for (pi, pane) in chrome.panes.iter().take(pane_n).enumerate() {
             let start = packed as u32;
-            let take = pane.lines.len().min(SUISEI_MAX_LINES.saturating_sub(packed));
+            let take = pane
+                .lines
+                .len()
+                .min(SUISEI_MAX_LINES.saturating_sub(packed));
             packed += take;
             o.panes[pi] = SuiseiPaneC {
                 tab_index: pane.tab_index,
@@ -975,6 +978,17 @@ pub extern "C" fn suisei_engine_set_system_appearance(ptr: *mut SuiseiEngine, is
     }
 }
 
+/// Current native floating-chrome material. This is intentionally a tiny
+/// getter rather than another field in the large paint snapshot: changing the
+/// material invalidates SwiftUI chrome, not the editor's retained scene.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_glass_style(ptr: *const SuiseiEngine) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    u8::from(unsafe { &*ptr }.0.app().glass_style == "tinted")
+}
+
 /// Tell the engine a path moved on disk, so open tabs, the active file and the
 /// language server follow it. The face performs the filesystem call — it has
 /// native Trash and native drag payloads — and reports the result here.
@@ -1137,6 +1151,28 @@ pub extern "C" fn suisei_engine_find_set_input(ptr: *mut SuiseiEngine, input: *c
     let input = unsafe { CStr::from_ptr(input) }.to_string_lossy();
     unsafe {
         (*ptr).0.find_set_input(&input);
+    }
+}
+
+/// Accept the native find field without routing a generic Return key.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_find_accept(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.find_accept();
+    }
+}
+
+/// Cancel the native find field without routing a generic Escape key.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_find_cancel(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.find_cancel();
     }
 }
 
@@ -2030,6 +2066,9 @@ pub extern "C" fn suisei_engine_status_extra(
 pub const SUISEI_MAX_SETTINGS_ROWS: usize = 48;
 pub const SUISEI_SETTINGS_LABEL: usize = 96;
 pub const SUISEI_SETTINGS_VALUE: usize = 64;
+pub const SUISEI_SETTINGS_GROUP: usize = 48;
+pub const SUISEI_SETTINGS_DETAIL: usize = 192;
+pub const SUISEI_SETTINGS_OPTIONS: usize = 96;
 pub const SUISEI_MAX_SETTINGS_TABS: usize = 8;
 
 #[repr(C)]
@@ -2044,6 +2083,18 @@ pub struct SuiseiSettingsSnapshot {
     pub tabs: [[c_char; 24]; SUISEI_MAX_SETTINGS_TABS],
     pub row_header: [u8; SUISEI_MAX_SETTINGS_ROWS],
     pub row_selected: [u8; SUISEI_MAX_SETTINGS_ROWS],
+    /// What each row IS (`SettingRow::kind`), so the face can branch on the
+    /// row's identity rather than parse its label. 0 = prose, no setting.
+    pub row_kind: [u32; SUISEI_MAX_SETTINGS_ROWS],
+    /// Which theme / which language, for the indexed kinds.
+    pub row_payload: [u32; SUISEI_MAX_SETTINGS_ROWS],
+    pub row_page: [u32; SUISEI_MAX_SETTINGS_ROWS],
+    pub row_control: [u32; SUISEI_MAX_SETTINGS_ROWS],
+    pub row_value_index: [u32; SUISEI_MAX_SETTINGS_ROWS],
+    pub row_advanced: [u8; SUISEI_MAX_SETTINGS_ROWS],
+    pub row_groups: [[c_char; SUISEI_SETTINGS_GROUP]; SUISEI_MAX_SETTINGS_ROWS],
+    pub row_details: [[c_char; SUISEI_SETTINGS_DETAIL]; SUISEI_MAX_SETTINGS_ROWS],
+    pub row_options: [[c_char; SUISEI_SETTINGS_OPTIONS]; SUISEI_MAX_SETTINGS_ROWS],
     pub row_labels: [[c_char; SUISEI_SETTINGS_LABEL]; SUISEI_MAX_SETTINGS_ROWS],
     pub row_values: [[c_char; SUISEI_SETTINGS_VALUE]; SUISEI_MAX_SETTINGS_ROWS],
 }
@@ -2105,6 +2156,15 @@ pub extern "C" fn suisei_engine_settings(
     for (i, r) in s.rows.iter().take(rn).enumerate() {
         o.row_header[i] = u8::from(r.is_header);
         o.row_selected[i] = u8::from(r.selected);
+        o.row_kind[i] = r.kind;
+        o.row_payload[i] = r.payload;
+        o.row_page[i] = r.page;
+        o.row_control[i] = r.control;
+        o.row_value_index[i] = r.value_index;
+        o.row_advanced[i] = u8::from(r.advanced);
+        write_cstr(&mut o.row_groups[i], &r.group);
+        write_cstr(&mut o.row_details[i], &r.detail);
+        write_cstr(&mut o.row_options[i], &r.options);
         write_cstr(&mut o.row_labels[i], &r.label);
         write_cstr(&mut o.row_values[i], &r.value);
     }
@@ -2173,6 +2233,30 @@ pub extern "C" fn suisei_engine_settings_activate(ptr: *mut SuiseiEngine, row: u
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_settings_set_value(ptr: *mut SuiseiEngine, row: u32, value: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.settings_set_value(row, value);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_settings_set_highlight_color(
+    ptr: *mut SuiseiEngine,
+    value: *const c_char,
+) {
+    if ptr.is_null() || value.is_null() {
+        return;
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    unsafe {
+        (*ptr).0.settings_set_highlight_color(&value);
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_settings_goto_page(ptr: *mut SuiseiEngine, page: u32) {
     if ptr.is_null() {
         return;
@@ -2199,6 +2283,16 @@ pub const SUISEI_GRAPH_LINE: usize = 200;
 pub const SUISEI_GIT_WB_LINE: usize = 220;
 pub const SUISEI_MAX_GIT_CHIPS: usize = 9;
 pub const SUISEI_MAX_GIT_COL: usize = 64;
+pub const SUISEI_MAX_GIT_WORKTREE: usize = 160;
+pub const SUISEI_MAX_GIT_HISTORY: usize = 80;
+pub const SUISEI_MAX_GIT_BRANCHES: usize = 160;
+pub const SUISEI_MAX_GIT_FILES: usize = 160;
+pub const SUISEI_MAX_GIT_STASHES: usize = 40;
+pub const SUISEI_MAX_GIT_REMOTES: usize = 24;
+pub const SUISEI_GIT_PATH: usize = 320;
+pub const SUISEI_GIT_SUBJECT: usize = 240;
+pub const SUISEI_GIT_AUTHOR: usize = 96;
+pub const SUISEI_GIT_EMAIL: usize = 160;
 
 #[repr(C)]
 pub struct SuiseiScmSnapshot {
@@ -2236,6 +2330,51 @@ pub struct SuiseiGitWbSnapshot {
     pub col_log: [[c_char; SUISEI_GIT_WB_LINE]; SUISEI_MAX_GIT_COL],
     pub col_files: [[c_char; SUISEI_GIT_WB_LINE]; SUISEI_MAX_GIT_COL],
     pub special: [[c_char; SUISEI_GIT_WB_LINE]; SUISEI_MAX_GIT_COL],
+    // Structured native-window data. The legacy text columns above remain for
+    // the painted/TUI workbench, but SwiftUI must not reverse-parse them.
+    pub selected_change: u32,
+    pub worktree_count: u32,
+    pub history_count: u32,
+    pub history_selected: u32,
+    pub branch_count: u32,
+    pub branch_selected: u32,
+    pub commit_file_count: u32,
+    pub commit_file_selected: u32,
+    pub stash_count: u32,
+    pub remote_count: u32,
+    pub commit_detail_valid: u8,
+    pub root_path: [c_char; SUISEI_PATH_CAP],
+    pub repository_name: [c_char; SUISEI_GIT_AUTHOR],
+    pub author_name: [c_char; SUISEI_GIT_AUTHOR],
+    pub author_email: [c_char; SUISEI_GIT_EMAIL],
+    pub worktree_staged: [u8; SUISEI_MAX_GIT_WORKTREE],
+    pub worktree_status: [c_char; SUISEI_MAX_GIT_WORKTREE],
+    pub worktree_paths: [[c_char; SUISEI_GIT_PATH]; SUISEI_MAX_GIT_WORKTREE],
+    pub history_hashes: [[c_char; 48]; SUISEI_MAX_GIT_HISTORY],
+    pub history_shorts: [[c_char; 16]; SUISEI_MAX_GIT_HISTORY],
+    pub history_subjects: [[c_char; SUISEI_GIT_SUBJECT]; SUISEI_MAX_GIT_HISTORY],
+    pub history_authors: [[c_char; SUISEI_GIT_AUTHOR]; SUISEI_MAX_GIT_HISTORY],
+    pub history_whens: [[c_char; 64]; SUISEI_MAX_GIT_HISTORY],
+    pub branch_current: [u8; SUISEI_MAX_GIT_BRANCHES],
+    pub branch_remote: [u8; SUISEI_MAX_GIT_BRANCHES],
+    pub branch_names: [[c_char; SUISEI_GIT_PATH]; SUISEI_MAX_GIT_BRANCHES],
+    pub branch_upstreams: [[c_char; SUISEI_GIT_PATH]; SUISEI_MAX_GIT_BRANCHES],
+    pub commit_file_status: [c_char; SUISEI_MAX_GIT_FILES],
+    pub commit_file_insertions: [u32; SUISEI_MAX_GIT_FILES],
+    pub commit_file_deletions: [u32; SUISEI_MAX_GIT_FILES],
+    pub commit_file_paths: [[c_char; SUISEI_GIT_PATH]; SUISEI_MAX_GIT_FILES],
+    pub detail_hash: [c_char; 48],
+    pub detail_short: [c_char; 16],
+    pub detail_subject: [c_char; SUISEI_GIT_SUBJECT],
+    pub detail_author: [c_char; SUISEI_GIT_AUTHOR],
+    pub detail_email: [c_char; SUISEI_GIT_EMAIL],
+    pub detail_date: [c_char; 64],
+    pub detail_body: [c_char; 512],
+    pub detail_insertions: u32,
+    pub detail_deletions: u32,
+    pub stashes: [[c_char; SUISEI_GIT_WB_LINE]; SUISEI_MAX_GIT_STASHES],
+    pub remote_names: [[c_char; SUISEI_GIT_AUTHOR]; SUISEI_MAX_GIT_REMOTES],
+    pub remote_urls: [[c_char; SUISEI_GIT_PATH]; SUISEI_MAX_GIT_REMOTES],
 }
 
 #[unsafe(no_mangle)]
@@ -2354,7 +2493,183 @@ pub extern "C" fn suisei_engine_git_wb(
     o.log_count = pack(&mut o.col_log, &g.col_log);
     o.files_count = pack(&mut o.col_files, &g.col_files);
     o.special_count = pack(&mut o.special, &g.special);
+
+    let model = &eng.0.app.git_wb;
+    o.selected_change = model.selected as u32;
+    if let Some(root) = model.root.as_ref() {
+        write_cstr(&mut o.root_path, &root.display().to_string());
+        let repository = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Repository");
+        write_cstr(&mut o.repository_name, repository);
+    }
+    write_cstr(&mut o.author_name, &model.author_name);
+    write_cstr(&mut o.author_email, &model.author_email);
+
+    for (index, entry) in model
+        .staged
+        .iter()
+        .chain(model.changes.iter())
+        .take(SUISEI_MAX_GIT_WORKTREE)
+        .enumerate()
+    {
+        o.worktree_staged[index] = u8::from(entry.staged);
+        o.worktree_status[index] = entry.status.letter() as c_char;
+        write_cstr(&mut o.worktree_paths[index], &entry.path);
+        o.worktree_count += 1;
+    }
+
+    o.history_selected = model.history_sel as u32;
+    for (index, commit) in model
+        .commits
+        .iter()
+        .take(SUISEI_MAX_GIT_HISTORY)
+        .enumerate()
+    {
+        write_cstr(&mut o.history_hashes[index], &commit.hash);
+        write_cstr(&mut o.history_shorts[index], &commit.short);
+        write_cstr(&mut o.history_subjects[index], &commit.subject);
+        write_cstr(&mut o.history_authors[index], &commit.author);
+        write_cstr(&mut o.history_whens[index], &commit.when);
+        o.history_count += 1;
+    }
+
+    o.branch_selected = model.branch_sel as u32;
+    for (index, branch) in model
+        .branches
+        .iter()
+        .take(SUISEI_MAX_GIT_BRANCHES)
+        .enumerate()
+    {
+        o.branch_current[index] = u8::from(branch.current);
+        o.branch_remote[index] = u8::from(branch.remote);
+        write_cstr(&mut o.branch_names[index], &branch.name);
+        if let Some(upstream) = branch.upstream.as_ref() {
+            write_cstr(&mut o.branch_upstreams[index], upstream);
+        }
+        o.branch_count += 1;
+    }
+
+    o.commit_file_selected = model.commit_file_sel as u32;
+    if let Some(detail) = model.commit_detail.as_ref() {
+        o.commit_detail_valid = 1;
+        write_cstr(&mut o.detail_hash, &detail.hash);
+        write_cstr(&mut o.detail_short, &detail.short);
+        write_cstr(&mut o.detail_subject, &detail.subject);
+        write_cstr(&mut o.detail_author, &detail.author);
+        write_cstr(&mut o.detail_email, &detail.email);
+        write_cstr(&mut o.detail_date, &detail.date);
+        write_cstr(&mut o.detail_body, &detail.body);
+        o.detail_insertions = detail.insertions;
+        o.detail_deletions = detail.deletions;
+        for (index, file) in detail.files.iter().take(SUISEI_MAX_GIT_FILES).enumerate() {
+            o.commit_file_status[index] = file.status as c_char;
+            o.commit_file_insertions[index] = file.insertions;
+            o.commit_file_deletions[index] = file.deletions;
+            write_cstr(&mut o.commit_file_paths[index], &file.path);
+            o.commit_file_count += 1;
+        }
+    }
+
+    for (index, stash) in model
+        .stashes
+        .iter()
+        .take(SUISEI_MAX_GIT_STASHES)
+        .enumerate()
+    {
+        write_cstr(&mut o.stashes[index], stash);
+        o.stash_count += 1;
+    }
+    for (index, (name, url)) in model
+        .remotes
+        .iter()
+        .take(SUISEI_MAX_GIT_REMOTES)
+        .enumerate()
+    {
+        write_cstr(&mut o.remote_names[index], name);
+        write_cstr(&mut o.remote_urls[index], url);
+        o.remote_count += 1;
+    }
     1
+}
+
+/// Monotonic token for the complete Git workbench diff payload.
+///
+/// The regular workbench snapshot intentionally stays small because it is
+/// sampled with the rest of the chrome. The GUI compares this token and only
+/// pulls the complete diff when it actually changes.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_diff_generation(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).0.app.git_wb.diff_generation }
+}
+
+/// Monotonic invalidation token for the structured native workbench model.
+/// Unlike `frame_gen`, this does not move for editor paint, terminal or LSP
+/// activity, so frontends can avoid copying `SuiseiGitWbSnapshot` on those
+/// unrelated frames.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_generation(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).0.git_wb_generation() }
+}
+
+/// Bytes required for all raw diff lines encoded as consecutive NUL-terminated
+/// UTF-8 strings. This preserves arbitrarily long source lines; a fixed stride
+/// would merely move the old 220-byte truncation to another magic number.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_diff_byte_count(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let lines = unsafe { &(*ptr).0.app.git_wb.diff_lines };
+    lines.iter().fold(0_u64, |total, line| {
+        total
+            .saturating_add(line.text.len() as u64)
+            .saturating_add(1)
+    })
+}
+
+/// Copy the complete diff into `out` as consecutive NUL-terminated UTF-8
+/// strings. Returns zero when the supplied buffer is too small, so callers
+/// never observe a partial final line.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_diff_copy(
+    ptr: *const SuiseiEngine,
+    out: *mut c_char,
+    capacity: u64,
+) -> u64 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let Ok(capacity) = usize::try_from(capacity) else {
+        return 0;
+    };
+    let lines = unsafe { &(*ptr).0.app.git_wb.diff_lines };
+    let Some(required) = lines.iter().try_fold(0_usize, |total, line| {
+        total.checked_add(line.text.len() + 1)
+    }) else {
+        return 0;
+    };
+    if capacity < required {
+        return 0;
+    }
+
+    let dst = unsafe { std::slice::from_raw_parts_mut(out.cast::<u8>(), capacity) };
+    let mut offset = 0_usize;
+    for line in lines {
+        let bytes = line.text.as_bytes();
+        dst[offset..offset + bytes.len()].copy_from_slice(bytes);
+        offset += bytes.len();
+        dst[offset] = 0;
+        offset += 1;
+    }
+    offset as u64
 }
 
 #[unsafe(no_mangle)]
@@ -2413,6 +2728,128 @@ pub extern "C" fn suisei_engine_git_wb_select_special(ptr: *mut SuiseiEngine, ro
     unsafe {
         (*ptr).0.git_wb_select_special(row);
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_select_branch_history(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_select_branch_history(row) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_refresh_window(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_refresh_window() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_toggle_stage(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_toggle_stage(row) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_stage_all(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_stage_all() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_unstage_all(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_unstage_all() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_commit(
+    ptr: *mut SuiseiEngine,
+    message: *const c_char,
+    amend: u8,
+) {
+    if ptr.is_null() || message.is_null() {
+        return;
+    }
+    let Ok(message) = unsafe { CStr::from_ptr(message) }.to_str() else {
+        return;
+    };
+    unsafe { (*ptr).0.git_wb_commit(message, amend != 0) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_stash(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_stash() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_discard_change(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_discard_change(row) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_open_window(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_open_window() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_focus_window(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_focus_window() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_close_window(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_close_window() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_checkout_selected_branch(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_checkout_selected_branch() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_create_branch(ptr: *mut SuiseiEngine, name: *const c_char) {
+    if ptr.is_null() || name.is_null() {
+        return;
+    }
+    let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
+        return;
+    };
+    unsafe { (*ptr).0.git_wb_create_branch(name) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_git_wb_delete_selected_branch(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.git_wb_delete_selected_branch() }
 }
 
 pub const SUISEI_MAX_BREAKPOINTS: usize = 128;
@@ -3082,6 +3519,35 @@ mod tests {
         let bytes: &[u8] = unsafe { std::slice::from_raw_parts(dst.as_ptr() as *const u8, 4) };
         assert_eq!(&bytes[..3], b"abc");
         assert_eq!(bytes[3], 0);
+    }
+
+    #[test]
+    fn git_diff_copy_preserves_all_lines_and_long_utf8_content() {
+        use suisei_core::git_ops::{DiffLine, DiffLineKind};
+
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        let long_line = format!("+{}", "긴줄🙂".repeat(180));
+        engine.0.app.git_wb.diff_lines = vec![
+            DiffLine::new(DiffLineKind::Header, "diff --git a/a b/a"),
+            DiffLine::new(DiffLineKind::Add, long_line.clone()),
+            DiffLine::new(DiffLineKind::Context, " final line"),
+        ];
+
+        let required = suisei_engine_git_wb_diff_byte_count(&*engine);
+        assert!(required > SUISEI_GIT_WB_LINE as u64);
+        let mut bytes = vec![0 as c_char; required as usize];
+        let copied = suisei_engine_git_wb_diff_copy(&*engine, bytes.as_mut_ptr(), required);
+        assert_eq!(copied, required);
+
+        let raw = bytes.into_iter().map(|byte| byte as u8).collect::<Vec<_>>();
+        let decoded = raw
+            .split(|byte| *byte == 0)
+            .filter(|line| !line.is_empty())
+            .map(|line| String::from_utf8(line.to_vec()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[1], long_line);
+        assert_eq!(decoded[2], " final line");
     }
 
     #[test]

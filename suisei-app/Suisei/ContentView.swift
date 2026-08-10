@@ -32,6 +32,14 @@ private enum GitWorkbenchCompactPage {
     case diff
 }
 
+private struct GitBranchRow: Identifiable {
+    let id: Int
+    let name: String
+    let selected: Bool
+    let current: Bool
+    let remote: Bool
+}
+
 
 
 
@@ -52,6 +60,10 @@ struct ContentView: View {
     @State private var gitWorkbenchContextW: Double = 288
     @State private var gitWorkbenchCompactPage: GitWorkbenchCompactPage = .master
     @State private var gitWorkbenchContextVisible = false
+    @State private var showGitNewBranchDialog = false
+    @State private var gitNewBranchName = ""
+    @State private var showGitBranchDeletionConfirmation = false
+    @State private var pendingGitBranchDeletion = ""
     /// Xcode-like navigator mode (icon rail).
     @State private var navMode: NavMode = .project
     @State private var inspectorMode: InspectorMode = .outline
@@ -75,202 +87,82 @@ struct ContentView: View {
     @Namespace private var tabPillSpace
     /// Tab currently held by a drag, nil otherwise.
     @State private var draggingTab: Int? = nil
-    /// Chip rects in the strip's space, keyed by STABLE document/layout id.
-    ///
-    /// Slot indices are reused while grouped chips collapse into a unified
-    /// chip. Keying this cache by slot let the outgoing view's `onDisappear`
-    /// erase the incoming view's freshly measured frame, which is why the
-    /// grouped grey container could randomly vanish on the reverse transition.
-    @State private var tabFrames: [UInt64: CGRect] = [:]
-    /// Historical member positions survive the unified presentation, where
-    /// the member views temporarily do not exist. They give the reverse
-    /// transition a real origin instead of making each chip fade in where it
-    /// will finish.
-    @State private var rememberedTabFrames: [UInt64: CGRect] = [:]
-    /// Last measured centre of each layout, whether represented as a grouped
-    /// run or as one unified chip.
-    @State private var layoutTransitionCenters: [UInt64: CGFloat] = [:]
-    /// Companion width for the persistent layout shape. Keeping this across
-    /// grouped/unified replacement bridges the one render pass before the
-    /// incoming chip reports its geometry.
-    @State private var layoutTransitionWidths: [UInt64: CGFloat] = [:]
-    /// `tabFrames` are measured in the chip row's OWN local space
-    /// (`chipRowSpace`) so the grouped-layout band — drawn as a background ON
-    /// that row — needs no origin correction and cannot be thrown off when the
-    /// centered ScrollView re-centers a shrinking row. Correcting the band by a
-    /// separately-measured origin lagged the frames by a pass, and on merge (a
-    /// big re-center shift) the band overshot to the right before catching up —
-    /// the "파란 알약이 오른쪽으로 튄다" jump.
-    ///
-    /// Hit-testing converts INTO this space via `chipRowOrigin`. That origin is
-    /// published by its own `.onGeometryChange` and so lands a layout pass late,
-    /// which is a live suspect for clicks landing on the wrong chip right after
-    /// the row re-centres (merge / unfold / detach). Publishing a second,
-    /// strip-space frame per chip to remove the conversion was tried and
-    /// REVERTED: it left grouped working but broke switching out of a merged
-    /// layout entirely, so the conversion is not the whole story. Needs a
-    /// logging build, not another blind swap.
-    ///
-    /// Chip frames in the STRIP's coordinate space — what hit-testing uses.
-    ///
-    /// Hit points arrive from `TabStripMouse` in strip space. They used to be
-    /// converted into the chip row's space with `chipRowOrigin`, which is
-    /// published by its OWN `.onGeometryChange` and therefore carries a
-    /// different timestamp than the chip frames it was being combined with.
-    /// Measured with `SUISEI_TABLOG=1`, two clicks of one double-click gesture
-    /// at an unchanged pointer position resolved to different chips because the
-    /// origin moved 187 -> 14 between them: a 173pt error, about one and a half
-    /// chips. Publishing the frame already in strip space removes the second
-    /// timestamp, and with it the whole class of bug.
-    ///
-    /// `tabFrames` stays in row space for the grouped band, which wants it.
-    @State private var tabHitFrames: [UInt64: CGRect] = [:]
 
-    /// Origin of the chip row inside `tabStripSpace`.
-    ///
-    /// Hit-test points arrive in strip space; `tabFrames` are in the row's own
-    /// space, so they are reconciled here. Not `@State`: this changes on every
-    /// frame of a horizontal scroll and only the mouse-handler closures read it,
-    /// so an observable write would rebuild the whole body per frame.
-    private final class ChipRowOrigin { var value: CGPoint = .zero }
-    @State private var chipRowOriginBox = ChipRowOrigin()
-    private var chipRowOrigin: CGPoint { chipRowOriginBox.value }
 
     /// Width of the "+" button's slot.
     static let tabPlusW: CGFloat = 22
+    /// One shared height for jump bars and navigator selection chrome.
+    static let editorHeaderHeight: CGFloat = 26
 
-    /// Leading inset that puts the "+" just past the last chip.
-    ///
-    /// The chips are centred in a viewport pinned to `maxWidth`, so their
-    /// trailing edge sits at `(maxWidth + contentWidth) / 2` — the leading and
-    /// trailing edge-fade paddings are equal and cancel. Clamped so a strip that
-    /// has outgrown its viewport parks the button at the right edge instead of
-    /// pushing it out of view.
-    private func plusLeading(maxWidth: CGFloat) -> CGFloat {
-        let content = min(maxWidth, tabStripContentWidth)
-        let trailing = (maxWidth + content) / 2
-        return min(max(0, trailing + 2), max(0, maxWidth - Self.tabPlusW))
-    }
-
-    /// The chip row's own width, measured before the edge padding.
-    ///
-    /// Restored after being deleted as "unread": it was unread only because the
-    /// viewport had just been pinned to `maxWidth` to stop a 93pt jump on merge,
-    /// which orphaned its two readers. Pinning the viewport is right — but it
-    /// also stranded the "+" at the far end of a full-width scroller, because
-    /// the button is a sibling AFTER the ScrollView. This width is what lets the
-    /// "+" find the chips again without unpinning anything.
-    @State private var tabStripContentWidth: CGFloat = 0
 
     static let tabStripSpace = "suisei.tabstrip"
-    /// The chip row's own space. Re-centering moves the row, not the chips
-    /// within it, so band geometry measured here is immune to the merge jump.
-    static let chipRowSpace = "suisei.chiprow"
 
-    /// Which chip sits under `x`. Used for CLICKS, where "contains" is right.
+    /// Dispatch a chip click through the model (spec §3).
     ///
-    /// Walks the LIVE tabs and looks each one's frame up by key. It must not be
-    /// written the other way round — as `tabFrames.first(where: contains(x))` —
-    /// for two reasons, and that form caused two separate reported bugs:
-    ///
-    /// 1. `Dictionary.first(where:)` has **no defined iteration order**. When
-    ///    two frames contain the same x, the winner is arbitrary and can differ
-    ///    between runs. Clicking one chip in a grouped layout could therefore
-    ///    resolve to a different chip entirely — navigating to the wrong
-    ///    document, and showing the wrong hover tooltip, because both go
-    ///    through here.
-    /// 2. `tabFrames` can outlive the strip. Merging a layout removes its
-    ///    member chips from `chrome.tabs`, but an in-flight `onGeometryChange`
-    ///    can re-record a member's frame *after* `pruneTabFrames` has run, and
-    ///    nothing prunes it again until the presentation key next changes. A
-    ///    stale frame that wins the scan maps to a `stableId` no longer in
-    ///    `tabs`, the lookup returns nil, and the click silently does nothing —
-    ///    which is why a merged layout appeared to trap the whole strip.
-    ///
-    /// Driving the scan from `chrome.tabs` fixes both: the order is the strip's
-    /// own, and a frame belonging to no live tab can never be selected.
-    /// The computed layout, built from chip metrics rather than measured.
-    ///
-    /// Not yet authoritative: it runs beside the measured frames so
-    /// `TabLog.compare` can report whether the derived widths match what
-    /// SwiftUI actually laid out. Switching hit-testing onto a formula that is
-    /// off by a few points would mis-aim every click — worse than the race it
-    /// replaces — so the numbers decide, not the theory.
-    private func computedStripLayout(viewportWidth: CGFloat) -> TabStripLayout {
-        let tabs = engine.chrome.tabs
-        return TabStripLayout(
-            tabs: tabs.map { (stableId: $0.stableId, group: $0.group) },
-            viewportWidth: viewportWidth,
-            scrollOffset: max(0, -chipRowOrigin.x),
-            widthFor: { slot in
-                let t = tabs[slot]
-                return TabChipMetrics.width(
-                    title: t.title,
-                    active: t.active,
-                    isLayout: t.isLayout,
-                    deleted: t.deleted
-                )
+    /// Replaces `selectTabChip`'s three-way branch, whose
+    /// `isLayoutDeskActive || editorSplit.isSplit` condition was a guess
+    /// standing in for an undecided rule. The rule is decided now, so the
+    /// branch is a lookup.
+    private func applyStripClick(chip stableId: UInt64) {
+        switch stripModel.click(chip: stableId) {
+        case .focusDocument(let id):
+            engine.gotoTabId(id)
+        case .focusMember(let id, let group):
+            // "Focus within the layout" has to say what happens when the
+            // layout is not the arrangement currently on screen. I read the
+            // spec's "arrangement unchanged" as plain `gotoTabId` and deleted
+            // the branch below, calling it a guess. It was not a guess — it
+            // carries two constraints, and dropping it broke both:
+            //
+            // * a parked layout must be INSTALLED, or its split never appears;
+            // * installing sets `App::active_layout`, and `unfold_layout` bails
+            //   on `active_layout == None` — so grouped ⇄ loose stopped working
+            //   entirely (suisei-core/src/layouts.rs).
+            //
+            // The one case that must NOT activate is a free multi-pane split
+            // the user built themselves: replacing it with the parked tree
+            // discards their arrangement.
+            if engine.activeLayoutId == group {
+                // Already the arrangement on screen: move focus, touch nothing.
+                engine.gotoTabId(id)
+            } else if engine.editorSplit.isSplit && !engine.isLayoutDeskActive {
+                // A split the user built themselves. Installing a parked tree
+                // over it would discard their arrangement.
+                engine.gotoTabId(id)
+            } else {
+                // Nothing of this layout's is on screen — including the case
+                // where a DIFFERENT layout owns the desk. Install it.
+                //
+                // This used to read `isLayoutDeskActive || isSplit`, which
+                // only asked whether SOME layout was active. With a merged
+                // layout A on screen, clicking a member of a grouped layout
+                // (B C) took the focus-in-place branch; core then saw a target
+                // outside the active layout, parked A, and collapsed the desk
+                // to one pane. So the first click showed B alone and the
+                // SECOND click — with no layout active by then — finally
+                // installed the split. Which layout is active is the question,
+                // not whether one is.
+                engine.activateLayout(group, focusDoc: id)
             }
-        )
+        case .activateLayout(let id):
+            engine.activateLayout(id)
+        case nil:
+            // A chip that is not on the strip — while merged, a member id lands
+            // here. Opaque means opaque: do nothing rather than guess.
+            break
+        }
     }
 
-    private func tabSlot(at x: CGFloat) -> Int? {
-        defer {
-            TabLog.dump(x: x, origin: chipRowOrigin, frames: tabHitFrames, tabs: engine.chrome.tabs)
-            if TabLog.enabled, !engine.chrome.tabs.isEmpty {
-                // Compare against the frames SwiftUI reported. Widths are
-                // space-independent, so a width mismatch is a formula error;
-                // an x mismatch with matching widths is an origin error.
-                let measured = engine.chrome.tabs.compactMap { t -> (slot: Int, x: CGFloat, w: CGFloat)? in
-                    guard let r = tabHitFrames[t.stableId] else { return nil }
-                    return (t.id, r.minX, r.width)
-                }
-                let viewport = measured.isEmpty ? 0 : (measured.map(\.x).min() ?? 0)
-                    + (measured.map { $0.x + $0.w }.max() ?? 0)
-                let computed = computedStripLayout(viewportWidth: max(1, viewport))
-                    .chips
-                    .map { (slot: $0.slot, x: $0.x, w: $0.width) }
-                TabLog.compare(computed: computed, measured: measured)
-            }
+    /// Dispatch a close through the model (spec §5).
+    private func applyStripClose(chip stableId: UInt64) {
+        switch stripModel.close(chip: stableId) {
+        case .closeDocument(let id):
+            engine.closeTabId(id)
+        case .dropLayout(let id):
+            engine.dropLayout(id)
+        case nil:
+            break
         }
-        var best: (slot: Int, width: CGFloat)?
-        for tab in engine.chrome.tabs {
-            guard let r = tabHitFrames[tab.stableId], r.minX <= x, x <= r.maxX else { continue }
-            // Narrowest match wins, so a wide container can never beat the chip
-            // drawn inside it.
-            if best == nil || r.width < best!.width {
-                best = (tab.id, r.width)
-            }
-        }
-        return best?.slot
-    }
-
-    /// One-step neighbour swap while dragging, decided by the neighbour's
-    /// MIDPOINT rather than its bounds.
-    ///
-    /// `tabSlot(at:)` swaps the moment the cursor touches a neighbour's edge —
-    /// and the swap moves the chips, which puts the cursor back over the
-    /// original, which swaps it straight back. That oscillation is the shake
-    /// when a dragged tab sits ambiguously over another. Requiring the cursor
-    /// to pass the neighbour's midpoint is stable: once the swap lands, the
-    /// next midpoint is a whole chip away, so there is no return trip.
-    ///
-    /// One step at a time, so a fast drag walks the chips instead of teleporting
-    /// past the ones it crossed.
-    private func tabDragTarget(held: Int, x: CGFloat) -> Int? {
-        let tabs = engine.chrome.tabs
-        if let next = tabs.first(where: { $0.id == held + 1 }),
-           let frame = tabHitFrames[next.stableId],
-           x > frame.midX {
-            return held + 1
-        }
-        if held > 0,
-           let prev = tabs.first(where: { $0.id == held - 1 }),
-           let frame = tabHitFrames[prev.stableId],
-           x < frame.midX {
-            return held - 1
-        }
-        return nil
     }
 
     /// While the pill is in flight (click travel or drag) it turns to Liquid
@@ -294,6 +186,21 @@ struct ContentView: View {
     @State private var liveResizeSize: CGSize = .zero
     /// Measured tab-chip row width (exact centering in the titlebar).
     @State private var tabStripHover = false
+    /// Slot under the pointer, from the SAME hit test clicks use.
+    ///
+    /// Not each chip's own `.onHover`: that is SwiftUI's hit-testing, a second
+    /// authority that disagreed with the click path — hovering one chip
+    /// highlighted and selected another. Spec §4 requires one lookup.
+    @State private var hoveredSlot: Int? = nil
+    /// Horizontal scroll position of the chip run.
+    ///
+    /// A `StateObject`, not `@State`: this changes on every wheel tick, and as
+    /// a published property on a small object it invalidates only what reads
+    /// it. It replaces the `ScrollView` that used to own this privately and
+    /// report it back a pass late as `chipRowOrigin`.
+    @StateObject private var tabScroll = TabStripScroll()
+    /// The strip's entry model — see docs/SUISEI-TAB-STRIP-BEHAVIOUR.md.
+    private var stripModel: TabStripModel { TabStripModel(tabs: engine.chrome.tabs) }
     @State private var plusBridge = PlusMenuBridge()
     /// Background code-file warm-up for the project's master directory.
     @StateObject private var projectIndex = ProjectIndex()
@@ -357,7 +264,38 @@ struct ContentView: View {
 
     // Live theme from Core (`engine.chrome.theme`) — updates when settings apply.
     private var theme: ThemeSnap { engine.chrome.theme }
-    private var editorBg: Color { theme.color(theme.editorBg) }
+
+    /// The editor's own surface — the system's text-content colour, resolved
+    /// against the theme's light/dark, exactly as the Git workbench does it.
+    ///
+    /// This used to be `theme.editorBg`, an authored near-black that put the
+    /// theme's near-white text at a contrast the workbench never shows. Taking
+    /// the surface from AppKit instead makes the two windows one app, and it
+    /// tracks the platform: `.textBackgroundColor` moves with Increase
+    /// Contrast and with whatever macOS decides a content surface is, which an
+    /// authored constant cannot.
+    ///
+    /// Only the SURFACES move. Syntax colours stay the theme's — those are the
+    /// theme.
+    private var editorBg: Color { Color(nsColor: Self.systemSurface(light: isLightTheme)) }
+
+    /// `.textBackgroundColor` and friends are dynamic: they answer differently
+    /// per `NSAppearance`. The chrome's light/dark is the theme's, not the
+    /// system's, so they are resolved explicitly against it — otherwise a dark
+    /// theme under a light system paints a white editor.
+    private static func systemSurface(light: Bool) -> NSColor {
+        resolve(.textBackgroundColor, light: light)
+    }
+
+    private static func resolve(_ color: NSColor, light: Bool) -> NSColor {
+        let appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+        var out = color
+        appearance?.performAsCurrentDrawingAppearance {
+            out = color.usingColorSpace(.sRGB) ?? color
+        }
+        return out
+    }
+
     /// GUI contrast boost: TUI colors wash out on Retina; push fg/dim for readability.
     private var isLightTheme: Bool {
         let c = theme.editorBg
@@ -604,13 +542,12 @@ struct ContentView: View {
         .onChange(of: engine.chrome.search.open) { _, open in
             if open { engine.reclaimKeyboardFromTextFields() }
         }
-        .onChange(of: engine.chrome.gitWb.open) { _, _ in
-            gitWorkbenchCompactPage = .master
-            gitWorkbenchContextVisible = false
-        }
-        .onChange(of: engine.chrome.gitWb.tabIndex) { _, _ in
-            gitWorkbenchCompactPage = .master
-            gitWorkbenchContextVisible = false
+        .onChange(of: engine.gitWorkbenchWindowOpen) { _, open in
+            if open {
+                openWindow(id: "git-workbench")
+            } else {
+                dismissWindow(id: "git-workbench")
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willStartLiveResizeNotification)) { note in
             guard let w = note.object as? NSWindow, isEditorWindow(w) else { return }
@@ -627,6 +564,10 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
             guard let w = note.object as? NSWindow, isEditorWindow(w) else { return }
             ContentView.applyTrafficLightInset(w)
+            // The Git model may stay open in its own window. Returning to an
+            // editor window must nevertheless return keyboard ownership to the
+            // editor instead of leaving Core in GitWorkbench mode.
+            engine.ensureEditorFocus()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEndLiveResizeNotification)) { note in
             guard let w = note.object as? NSWindow, isEditorWindow(w) else { return }
@@ -643,6 +584,7 @@ struct ContentView: View {
             }
         )
         .foregroundStyle(.primary)
+        .tint(accent)
         // Chrome UI uses a fixed size — Cmd+/- only zooms the editor canvas (EditorMetrics).
         .font(.system(size: 13, weight: .regular))
         .preferredColorScheme(isLightTheme ? .light : .dark)
@@ -742,10 +684,13 @@ struct ContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .suiseiOpenSettingsWindow)) { _ in
-            if !engine.chrome.settings.open {
-                engine.openSettings()
-            }
+            // The command/toolbar sender already opened Core. This notification
+            // only presents (or raises) the independent native window.
             openWindow(id: "settings")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .suiseiOpenGitWorkbenchWindow)) { _ in
+            engine.openGitWorkbenchWindow()
+            openWindow(id: "git-workbench")
         }
         .onReceive(NotificationCenter.default.publisher(for: .suiseiNavProject)) { _ in
             navMode = .project
@@ -789,11 +734,7 @@ struct ContentView: View {
     /// that want to sit in the middle of the EDITOR offset by the difference
     /// between this and `inspectorReserved`.
     private var navigatorPresented: Bool {
-        // A Full Workbench already supplies its own master list. Temporarily
-        // slide the Project navigator away instead of creating a second master;
-        // `uiNavVisible` is left untouched so closing Git restores the user's
-        // previous navigator state.
-        engine.uiNavVisible && !engine.chrome.gitWb.open
+        engine.uiNavVisible
     }
 
     private var navReserved: CGFloat {
@@ -805,9 +746,8 @@ struct ContentView: View {
         outlineVisible ? CGFloat(inspectorW) + ContentView.panelGap : 0
     }
 
-    /// Outline shows unless the git workbench owns the editor slot.
     private var outlineVisible: Bool {
-        engine.uiInspectorVisible && !engine.chrome.gitWb.open
+        engine.uiInspectorVisible
     }
 
     /// Is this one of OUR document windows?
@@ -887,10 +827,17 @@ struct ContentView: View {
     // MARK: - Xcode-like shell (flat panes, native sidebar/inspector)
 
     /// Chrome base slightly separated from the editor fill.
+    /// Everything around the editor — the same surface the Git workbench's
+    /// window uses.
+    ///
+    /// This was `editorBg` darkened by 16% in dark mode, so the shell was
+    /// always further from the content than macOS puts it, and the whole window
+    /// read as higher contrast than a native one. `.windowBackgroundColor` sits
+    /// LIGHTER than `.textBackgroundColor` in dark mode, which is the direction
+    /// AppKit actually goes: chrome recedes by being nearer the mid grey, not
+    /// by going blacker.
     private var shellBase: Color {
-        isLightTheme
-            ? mixColor(editorBg, .black, 0.03)
-            : mixColor(editorBg, .black, 0.16)
+        Color(nsColor: Self.resolve(.windowBackgroundColor, light: isLightTheme))
     }
 
     /// Sidebar column — navigator strip on top, flat content below.
@@ -913,6 +860,30 @@ struct ContentView: View {
             dockedNavigator
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        // The Git workbench's sidebar is a `List(.listStyle(.sidebar))`, and
+        // THAT is where its material comes from — not from `NavigationSplitView`,
+        // which gives the column geometry and nothing else. This navigator is a
+        // plain `ScrollView` (800 lines of custom rows, rename, drag-drop,
+        // expansion state), so it had no material at all.
+        //
+        // `behindWindow: true` is the load-bearing part. A real Mac sidebar
+        // samples what is behind the WINDOW, not the window's own content —
+        // which is why the workbench's sidebar visibly takes a cast from the
+        // wallpaper. `.withinWindow` cannot do that and reads as a flat tint;
+        // this file's own `WithinWindowBlur` doc says so, measured against
+        // Xcode, and it was written for exactly this call site and then never
+        // wired up.
+        //
+        // `light:` pins the material to the THEME, so a dark theme under a
+        // light system does not paint a white column.
+        .background(
+            WithinWindowBlur(
+                material: .sidebar,
+                light: isLightTheme,
+                behindWindow: true
+            )
+            .ignoresSafeArea()
+        )
     }
 
     /// Detail column: editor stage (+ outline card) + status line.
@@ -1272,8 +1243,10 @@ struct ContentView: View {
         // selected pill was y≈58. Keep the rail's total 40pt layout height
         // (and therefore Project's position) but move only its chrome/content
         // down by the measured 5pt.
-        .padding(.top, 11)
-        .padding(.bottom, 1)
+        // Keep the 40pt strip slot, but align its 26pt selection capsule with
+        // the editor's 26pt jump bar instead of bottom-aligning it 5pt lower.
+        .padding(.top, 5)
+        .padding(.bottom, 5)
         // Post-build ink audit: the rail glyphs still centred at y=61 while
         // the jump-bar glyphs centred at y=63. A render-only offset closes
         // that final 2px without moving Project or changing the 40pt layout.
@@ -1285,7 +1258,7 @@ struct ContentView: View {
     /// mismatch shows up as glyphs sitting off-centre in their own chrome.
     private enum NavStrip {
         static let iconW: CGFloat = 28
-        static let iconH: CGFloat = 24
+        static let iconH: CGFloat = ContentView.editorHeaderHeight
         /// Breathing room between the icons and the pill's edge.
         static let inset: CGFloat = 2
         /// Gap in the LAYOUT once separated. The two halves each wrap their
@@ -1321,103 +1294,7 @@ struct ContentView: View {
         static let settle: Animation = .spring(duration: 0.4, bounce: 0)
     }
 
-    /// One navigator-strip glyph. The selection capsule FILLS the slot it was
-    /// given rather than staying a fixed `iconW` — as the rail widens and the
-    /// icons spread, the blue pill has to spread with them or it reads as a
-    /// button that forgot to grow (Xcode's does grow). `iconW` survives only as
-    /// the floor the toggle shrinks to once the pill splits.
-    /// Contiguous runs of chips belonging to one folded layout, with the
-    /// measured x-span of each run.
-    ///
-    /// Derived from the chip frames the drag already measures, so the grouped
-    /// container is exact rather than arithmetic that has to agree with the
-    /// layout — the same reasoning that fixed the three-pane clipping.
-    struct LayoutRun: Identifiable, Equatable {
-        var group: UInt64
-        var minX: CGFloat
-        var maxX: CGFloat
-        var unified: Bool = false
-        var id: UInt64 { group }
-    }
 
-    private func layoutGroupRuns(_ tabs: [TabItem]) -> [LayoutRun] {
-        let groups = Dictionary(grouping: tabs.filter {
-            $0.group != 0 && !$0.isLayout
-        }, by: \.group)
-
-        return groups.compactMap { group, members -> LayoutRun? in
-            // A lone member is not a group — core dissolves layouts below two
-            // documents, but the strip must not draw a one-chip container in
-            // the frame before that lands.
-            guard members.count >= 2 else { return nil }
-            let frames = members.compactMap {
-                tabFrames[$0.stableId] ?? rememberedTabFrames[$0.stableId]
-            }
-            guard frames.count == members.count else { return nil }
-
-            // Do not use min...max here. During gather those rects still
-            // occupy the OLD scattered positions for several frames, so the
-            // old implementation painted one enormous band across unrelated
-            // tabs. A grouped run's final width is deterministic: member
-            // widths plus the HStack's 4pt gaps. Anchor it at the first member
-            // and let that one measured origin ride the structural motion.
-            let width = frames.reduce(CGFloat.zero) { $0 + $1.width }
-                + CGFloat(members.count - 1) * 4
-            let start = tabFrames[members[0].stableId]?.minX
-                ?? rememberedTabFrames[members[0].stableId]?.minX
-                ?? (layoutTransitionCenters[group].map { $0 - width / 2 })
-            guard let start else { return nil }
-            return LayoutRun(group: group, minX: start, maxX: start + width)
-        }
-        .sorted { $0.minX < $1.minX }
-    }
-
-    /// One persistent shape per folded layout. Grouped and unified used to be
-    /// two different background views connected with matched geometry; inside
-    /// a macOS titlebar ScrollView the outgoing background was destroyed before
-    /// SwiftUI retained it, so an 8× slow trace still snapped in 50 ms. Keeping
-    /// the same `group`-keyed view alive makes the band's bounds directly
-    /// animatable and removes that lifecycle race entirely.
-    private func layoutShapeRuns(_ tabs: [TabItem]) -> [LayoutRun] {
-        var runs = Dictionary(uniqueKeysWithValues: layoutGroupRuns(tabs).map {
-            ($0.group, $0)
-        })
-
-        for tab in tabs where tab.group != 0 && tab.isLayout {
-            let frame = tabFrames[tab.stableId] ?? rememberedTabFrames[tab.stableId]
-            let center = frame?.midX ?? layoutTransitionCenters[tab.group]
-            let width = frame?.width ?? layoutTransitionWidths[tab.group]
-            guard let center, let width else { continue }
-            runs[tab.group] = LayoutRun(
-                group: tab.group,
-                minX: center - width / 2,
-                maxX: center + width / 2,
-                unified: true
-            )
-        }
-
-        return runs.values.sorted { $0.minX < $1.minX }
-    }
-
-    /// The close glyph is drawn by the SwiftUI chip, but `TabStripMouse` sits
-    /// above the titlebar strip to opt it out of window dragging. Route the
-    /// glyph's real 14pt slot (expanded to a 20pt hit target) through that
-    /// overlay instead of treating every press in the chip as tab activation.
-    private func tabCloseSlot(at point: CGPoint) -> Int? {
-        for tab in engine.chrome.tabs {
-            guard let rect = tabHitFrames[tab.stableId] else { continue }
-            let glyph = CGRect(
-                x: rect.maxX - 24,
-                y: rect.midY - 7,
-                width: 14,
-                height: 14
-            )
-            if glyph.insetBy(dx: -3, dy: -3).contains(point) {
-                return tab.id
-            }
-        }
-        return nil
-    }
 
     /// One folded layout's container behind its run of chips. Its horizontal
     /// bounds are EXACTLY the measured run: the old `+16` expansion crossed
@@ -1436,39 +1313,6 @@ struct ContentView: View {
     }
     private var layoutGroupStroke: Color {
         Color(nsColor: .systemBlue).opacity(isLightTheme ? 0.45 : 0.55)
-    }
-
-    @ViewBuilder
-    private func layoutGroupContainer(_ run: LayoutRun) -> some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(layoutGroupFill)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(layoutGroupStroke, lineWidth: 1)
-            )
-            .frame(
-                width: max(0, run.maxX - run.minX),
-                height: Self.tabLabelFrameH
-            )
-            // Runs are in the chip row's local space, and this container is a
-            // background OF that row, so its position needs no origin term.
-            .position(
-                x: (run.minX + run.maxX) / 2,
-                y: Self.tabLabelFrameH / 2
-            )
-            .background(AnimationTraceProbe(key: "layout-shape-\(run.group)"))
-            // Geometry reports one pass after chrome replacement. The stable
-            // group-keyed view retargets from its remembered bounds when that
-            // report arrives, so grouped ⇄ unified remains one continuous
-            // motion rather than a removal/insertion cross-fade.
-            .animation(
-                .smooth(duration: 0.30 * AnimationTraceRecorder.slowMotionMultiplier),
-                value: run
-            )
-            .transition(.asymmetric(
-                insertion: .opacity.combined(with: .scale(scale: 0.97, anchor: .center)),
-                removal: .opacity.combined(with: .scale(scale: 0.97, anchor: .center))
-            ))
     }
 
     /// Strip presentation fingerprint — drives implicit animation when only
@@ -1490,14 +1334,6 @@ struct ContentView: View {
         return UInt64(bitPattern: Int64(h.finalize()))
     }
 
-    /// Drop frames for chips that left the strip so hit-testing and group
-    /// runs never consult a stale rect.
-    private func pruneTabFrames(keeping tabs: [TabItem]) {
-        let live = Set(tabs.map(\.stableId))
-        tabFrames = tabFrames.filter { live.contains($0.key) }
-        tabHitFrames = tabHitFrames.filter { live.contains($0.key) }
-    }
-
     /// Members of each non-zero layout group, indexed once.
     ///
     /// `rememberTabFrame` used to derive this with `engine.chrome.tabs.filter`
@@ -1512,36 +1348,6 @@ struct ContentView: View {
             out[t.group, default: []].append(t)
         }
         return out
-    }
-
-    private func rememberTabFrame(
-        _ tab: TabItem,
-        rect: CGRect,
-        groupMembers: [UInt64: [TabItem]]
-    ) {
-        // `onGeometryChange` fires on any layout pass, not only on a pass that
-        // moved this chip — and a `@State` dictionary write invalidates the
-        // whole body whether or not the value differs. At rest, with the strip
-        // merely being re-laid-out by something else in the window, every chip
-        // was rewriting its own unchanged rect. Compare first.
-        guard tabFrames[tab.stableId] != rect else { return }
-        tabFrames[tab.stableId] = rect
-        rememberedTabFrames[tab.stableId] = rect
-
-        guard tab.group != 0 else { return }
-        if tab.isLayout {
-            layoutTransitionCenters[tab.group] = rect.midX
-            layoutTransitionWidths[tab.group] = rect.width
-            return
-        }
-
-        let members = groupMembers[tab.group] ?? []
-        let frames = members.compactMap { tabFrames[$0.stableId] }
-        guard frames.count == members.count, let first = frames.first else { return }
-        let width = frames.reduce(CGFloat.zero) { $0 + $1.width }
-            + CGFloat(max(0, members.count - 1)) * 4
-        layoutTransitionCenters[tab.group] = first.minX + width / 2
-        layoutTransitionWidths[tab.group] = width
     }
 
     private func tabPresentationTransition(_ tab: TabItem) -> AnyTransition {
@@ -1627,316 +1433,99 @@ struct ContentView: View {
             )
     }
 
-    /// Center titlebar: all document tabs in a wheel/trackpad-scrollable strip
-    /// (no "+n" truncation) + a "+" menu. The active tab auto-scrolls into view.
+    /// Center titlebar: every document tab, positioned by computed geometry.
+    ///
+    /// Rewritten. The previous strip was a `ScrollView` wrapping an `HStack`,
+    /// which decided chip positions privately, ringed by five measurements
+    /// trying to recover them: `tabFrames`, `tabHitFrames`, `chipRowOrigin`,
+    /// `tabStripContentWidth`, and `TabStripLayout` computing them a sixth way
+    /// for hit-testing. Every defect here was two of those disagreeing, so each
+    /// fix removed a symptom and left the cause — clicks opening the wrong
+    /// file, hover lighting a chip three places away, chips unreachable while
+    /// merged, the "+" stranded mid-row.
+    ///
+    /// Now one `TabStripLayout` decides, and everything reads it: the chips are
+    /// PLACED at its coordinates (`TabStripRow`), the band and the "+" are
+    /// positioned from it, and the hit test queries it. Verified by hosting the
+    /// real layout — placement matches to 0.00pt while fitting, overflowing,
+    /// scrolled and clamped, and a click at each chip's drawn centre resolves
+    /// to that chip.
+    ///
+    /// What made this possible was noticing the viewport width is an INPUT
+    /// (`maxWidth`), not something to discover. With that and exact chip widths,
+    /// every position is arithmetic and there is nothing left to measure.
     private func documentTabStrip(maxWidth: CGFloat) -> some View {
-        // Indexed ONCE per pass and captured by every chip's geometry callback,
-        // instead of each callback re-deriving it with a full `tabs.filter`.
-        let groupMembers = groupMemberIndex(engine.chrome.tabs)
-        return HStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 4) {
-                        // Keyed by the DOCUMENT, not the slot. With the slot
-                        // index as identity a reorder leaves the identity list
-                        // unchanged and only the titles swap in place, so there
-                        // is nothing for SwiftUI to move.
-                        ForEach(engine.chrome.tabs, id: \.stableId) { tab in
-                            // Layout membership (grouped band or unified chip)
-                            // uses system-blue wash + black ink so it stands
-                            // out from ordinary document chips.
-                            let inLayout = tab.isLayout || tab.group != 0
-                            ToolbarTabChip(
-                                title: tab.title,
-                                dirty: tab.dirty,
-                                deleted: tab.deleted,
-                                active: tab.active,
-                                accent: inLayout ? Color.black : Color.accentColor,
-                                fg: inLayout ? Color.black : Color.primary,
-                                dim: inLayout ? Color.black.opacity(0.72) : Color.secondary,
-                                isLight: isLightTheme,
-                                isLayout: tab.isLayout,
-                                inLayoutGroup: inLayout,
-                                tabId: Int(truncatingIfNeeded: tab.stableId),
-                                pillSpace: tabPillSpace,
-                                action: {
-                                    focused = true
-                                    engine.selectTabChip(tab)
-                                },
-                                onClose: {
-                                    focused = true
-                                    if tab.isLayout {
-                                        engine.dropLayout(tab.group)
-                                    } else {
-                                        engine.closeTabId(tab.stableId)
-                                    }
-                                }
-                            )
-                            .id(tab.stableId)
-                            .background(AnimationTraceProbe(key: "tab-\(tab.stableId)"))
-                            // Report this chip's slot so the drag below knows
-                            // which one the cursor is over. Chip widths differ
-                            // with the title, so slots cannot be computed.
-                            // Measured in the chip row's LOCAL space: the band
-                            // reads these directly (no origin correction) and a
-                            // re-center — which moves the row, not the chips in
-                            // it — leaves them untouched.
-                            .onGeometryChange(for: CGRect.self) { proxy in
-                                proxy.frame(in: .named(Self.chipRowSpace))
-                            } action: { rect in
-                                rememberTabFrame(
-                                    tab, rect: rect, groupMembers: groupMembers
-                                )
-                            }
-                            // The same chip in STRIP space, for hit-testing.
-                            // One measurement, one timestamp — nothing to
-                            // reconcile against a separately-published origin.
-                            .onGeometryChange(for: CGRect.self) { proxy in
-                                proxy.frame(in: .named(Self.tabStripSpace))
-                            } action: { rect in
-                                guard tabHitFrames[tab.stableId] != rect else { return }
-                                tabHitFrames[tab.stableId] = rect
-                            }
-                            // Grouped↔unified: members collapse toward the
-                            // group's center (merge) or bloom out of it
-                            // (expand). Stronger shrink on removal so they
-                            // read as feeding the unified chip rather than
-                            // fading in place next to it.
-                            // Each chip carries its OWN staggered curve
-                            // (`tabPresentationTransition`): a member fades out
-                            // fast (0.07s) and the unified label fades in delayed
-                            // (0.07s), so the two label sets never overlap into a
-                            // smeared stack — which is why they no longer need to
-                            // be hard-snapped (animation-disabled) during the
-                            // grouped ⇄ unified morph. Snapping them was the jank.
-                            .transition(tabPresentationTransition(tab))
-                            // Picked up: lifted, not merely dimmer. Without
-                            // this a grabbed tab looked identical to a resting
-                            // one and the reorder read as a teleport.
-                            .scaleEffect(draggingTab == tab.id ? 1.06 : 1)
-                            .opacity(draggingTab == tab.id ? 0.9 : 1)
-                            .shadow(
-                                color: .black.opacity(draggingTab == tab.id ? 0.28 : 0),
-                                radius: draggingTab == tab.id ? 7 : 0,
-                                y: draggingTab == tab.id ? 2 : 0
-                            )
-                            .zIndex(draggingTab == tab.id ? 1 : 0)
-                            .animation(.snappy(duration: 0.16), value: draggingTab)
-                            .contextMenu {
-                                if tab.group != 0 {
-                                    Button(
-                                        tab.isLayout
-                                            ? "Show Layout as Group"
-                                            : "Merge Layout into One Tab"
-                                    ) {
-                                        engine.toggleLayoutStyle(tab.group)
-                                    }
-                                    Button("Unfold Layout") { engine.unfoldLayout() }
-                                    Divider()
-                                }
-                                Button("Close Tab") {
-                                    if tab.isLayout {
-                                        engine.dropLayout(tab.group)
-                                    } else {
-                                        engine.closeTabId(tab.stableId)
-                                    }
-                                }
-                                Button("Close Other Tabs") {
-                                    for other in engine.chrome.tabs.reversed()
-                                    where other.stableId != tab.stableId {
-                                        if other.isLayout {
-                                            engine.dropLayout(other.group)
-                                        } else {
-                                            engine.closeTabId(other.stableId)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // ONE capsule for the whole strip, following the active
-                    // chip's anchor. This is the only view holding both the
-                    // chip it leaves and the chip it arrives at, which is why
-                    // the travel is drawn — and animated — here. Attached
-                    // BEFORE the group container so it draws OVER it: the
-                    // capsule on the grey band is the in-group active
-                    // affordance (behind the container it just deepened the
-                    // band's fill with no shape of its own).
-                    .background {
-                        if let activeId = engine.chrome.tabs
-                            .first(where: \.active)
-                            .map({ Int(truncatingIfNeeded: $0.stableId) }) {
-                            Capsule(style: .continuous)
-                                .fill(Color.primary.opacity(isLightTheme ? 0.10 : 0.14))
-                                .background(
-                                    AnimationTraceProbe(key: "active-pill-\(activeId)")
-                                )
-                                .matchedGeometryEffect(
-                                    id: activeId, in: tabPillSpace, isSource: false
-                                )
-                        }
-                    }
-                    // Grouped layouts: one rounded grey container behind the
-                    // run of chips that belong to the same folded layout, so
-                    // you can still see WHAT is in there. The unified shape is
-                    // a single chip instead — see `ToolbarTabChip`.
-                    .background {
-                        ForEach(layoutShapeRuns(engine.chrome.tabs), id: \.group) { run in
-                            layoutGroupContainer(run)
-                        }
-                        // No implicit `.animation(value:)` here — it competed
-                        // with the explicit `withAnimation` in fold/unfold/
-                        // toggle and caused double-driver jitter. The
-                        // container's `.transition` handles insertion/removal;
-                        // bounds changes ride the `withAnimation` transaction
-                        // from the EngineBridge call.
-                    }
-                    // Anchor the chips' local space HERE, on the same row the
-                    // band backgrounds are drawn on, BEFORE the horizontal
-                    // padding. Band geometry lives in this space; the re-center
-                    // that shifts the row cannot move the band relative to its
-                    // chips.
-                    .coordinateSpace(name: Self.chipRowSpace)
-                    // The fade remains 14pt deep, but tabs get an equally deep
-                    // safe inset at both resting ends. This expands the real
-                    // viewport instead of solving an inset fade by deleting
-                    // it; tabs still dissolve while scrolling through an edge,
-                    // while the first and last chips can rest fully visible.
-                    // Measure the chip row's WIDTH here — before the padding, so
-                    // it is the chips' own extent and not the viewport's.
-                    //
-                    // (A companion measurement of the row's ORIGIN used to live
-                    // here, to convert hit-test points out of strip space. It is
-                    // gone: chips now publish a second frame already in strip
-                    // space, so nothing needs converting. The origin lagged a
-                    // layout pass and mis-aimed every click when the row
-                    // re-centred.)
-                    .onGeometryChange(for: CGFloat.self) { proxy in
-                        proxy.size.width
-                    } action: { w in
-                        guard abs(tabStripContentWidth - w) > 0.5 else { return }
-                        tabStripContentWidth = w
-                    }
-                    .onGeometryChange(for: CGPoint.self) { proxy in
-                        proxy.frame(in: .named(Self.tabStripSpace)).origin
-                    } action: { chipRowOriginBox.value = $0 }
-                    .padding(.horizontal, Self.tabEdgeFadeW)
-                    // The row moves/reorders tabs on the current structural
-                    // curve — INCLUDING grouped ⇄ unified now. Nulling the curve
-                    // there is what left the chips (and their labels) hard-
-                    // snapping while the band morphed one frame late: the two
-                    // read as desynced. With the staggered per-chip transitions
-                    // (which already prevent the label smear) the row can ride
-                    // the same structural curve as the band.
-                    .animation(engine.tabStructuralAnimation, value: tabStripPresentationKey)
-                    .onChange(of: tabStripPresentationKey) { _, _ in
-                        pruneTabFrames(keeping: engine.chrome.tabs)
-                    }
-                    // Take the chips' TRUE width, never the scroll frame's:
-                    // without this the measurement can latch to the frame that
-                    // it itself feeds, collapsing the strip to its floor and
-                    // clipping the title down to a few characters.
-                    .fixedSize(horizontal: true, vertical: false)
-                    // (An `.onGeometryChange` here used to publish the row's
-                    // width into `tabStripContentWidth` — a `@State` property
-                    // that NOTHING read. Every width change invalidated the
-                    // whole body to store a number no one wanted. The
-                    // `.fixedSize` above is what actually does the work
-                    // described in the comment; the measurement was vestigial.)
-                    // Tabs past the ABI cap don't vanish silently — "+N"
-                    // says how many couldn't fit.
-                    if engine.chrome.tabsOverflow > 0 {
-                        Text("+\(engine.chrome.tabsOverflow)")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color.secondary)
-                            .help("\(engine.chrome.tabsOverflow) more tabs than fit")
-                            .padding(.trailing, 4)
-                    }
-                }
-                // Hug the measured chip row; scroll once it outgrows the space
-                // actually available between the sidebar/toggle zone and the
-                // trailing icons (a fixed 700 cap overflowed small windows —
-                // tabs spilled across the sidebar). Before the first
-                // measurement arrives, take the full allowance rather than the
-                // floor — a 60pt strip reads as a broken tab bar.
-                // Viewport pinned to the chips' own height so there is no
-                // spare vertical room for a horizontal `ScrollView` to align
-                // content within. (This was not the cause of the "+" sitting
-                // low — that was type metrics, see `plusInkNudge` — but an
-                // ambiguous viewport is worth removing anyway.)
-                .frame(
-                    width: maxWidth,
-                    height: Self.tabLabelFrameH
-                )
-                // Keep the viewport stable while the intrinsic row shrinks.
-                // The old content-hugging frame jumped 93pt on merge. A fixed
-                // available-width viewport stays put; its smaller content is
-                // centred by the scroll view instead.
-                .defaultScrollAnchor(.center)
-                // Keep the inward edge fade; the content padding above moves
-                // its resting bounds outward so the blur no longer consumes
-                // the end tabs.
-                .mask(
-                    HStack(spacing: 0) {
-                        LinearGradient(
-                            colors: [.clear, .black],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                        .frame(width: Self.tabEdgeFadeW)
-                        Rectangle().fill(Color.black)
-                        LinearGradient(
-                            colors: [.black, .clear],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                        .frame(width: Self.tabEdgeFadeW)
-                    }
-                )
-                .onChange(of: engine.chrome.tabs.first(where: \.active)?.stableId) { _, stableId in
-                    // Chips are `.id(stableId)` — scrolling to the SLOT index
-                    // matched nothing (Int ≠ UInt64 identity), so the active
-                    // tab only auto-centered by luck.
-                    // Structural motion pins the viewport. Otherwise this
-                    // second animation moves the entire row while its chips
-                    // are already rearranging (the 100pt lurch captured by
-                    // AnimationTrace).
-                    guard !engine.tabStructuralMotionActive,
-                          let stableId else { return }
-                    withAnimation(.snappy(duration: 0.2)) {
-                        proxy.scrollTo(stableId, anchor: .center)
-                    }
+        let tabs = engine.chrome.tabs
+        // Chips rest inside the fade at both ends rather than under it.
+        let viewport = max(1, maxWidth - Self.tabEdgeFadeW * 2)
+        let layout = stripLayout(viewportWidth: viewport)
+
+        return ZStack(alignment: .topLeading) {
+            stripBandsView(layout)
+            stripActivePill(layout)
+
+            TabStripRow(layout: layout, rowHeight: Self.tabLabelFrameH) {
+                // Keyed by the DOCUMENT, not the slot: with the slot index as
+                // identity a reorder leaves the identity list unchanged and only
+                // the titles swap in place, so there is nothing for SwiftUI to
+                // move. Order here must match `layout.chips` — both come from
+                // `engine.chrome.tabs` in the same pass.
+                ForEach(tabs, id: \.stableId) { tab in
+                    stripChip(tab)
                 }
             }
 
+            // Tabs past the ABI cap don't vanish silently.
+            if engine.chrome.tabsOverflow > 0 {
+                Text("+\(engine.chrome.tabsOverflow)")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.secondary)
+                    .help("\(engine.chrome.tabsOverflow) more tabs than fit")
+                    .frame(height: Self.tabLabelFrameH)
+                    .offset(x: min(layout.plusX + Self.tabPlusW, viewport))
+            }
         }
-        // Fixed strip height keeps chips and "+" on one exact center line.
+        .frame(width: viewport, height: Self.tabLabelFrameH)
+        .padding(.horizontal, Self.tabEdgeFadeW)
+        // Positions are recomputed, not re-measured, so they can ride the
+        // structural curve directly — no one-pass lag to hide.
+        .animation(engine.tabStructuralAnimation, value: tabStripPresentationKey)
         .frame(height: 26)
-        // "+" rides the chips' trailing edge.
-        //
-        // It cannot be a trailing sibling in the HStack above: the scroll
-        // viewport is pinned to `maxWidth` (to stop the 93pt jump on merge), so
-        // a sibling parks at the far right forever, however few tabs there are.
-        //
-        // It is an overlay on THIS container, not on the ScrollView — that
-        // variant was isolation-tested and broke tab hit-testing in the merged
-        // state. Safe here because `TabStripMouse.hitTest` only claims a click
-        // when `slotAt` finds a chip under it and otherwise declines, letting it
-        // fall through to SwiftUI; `plusLeading` always places the button past
-        // the last chip, where `slotAt` is nil.
-        //
-        // Positioned with PADDING (participates in layout), never `.offset` —
-        // the offset variants are the ones that drifted.
+        // Chips dissolve while scrolling through an end, and rest fully visible.
+        .mask(
+            HStack(spacing: 0) {
+                LinearGradient(
+                    colors: [.clear, .black], startPoint: .leading, endPoint: .trailing
+                )
+                .frame(width: Self.tabEdgeFadeW)
+                Rectangle().fill(Color.black)
+                LinearGradient(
+                    colors: [.black, .clear], startPoint: .leading, endPoint: .trailing
+                )
+                .frame(width: Self.tabEdgeFadeW)
+            }
+        )
+        // Keep the selection reachable when the run outgrows the viewport.
+        // `scrollToReveal` returns nil when the chip is already whole on
+        // screen, so this writes nothing in the common case — the strip no
+        // longer re-centres itself under a resting cursor.
+        .onChange(of: engine.chrome.tabs.first(where: \.active)?.id) { _, slot in
+            guard !engine.tabStructuralMotionActive, let slot else { return }
+            withAnimation(.snappy(duration: 0.2)) {
+                tabScroll.reveal(slot: slot, layout: layout)
+            }
+        }
+        // "+" rides the chips' trailing edge, at the layout's own clamp.
         .overlay(alignment: .leading) {
             tabPlusMenu
                 .fixedSize()
                 .frame(width: Self.tabPlusW, height: 26)
                 .opacity(tabStripHover ? 1 : 0)
                 .animation(.easeOut(duration: 0.12), value: tabStripHover)
-                .padding(.leading, plusLeading(maxWidth: maxWidth))
+                .offset(x: Self.tabEdgeFadeW + layout.plusX)
                 // Only moves when the tab set changes, so the hover target
                 // never shifts under a resting cursor.
-                .animation(.snappy(duration: 0.22), value: plusLeading(maxWidth: maxWidth))
+                .animation(.snappy(duration: 0.22), value: tabStripPresentationKey)
         }
         .background(AnimationTraceProbe(key: "tab-strip"))
         .contentShape(Rectangle())
@@ -1947,51 +1536,47 @@ struct ContentView: View {
         // `.fullSizeContentView` with a hidden titlebar). AppKit drags the
         // window from any view there whose `mouseDownCanMoveWindow` is true,
         // and it consumes the mouseDown BEFORE SwiftUI gesture arbitration
-        // runs. Five SwiftUI gesture shapes were tried and none received a
-        // single event; a synthetic drag on the strip dragged the window off
-        // the screen instead. `.simultaneousGesture(DragGesture)` on a Button
-        // is separately reported not to fire on macOS at all
-        // (developer.apple.com/forums/thread/718959).
-        //
-        // An overlay that overrides `mouseDownCanMoveWindow` to false opts the
-        // region out of titlebar dragging, and only then do mouse events
-        // arrive. It therefore owns clicks too, so it routes them back.
+        // runs, so this overlay owns clicks as well as drags and routes them
+        // back.
         .overlay(
             TabStripMouse(
-                // TabStripMouse reports in tabStripSpace; tabFrames now live in
-                // the chip row's local space, so shift every hit-test point by
-                // the row origin. At rest (when hit-testing happens) the origin
-                // is exact, so its one-pass lag never shows.
-                slotAt: { x in tabSlot(at: x) },
-                closeAt: { point in tabCloseSlot(at: point) },
-                targetFor: { held, x in tabDragTarget(held: held, x: x) },
+                // Every query goes to the one layout this pass was drawn from.
+                slotAt: { x in layout.slot(at: x - Self.tabEdgeFadeW) },
+                closeAt: { p in
+                    layout.closeSlot(
+                        at: CGPoint(x: p.x - Self.tabEdgeFadeW, y: p.y),
+                        rowHeight: Self.tabLabelFrameH
+                    )
+                },
+                targetFor: { held, x in
+                    layout.dragTarget(held: held, x: x - Self.tabEdgeFadeW)
+                },
                 onDrag: { held, to in
                     // By stable id: under a folded group the slots no longer
                     // line up with buffer indices, so a slot-based move would
                     // carry the wrong document.
-                    let tabs = engine.chrome.tabs
                     guard let fromId = tabs.first(where: { $0.id == held })?.stableId,
                           let toId = tabs.first(where: { $0.id == to })?.stableId,
                           engine.moveTabIds(from: fromId, to: toId)
                     else { return }
                     draggingTab = to
                 },
+                onHoverSlot: { slot in
+                    guard hoveredSlot != slot else { return }
+                    hoveredSlot = slot
+                },
                 onPick: { held in draggingTab = held },
                 onClick: { slot in
                     focused = true
-                    // The chip's own `action:` never runs for clicks — this
-                    // overlay owns them (see the comment above) — so the
-                    // layout routing has to live here too, not only there.
-                    guard let tab = engine.chrome.tabs.first(where: { $0.id == slot })
-                    else {
+                    guard let tab = tabs.first(where: { $0.id == slot }) else {
                         engine.gotoTab(slot)
                         return
                     }
-                    engine.selectTabChip(tab)
+                    applyStripClick(chip: tab.stableId)
                 },
                 onDoubleClick: { slot in
                     focused = true
-                    guard let tab = engine.chrome.tabs.first(where: { $0.id == slot }),
+                    guard let tab = tabs.first(where: { $0.id == slot }),
                           tab.group != 0
                     else { return }
                     // Double-click is an alternate grouped⇄unified gesture.
@@ -2000,32 +1585,182 @@ struct ContentView: View {
                     engine.toggleLayoutStyle(tab.group)
                 },
                 onClose: { slot in
-                    guard let tab = engine.chrome.tabs.first(where: { $0.id == slot })
-                    else { return }
+                    guard let tab = tabs.first(where: { $0.id == slot }) else { return }
                     focused = true
-                    if tab.isLayout {
-                        engine.dropLayout(tab.group)
-                    } else {
-                        engine.closeTabId(tab.stableId)
-                    }
+                    applyStripClose(chip: tab.stableId)
                 },
                 onEnd: { draggingTab = nil },
+                onScroll: { dx in tabScroll.scroll(by: dx, layout: layout) },
                 onFoldUp: { engine.advanceLayoutPresentation() },
                 onFoldDown: { engine.retreatLayoutPresentation() }
             )
-            // The AppKit catcher owns the titlebar hit region, so expose that
-            // region itself to accessibility clients. Without this, assistive
-            // input (and UI automation) can see only the underlying horizontal
-            // ScrollView and its scroll bar; a vertical layout gesture is then
-            // sent to the wrong object and never reaches `scrollWheel` above.
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Tab strip")
+            .accessibilityLabel("Document tabs")
             .accessibilityHint(
                 "Scroll up to group or unify the active layout; scroll down to expand it"
             )
         )
         .zIndex(1)
         .onHover { tabStripHover = $0 }
+    }
+
+    /// Band behind each grouped run, from the run's own computed extent.
+    ///
+    /// This used to reconstruct itself from remembered frames and stashed
+    /// transition centres because it had no way to ask where its members were.
+    /// It can just ask now.
+    @ViewBuilder
+    private func stripBandsView(_ layout: TabStripLayout) -> some View {
+        ForEach(stripBands(layout)) { band in
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(layoutGroupFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(layoutGroupStroke, lineWidth: 1)
+                )
+                .frame(width: band.width, height: Self.tabLabelFrameH)
+                .offset(x: band.minX)
+                .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        }
+    }
+
+    /// One capsule for the active chip, placed at its computed rect.
+    ///
+    /// This was a `matchedGeometryEffect` pairing an invisible anchor in every
+    /// chip with a capsule drawn on the row — which meant the selection's
+    /// position came from SwiftUI's measurement of a chip, one more authority
+    /// to disagree with the hit test. The active chip's rect is known here, so
+    /// the capsule is simply put there.
+    @ViewBuilder
+    private func stripActivePill(_ layout: TabStripLayout) -> some View {
+        if let active = activeChip(layout) {
+            Capsule(style: .continuous)
+                .fill(Color.primary.opacity(isLightTheme ? 0.10 : 0.14))
+                .frame(width: active.width, height: Self.tabLabelFrameH)
+                .offset(x: layout.originX + active.x)
+        }
+    }
+
+    /// The chip carrying the selection, if any.
+    ///
+    /// A plain function rather than an inline `first(where:)` in the body: the
+    /// nested closure over two collections pushed the strip past what the
+    /// type-checker will solve in reasonable time.
+    private func activeChip(_ layout: TabStripLayout) -> TabStripLayout.Chip? {
+        let active: Set<Int> = Set(
+            engine.chrome.tabs.filter(\.active).map(\.id)
+        )
+        return layout.chips.first { active.contains($0.slot) }
+    }
+
+    /// One chip. Hoisted out of the `ForEach` because inlined it pushed the
+    /// strip's body past what the type-checker will solve in reasonable time.
+    @ViewBuilder
+    private func stripChip(_ tab: TabItem) -> some View {
+        let inLayout = tab.isLayout || tab.group != 0
+        ToolbarTabChip(
+            title: tab.title,
+            dirty: tab.dirty,
+            deleted: tab.deleted,
+            active: tab.active,
+            accent: inLayout ? Color.black : Color.accentColor,
+            fg: inLayout ? Color.black : Color.primary,
+            dim: inLayout ? Color.black.opacity(0.72) : Color.secondary,
+            isLight: isLightTheme,
+            isLayout: tab.isLayout,
+            inLayoutGroup: tab.group != 0,
+            tabId: tab.id,
+            pillSpace: tabPillSpace,
+            hovered: hoveredSlot == tab.id,
+            action: {
+                focused = true
+                applyStripClick(chip: tab.stableId)
+            },
+            onClose: {
+                focused = true
+                applyStripClose(chip: tab.stableId)
+            }
+        )
+        .id(tab.stableId)
+        .background(AnimationTraceProbe(key: "tab-\(tab.stableId)"))
+        .transition(tabPresentationTransition(tab))
+        // Picked up: lifted, not merely dimmer. Without this a grabbed tab
+        // looked identical to a resting one and the reorder read as a teleport.
+        .scaleEffect(draggingTab == tab.id ? 1.06 : 1)
+        .opacity(draggingTab == tab.id ? 0.9 : 1)
+        .shadow(
+            color: .black.opacity(draggingTab == tab.id ? 0.28 : 0),
+            radius: draggingTab == tab.id ? 7 : 0,
+            y: draggingTab == tab.id ? 2 : 0
+        )
+        .zIndex(draggingTab == tab.id ? 1 : 0)
+        .animation(.snappy(duration: 0.16), value: draggingTab)
+        .contextMenu { tabContextMenu(tab) }
+    }
+
+    /// The strip's geometry for this pass — the only authority for where a chip
+    /// is, used by the renderer and the hit test alike.
+    private func stripLayout(viewportWidth: CGFloat) -> TabStripLayout {
+        let tabs = engine.chrome.tabs
+        return TabStripLayout(
+            tabs: tabs.map { (stableId: $0.stableId, group: $0.group) },
+            viewportWidth: viewportWidth,
+            // Owned, not observed. A `ScrollView` reported this back a pass
+            // late, which is the lag the whole strip used to be built around.
+            scrollOffset: tabScroll.offset,
+            widthFor: { slot in
+                let t = tabs[slot]
+                return TabChipMetrics.width(
+                    title: t.title,
+                    active: t.active,
+                    isLayout: t.isLayout,
+                    deleted: t.deleted
+                )
+            }
+        )
+    }
+
+    private struct StripBand: Identifiable, Equatable {
+        let group: UInt64
+        let minX: CGFloat
+        let width: CGFloat
+        var id: UInt64 { group }
+    }
+
+    /// One band per grouped run, straight from the run's computed extent.
+    private func stripBands(_ layout: TabStripLayout) -> [StripBand] {
+        var seen: [UInt64] = []
+        var out: [StripBand] = []
+        for chip in layout.chips where chip.group != 0 {
+            guard !seen.contains(chip.group) else { continue }
+            seen.append(chip.group)
+            guard let extent = layout.bandExtent(group: chip.group) else { continue }
+            out.append(StripBand(
+                group: chip.group,
+                minX: extent.minX,
+                width: max(0, extent.maxX - extent.minX)
+            ))
+        }
+        return out
+    }
+
+    @ViewBuilder
+    private func tabContextMenu(_ tab: TabItem) -> some View {
+        if tab.group != 0 {
+            Button(
+                tab.isLayout ? "Show Layout as Group" : "Merge Layout into One Tab"
+            ) {
+                engine.toggleLayoutStyle(tab.group)
+            }
+            Button("Unfold Layout") { engine.unfoldLayout() }
+            Divider()
+        }
+        Button("Close Tab") { applyStripClose(chip: tab.stableId) }
+        Button("Close Other Tabs") {
+            for other in engine.chrome.tabs.reversed()
+            where other.stableId != tab.stableId {
+                applyStripClose(chip: other.stableId)
+            }
+        }
     }
 
     /// Custom titlebar row: replaces NSToolbar so the sidebar reaches the
@@ -2136,6 +1871,10 @@ struct ContentView: View {
             // this to AppKit's 28pt default moved every control centre from
             // y=24 to y=14 and visibly pinned the row to the window top.
             .frame(width: geo.size.width, height: ContentView.topBandHeight)
+            // Drop the whole titlebar row by the shared amount. Applied to the
+            // band, not to the tab strip and the trailing icons separately, so
+            // the two cannot end up on different lines.
+            .offset(y: ContentView.titlebarDrop)
             .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
         }
         .frame(height: ContentView.topBandHeight)
@@ -2896,13 +2635,12 @@ struct ContentView: View {
             }
 
             Button {
-                engine.toggleGitWorkbench()
-                focused = true
+                NotificationCenter.default.post(name: .suiseiOpenGitWorkbenchWindow, object: nil)
             } label: {
                 HStack {
-                    Image(systemName: "rectangle.split.3x1")
+                    Image(systemName: "macwindow")
                         .font(.system(size: 11))
-                    Text("Open Git Workbench")
+                    Text("Open Source Control Window")
                         .font(.system(size: 11, weight: .medium))
                     Spacer()
                 }
@@ -3207,6 +2945,12 @@ struct ContentView: View {
             if window.backgroundColor != bg {
                 window.backgroundColor = bg
             }
+            // NOT opaque. A `.behindWindow` effect view samples what is behind
+            // the WINDOW, which is the whole point of a sidebar material — the
+            // workbench's sidebar visibly takes a cast from the wallpaper. An
+            // opaque window has nothing behind it to sample, so forcing one
+            // here (tried, 2026-08-10) flattened the sidebar into the shell
+            // colour and made the two windows look less alike, not more.
             window.isMovableByWindowBackground = false
             if !window.styleMask.contains(.fullSizeContentView) {
                 window.styleMask.insert(.fullSizeContentView)
@@ -3227,7 +2971,26 @@ struct ContentView: View {
     /// One corner radius for every floating panel (sidebar, editor island,
     /// outline card) — matches the window's own corner radius so the nested
     /// corners read as one system. The resize HUD mask uses the same value.
-    static let panelCornerRadius: CGFloat = 12
+    ///
+    /// Derived, not written twice. Nothing in this app rounds the editor window
+    /// — macOS draws that corner — so this constant is a MIRROR of a system
+    /// value, and it had drifted: three places each claimed to know the window
+    /// radius and two of them said 12 while `WelcomeView` (the one window whose
+    /// corner this app actually cuts itself, so the one number that had to look
+    /// right next to real windows) said 18. On this OS the window corner is the
+    /// rounder one, which is why the sidebar read tighter than the background
+    /// behind it.
+    ///
+    /// Same shape of defect as the tab strip's: several independent authorities
+    /// for one fact, silently disagreeing. There is one now.
+    ///
+    /// `window - gap`, not `window`. A card inset by `panelGap` keeps a uniform
+    /// gap only if its corner is that much tighter; give it the window's own
+    /// radius and the two curves converge at the corner and the gap pinches
+    /// shut. (I set this to the window radius first, which is the same mistake
+    /// in the opposite direction from the 12 it replaced.)
+    static let panelCornerRadius: CGFloat =
+        Radius.inside(WindowChrome.windowCornerRadius, gap: panelGap)
 
     /// Gap between a panel and the window edge.
     static let panelGap: CGFloat = 6
@@ -3235,6 +2998,15 @@ struct ContentView: View {
     /// The editor island starts below this band. Standard window buttons and
     /// custom document controls share its 24pt optical centreline.
     static let topBandHeight: CGFloat = 48
+
+    /// How far the whole titlebar row sits below that centreline.
+    ///
+    /// One constant for all three groups — traffic lights, tab strip, trailing
+    /// icons — because they read as one row and any drift between them is
+    /// immediately visible. The lights are AppKit views positioned in an
+    /// unflipped coordinate space, so `StableTrafficLightOverlay` SUBTRACTS
+    /// this where SwiftUI adds it.
+    static let titlebarDrop: CGFloat = 2
 
     /// Fixed status-bar height — it renders as the root's bottom z-layer and
     /// the detail column reserves exactly this much.
@@ -3246,13 +3018,28 @@ struct ContentView: View {
     /// written. Auto Layout pins the overlay to the frame view's top-left, so
     /// resize/focus/titlebar passes have nothing to fight and cannot make the
     /// lights jump.
-    static func styleTrafficLights(_ window: NSWindow) {
+    /// - Parameters:
+    ///   - bandHeight: the row the lights are centred in. Their centre lands at
+    ///     `bandHeight / 2` from the window's top edge, so this is how the
+    ///     caller states where its chrome wants them.
+    ///   - drop: extra downward nudge, in the titlebar row's own units.
+    ///
+    /// Both are parameters because the editor and Settings are different
+    /// windows with different chrome. Settings was calling this with the
+    /// EDITOR's 48pt band, which centres the lights ~27pt down; a Mac settings
+    /// window puts them at ~15pt, so they sat visibly low and out of step with
+    /// the sidebar beside them.
+    static func styleTrafficLights(
+        _ window: NSWindow,
+        bandHeight: CGFloat = topBandHeight,
+        drop: CGFloat = titlebarDrop
+    ) {
         guard window.styleMask.contains(.titled) else { return }
         for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
             guard let button = window.standardWindowButton(kind) else { continue }
             button.isHidden = true
         }
-        StableTrafficLightOverlay.install(in: window, bandHeight: topBandHeight)
+        StableTrafficLightOverlay.install(in: window, bandHeight: bandHeight, drop: drop)
     }
 
     /// Compatibility entry point used by window activation.
@@ -3293,7 +3080,7 @@ struct ContentView: View {
         // add doubled it and never adapted.
         return content()
             .clipShape(shape)
-            .glassEffect(SuiseiGlass.panel(light: isLightTheme), in: shape)
+            .glassEffect(SuiseiGlass.panel(light: isLightTheme, style: engine.glassStyle), in: shape)
     }
 
     // Legacy floating explorer/SCM cards removed — the navigator owns these
@@ -3353,175 +3140,286 @@ struct ContentView: View {
     // MARK: - Git workbench (Ctrl+Shift+G)
 
     private var gitWorkbenchDocked: some View {
-        VStack(spacing: 0) {
-            // Repository identity + primary destinations. Files and Diff are
-            // detail panes, so they deliberately do not compete for this row.
-            HStack(spacing: 12) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(accent)
-                    Text(engine.chrome.gitWb.branch.isEmpty ? "HEAD" : engine.chrome.gitWb.branch)
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: 190, alignment: .leading)
+        HStack(spacing: 0) {
+            gitWorkbenchSourceList
+                .frame(width: 184)
 
-                HStack(spacing: 2) {
-                    gitWorkbenchDestination("Status")
-                    gitWorkbenchDestination("Log")
-                    gitWorkbenchDestination("Branches")
-                    gitWorkbenchDestination("Stash", label: "Stashes")
-                }
+            gitWorkbenchDivider
 
-                Rectangle()
-                    .fill(Color(nsColor: .separatorColor))
-                    .frame(width: 1, height: 18)
+            VStack(spacing: 0) {
+                gitWorkbenchDetailHeader
+                gitWorkbenchDetailBody
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(editorBg)
+        .contentShape(Rectangle())
+        .alert("New Branch", isPresented: $showGitNewBranchDialog) {
+            TextField("Branch name", text: $gitNewBranchName)
+            Button("Cancel", role: .cancel) {}
+            Button("Create") {
+                engine.gitWbCreateBranch(gitNewBranchName)
+                gitNewBranchName = ""
+                focused = true
+            }
+            .disabled(gitNewBranchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Create and check out a branch from the current HEAD.")
+        }
+        .confirmationDialog(
+            "Delete “\(pendingGitBranchDeletion)”?",
+            isPresented: $showGitBranchDeletionConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Branch", role: .destructive) {
+                engine.gitWbDeleteSelectedBranch()
+                pendingGitBranchDeletion = ""
+                focused = true
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Only the selected local branch will be deleted. This cannot be undone.")
+        }
+    }
 
-                HStack(spacing: 2) {
-                    gitWorkbenchDestination("PRs")
-                    gitWorkbenchDestination("Issues")
-                }
+    private var gitWorkbenchSourceList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 7) {
+                Label("Source Control", systemImage: "externaldrive.connected.to.line.below")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
 
-                Spacer(minLength: 8)
-
-                if engine.chrome.gitWb.loading {
-                    ProgressView().controlSize(.mini)
-                }
-
-                Menu {
-                    Button("GitHub Authentication…") {
-                        gitWorkbenchCompactPage = .master
-                        gitWorkbenchContextVisible = false
-                        engine.gitWbSetTab(8)
-                        focused = true
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 26)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("More Git actions")
-
-                Button {
-                    engine.gitWbSetTab(engine.chrome.gitWb.chips.first(where: \.active)?.key ?? 1)
-                    focused = true
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 24)
-                }
-                .buttonStyle(.plain)
-                .help("Refresh")
-
-                Button {
-                    gitWorkbenchCompactPage = .master
-                    gitWorkbenchContextVisible = false
-                    engine.toggleGitWorkbench()
-                    focused = true
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 24)
-                }
-                .buttonStyle(.plain)
-                .help("Close · Esc")
+                Label(
+                    engine.chrome.gitWb.branch.isEmpty ? "Detached HEAD" : engine.chrome.gitWb.branch,
+                    systemImage: "arrow.triangle.branch"
+                )
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
             }
             .padding(.horizontal, 12)
-            .frame(height: 44)
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+            .frame(height: 58, alignment: .leading)
+
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(height: 1)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    gitWorkbenchSourceSection("WORKSPACE")
+                    gitWorkbenchSourceDestination("Status", label: "Changes")
+                    gitWorkbenchSourceDestination("Log", label: "History")
+
+                    gitWorkbenchSourceSection("REPOSITORY")
+                        .padding(.top, 8)
+                    gitWorkbenchSourceDestination("Branches")
+                    gitWorkbenchSourceDestination("Stash", label: "Stashes")
+
+                    gitWorkbenchSourceSection("GITHUB")
+                        .padding(.top, 8)
+                    gitWorkbenchSourceDestination("PRs", label: "Pull Requests")
+                    gitWorkbenchSourceDestination("Issues")
+                    gitWorkbenchSourceDestination("Auth", label: "Account")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 9)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(
+            Color(nsColor: .windowBackgroundColor)
+                .opacity(isLightTheme ? 0.72 : 0.42)
+        )
+    }
+
+    private func gitWorkbenchSourceSection(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .tracking(0.35)
+            .padding(.horizontal, 7)
+            .frame(height: 18, alignment: .bottomLeading)
+    }
+
+    @ViewBuilder
+    private func gitWorkbenchSourceDestination(_ name: String, label: String? = nil) -> some View {
+        if let chip = engine.chrome.gitWb.chips.first(where: { $0.label == name }) {
+            Button {
+                gitWorkbenchCompactPage = .master
+                gitWorkbenchContextVisible = false
+                engine.gitWbSetTab(chip.key)
+                focused = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: gitWorkbenchDestinationSymbol(name))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(chip.active ? Color.white : .secondary)
+                        .frame(width: 15)
+                    Text(label ?? gitWorkbenchDestinationTitle(name))
+                        .font(.system(size: 11, weight: chip.active ? .semibold : .regular))
+                        .foregroundStyle(chip.active ? Color.white : .primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 27)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                        .fill(chip.active ? accent : Color.clear)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var gitWorkbenchDetailHeader: some View {
+        HStack(spacing: 9) {
+            Image(systemName: gitWorkbenchDestinationSymbol(activeGitWorkbenchDestination))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(gitWorkbenchDestinationTitle(activeGitWorkbenchDestination))
+                    .font(.system(size: 12, weight: .semibold))
+                Text(gitWorkbenchDetailSubtitle)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
-            Group {
-                if engine.chrome.gitWb.loading
-                    && engine.chrome.gitWb.special.count <= 2
-                    && engine.chrome.gitWb.colLog.count <= 1
-                    && engine.chrome.gitWb.colChanges.count <= 1 {
-                    gitEmptyState(
-                        icon: "arrow.triangle.branch",
-                        title: "Loading…",
-                        detail: engine.chrome.gitWb.message.isEmpty
-                            ? "Talking to git / gh…"
-                            : engine.chrome.gitWb.message
-                    )
-                } else if engine.chrome.gitWb.docked {
-                    GeometryReader { geo in
-                        let contextWidth = min(max(CGFloat(gitWorkbenchContextW), 260), 320)
-                        let maximumMaster = geo.size.width >= 1_200
-                            ? max(280, geo.size.width - contextWidth - 522)
-                            : max(280, geo.size.width - 521)
-                        let masterWidth = min(
-                            max(CGFloat(gitWorkbenchMasterW), 280),
-                            min(480, maximumMaster)
+            Spacer(minLength: 8)
+
+            if activeGitWorkbenchDestination == "Branches" {
+                Button {
+                    gitNewBranchName = ""
+                    showGitNewBranchDialog = true
+                } label: {
+                    Label("New Branch", systemImage: "plus")
+                        .font(.system(size: 10.5, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+
+                if let branch = selectedGitBranch, !branch.current {
+                    Button("Check Out") {
+                        engine.gitWbCheckoutSelectedBranch()
+                        focused = true
+                    }
+                    .font(.system(size: 10.5, weight: .medium))
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if engine.chrome.gitWb.loading {
+                ProgressView().controlSize(.mini)
+            }
+
+            Button {
+                engine.gitWbSetTab(engine.chrome.gitWb.chips.first(where: \.active)?.key ?? 1)
+                focused = true
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("Refresh")
+
+            Button {
+                gitWorkbenchCompactPage = .master
+                gitWorkbenchContextVisible = false
+                engine.toggleGitWorkbench()
+                focused = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("Close · Esc")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 44)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+        }
+    }
+
+    private var gitWorkbenchDetailSubtitle: String {
+        switch activeGitWorkbenchDestination {
+        case "Status": return "Review and stage changes in the working tree"
+        case "Log": return "Browse commits and inspect changed files"
+        case "Branches": return "Select a branch, then check it out explicitly"
+        case "Stash": return "Saved working tree changes"
+        case "PRs": return "Pull requests for this repository"
+        case "Issues": return "Issues for this repository"
+        case "Auth": return "GitHub CLI account and authentication"
+        default: return engine.chrome.gitWb.message
+        }
+    }
+
+    @ViewBuilder
+    private var gitWorkbenchDetailBody: some View {
+        if engine.chrome.gitWb.loading
+            && engine.chrome.gitWb.special.count <= 2
+            && engine.chrome.gitWb.colLog.count <= 1
+            && engine.chrome.gitWb.colChanges.count <= 1 {
+            gitEmptyState(
+                icon: "arrow.triangle.branch",
+                title: "Loading…",
+                detail: engine.chrome.gitWb.message.isEmpty
+                    ? "Talking to git / gh…"
+                    : engine.chrome.gitWb.message
+            )
+        } else if engine.chrome.gitWb.docked {
+            GeometryReader { geo in
+                let contextWidth = min(max(CGFloat(gitWorkbenchContextW), 260), 320)
+                let maximumMaster = geo.size.width >= 1_200
+                    ? max(280, geo.size.width - contextWidth - 522)
+                    : max(280, geo.size.width - 521)
+                let masterWidth = min(
+                    max(CGFloat(gitWorkbenchMasterW), 280),
+                    min(480, maximumMaster)
+                )
+                let isHistory = activeGitWorkbenchDestination == "Log"
+
+                if geo.size.width < 800 {
+                    gitWorkbenchCompactBody(isHistory: isHistory)
+                } else if isHistory {
+                    HStack(spacing: 0) {
+                        gitRichColumn(
+                            title: "History",
+                            icon: "clock.arrow.circlepath",
+                            lines: engine.chrome.gitWb.colLog,
+                            kind: .history
+                        ) {
+                            engine.gitWbSelectHistory($0)
+                            if geo.size.width < 1_200 {
+                                gitWorkbenchContextVisible = true
+                            }
+                        }
+                        .frame(width: masterWidth)
+
+                        gitWorkbenchResizeDivider(
+                            size: $gitWorkbenchMasterW,
+                            min: 280,
+                            max: 480,
+                            invert: false
                         )
-                        let isHistory = activeGitWorkbenchDestination == "Log"
 
-                        if geo.size.width < 800 {
-                            gitWorkbenchCompactBody(isHistory: isHistory)
-                        } else if isHistory {
-                            HStack(spacing: 0) {
-                                gitRichColumn(
-                                    title: "History",
-                                    icon: "clock.arrow.circlepath",
-                                    lines: engine.chrome.gitWb.colLog,
-                                    kind: .history
-                                ) {
-                                    engine.gitWbSelectHistory($0)
-                                    if geo.size.width < 1_200 {
-                                        gitWorkbenchContextVisible = true
-                                    }
-                                }
-                                .frame(width: masterWidth)
-
-                                gitWorkbenchResizeDivider(
-                                    size: $gitWorkbenchMasterW,
-                                    min: 280,
-                                    max: 480,
-                                    invert: false
-                                )
-
-                                gitDiffDetail(
-                                    lines: engine.chrome.gitWb.special,
-                                    showFilesAction: geo.size.width < 1_200
-                                        ? { gitWorkbenchContextVisible.toggle() }
-                                        : nil
-                                )
-                                    .frame(maxWidth: .infinity)
-                                    .overlay(alignment: .trailing) {
-                                        if geo.size.width < 1_200, gitWorkbenchContextVisible {
-                                            HStack(spacing: 0) {
-                                                gitWorkbenchResizeDivider(
-                                                    size: $gitWorkbenchContextW,
-                                                    min: 260,
-                                                    max: 320,
-                                                    invert: true
-                                                )
-                                                gitRichColumn(
-                                                    title: "Changed Files",
-                                                    icon: "doc.text",
-                                                    lines: engine.chrome.gitWb.colFiles,
-                                                    kind: .files
-                                                ) {
-                                                    engine.gitWbSelectCommitFile($0)
-                                                    gitWorkbenchContextVisible = false
-                                                }
-                                                .frame(width: contextWidth)
-                                            }
-                                            .background(editorBg)
-                                            .shadow(color: .black.opacity(0.14), radius: 12, x: -4)
-                                            .transition(.move(edge: .trailing).combined(with: .opacity))
-                                        }
-                                    }
-
-                                if geo.size.width >= 1_200 {
+                        gitDiffDetail(
+                            lines: engine.chrome.gitWb.special,
+                            showFilesAction: geo.size.width < 1_200
+                                ? { gitWorkbenchContextVisible.toggle() }
+                                : nil
+                        )
+                        .frame(maxWidth: .infinity)
+                        .overlay(alignment: .trailing) {
+                            if geo.size.width < 1_200, gitWorkbenchContextVisible {
+                                HStack(spacing: 0) {
                                     gitWorkbenchResizeDivider(
                                         size: $gitWorkbenchContextW,
                                         min: 260,
@@ -3533,69 +3431,82 @@ struct ContentView: View {
                                         icon: "doc.text",
                                         lines: engine.chrome.gitWb.colFiles,
                                         kind: .files
-                                    ) { engine.gitWbSelectCommitFile($0) }
+                                    ) {
+                                        engine.gitWbSelectCommitFile($0)
+                                        gitWorkbenchContextVisible = false
+                                    }
                                     .frame(width: contextWidth)
                                 }
-                            }
-                            .animation(.easeOut(duration: 0.16), value: gitWorkbenchContextVisible)
-                        } else {
-                            HStack(spacing: 0) {
-                                gitRichColumn(
-                                    title: "Changes",
-                                    icon: "doc.badge.gearshape",
-                                    lines: engine.chrome.gitWb.colChanges,
-                                    kind: .changes
-                                ) { engine.gitWbSelectChange($0) }
-                                .frame(width: masterWidth)
-
-                                gitWorkbenchResizeDivider(
-                                    size: $gitWorkbenchMasterW,
-                                    min: 280,
-                                    max: 480,
-                                    invert: false
-                                )
-
-                                gitDiffDetail(lines: engine.chrome.gitWb.special)
-                                    .frame(maxWidth: .infinity)
+                                .background(editorBg)
+                                .shadow(color: .black.opacity(0.14), radius: 12, x: -4)
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
                             }
                         }
+
+                        if geo.size.width >= 1_200 {
+                            gitWorkbenchResizeDivider(
+                                size: $gitWorkbenchContextW,
+                                min: 260,
+                                max: 320,
+                                invert: true
+                            )
+                            gitRichColumn(
+                                title: "Changed Files",
+                                icon: "doc.text",
+                                lines: engine.chrome.gitWb.colFiles,
+                                kind: .files
+                            ) { engine.gitWbSelectCommitFile($0) }
+                            .frame(width: contextWidth)
+                        }
                     }
+                    .animation(.easeOut(duration: 0.16), value: gitWorkbenchContextVisible)
                 } else {
-                    gitSpecialSurface
+                    HStack(spacing: 0) {
+                        gitRichColumn(
+                            title: "Changes",
+                            icon: "doc.badge.gearshape",
+                            lines: engine.chrome.gitWb.colChanges,
+                            kind: .changes
+                        ) { engine.gitWbSelectChange($0) }
+                        .frame(width: masterWidth)
+
+                        gitWorkbenchResizeDivider(
+                            size: $gitWorkbenchMasterW,
+                            min: 280,
+                            max: 480,
+                            invert: false
+                        )
+
+                        gitDiffDetail(lines: engine.chrome.gitWb.special)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if activeGitWorkbenchDestination == "Branches" {
+            gitBranchesSurface
+        } else {
+            gitSpecialSurface
         }
-        .background(editorBg)
-        .contentShape(Rectangle())
     }
 
     private var activeGitWorkbenchDestination: String {
         engine.chrome.gitWb.chips.first(where: \.active)?.label ?? "Status"
     }
 
-    @ViewBuilder
-    private func gitWorkbenchDestination(_ name: String, label: String? = nil) -> some View {
-        if let chip = engine.chrome.gitWb.chips.first(where: { $0.label == name }) {
-            Button {
-                gitWorkbenchCompactPage = .master
-                gitWorkbenchContextVisible = false
-                engine.gitWbSetTab(chip.key)
-                focused = true
-            } label: {
-                Text(label ?? name)
-                    .font(.system(size: 11, weight: chip.active ? .semibold : .medium))
-                    .foregroundStyle(chip.active ? fg : dim)
-                    .padding(.horizontal, 9)
-                    .frame(height: 43)
-                    .overlay(alignment: .bottom) {
-                        Rectangle()
-                            .fill(chip.active ? accent : Color.clear)
-                            .frame(height: 2)
-                    }
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+    private func gitWorkbenchDestinationTitle(_ raw: String) -> String {
+        raw == "Log" ? "History" : (raw == "Stash" ? "Stashes" : raw)
+    }
+
+    private func gitWorkbenchDestinationSymbol(_ raw: String) -> String {
+        switch raw {
+        case "Status": return "arrow.triangle.2.circlepath"
+        case "Log": return "clock.arrow.circlepath"
+        case "Branches": return "arrow.triangle.branch"
+        case "Stash": return "tray.full"
+        case "PRs": return "arrow.triangle.pull"
+        case "Issues": return "exclamationmark.circle"
+        case "Auth": return "person.crop.circle"
+        default: return "point.3.connected.trianglepath.dotted"
         }
     }
 
@@ -3695,6 +3606,168 @@ struct ContentView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
         }
+    }
+
+    private var gitBranchRows: [GitBranchRow] {
+        engine.chrome.gitWb.special.enumerated().compactMap { index, line in
+            let characters = Array(line)
+            guard characters.count >= 3 else { return nil }
+
+            let selected = characters[0] == "›"
+            let current = characters[1] == "*"
+            let hasScopeMarker = characters.count >= 4
+                && (characters[2] == "L" || characters[2] == "R")
+                && characters[3] == " "
+            let remote = hasScopeMarker
+                ? characters[2] == "R"
+                : String(characters.dropFirst(2)).trimmingCharacters(in: .whitespaces).hasPrefix("origin/")
+            let markerWidth = hasScopeMarker ? 4 : 2
+            let name = String(characters.dropFirst(markerWidth))
+                .trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, !name.hasPrefix("(") else { return nil }
+
+            return GitBranchRow(
+                id: index,
+                name: name,
+                selected: selected,
+                current: current,
+                remote: remote
+            )
+        }
+    }
+
+    private var selectedGitBranch: GitBranchRow? {
+        gitBranchRows.first(where: \.selected) ?? gitBranchRows.first(where: \.current)
+    }
+
+    private var gitBranchesSurface: some View {
+        let local = gitBranchRows.filter { !$0.remote }
+        let remote = gitBranchRows.filter(\.remote)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text("Branches")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Text("\(gitBranchRows.count)")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+            }
+
+            if gitBranchRows.isEmpty {
+                gitEmptyState(
+                    icon: "arrow.triangle.branch",
+                    title: "No branches",
+                    detail: engine.chrome.gitWb.message.isEmpty
+                        ? "Refresh the repository to load branches."
+                        : engine.chrome.gitWb.message
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        gitBranchGroup("LOCAL", rows: local)
+                        if !remote.isEmpty {
+                            gitBranchGroup("REMOTES", rows: remote)
+                                .padding(.top, 9)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private func gitBranchGroup(_ title: String, rows: [GitBranchRow]) -> some View {
+        if !rows.isEmpty {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .tracking(0.35)
+                .padding(.horizontal, 8)
+                .frame(height: 20, alignment: .bottomLeading)
+
+            ForEach(rows) { branch in
+                gitBranchRow(branch)
+            }
+        }
+    }
+
+    private func gitBranchRow(_ branch: GitBranchRow) -> some View {
+        HoverRow(corner: Radius.row) {
+            Button {
+                engine.gitWbSelectSpecial(branch.id)
+                focused = true
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: branch.current
+                        ? "checkmark.circle.fill"
+                        : (branch.remote ? "icloud" : "arrow.triangle.branch"))
+                        .font(.system(size: 11, weight: branch.current ? .semibold : .regular))
+                        .foregroundStyle(branch.current ? accent : .secondary)
+                        .frame(width: 16)
+
+                    Text(branch.name)
+                        .font(.system(size: 11.5, weight: branch.current ? .semibold : .regular))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Spacer(minLength: 8)
+
+                    if branch.current {
+                        Text("Current")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                    } else if branch.remote {
+                        Text("Remote")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                        .fill(branch.selected ? accent.opacity(isLightTheme ? 0.14 : 0.20) : Color.clear)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .contextMenu {
+            Button("Check Out") {
+                engine.gitWbSelectSpecial(branch.id)
+                engine.gitWbCheckoutSelectedBranch()
+                focused = true
+            }
+            .disabled(branch.current)
+
+            if !branch.remote {
+                Divider()
+                Button("Delete Branch", role: .destructive) {
+                    engine.gitWbSelectSpecial(branch.id)
+                    pendingGitBranchDeletion = branch.name
+                    showGitBranchDeletionConfirmation = true
+                }
+                .disabled(branch.current)
+            }
+        }
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                guard !branch.current else { return }
+                engine.gitWbSelectSpecial(branch.id)
+                engine.gitWbCheckoutSelectedBranch()
+                focused = true
+            }
+        )
     }
 
     /// PRs / Issues / Branches / Auth — card list, not bare monospaced dump.
@@ -3876,11 +3949,8 @@ struct ContentView: View {
                 let shown = gitWorkbenchSelectableCount(lines: lines, kind: kind)
                 let total = gitWorkbenchAdvertisedCount(lines: lines, kind: kind)
                 Text(total > shown ? "\(shown)/\(total)" : "\(shown)")
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Color.primary.opacity(0.06)))
             }
             .padding(.horizontal, 12)
             .frame(height: 32)
@@ -3931,7 +4001,11 @@ struct ContentView: View {
                                     onSelect(selection)
                                     focused = true
                                 } label: {
-                                    gitWorkbenchListRow(cleaned: cleaned, selected: selected)
+                                    gitWorkbenchListRow(
+                                        cleaned: cleaned,
+                                        selected: selected,
+                                        kind: kind
+                                    )
                                 }
                                 .buttonStyle(.plain)
                                 .padding(.horizontal, 4)
@@ -3952,32 +4026,55 @@ struct ContentView: View {
         .background(editorBg)
     }
 
-    private func gitWorkbenchListRow(cleaned: String, selected: Bool) -> some View {
-        HoverRow(corner: 4) {
+    private func gitWorkbenchListRow(
+        cleaned: String,
+        selected: Bool,
+        kind: GitWorkbenchListKind
+    ) -> some View {
+        let status = gitStatusCode(cleaned, kind: kind)
+        let title = status == nil ? cleaned : String(cleaned.dropFirst(2))
+        return HoverRow(corner: Radius.row) {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(selected ? accent : gitStatusDotColor(cleaned))
-                    .frame(width: 5, height: 5)
-                Text(cleaned)
-                    .font(.system(size: 11, design: .monospaced))
+                Image(systemName: kind == .history ? "point.3.connected.trianglepath.dotted" : "doc.text")
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(selected ? accent : .secondary)
+                    .frame(width: 14)
+                Text(title)
+                    .font(.system(size: 11, design: kind == .history ? .monospaced : .default))
                     .foregroundStyle(selected ? fg : fg.opacity(0.88))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
+                if let status {
+                    Text(status)
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(gitStatusDotColor(cleaned))
+                        .padding(.horizontal, 5)
+                        .frame(height: 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(gitStatusDotColor(cleaned).opacity(0.12))
+                        )
+                }
             }
             .padding(.horizontal, 10)
-            .frame(height: 28)
+            .frame(height: 27)
             .background(
-                Rectangle()
-                    .fill(selected ? accent.opacity(0.10) : Color.clear)
+                RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                    .fill(selected ? accent.opacity(isLightTheme ? 0.14 : 0.18) : Color.clear)
             )
-            .overlay(alignment: .leading) {
-                Rectangle()
-                    .fill(selected ? accent : Color.clear)
-                    .frame(width: 2)
-            }
             .contentShape(Rectangle())
         }
+    }
+
+    private func gitStatusCode(
+        _ line: String,
+        kind: GitWorkbenchListKind
+    ) -> String? {
+        guard kind == .changes, line.count >= 2 else { return nil }
+        let chars = Array(line)
+        guard chars[1].isWhitespace, "MADRU?".contains(chars[0]) else { return nil }
+        return String(chars[0])
     }
 
     private func gitWorkbenchSelectionIndex(
@@ -4175,31 +4272,15 @@ struct ContentView: View {
 
     private var findBar: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-            TextField(
-                "Find",
+            NativeFindSearchField(
                 text: Binding(
                     get: { engine.chrome.search.input },
                     set: { engine.setFindInput($0) }
                 )
             )
-            .textFieldStyle(.plain)
-            .font(.system(size: 12, design: .monospaced))
-            .foregroundStyle(fg)
             .focused($overlayTextInput, equals: .find)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .frame(minWidth: 160, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
-                    .fill(fg.opacity(isLightTheme ? 0.05 : 0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
-                    .strokeBorder(accent.opacity(0.45), lineWidth: 1)
-            )
+            .frame(minWidth: 230, maxWidth: .infinity)
+            .frame(height: 24)
             .onAppear {
                 DispatchQueue.main.async {
                     overlayTextInput = .find
@@ -4214,35 +4295,57 @@ struct ContentView: View {
             Text(
                 engine.chrome.search.matchCount > 0
                     ? "\(engine.chrome.search.matchIndex + 1) of \(engine.chrome.search.matchCount)"
-                    : (engine.chrome.search.input.isEmpty ? " " : "Not found")
+                    : (engine.chrome.search.input.isEmpty ? "0 results" : "No results")
             )
-            .font(.system(size: 10, design: .rounded))
-            .foregroundStyle(engine.chrome.search.matchCount > 0 ? Color.secondary : Color(nsColor: .systemOrange))
-            .frame(minWidth: 64, alignment: .leading)
+            .font(.system(size: 11))
+            .monospacedDigit()
+            .foregroundStyle(
+                engine.chrome.search.matchCount > 0
+                    ? Color.secondary : Color(nsColor: .systemOrange)
+            )
+            .frame(minWidth: 58, alignment: .trailing)
 
-            HoverIconButton(systemImage: "chevron.left", help: "Previous · ⇧⌘G", fg: Color.primary, dim: Color.secondary) {
-                engine.findStep(forward: false)
+            ControlGroup {
+                Button {
+                    engine.findStep(forward: false)
+                } label: {
+                    Image(systemName: "chevron.up")
+                }
+                .help("Previous · ⇧⌘G")
+
+                Button {
+                    engine.findStep(forward: true)
+                } label: {
+                    Image(systemName: "chevron.down")
+                }
+                .help("Next · ⌘G")
             }
-            HoverIconButton(systemImage: "chevron.right", help: "Next · ⌘G", fg: Color.primary, dim: Color.secondary) {
-                engine.findStep(forward: true)
-            }
-            HoverIconButton(systemImage: "xmark", help: "Done · Return", fg: Color.primary, dim: Color.secondary) {
-                overlayTextInput = nil
+            .controlGroupStyle(.navigation)
+            .controlSize(.small)
+            .disabled(engine.chrome.search.matchCount == 0)
+
+            Button("Done") {
+                // Commit while the find field still owns first responder. If
+                // focus is released first, the editor cancels Search and this
+                // same Return is reinterpreted as a document newline.
                 engine.closeFind()
                 focused = true
             }
+            .controlSize(.small)
+            .keyboardShortcut(.return, modifiers: [])
+            .help("Done · Return")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(8)
+        .frame(minWidth: 420, idealWidth: 480, maxWidth: 540)
         .glassEffect(
-            SuiseiGlass.chrome(light: isLightTheme),
-            in: RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
+            SuiseiGlass.chrome(light: isLightTheme, style: engine.glassStyle),
+            in: RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: Radius.panel, style: .continuous)
-                .strokeBorder(fg.opacity(0.10), lineWidth: 1)
+            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                .strokeBorder(fg.opacity(0.08), lineWidth: 0.5)
         )
-        .shadow(color: .black.opacity(isLightTheme ? 0.10 : 0.35), radius: 12, y: 4)
+        .shadow(color: .black.opacity(isLightTheme ? 0.08 : 0.28), radius: 8, y: 3)
         .padding(.top, 8)
         .padding(.trailing, 12)
     }
@@ -4583,7 +4686,7 @@ struct ContentView: View {
             .accessibilityLabel("Split editor")
             .padding(.trailing, 4)
         }
-        .frame(height: 26)
+        .frame(height: ContentView.editorHeaderHeight)
         .background(editorBg)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
@@ -4965,15 +5068,11 @@ struct ContentView: View {
     private var editorIsolatedStage: some View {
         VStack(spacing: 0) {
             // Jump bar lives above the editor (Cursor/Xcode chrome).
-            if !engine.editorSplit.isSplit, !engine.chrome.gitWb.open,
-               !engine.preview.open
-            {
+            if !engine.editorSplit.isSplit, !engine.preview.open {
                 jumpBar
             }
             Group {
-                if engine.chrome.gitWb.open {
-                    gitWorkbenchDocked
-                } else if engine.preview.open {
+                if engine.preview.open {
                     previewPanel
                 } else {
                     // Full-panel terminal paints inside the bound split pane (see editorColumn).
@@ -4985,7 +5084,7 @@ struct ContentView: View {
             // with editor pane rebuilds; that was the layer flicker).
             .overlay(alignment: .trailing) {
                 if minimapEnabled, !engine.editorSplit.isSplit,
-                   !engine.chrome.gitWb.open, !engine.preview.open
+                   !engine.preview.open
                 {
                     MinimapStrip(
                         engine: engine,
@@ -5073,7 +5172,7 @@ struct ContentView: View {
             .padding(.horizontal, 28)
             .padding(.vertical, 20)
             .glassEffect(
-                SuiseiGlass.panel(light: isLightTheme),
+                SuiseiGlass.panel(light: isLightTheme, style: engine.glassStyle),
                 in: RoundedRectangle(cornerRadius: Radius.floating, style: .continuous)
             )
             .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
@@ -5465,8 +5564,8 @@ struct ContentView: View {
     @ViewBuilder
     private func splitEditorLayout(size: CGSize) -> some View {
         let panes = engine.editorSplit.panes
-        let pathH: CGFloat = 26
-        ZStack(alignment: .topLeading) {
+        let pathH = ContentView.editorHeaderHeight
+        return ZStack(alignment: .topLeading) {
             ForEach(Array(panes.enumerated()), id: \.element.id) { _, pane in
                 let w = max(40, size.width * pane.rect.width - 1)
                 let h = max(40, size.height * pane.rect.height - 1)
@@ -5503,6 +5602,39 @@ struct ContentView: View {
             }
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
+        // Pane STRUCTURE lands in one frame. Pane SIZE still animates.
+        //
+        // Two different changes reach this view and they want opposite
+        // treatment:
+        //
+        // * a tab switch that collapses a split changes what the ENGINE says
+        //   the panes are — their count and their rect fractions — while the
+        //   container's size holds still. That should be instant; animated, the
+        //   departing pane lingers and the survivor is caught mid-grow, which
+        //   is a one-step action played as a little movie.
+        // * opening or closing a panel changes the CONTAINER's size while the
+        //   engine's pane fractions hold still. That should follow the panel.
+        //
+        // A blanket `.transaction { $0.animation = nil }` was tried and killed
+        // both, so a split desk snapped to full width the instant a panel
+        // closed while an unsplit one — a different branch, untouched — glided.
+        // Keying the suppression to the structure alone separates them: the key
+        // moves only when the engine's own description of the panes does.
+        .animation(nil, value: paneStructureKey(panes))
+    }
+
+    /// What the ENGINE says the panes are, as one comparable value.
+    ///
+    /// Ids and rect fractions — deliberately not the pixel sizes, which move
+    /// whenever the window or a panel does. This changes when the arrangement
+    /// changes and holds still when only the space around it does.
+    private func paneStructureKey(_ panes: [EditorPaneSnap]) -> String {
+        panes
+            .map { p in
+                let r = p.rect
+                return "\(p.id):\(r.minX),\(r.minY),\(r.width),\(r.height)"
+            }
+            .joined(separator: "|")
     }
 
     /// One Xcode editor column: path bar (file for this pane) + text surface.
@@ -5544,7 +5676,7 @@ struct ContentView: View {
                     .help("Close terminal")
                 }
                 .padding(.horizontal, 10)
-                .frame(height: 26)
+                .frame(height: ContentView.editorHeaderHeight)
                 .background(editorBg.opacity(0.95))
                 .overlay(alignment: .bottom) {
                     Rectangle()
@@ -5562,6 +5694,19 @@ struct ContentView: View {
                     paneIndex: pane.id,
                     showFocusRing: pane.focused
                 )
+                .overlay(alignment: .trailing) {
+                    if minimapEnabled, pane.focused {
+                        MinimapStrip(
+                            engine: engine,
+                            accent: accent,
+                            fg: fg,
+                            bg: editorBg,
+                            isLight: isLightTheme
+                        )
+                        .frame(width: 62)
+                        .transition(.opacity)
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -5665,7 +5810,7 @@ struct ContentView: View {
             .help("Close pane")
         }
         .padding(.horizontal, 8)
-        .frame(height: 26)
+        .frame(height: ContentView.editorHeaderHeight)
         .background(pane.focused ? editorBg : shellBase.opacity(0.55))
         .overlay(alignment: .bottom) {
             Rectangle()
@@ -6173,11 +6318,15 @@ private struct TabStripMouse: NSViewRepresentable {
     /// The one-step swap target while dragging, or nil to stay put.
     var targetFor: (Int, CGFloat) -> Int?
     var onDrag: (Int, Int) -> Void
+    /// The slot under the pointer, or nil. Same lookup as `slotAt`.
+    var onHoverSlot: (Int?) -> Void
     var onPick: (Int) -> Void
     var onClick: (Int) -> Void
     var onDoubleClick: (Int) -> Void = { _ in }
     var onClose: (Int) -> Void
     var onEnd: () -> Void
+    /// Horizontal scroll; returns whether the strip consumed it.
+    var onScroll: (CGFloat) -> Bool
     var onFoldUp: () -> Void = {}
     var onFoldDown: () -> Void = {}
 
@@ -6188,6 +6337,12 @@ private struct TabStripMouse: NSViewRepresentable {
         var onDrag: ((Int, Int) -> Void)?
         var onPick: ((Int) -> Void)?
         var onClick: ((Int) -> Void)?
+        var onHoverSlot: ((Int?) -> Void)?
+        /// Move the run horizontally; returns whether it actually moved, so an
+        /// unconsumed scroll at either end still falls through.
+        var onScroll: ((CGFloat) -> Bool)?
+        /// Last reported hover, so only boundary crossings publish.
+        private var lastHoverSlot: Int?
         var onDoubleClick: ((Int) -> Void)?
         var onClose: ((Int) -> Void)?
         var onEnd: (() -> Void)?
@@ -6250,11 +6405,18 @@ private struct TabStripMouse: NSViewRepresentable {
                 return self
             case .scrollWheel:
                 observeScrollGesture(e)
-                // Claim ONLY the deliberate vertical flick that folds a layout.
-                // Ordinary horizontal tab scrolling has to fall through to the
-                // `ScrollView` underneath, and it does — by not being claimed
-                // here at all, rather than by being forwarded afterwards.
-                return Catcher.isFoldFlick(e) ? self : nil
+                // Claim every scroll. `scrollWheel` sorts them out.
+                //
+                // This used to claim ONLY the vertical fold flick and decline
+                // the rest, with the note that ordinary horizontal scrolling
+                // "has to fall through to the `ScrollView` underneath". There
+                // is no ScrollView underneath any more — the strip computes its
+                // own layout and owns its own offset — so declining sent
+                // horizontal scrolls to nobody and the strip simply would not
+                // scroll. Declining here also meant the `scrollWheel` override
+                // never ran, so the handler added for exactly this could not
+                // fire.
+                return self
             default:
                 return nil
             }
@@ -6290,8 +6452,30 @@ private struct TabStripMouse: NSViewRepresentable {
         /// rather than `leftMouseDragged`, and a reorder that only listens for
         /// the latter silently does nothing for them.
         override func mouseMoved(with event: NSEvent) {
+            // Hover resolves through `slotAt` — the same lookup a click uses.
+            // It used to come from each chip's own `.onHover`, i.e. SwiftUI's
+            // hit-testing, which is a SECOND authority and free to disagree
+            // with this one. It did: hovering one chip highlighted, and then
+            // selected, another. See docs/SUISEI-TAB-STRIP-BEHAVIOUR.md §4.
+            //
+            // Reported only when the slot CHANGES, so crossing a chip boundary
+            // costs one publish and moving within a chip costs none — a write
+            // per mouse move is the invalidation storm that made the strip
+            // stutter.
+            let slot = slotAt?(x(of: event)) ?? nil
+            if slot != lastHoverSlot {
+                lastHoverSlot = slot
+                onHoverSlot?(slot)
+            }
             guard held != nil else { return }
             advance(to: x(of: event))
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            if lastHoverSlot != nil {
+                lastHoverSlot = nil
+                onHoverSlot?(nil)
+            }
         }
 
         private func advance(to cur: CGFloat) {
@@ -6316,6 +6500,23 @@ private struct TabStripMouse: NSViewRepresentable {
         /// and each downward gesture reverses the same ladder.
         override func scrollWheel(with event: NSEvent) {
             guard Catcher.isFoldFlick(event) else {
+                // Horizontal scrolling used to fall through to a `ScrollView`.
+                // There is no longer one — the strip owns its offset — so the
+                // run is moved here. A trackpad's horizontal component is
+                // `scrollingDeltaX`; a plain wheel with shift held reports on
+                // the same axis, so both arrive as one number.
+                // A trackpad's horizontal component is `scrollingDeltaX`. A
+                // plain mouse wheel has none — it only reports Y — and a tab
+                // strip is expected to scroll from that too (every browser does
+                // it), so a vertical wheel that is NOT a fold flick drives the
+                // run sideways.
+                let dx = event.scrollingDeltaX
+                let raw = dx != 0 ? dx : event.scrollingDeltaY
+                // Trackpads already report point deltas and a momentum tail.
+                // Mouse-wheel detents are tiny unit steps; map those to one
+                // conventional text-line distance so both devices feel direct.
+                let delta = event.hasPreciseScrollingDeltas ? raw : raw * 24
+                if delta != 0, onScroll?(delta) == true { return }
                 super.scrollWheel(with: event)
                 return
             }
@@ -6372,7 +6573,7 @@ private struct TabStripMouse: NSViewRepresentable {
             trackingAreas.forEach(removeTrackingArea)
             addTrackingArea(NSTrackingArea(
                 rect: bounds,
-                options: [.activeInKeyWindow, .mouseMoved, .inVisibleRect],
+                options: [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
                 owner: self
             ))
         }
@@ -6412,6 +6613,8 @@ private struct TabStripMouse: NSViewRepresentable {
         v.onDrag = onDrag
         v.onPick = onPick
         v.onClick = onClick
+        v.onHoverSlot = onHoverSlot
+        v.onScroll = onScroll
         v.onDoubleClick = onDoubleClick
         v.onClose = onClose
         v.onEnd = onEnd
@@ -6420,7 +6623,9 @@ private struct TabStripMouse: NSViewRepresentable {
     }
 }
 
-private struct TravellingPill: Shape {
+/// Shared selection geometry for Suisei's draggable mode rails. The editor
+/// navigator and independent workbench both use the same motion contract.
+struct TravellingPill: Shape {
     /// 0 = fully at `from`, 1 = fully at `to`.
     var progress: CGFloat
     var from: CGFloat
@@ -6527,6 +6732,50 @@ private struct NavigatorSearchField: View {
     }
 }
 
+/// AppKit's real single-line search control. Xcode's find panel uses this
+/// control rather than a plain text field with a separately drawn icon and
+/// bezel, so the clear button, focus ring, text metrics and accessibility all
+/// follow the current macOS appearance automatically.
+private struct NativeFindSearchField: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.placeholderString = "Find"
+        field.controlSize = .small
+        field.font = .systemFont(ofSize: 12)
+        field.sendsWholeSearchString = false
+        field.sendsSearchStringImmediately = true
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.searchChanged(_:))
+        field.setAccessibilityLabel("Find")
+        return field
+    }
+
+    func updateNSView(_ nsView: NSSearchField, context: Context) {
+        context.coordinator.parent = self
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var parent: NativeFindSearchField
+
+        init(parent: NativeFindSearchField) {
+            self.parent = parent
+        }
+
+        @objc func searchChanged(_ sender: NSSearchField) {
+            parent.text = sender.stringValue
+        }
+    }
+}
+
 /// A panel docked to the bottom of a surface, fused to it rather than laid on
 /// top of it.
 ///
@@ -6576,10 +6825,21 @@ private struct DockedPanelShape: Shape {
 struct WithinWindowBlur: NSViewRepresentable {
     var material: NSVisualEffectView.Material = .popover
     var light: Bool? = nil
+    /// Sample the DESKTOP rather than the window's own content.
+    ///
+    /// This is the difference the sidebar's colour turns on. Measured against
+    /// Xcode: its sidebar reads neutral `#F5F5F5` over a black desktop and
+    /// takes on a blue cast over a purple wallpaper — because a real Mac
+    /// sidebar blends behind-window and samples what is behind it. A flat
+    /// colour, or `.withinWindow`, can never do that.
+    ///
+    /// Behind-window blending only shows through a window that is actually
+    /// transparent there, so this travels with the window being non-opaque.
+    var behindWindow: Bool = false
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
-        v.blendingMode = .withinWindow
+        v.blendingMode = behindWindow ? .behindWindow : .withinWindow
         v.material = material
         v.state = .active
         apply(v)
@@ -6588,6 +6848,7 @@ struct WithinWindowBlur: NSViewRepresentable {
 
     func updateNSView(_ v: NSVisualEffectView, context: Context) {
         v.material = material
+        v.blendingMode = behindWindow ? .behindWindow : .withinWindow
         apply(v)
     }
 
@@ -7690,8 +7951,10 @@ private final class StableTrafficLightOverlay: NSView {
     private let closeControl: NSButton
     private let minimizeControl: NSButton
     private let zoomControl: NSButton
+    /// Downward nudge, set by whichever window installed this.
+    private var drop: CGFloat = 0
 
-    static func install(in window: NSWindow, bandHeight: CGFloat) {
+    static func install(in window: NSWindow, bandHeight: CGFloat, drop: CGFloat) {
         guard let frameView = window.contentView?.superview else { return }
         if let existing = frameView.subviews.first(where: { $0.identifier == overlayID }) {
             // Bring to front every install — SwiftUI/AppKit can re-order
@@ -7721,6 +7984,7 @@ private final class StableTrafficLightOverlay: NSView {
             minimize: minimize,
             zoom: zoom
         )
+        overlay.drop = drop
         overlay.identifier = overlayID
         overlay.translatesAutoresizingMaskIntoConstraints = false
         frameView.addSubview(overlay, positioned: .above, relativeTo: nil)
@@ -7775,6 +8039,52 @@ private final class StableTrafficLightOverlay: NSView {
     /// Click the lights without focusing the window first.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    // MARK: - Hover glyphs
+    //
+    // The ×, − and + only appear when the pointer is over the GROUP, and a
+    // traffic light does not decide that for itself: each cell asks its
+    // superview, and for real lights the answer comes from AppKit's own
+    // titlebar view, which does the tracking.
+    //
+    // These buttons are detached — built by the `NSWindow` class method rather
+    // than taken from a window — so that superview is this overlay, and nothing
+    // was answering. The lights drew as three bare circles and never showed
+    // their symbols, while clicking still worked because the actions were wired
+    // independently. That is exactly the reported "작동은 함" shape.
+
+    /// Whether the pointer is inside the group, which is what the cells draw on.
+    private var mouseInGroup = false
+
+    /// The callback each button cell makes on its superview. Implementing it is
+    /// answering AppKit's question, not calling into it.
+    @objc(_mouseInGroup:)
+    func _mouseInGroup(_ button: NSButton) -> Bool { mouseInGroup }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        // `.activeAlways`, not `.activeInKeyWindow`: the lights show their
+        // symbols on hover even while the window is inactive, and matching that
+        // is the whole point of using the real controls.
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) { setGroupHover(true) }
+    override func mouseExited(with event: NSEvent) { setGroupHover(false) }
+
+    private func setGroupHover(_ inside: Bool) {
+        guard mouseInGroup != inside else { return }
+        mouseInGroup = inside
+        // The cells cache the answer; they have to be asked to redraw.
+        for button in [closeControl, minimizeControl, zoomControl] {
+            button.needsDisplay = true
+        }
+    }
+
     private func configure(
         _ button: NSButton,
         identifier: String,
@@ -7803,7 +8113,9 @@ private final class StableTrafficLightOverlay: NSView {
             let size = button.fittingSize
             let w = max(size.width, 14)
             let h = max(size.height, 16)
-            let y = floor((bounds.height - h) / 2) - 1.5
+            // Unflipped: subtracting moves DOWN, so the shared drop is
+            // subtracted here and added on the SwiftUI side.
+            let y = floor((bounds.height - h) / 2) - 1.5 - drop
             button.frame = NSRect(
                 x: CGFloat(index) * Self.buttonStep,
                 y: y,

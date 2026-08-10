@@ -5,32 +5,60 @@ import SwiftUI
 enum WindowChrome {
     static let editorIdentifier = NSUserInterfaceItemIdentifier("suisei.window.editor")
     static let settingsIdentifier = NSUserInterfaceItemIdentifier("suisei.window.settings")
+    static let gitWorkbenchIdentifier = NSUserInterfaceItemIdentifier("suisei.window.gitWorkbench")
 
-    static func applyThemedTitlebar(to window: NSWindow, background: NSColor, light: Bool) {
+    /// The corner radius macOS gives a window on this OS.
+    ///
+    /// The single place this number lives. It cannot be read back — the frame
+    /// view reports `layer.cornerRadius == 0` here — so it is stated, and every
+    /// surface that has to line up with a window corner derives from it:
+    /// `ContentView.panelCornerRadius`, the Welcome window's own cut corner,
+    /// and the resize HUD's mask. Those were three separate literals, and they
+    /// had already drifted apart (12, 18, 12).
+    ///
+    /// If panels ever read tighter or rounder than the window behind them, this
+    /// is the one value to change — everything else derives from it, so nothing
+    /// else needs touching.
+    ///
+    /// MEASURED, not inferred. Captured a window against a near-black desktop
+    /// and walked the top-left corner scanline by scanline: the inset reaches
+    /// the straight edge after 31 native pixels on a 2x display, so the corner
+    /// is ~16pt.
+    ///
+    /// The previous value here was 24, which I had back-solved from "the panel
+    /// looked too tight" rather than measured — the same guessing this constant
+    /// exists to stop. 16 is what the pixels say.
+    static let windowCornerRadius: CGFloat = 16
+
+    /// Apply appearance only. SwiftUI owns the Settings titlebar geometry.
+    ///
+    /// Moving or cloning the standard window buttons is appropriate for the
+    /// editor's custom 48pt chrome, but not for a conventional Settings window.
+    /// Keeping AppKit's real buttons in their native hierarchy preserves the
+    /// system's placement, focus and accessibility behavior.
+    static func applyThemedTitlebar(
+        to window: NSWindow,
+        background: NSColor,
+        light: Bool,
+        opaque: Bool = false
+    ) {
         window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
-        window.backgroundColor = background
-        window.isOpaque = true
-
-        // Keep a real titlebar so ●●● always exist and stay clickable.
+        // The detail view paints its own semantic background. Keeping the
+        // window itself transparent is what lets NavigationSplitView's native
+        // sidebar material continue through the titlebar and blend like System
+        // Settings; an opaque window flattened it into a mismatched dark slab.
+        window.backgroundColor = opaque ? background : .clear
+        window.isOpaque = opaque
+        window.titlebarAppearsTransparent = true
         window.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
-        // Do NOT use fullSizeContentView here — content drawing under titlebar
-        // was covering / losing traffic lights in the Settings window.
-        window.styleMask.remove(.fullSizeContentView)
-        window.titlebarAppearsTransparent = false
-        window.titleVisibility = .visible
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = false
 
-        // Ensure standard buttons are visible and enabled.
         for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            if let btn = window.standardWindowButton(kind) {
-                btn.isHidden = false
-                btn.alphaValue = 1
-                btn.isEnabled = true
-            }
-        }
-
-        if let cv = window.contentView {
-            cv.wantsLayer = true
-            cv.layer?.backgroundColor = background.cgColor
+            guard let button = window.standardWindowButton(kind) else { continue }
+            button.isHidden = false
+            button.alphaValue = 1
+            button.isEnabled = true
         }
     }
 }
@@ -40,6 +68,7 @@ struct ThemedWindowChrome: NSViewRepresentable {
     var background: NSColor
     var light: Bool
     var identifier: NSUserInterfaceItemIdentifier? = nil
+    var opaque: Bool = false
 
     func makeNSView(context: Context) -> NSView {
         let v = NSView(frame: .zero)
@@ -57,7 +86,12 @@ struct ThemedWindowChrome: NSViewRepresentable {
         if let identifier {
             window.identifier = identifier
         }
-        WindowChrome.applyThemedTitlebar(to: window, background: background, light: light)
+        WindowChrome.applyThemedTitlebar(
+            to: window,
+            background: background,
+            light: light,
+            opaque: opaque
+        )
     }
 }
 
@@ -150,7 +184,7 @@ final class ResizeHudWindow {
     /// The child window is a plain rectangle: unmasked, its square corners paint
     /// over the parent's rounded ones for the whole drag. Clip it to match. The
     /// parent's frame view doesn't expose its radius as layer.cornerRadius on
-    /// this OS (reads 0), so fall back to the standard window radius; fullscreen
+    /// this OS (reads 0), so fall back to `WindowChrome.windowCornerRadius`; fullscreen
     /// windows are the only truly square case.
     private func applyCornerMask(to hud: NSWindow, matching parent: NSWindow) {
         guard let content = hud.contentView else { return }
@@ -160,7 +194,7 @@ final class ResizeHudWindow {
         if parent.styleMask.contains(.fullScreen) {
             radius = 0
         } else {
-            radius = parentRadius > 0 ? parentRadius : 12
+            radius = parentRadius > 0 ? parentRadius : WindowChrome.windowCornerRadius
         }
         content.layer?.cornerRadius = radius
         content.layer?.cornerCurve = .continuous

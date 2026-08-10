@@ -75,10 +75,21 @@ enum TabChipMetrics {
         if showsTrailing {
             w += interItemGap + trailingSlotWidth
         }
-        // NOT rounded: SwiftUI lays the chip out in fractional points, and a
-        // 1pt rounding error per chip compounds along the run — by the tenth
-        // tab that is a whole chip's worth of drift.
-        return w
+        // Rounded UP, per chip, because that is what SwiftUI does.
+        //
+        // This comment used to say the opposite — that rounding compounds, so
+        // leave it fractional. Measured against a hosted `HStack(spacing: 4)`
+        // of real chips, the reasoning was backwards: SwiftUI ceils every
+        // child to a whole point, so `sum(ceil(wᵢ))` matches its layout
+        // exactly at 1, 2, 5 and 10 chips while `sum(wᵢ)` falls behind by
+        // ~0.36pt per chip — 3.6pt by the tenth tab, and growing. NOT
+        // rounding is the thing that compounds.
+        //
+        // This matters more than it used to: `tabSlot` now computes chip
+        // positions from these widths instead of measuring each chip, so a
+        // systematic bias here aims every click and hover slightly wrong, and
+        // worse the further right you go.
+        return w.rounded(.up)
     }
 
     /// Drop the caches when the system font or appearance changes underneath

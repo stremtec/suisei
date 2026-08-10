@@ -908,6 +908,85 @@ pub fn resolve(name: &str, system_is_dark: bool) -> &'static Theme {
     find(name).unwrap_or(if system_is_dark { &DARK } else { &LIGHT })
 }
 
+/// Apply the one supported palette override: the interaction/highlight hue.
+///
+/// Syntax colours and surfaces stay authored as a coherent Light or Dark
+/// palette. Allowing each of those colours to drift independently recreates
+/// the low-contrast theme combinations this layer exists to prevent. The
+/// chosen hue is therefore used directly for controls and softly mixed into
+/// selection/search surfaces; `default` leaves the authored palette intact.
+pub fn with_highlight(base: &Theme, preference: &str) -> Theme {
+    let Some(highlight) = parse_hex_rgb(preference) else {
+        return *base;
+    };
+    let mut theme = *base;
+    theme.accent = highlight;
+    theme.accent_fg = if relative_luminance(highlight) > 0.56 {
+        rgb(18, 20, 24)
+    } else {
+        rgb(255, 255, 255)
+    };
+    theme.selection_bg = mix(
+        highlight,
+        base.editor_bg,
+        if base.name == "light" { 0.76 } else { 0.62 },
+    );
+    theme.search_bg = mix(
+        highlight,
+        base.editor_bg,
+        if base.name == "light" { 0.68 } else { 0.54 },
+    );
+    theme.panel_sel_bg = mix(
+        highlight,
+        base.panel_bg,
+        if base.name == "light" { 0.82 } else { 0.68 },
+    );
+    theme.mode_search = highlight;
+    theme.mode_find = highlight;
+    theme.git_hunk = highlight;
+    theme
+}
+
+fn parse_hex_rgb(value: &str) -> Option<Rgba> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("default") {
+        return None;
+    }
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let n = u32::from_str_radix(hex, 16).ok()?;
+    Some(rgb(
+        ((n >> 16) & 0xff) as u8,
+        ((n >> 8) & 0xff) as u8,
+        (n & 0xff) as u8,
+    ))
+}
+
+fn mix(foreground: Rgba, background: Rgba, background_amount: f32) -> Rgba {
+    let amount = background_amount.clamp(0.0, 1.0);
+    let channel =
+        |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * amount).round() as u8;
+    rgb(
+        channel(foreground.r, background.r),
+        channel(foreground.g, background.g),
+        channel(foreground.b, background.b),
+    )
+}
+
+fn relative_luminance(color: Rgba) -> f32 {
+    let linear = |v: u8| {
+        let value = f32::from(v) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    linear(color.r) * 0.2126 + linear(color.g) * 0.7152 + linear(color.b) * 0.0722
+}
+
 #[cfg(test)]
 mod resolve_tests {
     use super::*;
@@ -928,5 +1007,20 @@ mod resolve_tests {
     #[test]
     fn an_unknown_name_falls_back_to_the_appearance() {
         assert_eq!(resolve("nope", true).name, "dark");
+    }
+
+    #[test]
+    fn highlight_override_changes_semantic_highlights_only() {
+        let customized = with_highlight(&DARK, "#FF2D55");
+        assert_eq!(customized.accent, rgb(255, 45, 85));
+        assert_eq!(customized.keyword, DARK.keyword);
+        assert_eq!(customized.editor_bg, DARK.editor_bg);
+        assert_ne!(customized.selection_bg, DARK.selection_bg);
+    }
+
+    #[test]
+    fn default_or_invalid_highlight_keeps_authored_palette() {
+        assert_eq!(with_highlight(&LIGHT, "default").accent, LIGHT.accent);
+        assert_eq!(with_highlight(&LIGHT, "not-a-colour").accent, LIGHT.accent);
     }
 }

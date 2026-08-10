@@ -174,9 +174,13 @@ pub struct App {
     pub terminal_separator_x: u16,
     pub screen_width: u16,
     pub screen_height: u16,
-    pub theme: &'static Theme,
+    /// Resolved Light/Dark palette plus the optional semantic highlight hue.
+    /// Owned because the highlight override is per-user, not a global static.
+    pub theme: Theme,
     /// The configured theme name — `"system"` means follow macOS.
     pub theme_pref: String,
+    /// Native floating-chrome material: `"clear"` or `"tinted"`.
+    pub glass_style: String,
     /// Current system appearance, pushed down by the face.
     pub system_is_dark: bool,
     pub xlc_height: u16,
@@ -528,8 +532,9 @@ impl Default for App {
             terminal_separator_x: 0,
             screen_width: 80,
             screen_height: 24,
-            theme: &OCEAN,
+            theme: OCEAN,
             theme_pref: "system".to_string(),
+            glass_style: "clear".to_string(),
             system_is_dark: true,
             xlc_height: 11,
             xlc_separator_y: 0,
@@ -709,8 +714,15 @@ impl App {
         self.key_hints = cfg.key_hints;
         self.lsp
             .apply_config(cfg.lsp_enabled, cfg.lsp_servers.clone());
+        if cfg.update_check {
+            self.update.start_check(env!("CARGO_PKG_VERSION"));
+        }
         self.theme_pref = cfg.theme.clone();
-        self.theme = theme::resolve(&cfg.theme, self.system_is_dark);
+        self.glass_style = cfg.glass_style.clone();
+        self.theme = theme::with_highlight(
+            theme::resolve(&cfg.theme, self.system_is_dark),
+            &cfg.highlight_color,
+        );
     }
 
     /// `:status` — toggle the live CPU/MEM/GPU readout in the status line.
@@ -733,7 +745,11 @@ impl App {
             return;
         }
         self.system_is_dark = is_dark;
-        self.theme = crate::theme::resolve(&self.theme_pref, is_dark);
+        let cfg = config::load();
+        self.theme = crate::theme::with_highlight(
+            crate::theme::resolve(&self.theme_pref, is_dark),
+            &cfg.highlight_color,
+        );
     }
 
     /// Status-line note. Replaces the XLC console the vim `:` command line
@@ -1581,8 +1597,12 @@ impl App {
 
     /// Open unified Settings (Ctrl+,). Starts on About page.
     pub fn open_settings(&mut self) {
-        if self.mode == Mode::Settings {
-            self.close_settings();
+        // Native Settings is an independent window. Cmd+, means "show it",
+        // never "toggle it closed". This also makes duplicate SwiftUI scene
+        // presentation callbacks harmless instead of racing open → close and
+        // leaving a visible window backed by an empty settings snapshot.
+        if self.settings.open {
+            self.mode = Mode::Settings;
             return;
         }
         if self.palette.open {
@@ -1591,9 +1611,10 @@ impl App {
         if self.preview.open {
             self.preview.close_immediate();
         }
-        if self.git_wb.open {
-            self.git_wb.close();
-        }
+        // Settings and the native Source Control workbench are independent
+        // macOS windows. Opening one must not tear down the other's model:
+        // SwiftUI can keep both scenes visible and hands keyboard ownership
+        // back through the per-window focus callbacks.
         if self.scm.open {
             self.scm.close_immediate();
         }
@@ -1632,8 +1653,15 @@ impl App {
         self.key_hints = cfg.key_hints;
         self.lsp
             .apply_config(cfg.lsp_enabled, cfg.lsp_servers.clone());
+        if cfg.update_check {
+            self.update.start_check(env!("CARGO_PKG_VERSION"));
+        }
         self.theme_pref = cfg.theme.clone();
-        self.theme = theme::resolve(&cfg.theme, self.system_is_dark);
+        self.glass_style = cfg.glass_style.clone();
+        self.theme = theme::with_highlight(
+            theme::resolve(&cfg.theme, self.system_is_dark),
+            &cfg.highlight_color,
+        );
         // Restart LSP for current file with new server map
         self.lsp_restart_for_current();
     }
@@ -2861,7 +2889,8 @@ impl App {
             id if id.starts_with("theme:") => {
                 let name = &id[6..];
                 if let Some(t) = theme::find(name) {
-                    self.theme = t;
+                    let cfg = config::load();
+                    self.theme = theme::with_highlight(t, &cfg.highlight_color);
                     config::save_theme(t.name);
                     self.message = format!("Theme: {}", t.name);
                 }
@@ -4533,7 +4562,11 @@ mod tests {
 
         // Hop to the other member.
         app.goto_tab_id(ids[1]);
-        assert_eq!(app.active_layout, Some(app.layouts[0].id), "still on the desk");
+        assert_eq!(
+            app.active_layout,
+            Some(app.layouts[0].id),
+            "still on the desk"
+        );
         assert_eq!(app.split.pane_count(), 2, "must not collapse");
         assert_eq!(app.current_buffer_id(), ids[1]);
 
@@ -4988,9 +5021,27 @@ mod tests {
         assert_eq!(shown(&app), ["d"], "only d remains");
 
         // Unrelated close: split on b|d, close c (shown nowhere) → still b|d.
-        let b_id = app.tabs.buffers.iter().find(|t| t.buffer.line(0) == "b").unwrap().id;
-        let d_id = app.tabs.buffers.iter().find(|t| t.buffer.line(0) == "d").unwrap().id;
-        let c_id = app.tabs.buffers.iter().find(|t| t.buffer.line(0) == "c").unwrap().id;
+        let b_id = app
+            .tabs
+            .buffers
+            .iter()
+            .find(|t| t.buffer.line(0) == "b")
+            .unwrap()
+            .id;
+        let d_id = app
+            .tabs
+            .buffers
+            .iter()
+            .find(|t| t.buffer.line(0) == "d")
+            .unwrap()
+            .id;
+        let c_id = app
+            .tabs
+            .buffers
+            .iter()
+            .find(|t| t.buffer.line(0) == "c")
+            .unwrap()
+            .id;
         panes_on(&mut app, &[b_id, d_id]);
         assert_eq!(shown(&app), ["b", "d"]);
         app.close_tab_id(c_id);
@@ -5378,6 +5429,40 @@ mod tests {
         assert_eq!(app.scm.ahead, 2);
         assert_eq!(app.scm.total_files(), 2);
         assert!(app.scm.last_result.is_none());
+    }
+
+    #[test]
+    fn opening_settings_keeps_the_independent_workbench_alive() {
+        let mut app = App::new();
+        app.git_wb.open = true;
+        app.mode = Mode::GitWorkbench;
+
+        // Exercise the actual macOS command route. The legacy dispatcher used
+        // to reject Cmd+, while Git Workbench owned the mode, so SwiftUI could
+        // present a Settings window backed by a closed/empty Core model.
+        app.dispatch(crate::key::KeyEvent::new(
+            crate::key::KeyCode::Char(','),
+            crate::key::KeyModifiers::SUPER,
+        ));
+
+        assert!(app.settings.open);
+        assert!(
+            app.git_wb.open,
+            "opening one native window must not close the other window's model"
+        );
+
+        app.open_settings();
+        assert!(
+            app.settings.open,
+            "showing Settings twice must be idempotent"
+        );
+        assert!(app.git_wb.open);
+
+        app.close_settings();
+        assert!(
+            app.git_wb.open,
+            "closing Settings must leave Source Control open"
+        );
     }
 
     #[test]
@@ -5888,7 +5973,6 @@ mod tests {
         assert_eq!(app.tabs.buffers.len(), 2, "both tabs still open");
     }
 
-
     /// User scenario: 2-tab split folded into a group; close one pane via header.
     /// Group must dissolve; both tabs remain open; only one pane left.
     #[test]
@@ -5906,11 +5990,18 @@ mod tests {
         assert_eq!(app.layouts.len(), 0, "group must dissolve");
         assert_eq!(app.active_layout, None);
         assert_eq!(app.split.pane_count(), 1, "one pane left");
-        assert_eq!(app.tabs.buffers.len(), 2, "both tabs stay (header is not tab close)");
-        assert!(!app.split.panes.iter().any(|p| p.buffer == ids[0]) || app.current_buffer_id() == ids[1]
-            || app.split.panes[0].buffer == ids[1],
+        assert_eq!(
+            app.tabs.buffers.len(),
+            2,
+            "both tabs stay (header is not tab close)"
+        );
+        assert!(
+            !app.split.panes.iter().any(|p| p.buffer == ids[0])
+                || app.current_buffer_id() == ids[1]
+                || app.split.panes[0].buffer == ids[1],
             "survivor should be B; panes={:?}",
-            app.split.panes.iter().map(|p| p.buffer).collect::<Vec<_>>());
+            app.split.panes.iter().map(|p| p.buffer).collect::<Vec<_>>()
+        );
         assert_eq!(app.split.panes[0].buffer, ids[1], "remaining pane shows B");
     }
 
@@ -5928,9 +6019,16 @@ mod tests {
         assert_eq!(app.current_buffer_id(), ids[0]);
         app.close_tab_id(ids[0]);
 
-        assert!(!app.tabs.buffers.iter().any(|t| t.id == ids[0]), "A tab gone");
+        assert!(
+            !app.tabs.buffers.iter().any(|t| t.id == ids[0]),
+            "A tab gone"
+        );
         assert_eq!(app.tabs.buffers.len(), 1);
-        assert_eq!(app.split.pane_count(), 1, "A's pane must be removed, not kept as B|B");
+        assert_eq!(
+            app.split.pane_count(),
+            1,
+            "A's pane must be removed, not kept as B|B"
+        );
         assert_eq!(app.split.panes[0].buffer, ids[1], "only B remains");
         assert_eq!(app.layouts.len(), 0, "group dissolved");
     }

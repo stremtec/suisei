@@ -226,6 +226,22 @@ pub struct SettingsRowScene {
     pub value: String,
     pub is_header: bool,
     pub selected: bool,
+    /// What this row IS — `SettingRow::kind`. 0 for rows that exist only on the
+    /// About page and have no setting behind them.
+    ///
+    /// Carried so the face can branch on the row's identity instead of
+    /// pattern-matching its label. See `SettingRow::kind`.
+    pub kind: u32,
+    /// Which theme / which language, for the rows that are indexed.
+    pub payload: u32,
+    /// Native Settings destination and control semantics from Core.
+    pub page: u32,
+    pub control: u32,
+    pub value_index: u32,
+    pub advanced: bool,
+    pub group: String,
+    pub detail: String,
+    pub options: String,
 }
 
 #[derive(Debug, Clone)]
@@ -387,6 +403,28 @@ pub fn build_editor_band(
     start: usize,
     rows: usize,
 ) -> (Vec<EditorLineScene>, u32) {
+    // A pane the desk does not have is not a request to be satisfied with some
+    // other pane's document.
+    //
+    // Both arms below used to answer anyway: unsplit returned `current` for
+    // EVERY index, and the split arm clamped with `pane.min(n - 1)`. That is
+    // how "switch from a split to an ordinary tab" flashed the destination in
+    // BOTH panes. Leaving a layout collapses the split in one engine call, but
+    // the face animates the pane list over 0.22s, so the departing pane view is
+    // still alive and still pulling — and it was told the new document, because
+    // by then `is_split()` was false and every index answered `current`.
+    //
+    // Declining costs the caller nothing: `pull_band` treats an empty band as
+    // "no rows here", which is the truth for a pane that no longer exists.
+    let live_panes = if app.split.is_split() {
+        app.split.pane_count()
+    } else {
+        1
+    };
+    if pane >= live_panes {
+        return (Vec::new(), 0);
+    }
+
     // Resolve pane → tab + focus (mirrors build_editor_surfaces).
     let current = app.current_buffer();
     let (tab, focused) = if !app.split.is_split() {
@@ -800,26 +838,18 @@ fn build_outline(app: &App) -> Vec<OutlineItemScene> {
                 }
             }
         }
-        // Rust / Swift / general code symbols
-        if matches!(
-            ext.as_str(),
-            "rs" | "swift"
-                | "go"
-                | "ts"
-                | "tsx"
-                | "js"
-                | "jsx"
-                | "py"
-                | "c"
-                | "h"
-                | "cpp"
-                | "hpp"
-                | "java"
-                | "kt"
-                | "m"
-                | "mm"
-                | ""
-        ) || ext.is_empty()
+        // Code symbols. Gated on the language having lexical declarations at
+        // all, rather than on a hand-kept list of sixteen extensions that had
+        // C# , Ruby, PHP, Lua, Scala, Dart, Zig, Haskell and Elixir missing —
+        // their outline panel was empty while the file highlighted fine. Data
+        // and markup languages stay out: `outline_code_line` matches `fn `,
+        // `class `, `def ` and friends, which mean nothing in YAML or CSS.
+        let code_like = suisei_core::lang::Lang::from_ext(&ext)
+            .map(|l| l.scope().is_some())
+            .unwrap_or(false);
+        if code_like
+            || matches!(ext.as_str(), "kt" | "kts" | "scala" | "dart" | "zig" | "ex")
+            || ext.is_empty()
         {
             if let Some(item) = outline_code_line(trimmed, i) {
                 out.push(item);
@@ -1113,7 +1143,11 @@ fn build_git_wb(app: &App) -> GitWbScene {
                     " "
                 };
                 let cur = if b.current { "*" } else { " " };
-                special.push(format!("{mark}{cur} {}", b.name));
+                // Preserve branch semantics across the GUI snapshot. Parsing
+                // a slash in the name cannot distinguish `feature/foo` from
+                // `origin/foo`, so carry an explicit local/remote marker.
+                let scope = if b.remote { "R" } else { "L" };
+                special.push(format!("{mark}{cur}{scope} {}", b.name));
             }
             if special.is_empty() {
                 special.push("(loading branches…)".into());
@@ -1458,30 +1492,75 @@ fn build_settings(app: &App) -> SettingsScene {
                 value: String::new(),
                 is_header: true,
                 selected: false,
+                kind: 0,
+                payload: 0,
+                page: 0,
+                control: 0,
+                value_index: 0,
+                advanced: false,
+                group: String::new(),
+                detail: String::new(),
+                options: String::new(),
             });
             rows.push(SettingsRowScene {
                 label: "Version".into(),
                 value: suisei_core::settings::SettingsPanel::version_string(),
                 is_header: false,
                 selected: false,
+                kind: 0,
+                payload: 0,
+                page: 0,
+                control: 0,
+                value_index: 0,
+                advanced: false,
+                group: String::new(),
+                detail: String::new(),
+                options: String::new(),
             });
             rows.push(SettingsRowScene {
                 label: "Core".into(),
                 value: "xei-core".into(),
                 is_header: false,
                 selected: false,
+                kind: 0,
+                payload: 0,
+                page: 0,
+                control: 0,
+                value_index: 0,
+                advanced: false,
+                group: String::new(),
+                detail: String::new(),
+                options: String::new(),
             });
             rows.push(SettingsRowScene {
                 label: "Theme".into(),
                 value: app.theme.name.into(),
                 is_header: false,
                 selected: false,
+                kind: 0,
+                payload: 0,
+                page: 0,
+                control: 0,
+                value_index: 0,
+                advanced: false,
+                group: String::new(),
+                detail: String::new(),
+                options: String::new(),
             });
             rows.push(SettingsRowScene {
                 label: "Config".into(),
                 value: "~/.xei.toml".into(),
                 is_header: false,
                 selected: false,
+                kind: 0,
+                payload: 0,
+                page: 0,
+                control: 0,
+                value_index: 0,
+                advanced: false,
+                group: String::new(),
+                detail: String::new(),
+                options: String::new(),
             });
         }
         // Drop TUI key-chord junk from status when painting for the face.
@@ -1490,8 +1569,22 @@ fn build_settings(app: &App) -> SettingsScene {
             let themes = theme::all_themes();
             for (i, row) in app.settings.setting_rows().into_iter().enumerate() {
                 let selected = i == app.settings.selected;
+                let presentation = row.presentation();
                 let (label, value, is_header) = match row {
-                    SettingRow::ThemeHeader => ("Theme".into(), String::new(), true),
+                    SettingRow::ThemeHeader => (presentation.label.into(), String::new(), true),
+                    SettingRow::AppearanceMode => (
+                        presentation.label.into(),
+                        match draft.theme.as_str() {
+                            "light" => "light",
+                            "dark" => "dark",
+                            _ => "automatic",
+                        }
+                        .into(),
+                        false,
+                    ),
+                    SettingRow::GlassStyle => {
+                        (presentation.label.into(), draft.glass_style.clone(), false)
+                    }
                     SettingRow::Theme(ti) => {
                         let name = themes.get(ti).map(|t| t.name).unwrap_or("?");
                         let mark = if draft.theme.eq_ignore_ascii_case(name) {
@@ -1501,33 +1594,58 @@ fn build_settings(app: &App) -> SettingsScene {
                         };
                         (format!("{mark} {name}"), "Enter to apply".into(), false)
                     }
-                    SettingRow::EditorHeader => ("Editor".into(), String::new(), true),
-                    SettingRow::TabWidth => {
-                        ("Tab width".into(), format!("{}", draft.tab_width), false)
-                    }
+                    SettingRow::HighlightColor => (
+                        presentation.label.into(),
+                        draft.highlight_color.clone(),
+                        false,
+                    ),
+                    SettingRow::EditorHeader => (presentation.label.into(), String::new(), true),
+                    SettingRow::TabWidth => (
+                        presentation.label.into(),
+                        format!("{}", draft.tab_width),
+                        false,
+                    ),
+                    SettingRow::UpdateCheck => (
+                        presentation.label.into(),
+                        if draft.update_check {
+                            "automatically"
+                        } else {
+                            "manually"
+                        }
+                        .into(),
+                        false,
+                    ),
                     SettingRow::RelativeNumber => (
-                        "Relative number".into(),
+                        presentation.label.into(),
                         on_off(draft.relative_number),
                         false,
                     ),
-                    SettingRow::WrapLines => ("Wrap lines".into(), on_off(draft.wrap_lines), false),
+                    SettingRow::WrapLines => {
+                        (presentation.label.into(), on_off(draft.wrap_lines), false)
+                    }
                     SettingRow::UndoCaching => {
-                        ("Undo caching".into(), on_off(draft.undo_caching), false)
+                        (presentation.label.into(), on_off(draft.undo_caching), false)
                     }
-                    SettingRow::ClipboardSync => {
-                        ("Clipboard sync".into(), on_off(draft.clipboard_sync), false)
-                    }
-                    SettingRow::GpuAcc => ("GPU accel (TUI)".into(), on_off(draft.gpu_acc), false),
+                    SettingRow::ClipboardSync => (
+                        presentation.label.into(),
+                        on_off(draft.clipboard_sync),
+                        false,
+                    ),
+                    SettingRow::GpuAcc => (presentation.label.into(), on_off(draft.gpu_acc), false),
                     SettingRow::GpuGraphics => {
-                        ("GPU graphics".into(), on_off(draft.gpu_graphics), false)
+                        (presentation.label.into(), on_off(draft.gpu_graphics), false)
                     }
-                    SettingRow::GpuHyperlinks => {
-                        ("GPU hyperlinks".into(), on_off(draft.gpu_hyperlinks), false)
+                    SettingRow::GpuHyperlinks => (
+                        presentation.label.into(),
+                        on_off(draft.gpu_hyperlinks),
+                        false,
+                    ),
+                    SettingRow::KeyHints => {
+                        (presentation.label.into(), on_off(draft.key_hints), false)
                     }
-                    SettingRow::KeyHints => ("Key hints".into(), on_off(draft.key_hints), false),
-                    SettingRow::LspHeader => ("LSP".into(), String::new(), true),
+                    SettingRow::LspHeader => (presentation.label.into(), String::new(), true),
                     SettingRow::LspEnabled => {
-                        ("LSP enabled".into(), on_off(draft.lsp_enabled), false)
+                        (presentation.label.into(), on_off(draft.lsp_enabled), false)
                     }
                     SettingRow::LspLang(li) => {
                         let catalog = suisei_core::config::lsp_lang_catalog();
@@ -1537,19 +1655,27 @@ fn build_settings(app: &App) -> SettingsScene {
                             Some("") => "off",
                             Some(_) => "custom",
                         };
-                        (format!("LSP · {label}"), state.into(), false)
+                        (label.into(), state.into(), false)
                     }
-                    SettingRow::GitHeader => ("Git".into(), String::new(), true),
-                    SettingRow::OpenWorkbench => {
-                        ("Open Git workbench".into(), "Enter".into(), false)
+                    SettingRow::GitHeader => (presentation.label.into(), String::new(), true),
+                    SettingRow::OpenWorkbench | SettingRow::OpenScm => {
+                        (presentation.label.into(), "Enter".into(), false)
                     }
-                    SettingRow::OpenScm => ("Open SCM panel".into(), "Enter".into(), false),
                 };
                 rows.push(SettingsRowScene {
                     label,
                     value,
                     is_header,
                     selected,
+                    kind: row.kind(),
+                    payload: row.payload(),
+                    page: presentation.page.code(),
+                    control: presentation.control.code(),
+                    value_index: row.value_index(draft),
+                    advanced: presentation.advanced,
+                    group: presentation.group.into(),
+                    detail: presentation.detail.into(),
+                    options: presentation.options.into(),
                 });
             }
         }
@@ -1559,12 +1685,30 @@ fn build_settings(app: &App) -> SettingsScene {
                 value: "Enter → plugin store".into(),
                 is_header: false,
                 selected: true,
+                kind: 0,
+                payload: 0,
+                page: 0,
+                control: 0,
+                value_index: 0,
+                advanced: false,
+                group: String::new(),
+                detail: String::new(),
+                options: String::new(),
             });
             rows.push(SettingsRowScene {
                 label: "VS Code compat host".into(),
                 value: "in progress".into(),
                 is_header: false,
                 selected: false,
+                kind: 0,
+                payload: 0,
+                page: 0,
+                control: 0,
+                value_index: 0,
+                advanced: false,
+                group: String::new(),
+                detail: String::new(),
+                options: String::new(),
             });
         }
         SettingsPage::Help => {
@@ -1582,6 +1726,15 @@ fn build_settings(app: &App) -> SettingsScene {
                     },
                     is_header: e.is_header,
                     selected: i == app.settings.selected && !e.is_header,
+                    kind: 0,
+                    payload: 0,
+                    page: 0,
+                    control: 0,
+                    value_index: 0,
+                    advanced: false,
+                    group: String::new(),
+                    detail: String::new(),
+                    options: String::new(),
                 });
             }
         }
@@ -2200,7 +2353,11 @@ fn build_lines_at(
         // the current match. They stay in display-column coordinates like
         // syntax spans; the AppKit face resolves those columns through the
         // drawn CoreText line so CJK/emoji widths remain exact.
-        if is_current {
+        // The committed pattern stays available for Cmd-G / Shift-Cmd-G, but
+        // the yellow find decorations belong to the transient find panel.
+        // Once Done/Return closes that panel, the editor returns to normal
+        // syntax paint instead of retaining a permanent field of yellow boxes.
+        if is_current && matches!(app.mode, Mode::Search) {
             if let Some(pattern) = app.active_search_pattern() {
                 let pattern_len = pattern.chars().count();
                 if pattern_len > 0 {
@@ -2212,7 +2369,11 @@ fn build_lines_at(
                             full_spans.push(SpanScene {
                                 start,
                                 end,
-                                kind: if base + offset == app.search.current { 249 } else { 248 },
+                                kind: if base + offset == app.search.current {
+                                    249
+                                } else {
+                                    248
+                                },
                             });
                         }
                     }
@@ -2252,10 +2413,22 @@ fn build_lines_at(
                 })
                 .take(32)
                 .collect();
+            // A selection may legitimately reach ONE past the last character —
+            // that column is the newline, and it is what a blank line inside a
+            // selection consists of. `selection_on_line` already says so (its
+            // `v1 <= v0` fallback returns 0..1 for an empty row); clamping to
+            // `end_col` threw it away, so selecting a whole file left every
+            // blank line looking unselected. Same allowance the caret gets
+            // just below, and for the same reason.
+            let sel_limit = if is_last_chunk {
+                end_col + 1
+            } else {
+                end_col
+            };
             let (sv0, sv1) = match (sel_v0, sel_v1) {
                 (Some(a), Some(b)) => {
                     let s = a.max(base_col);
-                    let e = b.min(end_col);
+                    let e = b.min(sel_limit);
                     if e > s {
                         (Some(s - base_col), Some(e - base_col))
                     } else {
@@ -2632,7 +2805,10 @@ mod unicode_overlay_tests {
         let mut app = App::new();
         app.buffer = Buffer::from_string("a한글b");
         let span = Some((Position::new(0, 1), Position::new(0, 2)));
-        assert_eq!(selection_on_line(&app, 0, "a한글b", span), (Some(1), Some(5)));
+        assert_eq!(
+            selection_on_line(&app, 0, "a한글b", span),
+            (Some(1), Some(5))
+        );
     }
 
     #[test]
@@ -2651,6 +2827,28 @@ mod unicode_overlay_tests {
             .map(|span| span.kind)
             .collect();
         assert_eq!(kinds, vec![248, 249]);
+    }
+
+    #[test]
+    fn accepted_find_keeps_navigation_pattern_without_persistent_overlays() {
+        let mut app = App::new();
+        app.buffer = Buffer::from_string("suisei suisei");
+        app.enter_search();
+        app.set_search_input("suisei".into());
+        app.commit_search();
+
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.search.pattern.as_deref(), Some("suisei"));
+        assert_eq!(app.search.matches.len(), 2);
+
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true);
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| !matches!(span.kind, 248 | 249)),
+            "find decorations must disappear when the find panel closes"
+        );
     }
 
     #[test]

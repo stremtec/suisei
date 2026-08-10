@@ -8,8 +8,11 @@
 //! - **PRs** — `gh pr list` / checkout (when authed)  
 //! - **Auth** — built-in `gh auth` status / login / logout  
 
+use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
@@ -25,6 +28,7 @@ use crate::scm::{ScmEntry, parse_porcelain_entries};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitLoadTarget {
     Branches,
+    History,
     PullRequests,
     Issues,
     Auth,
@@ -72,9 +76,16 @@ impl GitCtxItem {
 
 enum GitLoadResult {
     Branches(Result<Vec<BranchInfo>, String>),
+    History {
+        reference: Option<String>,
+        result: Result<(Vec<CommitSummary>, Vec<GraphRow>), String>,
+    },
     Prs(Result<Vec<PrSummary>, String>),
     Issues(Result<Vec<IssueSummary>, String>),
-    Auth { info: GhAuthInfo, gh_ok: bool },
+    Auth {
+        info: GhAuthInfo,
+        gh_ok: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,10 +115,118 @@ pub enum GitFocus {
     Diff,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DiffOrigin {
     Worktree { path: String, staged: bool },
     Commit { hash: String, path: String },
+}
+
+#[derive(Debug)]
+struct StatusLoadResult {
+    root: PathBuf,
+    branch: String,
+    ahead: u32,
+    behind: u32,
+    author_name: String,
+    author_email: String,
+    staged: Vec<ScmEntry>,
+    changes: Vec<ScmEntry>,
+    stashes: Vec<String>,
+    remotes: Vec<(String, String)>,
+    gh_available: bool,
+}
+
+#[derive(Debug)]
+enum GitWorkerResult {
+    Status {
+        request: u64,
+        result: StatusLoadResult,
+    },
+    Diff {
+        request: u64,
+        origin: DiffOrigin,
+        result: Result<Vec<DiffLine>, String>,
+    },
+    CommitDetail {
+        request: u64,
+        hash: String,
+        result: Result<CommitDetail, String>,
+    },
+}
+
+#[derive(Debug)]
+enum GitWorkerJob {
+    Status {
+        request: u64,
+        root: PathBuf,
+    },
+    Diff {
+        request: u64,
+        root: PathBuf,
+        origin: DiffOrigin,
+    },
+    CommitDetail {
+        request: u64,
+        root: PathBuf,
+        hash: String,
+    },
+}
+
+impl GitWorkerJob {
+    fn request(&self) -> u64 {
+        match self {
+            Self::Status { request, .. }
+            | Self::Diff { request, .. }
+            | Self::CommitDetail { request, .. } => *request,
+        }
+    }
+
+    fn run(self) -> GitWorkerResult {
+        match self {
+            Self::Status { request, root } => GitWorkerResult::Status {
+                request,
+                result: load_status_snapshot(root),
+            },
+            Self::Diff {
+                request,
+                root,
+                origin,
+            } => {
+                let result = match &origin {
+                    DiffOrigin::Worktree { path, staged } => {
+                        git_ops::file_diff(&root, path, *staged)
+                    }
+                    DiffOrigin::Commit { hash, path } => {
+                        git_ops::commit_file_diff(&root, hash, path)
+                    }
+                };
+                GitWorkerResult::Diff {
+                    request,
+                    origin,
+                    result,
+                }
+            }
+            Self::CommitDetail {
+                request,
+                root,
+                hash,
+            } => GitWorkerResult::CommitDetail {
+                request,
+                result: git_ops::commit_detail(&root, &hash),
+                hash,
+            },
+        }
+    }
+}
+
+impl GitWorkerResult {
+    fn request(&self) -> u64 {
+        match self {
+            Self::Status { request, .. }
+            | Self::Diff { request, .. }
+            | Self::CommitDetail { request, .. } => *request,
+        }
+    }
 }
 
 /// Background-able network git operations.
@@ -126,6 +245,9 @@ pub struct GitWorkbench {
     pub tab: GitTab,
     pub focus: GitFocus,
     pub root: Option<PathBuf>,
+    /// Effective Git author identity (repository-local config wins).
+    pub author_name: String,
+    pub author_email: String,
     pub branch: String,
     pub ahead: u32,
     pub behind: u32,
@@ -140,12 +262,18 @@ pub struct GitWorkbench {
     pub history_view: HistoryView,
     pub history_sel: usize,
     pub history_limit: usize,
+    /// Branch/ref currently supplying the native repository history.
+    pub history_ref: Option<String>,
     pub commit_detail: Option<CommitDetail>,
     pub commit_file_sel: usize,
     // Diff
     pub diff_path: Option<String>,
     pub diff_staged: bool,
     pub diff_lines: Vec<DiffLine>,
+    /// Changes whenever the complete diff payload changes. GUI frontends use
+    /// this to pull the (potentially large) diff once instead of copying it in
+    /// every fixed-size chrome snapshot.
+    pub diff_generation: u64,
     pub diff_scroll: usize,
     pub diff_origin: Option<DiffOrigin>,
     // GitHub
@@ -194,6 +322,17 @@ pub struct GitWorkbench {
     pub loading: Option<GitLoadTarget>,
     loading_started: Option<Instant>,
     load_rx: Option<Receiver<GitLoadResult>>,
+    /// Read-only status/diff/detail work used by the native window. The sender
+    /// is retained so each request can publish into one queue; the UI thread
+    /// only polls and installs immutable results.
+    worker_job_tx: Sender<GitWorkerJob>,
+    worker_rx: Receiver<GitWorkerResult>,
+    cancelled_worker_requests: Arc<Mutex<HashSet<u64>>>,
+    worker_sequence: u64,
+    worker_in_flight: HashSet<u64>,
+    pending_status_request: Option<u64>,
+    pending_detail_request: Option<(u64, String)>,
+    pending_diff_requests: HashMap<DiffOrigin, u64>,
     /// Remote git op (push/pull/fetch) running on a background thread.
     action_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     pub action_label: Option<&'static str>,
@@ -229,14 +368,78 @@ pub enum InputMode {
 pub const HISTORY_DEFAULT: usize = 60;
 pub const HISTORY_MAX: usize = 1000;
 
+fn start_git_worker_pool() -> (
+    Sender<GitWorkerJob>,
+    Receiver<GitWorkerResult>,
+    Arc<Mutex<HashSet<u64>>>,
+) {
+    let (job_tx, job_rx) = mpsc::channel::<GitWorkerJob>();
+    let (result_tx, result_rx) = mpsc::channel::<GitWorkerResult>();
+    let shared_rx = Arc::new(Mutex::new(job_rx));
+    let cancelled = Arc::new(Mutex::new(HashSet::new()));
+    // Independent file diffs are parallel work. Use available cores, with a
+    // cap so expanding many files cannot become an unbounded process storm.
+    let worker_count = thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2)
+        .clamp(2, 6);
+
+    for index in 0..worker_count {
+        let jobs = Arc::clone(&shared_rx);
+        let results = result_tx.clone();
+        let cancellations = Arc::clone(&cancelled);
+        thread::Builder::new()
+            .name(format!("suisei-git-{index}"))
+            .spawn(move || {
+                loop {
+                    let job = {
+                        let Ok(receiver) = jobs.lock() else { return };
+                        match receiver.recv() {
+                            Ok(job) => job,
+                            Err(_) => return,
+                        }
+                    };
+                    let request = job.request();
+                    let was_cancelled = cancellations
+                        .lock()
+                        .map(|mut ids| ids.remove(&request))
+                        .unwrap_or(true);
+                    if was_cancelled {
+                        continue;
+                    }
+                    let result = job.run();
+                    // Supersession can happen while Git is running. The
+                    // process cannot be killed safely here, but its stale
+                    // result need not enter the UI queue or be decoded.
+                    let was_cancelled = cancellations
+                        .lock()
+                        .map(|mut ids| ids.remove(&request))
+                        .unwrap_or(true);
+                    if was_cancelled {
+                        continue;
+                    }
+                    if results.send(result).is_err() {
+                        return;
+                    }
+                }
+            })
+            .expect("spawn git worker");
+    }
+
+    (job_tx, result_rx, cancelled)
+}
+
 impl Default for GitWorkbench {
     fn default() -> Self {
+        let (worker_job_tx, worker_rx, cancelled_worker_requests) = start_git_worker_pool();
         Self {
             open: false,
             from_scm: false,
             tab: GitTab::Status,
             focus: GitFocus::List,
             root: None,
+            author_name: String::new(),
+            author_email: String::new(),
             branch: String::new(),
             ahead: 0,
             behind: 0,
@@ -250,11 +453,13 @@ impl Default for GitWorkbench {
             history_view: HistoryView::List,
             history_sel: 0,
             history_limit: HISTORY_DEFAULT,
+            history_ref: None,
             commit_detail: None,
             commit_file_sel: 0,
             diff_path: None,
             diff_staged: false,
             diff_lines: Vec::new(),
+            diff_generation: 0,
             diff_scroll: 0,
             diff_origin: None,
             auth: GhAuthInfo::default(),
@@ -291,6 +496,14 @@ impl Default for GitWorkbench {
             loading: None,
             loading_started: None,
             load_rx: None,
+            worker_job_tx,
+            worker_rx,
+            cancelled_worker_requests,
+            worker_sequence: 0,
+            worker_in_flight: HashSet::new(),
+            pending_status_request: None,
+            pending_detail_request: None,
+            pending_diff_requests: HashMap::new(),
             action_rx: None,
             action_label: None,
             app_msg: None,
@@ -304,14 +517,194 @@ impl GitWorkbench {
         Self::default()
     }
 
+    /// Stable fingerprint of the data exported to the native Source Control
+    /// window. The face polls a cheap generation counter and only copies the
+    /// large fixed-size C snapshot when this fingerprint changes.
+    ///
+    /// Deliberately exclude worker/channel identities and the complete diff
+    /// text. Pending work is represented by `is_loading()` and diff contents
+    /// already have their own monotonic generation. This keeps editor/LSP
+    /// frames from turning into 300+ KiB workbench snapshot copies.
+    pub fn native_snapshot_signature(&self) -> u64 {
+        let mut state = DefaultHasher::new();
+
+        self.open.hash(&mut state);
+        self.from_scm.hash(&mut state);
+        (self.tab as u8).hash(&mut state);
+        (self.focus as u8).hash(&mut state);
+        (self.pane as u8).hash(&mut state);
+        self.root.hash(&mut state);
+        self.author_name.hash(&mut state);
+        self.author_email.hash(&mut state);
+        self.branch.hash(&mut state);
+        self.ahead.hash(&mut state);
+        self.behind.hash(&mut state);
+        self.selected.hash(&mut state);
+        self.branch_sel.hash(&mut state);
+        self.history_sel.hash(&mut state);
+        self.history_limit.hash(&mut state);
+        self.history_ref.hash(&mut state);
+        (self.history_view as u8).hash(&mut state);
+        self.commit_file_sel.hash(&mut state);
+        self.diff_path.hash(&mut state);
+        self.diff_staged.hash(&mut state);
+        self.diff_generation.hash(&mut state);
+        self.diff_origin.hash(&mut state);
+        self.stash_sel.hash(&mut state);
+        self.message.hash(&mut state);
+        self.error.hash(&mut state);
+        self.is_loading().hash(&mut state);
+        self.action_label.hash(&mut state);
+
+        for entry in self.staged.iter().chain(self.changes.iter()) {
+            entry.path.hash(&mut state);
+            entry.status.letter().hash(&mut state);
+            entry.staged.hash(&mut state);
+        }
+        for branch in &self.branches {
+            branch.name.hash(&mut state);
+            branch.current.hash(&mut state);
+            branch.remote.hash(&mut state);
+            branch.upstream.hash(&mut state);
+        }
+        for commit in &self.commits {
+            commit.hash.hash(&mut state);
+            commit.short.hash(&mut state);
+            commit.subject.hash(&mut state);
+            commit.author.hash(&mut state);
+            commit.email.hash(&mut state);
+            commit.when.hash(&mut state);
+        }
+        if let Some(detail) = &self.commit_detail {
+            detail.hash.hash(&mut state);
+            detail.short.hash(&mut state);
+            detail.subject.hash(&mut state);
+            detail.body.hash(&mut state);
+            detail.author.hash(&mut state);
+            detail.email.hash(&mut state);
+            detail.date.hash(&mut state);
+            detail.insertions.hash(&mut state);
+            detail.deletions.hash(&mut state);
+            for file in &detail.files {
+                file.path.hash(&mut state);
+                file.status.hash(&mut state);
+                file.insertions.hash(&mut state);
+                file.deletions.hash(&mut state);
+            }
+        }
+        self.stashes.hash(&mut state);
+        self.remotes.hash(&mut state);
+
+        state.finish()
+    }
+
+    fn clear_diff_lines(&mut self) {
+        self.diff_lines.clear();
+        self.diff_generation = self.diff_generation.wrapping_add(1);
+    }
+
+    fn replace_diff_lines(&mut self, lines: Vec<DiffLine>) {
+        self.diff_lines = lines;
+        self.diff_generation = self.diff_generation.wrapping_add(1);
+    }
+
+    fn next_worker_request(&mut self) -> u64 {
+        self.worker_sequence = self.worker_sequence.wrapping_add(1).max(1);
+        self.worker_sequence
+    }
+
+    fn supersede_worker(&mut self, request: Option<u64>) {
+        if let Some(request) = request {
+            self.worker_in_flight.remove(&request);
+            if let Ok(mut cancelled) = self.cancelled_worker_requests.lock() {
+                cancelled.insert(request);
+            }
+        }
+    }
+
+    fn cancel_all_workers(&mut self) {
+        let requests: Vec<_> = self.worker_in_flight.drain().collect();
+        if let Ok(mut cancelled) = self.cancelled_worker_requests.lock() {
+            cancelled.extend(requests);
+        }
+    }
+
+    /// Schedule the native window's repository summary without blocking the
+    /// AppKit event that opened or refreshed it.
+    pub fn request_status_refresh(&mut self, hint: Option<&Path>) {
+        self.error = None;
+        let discovered = git_ops::find_git_root(hint).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|cwd| git_ops::find_git_root(Some(&cwd)))
+        });
+
+        if self.root.as_ref() != discovered.as_ref() {
+            self.branches_loaded = false;
+            self.history_loaded = false;
+            self.prs_loaded = false;
+            self.issues_loaded = false;
+            self.commits.clear();
+            self.history_graph.clear();
+            self.branches.clear();
+            self.prs.clear();
+            self.issues.clear();
+            self.pr_filtered.clear();
+            self.issue_filtered.clear();
+            self.commit_detail = None;
+            self.diff_path = None;
+            self.clear_diff_lines();
+            self.diff_origin = None;
+            self.stashes.clear();
+            self.remotes.clear();
+        }
+        self.root = discovered.clone();
+
+        let Some(root) = discovered else {
+            let previous = self.pending_status_request.take();
+            self.supersede_worker(previous);
+            self.error = Some("Not a git repository".into());
+            self.staged.clear();
+            self.changes.clear();
+            self.branch.clear();
+            return;
+        };
+
+        let previous = self.pending_status_request.take();
+        self.supersede_worker(previous);
+        let request = self.next_worker_request();
+        self.pending_status_request = Some(request);
+        self.worker_in_flight.insert(request);
+        self.message = Some("Refreshing changes…".into());
+        if self
+            .worker_job_tx
+            .send(GitWorkerJob::Status { request, root })
+            .is_err()
+        {
+            self.worker_in_flight.remove(&request);
+            self.pending_status_request = None;
+            self.error = Some("Git worker unavailable".into());
+        }
+    }
+
     pub fn visible(&self) -> bool {
         self.open
     }
 
     pub fn close(&mut self) {
         self.open = false;
+        // Metadata load receivers and worker request identities are scoped to
+        // one native-window session. An in-flight read-only command may finish,
+        // but its stale identity can no longer overwrite a reopened window.
+        self.load_rx = None;
+        self.loading = None;
+        self.loading_started = None;
+        self.cancel_all_workers();
+        self.pending_status_request = None;
+        self.pending_detail_request = None;
+        self.pending_diff_requests.clear();
         self.diff_path = None;
-        self.diff_lines.clear();
+        self.clear_diff_lines();
         self.diff_origin = None;
         self.commit_detail = None;
         self.message = None;
@@ -328,23 +721,36 @@ impl GitWorkbench {
     /// Open quickly: only working-tree status (no history/graph/gh network).
     /// Always re-resolves the git root from `hint` / cwd so project switches work.
     pub fn open_at(&mut self, hint: Option<&Path>, from_scm: bool) {
+        // A SwiftUI Window scene can close and reopen while an old branch/PR
+        // worker is still finishing. Start the new repository session with a
+        // fresh receive channel so old data cannot win that race.
+        self.load_rx = None;
+        self.loading = None;
+        self.loading_started = None;
+        self.cancel_all_workers();
+        self.pending_status_request = None;
+        self.pending_detail_request = None;
+        self.pending_diff_requests.clear();
         self.open = true;
         self.from_scm = from_scm;
         self.tab = GitTab::Status;
         self.focus = GitFocus::List;
         self.diff_path = None;
-        self.diff_lines.clear();
+        self.clear_diff_lines();
         self.diff_origin = None;
         self.commit_detail = None;
         // Drop project-scoped caches so a new folder cannot reuse old root/history.
         self.root = None;
         self.commits.clear();
         self.history_graph.clear();
+        self.history_ref = None;
         self.branches.clear();
         self.prs.clear();
         self.staged.clear();
         self.changes.clear();
         self.branch.clear();
+        self.author_name.clear();
+        self.author_email.clear();
         self.branches_loaded = false;
         self.history_loaded = false;
         self.prs_loaded = false;
@@ -355,9 +761,8 @@ impl GitWorkbench {
         self.input_buf.clear();
         self.stashes.clear();
         self.remotes.clear();
-        // Fast PATH check only — full `gh auth status` can hit the network.
-        self.gh_available = gh::gh_installed();
-        self.refresh_status(hint);
+        self.gh_available = false;
+        self.request_status_refresh(hint);
     }
 
     /// Ensure tab-specific data is loaded (lazy). Heavy tabs load in a
@@ -368,10 +773,7 @@ impl GitWorkbench {
                 self.start_load(GitLoadTarget::Branches);
             }
             GitTab::History | GitTab::Commit if !self.history_loaded => {
-                if let Some(ref root) = self.root.clone() {
-                    self.reload_history(&root);
-                    self.history_loaded = true;
-                }
+                self.start_load(GitLoadTarget::History);
             }
             GitTab::PullRequests if !self.prs_loaded => {
                 self.start_load(GitLoadTarget::PullRequests);
@@ -402,6 +804,7 @@ impl GitWorkbench {
     pub fn loading_label(&self) -> Option<&'static str> {
         match self.loading? {
             GitLoadTarget::Branches => Some("syncing branches"),
+            GitLoadTarget::History => Some("loading history"),
             GitLoadTarget::PullRequests => Some("syncing pull requests"),
             GitLoadTarget::Issues => Some("syncing issues"),
             GitLoadTarget::Auth => Some("refreshing GitHub account"),
@@ -409,7 +812,7 @@ impl GitWorkbench {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.loading.is_some() || self.action_rx.is_some()
+        self.loading.is_some() || self.action_rx.is_some() || !self.worker_in_flight.is_empty()
     }
 
     /// Animation tick (120ms steps) for shade-block phase.
@@ -441,21 +844,31 @@ impl GitWorkbench {
         // Mix with label so different tabs don't always show the same first tip
         let salt = match self.loading {
             Some(GitLoadTarget::Branches) => 0,
-            Some(GitLoadTarget::PullRequests) => 1,
-            Some(GitLoadTarget::Issues) => 2,
-            Some(GitLoadTarget::Auth) => 3,
+            Some(GitLoadTarget::History) => 1,
+            Some(GitLoadTarget::PullRequests) => 2,
+            Some(GitLoadTarget::Issues) => 3,
+            Some(GitLoadTarget::Auth) => 4,
             None => 0,
         };
         TIPS[(base + salt) % TIPS.len()]
     }
 
     fn start_load(&mut self, target: GitLoadTarget) {
+        // A second branch selection supersedes the previous history request.
+        // Dropping its receiver is enough to cancel delivery without blocking
+        // the UI while the old read-only git process winds down.
+        if target == GitLoadTarget::History && self.loading == Some(GitLoadTarget::History) {
+            self.load_rx = None;
+            self.loading = None;
+            self.loading_started = None;
+        }
         if self.loading.is_some() {
             return;
         }
         // Already have data
         match target {
             GitLoadTarget::Branches if self.branches_loaded => return,
+            GitLoadTarget::History if self.history_loaded => return,
             GitLoadTarget::PullRequests if self.prs_loaded => return,
             GitLoadTarget::Issues if self.issues_loaded => return,
             GitLoadTarget::Auth if self.auth_loaded => return,
@@ -464,12 +877,16 @@ impl GitWorkbench {
         let root = self.root.clone();
         let pr_state = self.pr_state;
         let issue_state = self.issue_state;
+        let history_limit = self.history_limit;
+        let history_ref = self.history_ref.clone();
+        let history_view = self.history_view;
         let (tx, rx) = mpsc::channel();
         self.load_rx = Some(rx);
         self.loading = Some(target);
         self.loading_started = Some(Instant::now());
         self.message = Some(match target {
             GitLoadTarget::Branches => "Syncing branches…".into(),
+            GitLoadTarget::History => "Loading history…".into(),
             GitLoadTarget::PullRequests => "Syncing pull requests…".into(),
             GitLoadTarget::Issues => "Syncing issues…".into(),
             GitLoadTarget::Auth => "Refreshing GitHub account…".into(),
@@ -483,6 +900,40 @@ impl GitWorkbench {
                         .ok_or_else(|| "No git root".to_string())
                         .and_then(|p| git_ops::list_branches(p));
                     GitLoadResult::Branches(r)
+                }
+                GitLoadTarget::History => {
+                    let r = root
+                        .as_ref()
+                        .ok_or_else(|| "No git root".to_string())
+                        .and_then(|p| {
+                            let commits = git_ops::list_commits_for_ref(
+                                p,
+                                history_limit,
+                                history_ref.as_deref(),
+                            )?;
+                            let graph = if history_view == HistoryView::Graph {
+                                let limit = history_limit.clamp(20, HISTORY_MAX).to_string();
+                                let out = git_ops::run_git(
+                                    p,
+                                    &[
+                                        "log",
+                                        "--all",
+                                        "--date-order",
+                                        "-n",
+                                        &limit,
+                                        "--pretty=format:%H%x00%h%x00%P%x00%d%x00%s%x00%an%x00%ar",
+                                    ],
+                                )?;
+                                git_graph::build_graph(&out)
+                            } else {
+                                Vec::new()
+                            };
+                            Ok((commits, graph))
+                        });
+                    GitLoadResult::History {
+                        reference: history_ref,
+                        result: r,
+                    }
                 }
                 GitLoadTarget::PullRequests => {
                     let gh_ok = gh::gh_installed();
@@ -551,10 +1002,123 @@ impl GitWorkbench {
         });
     }
 
+    fn poll_worker_results(&mut self) -> bool {
+        loop {
+            let result = match self.worker_rx.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return false,
+            };
+            let request = result.request();
+            // Closing/reopening or selecting the same item again removes the
+            // old request from this set. Its process may finish, but the result
+            // is then only drained and can never overwrite the new session.
+            if !self.worker_in_flight.remove(&request) {
+                if let Ok(mut cancelled) = self.cancelled_worker_requests.lock() {
+                    cancelled.remove(&request);
+                }
+                continue;
+            }
+
+            match result {
+                GitWorkerResult::Status { request, result } => {
+                    if self.pending_status_request != Some(request)
+                        || self.root.as_ref() != Some(&result.root)
+                    {
+                        continue;
+                    }
+                    self.pending_status_request = None;
+                    self.branch = result.branch;
+                    self.ahead = result.ahead;
+                    self.behind = result.behind;
+                    self.author_name = result.author_name;
+                    self.author_email = result.author_email;
+                    self.staged = result.staged;
+                    self.changes = result.changes;
+                    self.stashes = result.stashes;
+                    self.remotes = result.remotes;
+                    self.gh_available = result.gh_available;
+                    self.clamp_selected();
+                    self.message = Some(format!("{} changed files", self.total_files()));
+                    self.error = None;
+                    return true;
+                }
+                GitWorkerResult::Diff {
+                    request,
+                    origin,
+                    result,
+                } => {
+                    if self.pending_diff_requests.get(&origin) != Some(&request) {
+                        continue;
+                    }
+                    self.pending_diff_requests.remove(&origin);
+                    match result {
+                        Ok(lines) => {
+                            let path = match &origin {
+                                DiffOrigin::Worktree { path, .. }
+                                | DiffOrigin::Commit { path, .. } => path.clone(),
+                            };
+                            self.replace_diff_lines(lines);
+                            self.diff_path = Some(path.clone());
+                            self.diff_staged =
+                                matches!(origin, DiffOrigin::Worktree { staged: true, .. });
+                            self.diff_scroll = 0;
+                            self.diff_origin = Some(origin.clone());
+                            match origin {
+                                DiffOrigin::Worktree { .. } => {
+                                    self.tab = GitTab::Status;
+                                    self.pane = GitPane::Changes;
+                                }
+                                DiffOrigin::Commit { .. } => {
+                                    self.tab = GitTab::History;
+                                    self.pane = GitPane::Files;
+                                }
+                            }
+                            self.focus = GitFocus::List;
+                            self.message = Some(format!("Diff · {path}"));
+                            self.error = None;
+                        }
+                        Err(error) => {
+                            self.error = Some(error.clone());
+                            self.message = Some(error);
+                        }
+                    }
+                    // Publish at most one diff per engine tick. The native
+                    // frontend observes each generation and can cache every
+                    // independently expanded card, even if several complete
+                    // during the same filesystem burst.
+                    return true;
+                }
+                GitWorkerResult::CommitDetail {
+                    request,
+                    hash,
+                    result,
+                } => {
+                    if self.pending_detail_request.as_ref() != Some(&(request, hash.clone())) {
+                        continue;
+                    }
+                    self.pending_detail_request = None;
+                    match result {
+                        Ok(detail) => {
+                            self.commit_file_sel = 0;
+                            self.commit_detail = Some(detail);
+                            self.message = Some(format!("Commit · {}", &hash[..7.min(hash.len())]));
+                            self.error = None;
+                        }
+                        Err(error) => {
+                            self.error = Some(error.clone());
+                            self.message = Some(error);
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+
     /// Poll background loads. Call once per frame from the main loop.
     /// Returns true if state changed (needs redraw attention).
     pub fn poll_loading(&mut self) -> bool {
-        let mut changed = self.poll_auth_login();
+        let mut changed = self.poll_auth_login() | self.poll_worker_results();
         // Remote action completion (push/pull/fetch)
         if let Some(rx) = self.action_rx.take() {
             match rx.try_recv() {
@@ -598,6 +1162,7 @@ impl GitWorkbench {
         // Clear loading flag once the primary target is satisfied
         let done = match self.loading {
             Some(GitLoadTarget::Branches) => self.branches_loaded,
+            Some(GitLoadTarget::History) => self.history_loaded,
             Some(GitLoadTarget::PullRequests) => self.prs_loaded,
             Some(GitLoadTarget::Issues) => self.issues_loaded,
             Some(GitLoadTarget::Auth) => self.auth_loaded,
@@ -630,6 +1195,25 @@ impl GitWorkbench {
             GitLoadResult::Branches(Err(e)) => {
                 self.branches_loaded = true;
                 self.error = Some(e);
+            }
+            GitLoadResult::History { reference, result } => {
+                // A rapid branch change can finish requests out of order. Only
+                // publish the result that still matches the selected ref.
+                if reference != self.history_ref {
+                    return;
+                }
+                match result {
+                    Ok((commits, graph)) => {
+                        self.commits = commits;
+                        self.history_graph = graph;
+                        if self.history_sel >= self.commits.len() {
+                            self.history_sel = self.commits.len().saturating_sub(1);
+                        }
+                        self.message = Some(format!("{} commits", self.commits.len()));
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+                self.history_loaded = true;
             }
             GitLoadResult::Prs(Ok(p)) => {
                 self.prs = p;
@@ -785,7 +1369,7 @@ impl GitWorkbench {
             self.issue_filtered.clear();
             self.commit_detail = None;
             self.diff_path = None;
-            self.diff_lines.clear();
+            self.clear_diff_lines();
             self.diff_origin = None;
             self.stashes.clear();
             self.remotes.clear();
@@ -799,8 +1383,21 @@ impl GitWorkbench {
             return;
         };
 
-        self.branch = git_ops::current_branch(&root);
-        if let Ok(sb) = git_ops::run_git(&root, &["status", "-sb"]) {
+        let (author_name, author_email) = git_ops::author_identity(&root);
+        self.author_name = author_name;
+        self.author_email = author_email;
+        self.branch.clear();
+        self.staged.clear();
+        self.changes.clear();
+        if let Ok(sb) = git_ops::run_git(
+            &root,
+            &[
+                "status",
+                "--porcelain=v1",
+                "--branch",
+                "--untracked-files=all",
+            ],
+        ) {
             if let Some((b, a, be)) = parse_sb_branch(&sb) {
                 if !b.is_empty() {
                     self.branch = b;
@@ -808,12 +1405,7 @@ impl GitWorkbench {
                 self.ahead = a;
                 self.behind = be;
             }
-        }
-
-        self.staged.clear();
-        self.changes.clear();
-        if let Ok(out) = git_ops::run_git(&root, &["status", "--porcelain=v1", "-uall"]) {
-            for line in out.lines() {
+            for line in sb.lines().skip_while(|line| line.starts_with("## ")) {
                 for e in parse_porcelain_entries(line) {
                     if e.staged {
                         self.staged.push(e);
@@ -822,6 +1414,8 @@ impl GitWorkbench {
                     }
                 }
             }
+        } else {
+            self.branch = git_ops::current_branch(&root);
         }
         self.clamp_selected();
         // cheap metadata for Status footer
@@ -1297,12 +1891,7 @@ impl GitWorkbench {
         self.load_rx = None;
         match self.tab {
             GitTab::Branches => self.start_load(GitLoadTarget::Branches),
-            GitTab::History | GitTab::Commit => {
-                if let Some(ref root) = self.root.clone() {
-                    self.reload_history(root);
-                    self.history_loaded = true;
-                }
-            }
+            GitTab::History | GitTab::Commit => self.start_load(GitLoadTarget::History),
             GitTab::PullRequests => self.start_load(GitLoadTarget::PullRequests),
             GitTab::Issues => self.start_load(GitLoadTarget::Issues),
             GitTab::Auth => self.start_load(GitLoadTarget::Auth),
@@ -1340,7 +1929,7 @@ impl GitWorkbench {
     }
 
     pub fn reload_history(&mut self, root: &Path) {
-        match git_ops::list_commits(root, self.history_limit, true) {
+        match git_ops::list_commits_for_ref(root, self.history_limit, self.history_ref.as_deref()) {
             Ok(c) => {
                 self.commits = c;
                 if self.history_sel >= self.commits.len() {
@@ -1355,6 +1944,31 @@ impl GitWorkbench {
         } else {
             self.history_graph.clear();
         }
+    }
+
+    /// Select a repository-outline branch and load only that ref's history.
+    pub fn select_branch_history(&mut self, index: usize) -> Result<(), String> {
+        if self.branches.is_empty() {
+            return Err("No branch selected".into());
+        }
+        self.branch_sel = index.min(self.branches.len() - 1);
+        let reference = self.branches[self.branch_sel].name.clone();
+        self.history_ref = Some(reference);
+        if self.root.is_none() {
+            return Err("No git root".into());
+        }
+        self.history_sel = 0;
+        self.commits.clear();
+        self.history_graph.clear();
+        self.history_loaded = false;
+        self.commit_detail = None;
+        self.diff_path = None;
+        self.clear_diff_lines();
+        self.diff_origin = None;
+        self.tab = GitTab::History;
+        self.pane = GitPane::Log;
+        self.start_load(GitLoadTarget::History);
+        Ok(())
     }
 
     fn reload_history_graph(&mut self, root: &Path) {
@@ -1492,7 +2106,8 @@ impl GitWorkbench {
 
     pub fn load_commit_file_diff(&mut self, hash: &str, path: &str) -> Result<(), String> {
         let root = self.root.clone().ok_or_else(|| "No git root".to_string())?;
-        self.diff_lines = git_ops::commit_file_diff(&root, hash, path)?;
+        let lines = git_ops::commit_file_diff(&root, hash, path)?;
+        self.replace_diff_lines(lines);
         self.diff_path = Some(path.to_string());
         self.diff_staged = false;
         self.diff_scroll = 0;
@@ -1507,7 +2122,8 @@ impl GitWorkbench {
 
     pub fn load_diff(&mut self, path: &str, staged: bool) -> Result<(), String> {
         let root = self.root.clone().ok_or_else(|| "No git root".to_string())?;
-        self.diff_lines = git_ops::file_diff(&root, path, staged)?;
+        let lines = git_ops::file_diff(&root, path, staged)?;
+        self.replace_diff_lines(lines);
         self.diff_path = Some(path.to_string());
         self.diff_staged = staged;
         self.diff_scroll = 0;
@@ -1554,7 +2170,7 @@ impl GitWorkbench {
         self.history_sel = index.min(count - 1);
         self.load_selected_commit_detail()?;
         self.diff_path = None;
-        self.diff_lines.clear();
+        self.clear_diff_lines();
         self.diff_origin = None;
         self.tab = GitTab::History;
         self.pane = GitPane::Log;
@@ -1579,6 +2195,146 @@ impl GitWorkbench {
         self.pane = GitPane::Files;
         self.focus = GitFocus::List;
         Ok(())
+    }
+
+    fn request_diff_preview(&mut self, origin: DiffOrigin) -> Result<(), String> {
+        let root = self.root.clone().ok_or_else(|| "No git root".to_string())?;
+        let previous = self.pending_diff_requests.get(&origin).copied();
+        self.supersede_worker(previous);
+        let request = self.next_worker_request();
+        self.pending_diff_requests.insert(origin.clone(), request);
+        self.worker_in_flight.insert(request);
+        let request_key = origin.clone();
+        if self
+            .worker_job_tx
+            .send(GitWorkerJob::Diff {
+                request,
+                root,
+                origin,
+            })
+            .is_err()
+        {
+            self.worker_in_flight.remove(&request);
+            self.pending_diff_requests.remove(&request_key);
+            return Err("Git worker unavailable".into());
+        }
+        Ok(())
+    }
+
+    /// Native-window variant of `select_change_preview`: selection is
+    /// immediate and the read-only `git diff` runs away from AppKit's thread.
+    pub fn request_change_preview(&mut self, index: usize) -> Result<(), String> {
+        let count = self.total_files();
+        if count == 0 {
+            return Err("No changed file".into());
+        }
+        self.selected = index.min(count - 1);
+        let entry = self
+            .entry_at(self.selected)
+            .cloned()
+            .ok_or_else(|| "No changed file".to_string())?;
+        self.tab = GitTab::Status;
+        self.pane = GitPane::Changes;
+        self.focus = GitFocus::List;
+        self.message = Some(format!("Loading diff · {}…", entry.path));
+        self.request_diff_preview(DiffOrigin::Worktree {
+            path: entry.path,
+            staged: entry.staged,
+        })
+    }
+
+    /// Native-window variant of `select_history_preview`. Commit detail uses
+    /// several Git object queries, so never perform it in the click handler.
+    pub fn request_history_preview(&mut self, index: usize) -> Result<(), String> {
+        let count = self.commits.len().max(self.history_graph.len());
+        if count == 0 {
+            return Err("No commit selected".into());
+        }
+        self.history_sel = index.min(count - 1);
+        let hash = if self.history_view == HistoryView::Graph {
+            self.history_graph
+                .get(self.history_sel)
+                .map(|row| row.hash.clone())
+        } else {
+            self.commits
+                .get(self.history_sel)
+                .map(|commit| commit.hash.clone())
+        }
+        .ok_or_else(|| "No commit selected".to_string())?;
+
+        self.tab = GitTab::History;
+        self.pane = GitPane::Log;
+        self.focus = GitFocus::List;
+        self.diff_path = None;
+        self.clear_diff_lines();
+        self.diff_origin = None;
+
+        // A diff from the previously selected commit must not repopulate the
+        // new commit's context pane after it finishes.
+        let stale_commit_diffs: Vec<_> = self
+            .pending_diff_requests
+            .iter()
+            .filter_map(|(origin, request)| match origin {
+                DiffOrigin::Commit { .. } => Some((origin.clone(), *request)),
+                DiffOrigin::Worktree { .. } => None,
+            })
+            .collect();
+        for (origin, request) in stale_commit_diffs {
+            self.pending_diff_requests.remove(&origin);
+            self.supersede_worker(Some(request));
+        }
+
+        if self
+            .commit_detail
+            .as_ref()
+            .is_some_and(|detail| detail.hash == hash)
+        {
+            return Ok(());
+        }
+        self.commit_detail = None;
+        let previous = self
+            .pending_detail_request
+            .take()
+            .map(|(request, _)| request);
+        self.supersede_worker(previous);
+        let request = self.next_worker_request();
+        self.pending_detail_request = Some((request, hash.clone()));
+        self.worker_in_flight.insert(request);
+        self.message = Some(format!("Loading commit · {}…", &hash[..7.min(hash.len())]));
+        let root = self.root.clone().ok_or_else(|| "No git root".to_string())?;
+        if self
+            .worker_job_tx
+            .send(GitWorkerJob::CommitDetail {
+                request,
+                root,
+                hash,
+            })
+            .is_err()
+        {
+            self.worker_in_flight.remove(&request);
+            self.pending_detail_request = None;
+            return Err("Git worker unavailable".into());
+        }
+        Ok(())
+    }
+
+    /// Native-window changed-file preview for a selected commit.
+    pub fn request_commit_file_preview(&mut self, index: usize) -> Result<(), String> {
+        let detail = self
+            .commit_detail
+            .as_ref()
+            .ok_or_else(|| "No commit open".to_string())?;
+        if detail.files.is_empty() {
+            return Err("No file selected".into());
+        }
+        self.commit_file_sel = index.min(detail.files.len() - 1);
+        let hash = detail.hash.clone();
+        let path = detail.files[self.commit_file_sel].path.clone();
+        self.tab = GitTab::History;
+        self.pane = GitPane::Files;
+        self.focus = GitFocus::List;
+        self.message = Some(format!("Loading diff · {path}…"));
+        self.request_diff_preview(DiffOrigin::Commit { hash, path })
     }
 
     /// Mouse selection for the full-width list modes. This is deliberately
@@ -1621,21 +2377,42 @@ impl GitWorkbench {
 
     /// Commit with left-pane message buffer (JetBrains-style).
     pub fn commit_with_buf(&mut self) -> Result<(), String> {
+        let message = self.commit_buf.clone();
+        self.commit_with_message(&message, false)
+    }
+
+    /// Commit from a native frontend's message editor.
+    ///
+    /// Xcode exposes Amend beside the author identity, so the model accepts it
+    /// explicitly rather than teaching each frontend a different sequence of
+    /// raw Git commands. As before, an empty index means "stage all" for a
+    /// normal commit; amend only stages current changes when there are any.
+    pub fn commit_with_message(&mut self, message: &str, amend: bool) -> Result<(), String> {
         let root = self.root.clone().ok_or_else(|| "No git root".to_string())?;
-        let msg = self.commit_buf.trim().to_string();
-        if msg.is_empty() {
+        let msg = message.trim().to_string();
+        if msg.is_empty() && !amend {
             return Err("Empty commit message".into());
         }
         if self.staged.is_empty() {
-            if self.changes.is_empty() {
+            if self.changes.is_empty() && !amend {
                 return Err("No changes to commit".into());
             }
-            // Stage all then commit (common IDE default)
-            git_ops::run_git(&root, &["add", "-A"])?;
+            if !self.changes.is_empty() {
+                // Stage all then commit (common IDE default).
+                git_ops::run_git(&root, &["add", "-A"])?;
+            }
         }
-        git_ops::run_git(&root, &["commit", "-m", &msg])?;
+        if amend {
+            if msg.is_empty() {
+                git_ops::run_git(&root, &["commit", "--amend", "--no-edit"])?;
+            } else {
+                git_ops::run_git(&root, &["commit", "--amend", "-m", &msg])?;
+            }
+        } else {
+            git_ops::run_git(&root, &["commit", "-m", &msg])?;
+        }
         self.commit_buf.clear();
-        self.message = Some("Committed".into());
+        self.message = Some(if amend { "Commit amended" } else { "Committed" }.into());
         self.refresh_status(Some(&root));
         // Refresh history if already loaded
         if self.history_loaded {
@@ -1644,6 +2421,27 @@ impl GitWorkbench {
             }
         }
         Ok(())
+    }
+
+    /// Refresh every local data set used by the native Source Control window.
+    /// This is intentionally tied to an explicit toolbar action; automatic
+    /// refreshes still use the cheaper status-only path.
+    pub fn refresh_native_window(&mut self) {
+        let root = self.root.clone();
+        self.request_status_refresh(root.as_deref());
+        if self.root.is_none() {
+            return;
+        }
+        self.load_rx = None;
+        self.loading = None;
+        self.loading_started = None;
+        self.branches.clear();
+        self.commits.clear();
+        self.history_graph.clear();
+        self.branches_loaded = false;
+        self.history_loaded = false;
+        self.tab = GitTab::Branches;
+        self.start_load(GitLoadTarget::Branches);
     }
 
     pub fn cycle_pane(&mut self) {
@@ -1812,12 +2610,12 @@ impl GitWorkbench {
 
     pub fn checkout_selected_branch(&mut self) -> Result<(), String> {
         let root = self.root.clone().ok_or_else(|| "No git root".to_string())?;
-        let name = self
+        let branch = self
             .branches
             .get(self.branch_sel)
-            .map(|b| b.name.clone())
+            .cloned()
             .ok_or_else(|| "No branch selected".to_string())?;
-        let msg = git_ops::checkout_branch(&root, &name)?;
+        let msg = git_ops::checkout_branch(&root, &branch.name, branch.remote)?;
         self.message = Some(msg);
         self.refresh(Some(&root));
         Ok(())
@@ -2106,14 +2904,72 @@ impl GitWorkbench {
     }
 }
 
+fn load_status_snapshot(root: PathBuf) -> StatusLoadResult {
+    let mut branch = String::new();
+    let mut ahead = 0;
+    let mut behind = 0;
+    let mut staged = Vec::new();
+    let mut changes = Vec::new();
+    if let Ok(sb) = git_ops::run_git(
+        &root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--branch",
+            "--untracked-files=all",
+        ],
+    ) {
+        if let Some((parsed_branch, parsed_ahead, parsed_behind)) = parse_sb_branch(&sb) {
+            if !parsed_branch.is_empty() {
+                branch = parsed_branch;
+            }
+            ahead = parsed_ahead;
+            behind = parsed_behind;
+        }
+        for line in sb.lines().skip_while(|line| line.starts_with("## ")) {
+            for entry in parse_porcelain_entries(line) {
+                if entry.staged {
+                    staged.push(entry);
+                } else {
+                    changes.push(entry);
+                }
+            }
+        }
+    } else {
+        branch = git_ops::current_branch(&root);
+    }
+
+    let (author_name, author_email) = git_ops::author_identity(&root);
+
+    StatusLoadResult {
+        author_name,
+        author_email,
+        stashes: git_ops::stash_list(&root).unwrap_or_default(),
+        remotes: git_ops::remotes(&root).unwrap_or_default(),
+        gh_available: gh::gh_installed(),
+        root,
+        branch,
+        ahead,
+        behind,
+        staged,
+        changes,
+    }
+}
+
 fn parse_sb_branch(sb: &str) -> Option<(String, u32, u32)> {
     let first = sb.lines().next()?;
     let rest = first.strip_prefix("## ")?;
     let branch = rest
-        .split(['.', ' ', '['])
-        .next()
-        .unwrap_or(rest)
-        .to_string();
+        .strip_prefix("No commits yet on ")
+        .or_else(|| rest.strip_prefix("Initial commit on "))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            rest.split_once("...")
+                .map(|(name, _)| name)
+                .or_else(|| rest.split_once(" [").map(|(name, _)| name))
+                .unwrap_or(rest)
+                .to_string()
+        });
     let mut ahead = 0u32;
     let mut behind = 0u32;
     if let Some(idx) = rest.find('[') {
@@ -2136,4 +2992,97 @@ fn parse_sb_branch(sb: &str) -> Option<(String, u32, u32)> {
         }
     }
     Some((branch, ahead, behind))
+}
+
+#[cfg(test)]
+mod native_window_lifecycle_tests {
+    use super::*;
+    use crate::scm::ScmStatus;
+
+    #[test]
+    fn closing_drops_the_in_flight_metadata_receiver() {
+        let mut workbench = GitWorkbench::new();
+        let (_tx, rx) = mpsc::channel::<GitLoadResult>();
+        workbench.open = true;
+        workbench.loading = Some(GitLoadTarget::Branches);
+        workbench.loading_started = Some(Instant::now());
+        workbench.load_rx = Some(rx);
+
+        workbench.close();
+
+        assert!(!workbench.open);
+        assert!(workbench.loading.is_none());
+        assert!(workbench.loading_started.is_none());
+        assert!(workbench.load_rx.is_none());
+    }
+
+    #[test]
+    fn selecting_a_branch_schedules_history_off_the_calling_thread() {
+        let mut workbench = GitWorkbench::new();
+        workbench.open = true;
+        workbench.root = Some(PathBuf::from("/definitely/not/a/git/repository"));
+        workbench.branches.push(BranchInfo {
+            name: "main".into(),
+            current: true,
+            remote: false,
+            upstream: None,
+        });
+
+        workbench.select_branch_history(0).unwrap();
+
+        assert_eq!(workbench.tab, GitTab::History);
+        assert_eq!(workbench.history_ref.as_deref(), Some("main"));
+        assert!(!workbench.history_loaded);
+        assert_eq!(workbench.loading, Some(GitLoadTarget::History));
+        assert!(workbench.load_rx.is_some());
+    }
+
+    #[test]
+    fn native_change_selection_queues_diff_without_installing_it_inline() {
+        let mut workbench = GitWorkbench::new();
+        workbench.open = true;
+        workbench.root = Some(PathBuf::from("/definitely/not/a/git/repository"));
+        workbench.changes.push(ScmEntry {
+            path: "large-file.rs".into(),
+            status: ScmStatus::Modified,
+            staged: false,
+        });
+
+        workbench.request_change_preview(0).unwrap();
+
+        assert_eq!(workbench.selected, 0);
+        assert!(workbench.diff_path.is_none());
+        assert_eq!(workbench.pending_diff_requests.len(), 1);
+        assert_eq!(workbench.worker_in_flight.len(), 1);
+    }
+
+    #[test]
+    fn branch_header_preserves_dots_and_unborn_branch_names() {
+        assert_eq!(
+            parse_sb_branch(
+                "## feature/native.ui...origin/feature/native.ui [ahead 2, behind 1]\n"
+            ),
+            Some(("feature/native.ui".into(), 2, 1))
+        );
+        assert_eq!(
+            parse_sb_branch("## No commits yet on main\n?? README.md\n"),
+            Some(("main".into(), 0, 0))
+        );
+    }
+
+    #[test]
+    fn superseded_worker_is_removed_and_marked_for_queue_skip() {
+        let mut workbench = GitWorkbench::new();
+        workbench.worker_in_flight.insert(41);
+        workbench.supersede_worker(Some(41));
+
+        assert!(!workbench.worker_in_flight.contains(&41));
+        assert!(
+            workbench
+                .cancelled_worker_requests
+                .lock()
+                .unwrap()
+                .contains(&41)
+        );
+    }
 }

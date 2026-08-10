@@ -25,8 +25,9 @@ fn seed_buffers(engine: &mut Engine, n: usize) -> Vec<u64> {
         }
         let idx = engine.app.tabs.buffers.len() - 1;
         // A layout needs distinct documents; give each buffer a real path.
-        engine.app.tabs.buffers[idx].filename =
-            Some(std::path::PathBuf::from(format!("/tmp/suisei_merge_{i}.rs")));
+        engine.app.tabs.buffers[idx].filename = Some(std::path::PathBuf::from(format!(
+            "/tmp/suisei_merge_{i}.rs"
+        )));
         ids.push(engine.app.tabs.buffers[idx].id.0);
     }
     ids

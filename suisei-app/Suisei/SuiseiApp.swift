@@ -42,6 +42,19 @@ struct SuiseiApp: App {
         .restorationBehavior(.disabled)
         .commandsRemoved()
 
+        // Finder-shaped, independent Source Control window. A full workbench
+        // has its own destinations, navigation history and multi-column detail;
+        // embedding it in the editor made it an app-within-an-app and forced us
+        // to fake titlebars, source lists and splitters.
+        Window("Source Control", id: "git-workbench") {
+            GitWorkbenchWindowView(engine: engine)
+        }
+        .defaultSize(width: 1040, height: 680)
+        .defaultPosition(.center)
+        .windowResizability(.contentMinSize)
+        .restorationBehavior(.disabled)
+        .commandsRemoved()
+
         // MARK: Editor shell
         WindowGroup("Suisei", id: "editor") {
             EditorSceneRoot(engine: engine)
@@ -73,10 +86,13 @@ struct SuiseiApp: App {
         Window("Settings", id: "settings") {
             SettingsWindowView(engine: engine)
         }
-        .defaultSize(width: 840, height: 600)
+        .defaultSize(width: 780, height: 520)
         .defaultPosition(.center)
         .windowResizability(.contentMinSize)
-        .windowStyle(.titleBar)
+        .restorationBehavior(.disabled)
+        // Keep the standard titlebar. A root NavigationSplitView integrates
+        // its source-list sidebar into this area and AppKit owns the traffic
+        // lights; hiding the titlebar forced both back into custom geometry.
         .commandsRemoved()
     }
 
@@ -148,7 +164,7 @@ struct SuiseiApp: App {
             Divider()
 
             Button("Git Workbench") {
-                engine.toggleGitWorkbench()
+                NotificationCenter.default.post(name: .suiseiOpenGitWorkbenchWindow, object: nil)
             }
             .keyboardShortcut("g", modifiers: [.control, .shift])
 
@@ -281,6 +297,12 @@ struct SuiseiApp: App {
 
     @CommandsBuilder
     private var standardCommands: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About Suisei") {
+                AboutPanelController.shared.show()
+            }
+        }
+
         CommandGroup(replacing: .appSettings) {
             Button("Settings…") {
                 engine.openSettings()
@@ -455,7 +477,21 @@ private struct WelcomeSceneRoot: View {
         // Presented when the engine found unsaved work from a previous crash.
         // Each row shows the file path; Accept opens it with the recovered
         // buffer, Discard deletes the WAL entry permanently.
-        .sheet(isPresented: $engine.recoverySheetShown) {
+        // Presented only when there is something to recover.
+        //
+        // Observed at launch: the sheet came up reading "recovered unsaved work
+        // in 0 files" over an empty list, with its own default action disabled.
+        // `checkRecovery` sets the flag from a WAL entry count and then builds
+        // the row list separately, so an entry whose path cannot be read leaves
+        // the flag true and the list empty. Gating presentation on the list
+        // itself makes the empty sheet unrepresentable rather than merely
+        // unlikely.
+        .sheet(
+            isPresented: Binding(
+                get: { engine.recoverySheetShown && !engine.recoveryEntries.isEmpty },
+                set: { engine.recoverySheetShown = $0 }
+            )
+        ) {
             RecoverySheet(engine: engine)
         }
     }
@@ -503,6 +539,7 @@ private struct EditorSceneRoot: View {
 
 extension Notification.Name {
     static let suiseiOpenSettingsWindow = Notification.Name("suisei.openSettingsWindow")
+    static let suiseiOpenGitWorkbenchWindow = Notification.Name("suisei.openGitWorkbenchWindow")
     static let suiseiNavProject = Notification.Name("suisei.nav.project")
     static let suiseiNavScm = Notification.Name("suisei.nav.scm")
     static let suiseiNavFind = Notification.Name("suisei.nav.find")
@@ -533,92 +570,144 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// Crash-recovery sheet: lists unsaved buffers found in the WAL journal,
 /// lets the user accept (open with recovered content) or discard each.
+/// Built to macOS sheet conventions rather than to a private palette.
+///
+/// The previous version hard-coded a dark panel, wrote every foreground as
+/// `.white.opacity(…)`, and then forced `.preferredColorScheme(.dark)` so the
+/// numbers would hold — which meant it ignored the user's appearance entirely
+/// and looked pasted-in on a light Mac. It also put TWO buttons on every row,
+/// so a five-file recovery presented ten competing actions and no default, and
+/// it was pinned to 460×320 whether it held one entry or twenty.
+///
+/// What a Mac sheet does instead: semantic colours so it follows the system;
+/// one clear default action; destructive actions kept away from it; and a
+/// height that follows the content between sensible bounds.
 struct RecoverySheet: View {
     @ObservedObject var engine: EngineBridge
 
-    private let panelBg = Color(red: 0.12, green: 0.12, blue: 0.13)
-    private let rowBg = Color.white.opacity(0.06)
-    private let accent = Color(red: 0.42, green: 0.62, blue: 0.95)
+    /// Per-row destructive action, confirmed before it runs. Discarding a
+    /// recovery deletes the only copy of that work.
+    @State private var pendingDiscardAll = false
+
+    private var entries: [EngineBridge.RecoveryItem] { engine.recoveryEntries }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack(spacing: 10) {
-                Image(systemName: "lifeline.arrow.triangle.branch")
-                    .symbolRenderingMode(.hierarchical)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(accent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Unsaved Changes Found")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.95))
-                    Text("Suisei recovered unsaved work from a previous session. Review and accept to restore, or discard to delete permanently.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.50))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            list
+            Divider()
+            footer
+        }
+        .frame(width: 480)
+        // Follows the content instead of being pinned: one recovered file no
+        // longer sits in a half-empty panel.
+        .frame(minHeight: 240, maxHeight: 460)
+        .background(.regularMaterial)
+        .confirmationDialog(
+            "Discard all recovered changes?",
+            isPresented: $pendingDiscardAll
+        ) {
+            Button("Discard All", role: .destructive) {
+                engine.discardAllRecovery()
             }
-            .padding(.horizontal, 18)
-            .padding(.top, 18)
-            .padding(.bottom, 14)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes the unsaved work in all \(entries.count) files. It cannot be undone.")
+        }
+    }
 
-            // Recovery entries list
-            ScrollView {
-                VStack(spacing: 6) {
-                    ForEach(engine.recoveryEntries) { item in
-                        HStack(spacing: 10) {
-                            Image(systemName: "doc.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(accent.opacity(0.70))
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(item.name)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(.white.opacity(0.90))
-                                Text(item.path)
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.white.opacity(0.35))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Spacer()
-                            Button("Discard") {
-                                engine.discardRecovery(item)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            Button("Recover") {
-                                engine.acceptRecovery(item)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(rowBg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+    private var header: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "clock.arrow.circlepath")
+                .symbolRenderingMode(.hierarchical)
+                .font(.system(size: 26, weight: .regular))
+                // Semantic, so it stays legible in both appearances.
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 30)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Unsaved Changes Found")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(entries.count == 1
+                     ? "Suisei recovered unsaved work in 1 file from a previous session."
+                     : "Suisei recovered unsaved work in \(entries.count) files from a previous session.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 20)
+        .padding(.bottom, 16)
+    }
+
+    private var list: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                let items = entries
+                ForEach(items.indices, id: \.self) { index in
+                    row(items[index])
+                    if index < items.count - 1 {
+                        Divider().padding(.leading, 42)
                     }
                 }
-                .padding(.horizontal, 18)
             }
-
-            // Footer
-            HStack {
-                Button("Discard All") {
-                    engine.discardAllRecovery()
-                }
-                .foregroundStyle(.red.opacity(0.85))
-                Spacer()
-                Button("Close") {
-                    engine.recoverySheetShown = false
-                }
-                .keyboardShortcut(.escape)
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 10)
-            .padding(.bottom, 16)
         }
-        .frame(width: 460, height: 320)
-        .background(panelBg, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .preferredColorScheme(.dark)
+        // Zebra striping and per-row chrome both went; the list reads as one
+        // surface, which is what makes the file names scannable.
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+    }
+
+    private func row(_ item: EngineBridge.RecoveryItem) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.name)
+                    .font(.system(size: 12, weight: .medium))
+                Text(item.path)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            // One action per row, and it is the non-destructive one. Discarding
+            // a single file is rare enough to live behind the ⌫ affordance
+            // rather than competing with Recover on every line.
+            Button("Recover") { engine.acceptRecovery(item) }
+                .controlSize(.small)
+            Button {
+                engine.discardRecovery(item)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .controlSize(.small)
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Discard this file's recovered changes")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 12) {
+            Button("Discard All…") { pendingDiscardAll = true }
+            Spacer()
+            Button("Later") { engine.recoverySheetShown = false }
+                .keyboardShortcut(.cancelAction)
+            // The default action, so Return does the safe thing.
+            Button("Recover All") {
+                for item in entries { engine.acceptRecovery(item) }
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(entries.isEmpty)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
     }
 }

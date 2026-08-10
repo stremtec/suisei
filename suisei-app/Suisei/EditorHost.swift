@@ -452,6 +452,12 @@ final class EditorScrollView: NSScrollView {
     private var lastMinimapLine = -1
 
     @objc private func clipBoundsChanged(_ note: Notification) {
+        // CoreText participates in AppKit responsive scrolling and must not be
+        // force-invalidated for every fractional clip movement. Metal does not,
+        // so only its explicit opt-in path needs a viewport submission here.
+        if RendererChoice.useMetal {
+            canvas.viewportDidScroll()
+        }
         postLiveMinimapLine()
         guard !suppressPush else { return }
         syncCorePosition(force: false)
@@ -659,8 +665,31 @@ final class EditorCanvasView: NSView {
 
     /// Row cache: contiguous band pulled from the engine (0-based start).
     private var bandStart: Int = 0
+    /// Last BUFFER row the cache actually holds, 0-based; -1 when empty.
+    ///
+    /// Not derivable from `bandRows.count`, and that mattered: in wrap mode one
+    /// buffer row becomes several segment entries, so the count overstates how
+    /// far the band reaches. Measured on a wrapped Korean document, the cache
+    /// held 117 entries covering rows 108…191 — 84 rows — while the coverage
+    /// test read it as reaching row 225 and never re-pulled. Rows past 191 had
+    /// no data and simply did not draw.
+    private var bandEnd: Int = -1
     private var bandRows: [EditorLine] = []
     private var bookmarkImage: NSImage?
+    private lazy var metalRenderer: MetalTextRenderer? = {
+        RendererChoice.useMetal ? MetalTextRenderer() : nil
+    }()
+    private let metalLayer = CAMetalLayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        if RendererChoice.useMetal { wantsLayer = true }
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        if RendererChoice.useMetal { wantsLayer = true }
+    }
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
@@ -704,16 +733,42 @@ final class EditorCanvasView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        installMetalLayerIfNeeded()
         // Claim focus on launch. Otherwise SwiftUI hands first responder to the
         // first focusable view — the project-tree Filter field — so the first
         // thing typed goes into the filter instead of the document.
-        guard paneIndex == 0, let win = window else { return }
+        //
+        // Against the ENGINE's focused pane, not pane 0.
+        //
+        // `viewDidMoveToWindow` fires whenever a canvas is added to a window,
+        // not only at launch — installing a split creates fresh canvases and
+        // runs it again. Hard-coded to pane 0 it then claimed the responder a
+        // runloop turn later regardless of which pane the layout actually
+        // focuses, and `EditorScrollView.apply` — which keeps the responder on
+        // the engine-focused pane — took it straight back. Focus ping-ponged
+        // through pane 0, redrawing its focus ring each way, which is why the
+        // LEFT pane alone flickered on a switch into a split while the right
+        // one sat still. `apply`'s own comment already named pane 0 as the
+        // pane that wrongly ended up holding it.
+        //
+        // Deferring to the engine keeps the launch behaviour (one pane, focus
+        // 0) and stops the fight: only the pane the engine focuses claims, and
+        // that is the pane `apply` agrees with.
+        let wantsFocus = engine?.editorSplit.focus ?? 0
+        guard paneIndex == wantsFocus, let win = window else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.window === win else { return }
             if !(win.firstResponder is EditorCanvasView) {
                 win.makeFirstResponder(self)
             }
         }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        guard RendererChoice.useMetal else { return }
+        configureMetalLayer()
+        needsDisplay = true
     }
 
     override func keyDown(with event: NSEvent) {
@@ -815,9 +870,41 @@ final class EditorCanvasView: NSView {
         wheelLiveEndWork = nil
     }
 
+    /// Set when the engine changed under pixels AppKit had already drawn ahead
+    /// of the viewport. Consumed by `prepareContent(in:)`.
+    private var overdrawPredatesChange = false
+
+    /// AppKit's responsive scrolling draws BEYOND the viewport so a scroll has
+    /// pixels ready — the engine's overscan exists to feed exactly that (see
+    /// the `rows` computation in `scene.rs`, citing WWDC 2013-215). Those rows
+    /// were drawn from the state BEFORE the last change, and invalidating only
+    /// the viewport leaves them on the layer to be revealed by the next scroll.
+    ///
+    /// Select-all is where it shows: rows on screen repaint highlighted, then
+    /// scrolling uncovers bands drawn before the selection existed — measured,
+    /// with lines 20–24 selected, 26–30 not, and 32–35 selected again, because
+    /// only some tiles were redrawn. Every whole-document change has that
+    /// shape: a theme switch, a font size, a syntax frame landing.
+    ///
+    /// Assigning `preparedContentRect` from `noteContentChanged` was tried
+    /// first and only partly worked — AppKit re-prepared some bands and left
+    /// others. Redrawing here does work, because this is the moment AppKit
+    /// itself has decided it wants that area. The cost lands on the first
+    /// scroll after a change rather than on every keystroke, which is the one
+    /// path in this view that cannot afford a three-viewport repaint.
+    override func prepareContent(in rect: NSRect) {
+        if overdrawPredatesChange {
+            overdrawPredatesChange = false
+            setNeedsDisplay(rect)
+        }
+        super.prepareContent(in: rect)
+    }
+
     /// Engine content changed — drop cached rows and repaint the viewport.
     func noteContentChanged() {
         bandRows.removeAll(keepingCapacity: true)
+        bandEnd = -1
+        overdrawPredatesChange = true
         if let sv = scrollView {
             let pad = EditorMetrics.lineHeight * 4
             setNeedsDisplay(sv.documentVisibleRect.insetBy(dx: 0, dy: -pad))
@@ -867,9 +954,9 @@ final class EditorCanvasView: NSView {
     private func rows(_ r0: Int, _ r1: Int) -> ArraySlice<EditorLine> {
         let start = max(0, r0)
         let end = max(start, min(r1, Int(docLineCount) - 1))
-        let covered = !bandRows.isEmpty
-            && start >= bandStart
-            && end < bandStart + bandRows.count
+        // Against the rows the band really holds, not against how many entries
+        // it took to hold them — see `bandEnd`.
+        let covered = !bandRows.isEmpty && start >= bandStart && end <= bandEnd
         if !covered {
             // Pull a padded band so small scrolls stay cache-hits.
             let pad = 24
@@ -892,11 +979,26 @@ final class EditorCanvasView: NSView {
             }
             bandStart = want0
             bandRows = pulled
+            bandEnd = pulled.last.map { Int($0.lineNo) - 1 } ?? (want0 - 1)
         }
         // Slice by lineNo bounds (wrap rows share lineNo with their primary).
         let lo = bandRows.firstIndex { Int($0.lineNo) - 1 >= start } ?? bandRows.endIndex
         let hi = bandRows.lastIndex { Int($0.lineNo) - 1 <= end }.map { $0 + 1 } ?? lo
-        return bandRows[lo..<hi]
+        let slice = bandRows[lo..<hi]
+        if EditorDiagnostics.bandGaps {
+            EditorDiagnostics.reportBand(
+                pane: paneIndex,
+                want: start...end,
+                bandStart: bandStart,
+                bandCount: bandRows.count,
+                first: bandRows.first.map { Int($0.lineNo) - 1 },
+                last: bandRows.last.map { Int($0.lineNo) - 1 },
+                gotFirst: slice.first.map { Int($0.lineNo) - 1 },
+                gotLast: slice.last.map { Int($0.lineNo) - 1 },
+                gotCount: slice.count
+            )
+        }
+        return slice
     }
 
     /// Real-time glyph x of the caret in canvas coordinates, from the CURRENT
@@ -985,6 +1087,278 @@ final class EditorCanvasView: NSView {
 
     // MARK: - Draw
 
+    private func installMetalLayerIfNeeded() {
+        guard RendererChoice.useMetal, metalRenderer != nil, let root = layer else { return }
+        if metalLayer.superlayer !== root {
+            metalLayer.removeFromSuperlayer()
+            root.addSublayer(metalLayer)
+        }
+        configureMetalLayer()
+    }
+
+    private func configureMetalLayer() {
+        guard RendererChoice.useMetal, let device = MetalTextRenderer.device else { return }
+        metalLayer.device = device
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = true
+        metalLayer.displaySyncEnabled = true
+        metalLayer.maximumDrawableCount = 3
+        metalLayer.isOpaque = true
+        metalLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    /// Builds one complete visible frame for the instanced Metal renderer.
+    /// CoreText remains the shaper; all glyph fallback and real advances are
+    /// therefore identical to the CPU path below. Returning false makes the
+    /// same draw immediately fall back to CoreText.
+    private func renderMetalViewport() -> Bool {
+        guard RendererChoice.useMetal, let renderer = metalRenderer else { return false }
+        installMetalLayerIfNeeded()
+        guard metalLayer.superlayer != nil else { return false }
+
+        let viewport = (scrollView?.documentVisibleRect ?? visibleRect).intersection(bounds)
+        guard !viewport.isNull, viewport.width > 0, viewport.height > 0 else { return false }
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        metalLayer.frame = viewport
+        metalLayer.contentsScale = scale
+        metalLayer.drawableSize = CGSize(
+            width: max(1, ceil(viewport.width * scale)),
+            height: max(1, ceil(viewport.height * scale))
+        )
+        CATransaction.commit()
+
+        let lineH = EditorMetrics.lineHeight
+        let gutter = EditorMetrics.gutter
+        let fontSize = EditorMetrics.fontSize
+        let cell = EditorMetrics.cellWidth
+        let font = EditorMetrics.monospaced(fontSize, weight: .regular)
+        let ascent = font.ascender
+        let gap = EditorMetrics.gutterTextGap
+        let r0 = max(0, Int(floor(viewport.minY / lineH)))
+        let r1 = max(r0, Int(ceil(viewport.maxY / lineH)))
+        let band = rows(r0, r1)
+
+        renderer.beginFrame()
+        bracketRects.removeAll(keepingCapacity: true)
+        var wrapped: Set<UInt32> = []
+        if wrapLines {
+            for line in band where line.isWrapContinuation { wrapped.insert(line.lineNo) }
+        }
+
+        for line in band where !line.isWrapContinuation {
+            let baseRow = max(0, Int(line.lineNo) - 1)
+            let y = CGFloat(baseRow) * lineH
+            if y + lineH < viewport.minY || y > viewport.maxY { continue }
+            let rowRect = CGRect(x: viewport.minX, y: y, width: viewport.width, height: lineH)
+
+            if line.isCursor { renderer.addRect(rowRect, colors.cursorLine) }
+            if line.gitSignKind != 0 {
+                renderer.addRect(
+                    CGRect(x: 2, y: y + 2, width: EditorMetrics.gitStripeWidth, height: lineH - 4),
+                    gitColor(line.gitSignKind)
+                )
+            }
+            if line.hasBreakpoint {
+                renderer.addRect(
+                    CGRect(x: 5, y: y + 4, width: 7, height: max(5, lineH - 8)),
+                    colors.accent.withAlphaComponent(0.95)
+                )
+            }
+
+            if EditorDiagnostics.metal, renderer.atlas.isFull {
+                EditorDiagnostics.reportAtlasFull(
+                    row: Int(line.lineNo),
+                    resident: renderer.atlas.residentCount
+                )
+            }
+            let gutterEntry = gutterLine(line.lineNo, isCursor: line.isCursor, font: font)
+            guard renderer.addLine(
+                gutterEntry.line,
+                origin: CGPoint(x: max(4, gutter - gap - gutterEntry.width), y: y + (lineH - fontSize) * 0.5 - 1 + ascent),
+                fallbackColor: line.isCursor ? colors.accent : colors.gutter,
+                scale: scale
+            ) else { return false }
+
+            let textY = y + (lineH - fontSize) * 0.5 - 1
+            let ct = ctLine(for: line, font: font)
+            var displayCT = ct
+            var compositionCaretUTF16: Int?
+            var compositionStartUTF16: Int?
+            if line.isCursor, !markedText.isEmpty {
+                let composed = NSMutableAttributedString(attributedString: attributedLine(line, font: font))
+                let at = min(max(0, Int(line.caretUTF16)), composed.length)
+                composed.insert(
+                    NSAttributedString(
+                        string: markedText,
+                        attributes: [.font: font, .foregroundColor: colors.fg]
+                    ),
+                    at: at
+                )
+                displayCT = CTLineCreateWithAttributedString(composed)
+                compositionStartUTF16 = at
+                compositionCaretUTF16 = at + markedText.utf16.count
+            }
+
+            let visualMap = visualToUTF16Map(line.text)
+            for span in line.spans where span.kind == 248 || span.kind == 249 {
+                let v0 = Int(span.start)
+                let v1 = Int(span.end)
+                guard v1 > v0, v0 < visualMap.count else { continue }
+                let u0 = visualMap[v0]
+                let u1 = v1 < visualMap.count ? visualMap[v1] : (line.text as NSString).length
+                guard u1 > u0 else { continue }
+                let x0 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(u0), nil)
+                let x1 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(u1), nil)
+                let current = span.kind == 249
+                renderer.addRect(
+                    CGRect(x: x0, y: y + 1, width: max(1, x1 - x0), height: lineH - 2),
+                    NSColor.systemYellow.withAlphaComponent(current ? 0.52 : 0.24)
+                )
+            }
+
+            if line.hasSelection {
+                let x0 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(line.selU0), nil)
+                let x1 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(line.selU1), nil)
+                renderer.addRect(
+                    CGRect(x: x0, y: y, width: max(cell, x1 - x0), height: lineH),
+                    colors.sel
+                )
+            }
+
+            for span in line.spans where span.kind == 254 {
+                let key = "\(line.lineNo):\(span.start)"
+                let expired = CACurrentMediaTime() - bracketShownAt >= Self.bracketFlashDuration
+                if key != bracketKey || (!viewport.intersects(rowRect) && expired) {
+                    bracketKey = key
+                    bracketShownAt = CACurrentMediaTime()
+                    startBracketFade()
+                }
+                let age = CACurrentMediaTime() - bracketShownAt
+                guard age < Self.bracketFlashDuration else { continue }
+                let x0 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(span.start), nil)
+                let x1 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(span.end), nil)
+                let raw = min(1.0, max(0.0, (Self.bracketFlashDuration - age) / Self.bracketFadeTail))
+                let fade = raw * raw * (3 - 2 * raw)
+                renderer.addRect(
+                    CGRect(x: x0 - 1, y: y + 1, width: max(cell, x1 - x0) + 2, height: lineH - 2),
+                    NSColor.systemYellow.withAlphaComponent(0.55 * fade)
+                )
+                bracketRects.append(rowRect)
+            }
+
+            guard renderer.addLine(
+                displayCT,
+                origin: CGPoint(x: gutter, y: textY + ascent),
+                fallbackColor: colors.fg,
+                scale: scale
+            ) else { return false }
+
+            if let compositionStartUTF16, let compositionCaretUTF16 {
+                let x0 = gutter + CTLineGetOffsetForStringIndex(displayCT, CFIndex(compositionStartUTF16), nil)
+                let x1 = gutter + CTLineGetOffsetForStringIndex(displayCT, CFIndex(compositionCaretUTF16), nil)
+                renderer.addRect(CGRect(x: x0, y: y + lineH - 2, width: max(1, x1 - x0), height: 1), colors.fg)
+            }
+
+            if wrapLines, wrapped.contains(line.lineNo) {
+                let marker = CTLineCreateWithAttributedString(NSAttributedString(
+                    string: "⋯",
+                    attributes: [.font: font, .foregroundColor: colors.dim.withAlphaComponent(0.85)]
+                ))
+                let markerWidth = CGFloat(CTLineGetTypographicBounds(marker, nil, nil, nil))
+                guard renderer.addLine(
+                    marker,
+                    origin: CGPoint(x: viewport.maxX - markerWidth - 6, y: textY + ascent),
+                    fallbackColor: colors.dim,
+                    scale: scale
+                ) else { return false }
+            }
+
+            if line.isCursor {
+                let caretIndex = compositionCaretUTF16 ?? Int(line.caretUTF16)
+                let caretX = gutter + CTLineGetOffsetForStringIndex(displayCT, CFIndex(caretIndex), nil)
+                let baseline = textY + font.ascender
+                let capTop = baseline - font.capHeight
+                let descBottom = baseline - font.descender
+                let caretRect = CGRect(
+                    x: caretX,
+                    y: (capTop - 1).rounded(),
+                    width: 2,
+                    height: (descBottom - capTop + 2).rounded()
+                )
+                lastCaretRect = caretRect
+                if let win = window,
+                   engine?.editorSplit.isSplit != true || paneIndex == engine?.editorSplit.focus {
+                    let inWindow = convert(caretRect, to: nil)
+                    let height = win.contentView?.bounds.height ?? win.frame.height
+                    engine?.caretFrameInWindow = CGRect(
+                        x: inWindow.minX, y: height - inWindow.maxY,
+                        width: inWindow.width, height: inWindow.height
+                    )
+                }
+                renderer.addRect(caretRect, colors.caret)
+            }
+
+            for span in line.spans {
+                if span.kind == 250 {
+                    let x = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(span.start), nil)
+                    let baseline = textY + font.ascender
+                    let capTop = baseline - font.capHeight
+                    let descBottom = baseline - font.descender
+                    renderer.addRect(
+                        CGRect(x: x, y: (capTop - 1).rounded(), width: 2, height: (descBottom - capTop + 2).rounded()),
+                        colors.caret.withAlphaComponent(0.85)
+                    )
+                } else if span.kind >= 251 && span.kind <= 253 {
+                    let x0 = gutter + CGFloat(span.start) * cell
+                    let width = max(cell, CGFloat(span.end - span.start) * cell)
+                    let color: NSColor = span.kind == 251 ? .systemRed : (span.kind == 252 ? .systemOrange : .systemBlue)
+                    var x = x0
+                    var up = false
+                    while x < x0 + width {
+                        renderer.addRect(
+                            CGRect(x: x, y: y + lineH - (up ? 3 : 2), width: min(2, x0 + width - x), height: 1),
+                            color.withAlphaComponent(0.85)
+                        )
+                        x += 2
+                        up.toggle()
+                    }
+                }
+            }
+        }
+
+        if EditorDiagnostics.metal {
+            EditorDiagnostics.reportMetal(
+                viewport: viewport,
+                bounds: bounds,
+                layerFrame: metalLayer.frame,
+                rects: renderer.rectCount,
+                rectCapacity: renderer.rectCapacity,
+                glyphs: renderer.glyphCount,
+                glyphCapacity: renderer.glyphCapacity
+            )
+        }
+        let presented = renderer.present(
+            to: metalLayer,
+            size: viewport.size,
+            scroll: viewport.origin,
+            background: colors.bg
+        )
+        metalLayer.isHidden = !presented
+        return presented
+    }
+
+    /// Called directly by `EditorScrollView` while its clip view moves. Metal
+    /// does not participate in AppKit's responsive-scroll redraw callbacks, so
+    /// relying on `draw(_:)` alone can freeze the texture until scrolling ends.
+    func viewportDidScroll() {
+        guard RendererChoice.useMetal else { return }
+        if renderMetalViewport() { return }
+        metalLayer.isHidden = true
+        setNeedsDisplay(visibleRect)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let t0 = DispatchTime.now().uptimeNanoseconds
         defer {
@@ -993,6 +1367,8 @@ final class EditorCanvasView: NSView {
                 Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
             )
         }
+        if renderMetalViewport() { return }
+        metalLayer.isHidden = true
         colors.bg.setFill()
         dirtyRect.fill()
 
@@ -1552,28 +1928,60 @@ final class EditorCanvasView: NSView {
         }
         self.tracking = false
         isTrackingDrag = false
+        // The next drag starts from a standing start, not from wherever the
+        // last one had ramped to.
+        autoscrollLeftViewAt = 0
     }
+
+    /// When the pointer last left the viewport during a drag. Zero while it is
+    /// inside, so the time ramp below starts over on every excursion.
+    private var autoscrollLeftViewAt: CFTimeInterval = 0
 
     /// One frame of drag-scrolling.
     ///
     /// `autoscroll(with:)` scrolls PROPORTIONALLY to how far outside the view
     /// the pointer is — fine for easing a few points past the edge, but flick
     /// the mouse well below the window and each call jumps a long way, so at
-    /// tick rate it staircases instead of gliding. This ramps with distance but
-    /// caps the per-frame step, which is what keeps a fling smooth.
+    /// tick rate it staircases instead of gliding. So: ramp, but cap the
+    /// per-frame step.
+    ///
+    /// The ramp used to span six lines of overshoot, which the pointer clears
+    /// almost the instant it leaves the view — so the scroll reached its cap
+    /// immediately and then ran at one fixed speed no matter what the hand did.
+    /// That reads as no acceleration at all, which is what it was.
+    ///
+    /// Two ramps now, because a drag expresses intent two ways:
+    ///
+    /// * **how far out** — over 40% of the viewport, so pulling further really
+    ///   is faster all the way rather than only for the first few lines;
+    /// * **how long held** — ×1 → ×1.8 over 1.5 s, the way every native list
+    ///   behaves when you park the pointer at the edge and wait.
+    ///
+    /// At the edge that is ~0.3 lines a frame (≈14 lines/s at the 45 Hz
+    /// tracking rate); held far out for a second and a half, ~5.9 (≈265/s).
+    /// Both ends are smoothstepped, so there is no step change to feel.
     private func autoscrollStep(toward point: CGPoint) {
         guard let clip = scrollView?.contentView else { return }
         let visible = visibleRect
         var overshoot: CGFloat = 0
         if point.y < visible.minY { overshoot = point.y - visible.minY }
         else if point.y > visible.maxY { overshoot = point.y - visible.maxY }
-        guard overshoot != 0 else { return }
+        guard overshoot != 0 else {
+            autoscrollLeftViewAt = 0
+            return
+        }
+
+        let now = CACurrentMediaTime()
+        if autoscrollLeftViewAt == 0 { autoscrollLeftViewAt = now }
 
         let lineH = EditorMetrics.lineHeight
-        // Ramp over the first ~6 lines of overshoot, then hold at the cap.
-        let ramp = min(abs(overshoot) / (lineH * 6), 1)
+        let span = max(lineH * 6, visible.height * 0.4)
+        let ramp = min(abs(overshoot) / span, 1)
         let eased = ramp * ramp * (3 - 2 * ramp)          // smoothstep
-        let step = (lineH * 0.35 + lineH * 2.0 * eased) * (overshoot < 0 ? -1 : 1)
+        let held = min((now - autoscrollLeftViewAt) / 1.5, 1)
+        let sustain = 1 + 0.8 * (held * held * (3 - 2 * held))
+        let step = (lineH * 0.3 + lineH * 3.0 * eased) * sustain
+            * (overshoot < 0 ? -1 : 1)
 
         let maxY = max(0, frame.height - visible.height)
         let newY = min(max(0, visible.origin.y + step), maxY)

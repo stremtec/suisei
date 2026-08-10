@@ -66,7 +66,12 @@ impl Completions {
             out.push(Suggestion {
                 insert_text: s.name.clone(),
                 label: s.name.clone(),
-                detail: s.kind.detail().to_string(),
+                // The declared type when the grammar has one — `i32`,
+                // `String`, `number` — and what kind of thing it is otherwise.
+                // Showing `fn` against every entry was the complaint: `new` is
+                // a function, `is_bright` is a method, `brightness` is an f32,
+                // and one column can say all three.
+                detail: s.detail(),
             });
         }
         for kw in get_suggestions(prefix, ext) {
@@ -139,7 +144,17 @@ fn get_suggestions(prefix: &str, ext: Option<&str>) -> Vec<Suggestion> {
         Some("sql") => sql_keywords(),
         Some("c" | "h") => c_keywords(),
         Some("cpp" | "hpp" | "cc" | "cxx") => cpp_keywords(),
-        _ => vec![],
+        // Every other language: take the reserved words from the highlighter's
+        // own ruleset instead of keeping a second, shorter list here.
+        //
+        // The hand-written arms above cover fifteen spellings. Java, C#, Ruby,
+        // Lua, Swift, PHP, Zig, Scala, Haskell, Elixir and Dart had none at
+        // all — a Java file offered zero keywords — while `highlight.rs` has
+        // held their keyword tables all along, for colouring. One fact, so one
+        // table; the arms above stay only because their per-keyword
+        // descriptions ("function", "immutable binding") are better than
+        // anything derivable.
+        _ => derived_keywords(ext),
     };
 
     let prefix_lower = prefix.to_lowercase();
@@ -152,6 +167,28 @@ fn get_suggestions(prefix: &str, ext: Option<&str>) -> Vec<Suggestion> {
             detail: detail.to_string(),
         })
         .collect()
+}
+
+/// Reserved words read off `highlight.rs`'s ruleset for this extension.
+///
+/// De-duplicated because `keywords` and `controls` overlap by design — `if`
+/// and `return` are in both, since the highlighter wants to colour control
+/// flow separately while still treating it as a keyword.
+fn derived_keywords(ext: Option<&str>) -> Vec<(&'static str, &'static str)> {
+    let rules = crate::highlight::rules_for_ext(ext);
+    let mut out: Vec<(&'static str, &'static str)> = Vec::new();
+    let mut push = |words: &'static [&'static str], detail: &'static str| {
+        for w in words {
+            if !out.iter().any(|(label, _)| label == w) {
+                out.push((w, detail));
+            }
+        }
+    };
+    push(rules.controls, "control");
+    push(rules.keywords, "keyword");
+    push(rules.types, "type");
+    push(rules.imports, "import");
+    out
 }
 
 fn rust_keywords() -> Vec<(&'static str, &'static str)> {

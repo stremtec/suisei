@@ -45,7 +45,10 @@ struct WelcomeView: View {
     static let windowSize = NSSize(width: 860, height: 500)
     /// Control column share — art gets the majority (AE-style).
     static let controlSplit: CGFloat = 0.40
-    static let cornerRadius: CGFloat = 18
+    /// Welcome is borderless, so it cuts its own corner — and it has to match a
+    /// real window sitting next to it. Same source as every other surface that
+    /// lines up with a window edge.
+    static let cornerRadius: CGFloat = WindowChrome.windowCornerRadius
 
     @Environment(\.colorScheme) private var scheme
 

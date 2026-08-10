@@ -23,10 +23,18 @@ import simd
 // developed and measured against the CoreText path rather than replacing it —
 // see `SUISEI_RENDERER`.
 
-/// Which renderer the editor canvas uses. CoreText stays the default until the
-/// Metal path is proven on the same measurements that justified it.
+/// Which renderer the editor canvas uses.
+///
+/// CoreText is the production path. The Metal atlas is still useful for
+/// profiling, but it is not yet feature-equivalent: AppKit responsive
+/// scrolling, the matching-bracket animation and a few text-input overlays all
+/// depend on CoreText draw timing. Keep Metal explicit until those contracts
+/// have dedicated GPU implementations instead of silently changing every Mac.
 enum RendererChoice {
-    static let useMetal = ProcessInfo.processInfo.environment["SUISEI_RENDERER"] == "metal"
+    static let useMetal: Bool = {
+        let requested = ProcessInfo.processInfo.environment["SUISEI_RENDERER"]?.lowercased()
+        return requested == "metal" && MetalTextRenderer.device != nil
+    }()
 }
 
 // MARK: - Instance layouts
@@ -159,6 +167,12 @@ final class GlyphAtlas {
     /// True when this glyph is already resident — lets the caller decide to
     /// fall back rather than stall a frame on rasterization.
     func isResident(_ key: GlyphKey) -> Bool { slots[key] != nil }
+
+    /// Out of room, and permanently: `full` is never cleared. Korean is where
+    /// that bites — Latin needs a hundred-odd glyphs and Hangul is precomposed,
+    /// so one long document can ask for thousands.
+    var isFull: Bool { full }
+    var residentCount: Int { slots.count }
 
     private func rasterize(_ key: GlyphKey, scale: CGFloat) -> GlyphSlot? {
         var glyph = key.glyph
@@ -529,21 +543,79 @@ final class MetalTextRenderer {
         return true
     }
 
+    /// Add all CoreText runs from a shaped line. CoreText still owns shaping
+    /// and fallback-font selection; Metal only replaces repeated rasterization
+    /// and draw calls. This preserves Korean/CJK metrics and IME placement.
+    @discardableResult
+    func addLine(
+        _ line: CTLine,
+        origin: CGPoint,
+        fallbackColor: NSColor,
+        scale: CGFloat
+    ) -> Bool {
+        let runs = CTLineGetGlyphRuns(line) as NSArray
+        for case let run as CTRun in runs {
+            let count = CTRunGetGlyphCount(run)
+            guard count > 0 else { continue }
+
+            let attributes = CTRunGetAttributes(run) as NSDictionary
+            guard let fontValue = attributes[kCTFontAttributeName] else { return false }
+            let font = fontValue as! CTFont
+            let color: NSColor
+            if let colorValue = attributes[kCTForegroundColorAttributeName],
+               let resolved = NSColor(cgColor: colorValue as! CGColor) {
+                color = resolved
+            } else if let resolved = attributes[NSAttributedString.Key.foregroundColor] as? NSColor {
+                color = resolved
+            } else {
+                color = fallbackColor
+            }
+
+            var glyphBuffer = [CGGlyph](repeating: 0, count: count)
+            var positionBuffer = [CGPoint](repeating: .zero, count: count)
+            CTRunGetGlyphs(run, CFRange(location: 0, length: 0), &glyphBuffer)
+            CTRunGetPositions(run, CFRange(location: 0, length: 0), &positionBuffer)
+            guard addGlyphs(
+                font: font,
+                glyphs: glyphBuffer,
+                positions: positionBuffer,
+                origin: origin,
+                color: color,
+                scale: scale
+            ) else {
+                return false
+            }
+        }
+        return true
+    }
+
     var glyphCount: Int { glyphs.count }
     var rectCount: Int { rects.count }
 
+    /// How many instances a frame can actually carry. `encode` silently drops
+    /// anything past this, so a caller that wants to know whether a frame was
+    /// complete has to be able to ask.
+    var rectCapacity: Int {
+        rectBuffers[frameIndex].length / MemoryLayout<RectInstance>.stride
+    }
+    var glyphCapacity: Int {
+        glyphBuffers[frameIndex].length / MemoryLayout<GlyphInstance>.stride
+    }
+
     /// Encode and present. `size` is the drawable size in points.
+    @discardableResult
     func present(
         to layer: CAMetalLayer,
         size: CGSize,
         scroll: CGPoint,
         background: NSColor
-    ) {
-        guard size.width > 0, size.height > 0 else { return }
-        guard let drawable = layer.nextDrawable() else { return }
+    ) -> Bool {
+        guard size.width > 0, size.height > 0 else { return false }
+        guard let drawable = layer.nextDrawable() else { return false }
         encode(into: drawable.texture, size: size, scroll: scroll, background: background) {
             $0.present(drawable)
         }
+        return true
     }
 
     /// Encode this frame into any texture. Split out of `present` so the whole

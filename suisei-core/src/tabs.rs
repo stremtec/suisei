@@ -150,14 +150,10 @@ impl App {
         let target = self.tabs.buffers[idx].id;
 
         if let Some(lid) = self.active_layout {
-            let in_layout = self
-                .layouts
-                .iter()
-                .any(|l| l.id == lid && l.holds(target));
+            let in_layout = self.layouts.iter().any(|l| l.id == lid && l.holds(target));
             if in_layout {
                 // Same arrangement, different member.
-                if let Some(pidx) = self.split.panes.iter().position(|p| p.buffer == target)
-                {
+                if let Some(pidx) = self.split.panes.iter().position(|p| p.buffer == target) {
                     if pidx != self.split.focus_index() {
                         self.park_focused_pane();
                         self.split.set_focus(pidx);

@@ -198,7 +198,10 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             }
             KeyCode::Char(',') => {
                 // Ctrl/Cmd+, — Settings (VS Code convention)
-                if matches!(app.mode, Mode::Editor | Mode::Settings | Mode::Explorer) {
+                if matches!(
+                    app.mode,
+                    Mode::Editor | Mode::Settings | Mode::Explorer | Mode::GitWorkbench
+                ) {
                     app.open_settings();
                 }
                 return;
@@ -518,7 +521,10 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 }
                 KeyCode::Char(',') => {
                     // Ctrl+, without requiring Shift (some terminals only send CONTROL)
-                    if matches!(app.mode, Mode::Editor | Mode::Settings | Mode::Explorer) {
+                    if matches!(
+                        app.mode,
+                        Mode::Editor | Mode::Settings | Mode::Explorer | Mode::GitWorkbench
+                    ) {
                         app.open_settings();
                     }
                     return;

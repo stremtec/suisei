@@ -2155,13 +2155,20 @@ fn read_loop<R: Read>(stdout: R, tx: mpsc::Sender<Value>) {
 // ── Adapter selection ──────────────────────────────────────────────────────
 
 fn detect_lang(path: &Path) -> String {
-    match path
+    let raw = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
+        .to_ascii_lowercase();
+    let ext = match crate::lang::Lang::from_ext(&raw) {
+        Some(l) => l.extensions()[0],
+        None => raw.as_str(),
+    };
+    match ext {
+        // Spellings normalise through `crate::lang` first, so `.c++`, `.hxx`,
+        // `.ipp` and the rest reach the same adapter as `.cpp` instead of
+        // resolving to "unknown" — the same drift that left C++ without scope
+        // completion, pointed at the debugger.
         "py" | "pyw" => "python".into(),
         "rs" => "rust".into(),
         "go" => "go".into(),

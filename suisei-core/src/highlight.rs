@@ -45,6 +45,18 @@ pub fn from_semantic_type(name: &str) -> TokenKind {
 }
 
 /// Map tree-sitter capture name → TokenKind
+/// Map a tree-sitter highlight capture name → the kind the painter colours.
+///
+/// Capture vocabularies are not standardised. Every grammar author writes what
+/// they like, and a name this function does not answer for is not an error
+/// anywhere — the span is simply dropped and the text stays default-coloured.
+/// That is why `tests/every_grammar_loads.rs` walks every linked grammar's
+/// query and fails on any capture that is neither mapped here nor explicitly
+/// listed as paint-nothing. The list below grew from running exactly that.
+///
+/// The two-stage shape is deliberate: an exact match first, then the dotted
+/// BASE. `@keyword.coroutine` has no entry and does not need one — it is a
+/// keyword. Only names whose base would give the wrong answer are spelled out.
 pub fn from_capture(name: &str) -> Option<TokenKind> {
     // strip dotted suffix priority: take full match first
     let base = name.split('.').next().unwrap_or(name);
@@ -52,30 +64,75 @@ pub fn from_capture(name: &str) -> Option<TokenKind> {
         "keyword" | "keyword.function" | "keyword.operator" | "keyword.return" => {
             TokenKind::Keyword
         }
-        "keyword.control" | "conditional" | "repeat" => TokenKind::KeywordControl,
+        // Control flow reads better in its own colour, and the four grammars
+        // that spell it `conditional`/`repeat`/`exception` mean the same thing
+        // as the ones that say `keyword.control`.
+        "keyword.control"
+        | "keyword.conditional"
+        | "keyword.repeat"
+        | "keyword.exception"
+        | "conditional"
+        | "repeat"
+        | "exception" => TokenKind::KeywordControl,
         "keyword.import" | "include" => TokenKind::KeywordImport,
+        // `storageclass` is `static`/`extern`/`final`/`lateinit` — a modifier,
+        // not a control word.
+        "storageclass" | "keyword.modifier" | "keyword.storage" => TokenKind::Keyword,
         "string" | "string.special" | "character" => TokenKind::String,
+        // An escape inside a string is narrower than the string, and the
+        // painter now lets the inner span win, so these finally show.
+        "escape" | "string.escape" | "character.special" => TokenKind::String,
         "comment" | "comment.documentation" | "comment.line" | "comment.block" => {
             TokenKind::Comment
         }
         "number" | "float" | "boolean" => TokenKind::Number,
         "type" | "type.builtin" | "type.definition" | "constructor" => TokenKind::TypeName,
         "function" | "function.call" | "function.builtin" => TokenKind::Function,
-        "function.method" | "method" | "method.call" => TokenKind::Method,
+        "function.method" | "function.method.call" | "method" | "method.call" => TokenKind::Method,
         "function.macro" | "macro" => TokenKind::Macro,
+        // C and Objective-C preprocessor lines. Grouped with macros because
+        // that is what `#define` is, and `#import` sits beside it.
+        "preproc" | "keyword.directive" => TokenKind::Macro,
         "namespace" | "module" => TokenKind::Namespace,
-        "variable.parameter" | "parameter" => TokenKind::Parameter,
+        "variable.parameter" | "variable.parameter.builtin" | "parameter" => TokenKind::Parameter,
         "property" | "field" | "variable.member" => TokenKind::Property,
         "constant" | "constant.builtin" => TokenKind::Constant,
         "variable" | "variable.builtin" => TokenKind::Variable,
         "operator" => TokenKind::Operator,
-        "punctuation" | "punctuation.bracket" | "punctuation.delimiter" => TokenKind::Punctuation,
+        "punctuation" | "punctuation.bracket" | "punctuation.delimiter" | "delimiter" => {
+            TokenKind::Punctuation
+        }
         "attribute" | "annotation" => TokenKind::Attribute,
-        "lifetime" => TokenKind::Lifetime,
+        // A Rust lifetime, a `goto` label and a YAML anchor are the same shape:
+        // a name that is not a value, attached to a place in the code.
+        "lifetime" | "label" => TokenKind::Lifetime,
+        // ── markup ──────────────────────────────────────────────────────────
+        //
+        // Markdown, XML and the doc-comment queries speak `markup.*` and the
+        // older `text.*`. Suisei's palette has 14 slots that cross the FFI to
+        // named theme colours, so these map onto existing slots rather than
+        // growing the ABI for one file type: heading takes the accent
+        // (keyword), code takes the string colour, a link takes the function
+        // colour. Emphasis and strong have no font-variant channel to use, so
+        // they stay body text rather than being given an arbitrary colour.
+        "markup.heading" | "text.title" => TokenKind::Keyword,
+        "markup.raw" | "markup.raw.block" | "text.literal" => TokenKind::String,
+        "markup.link" | "markup.link.url" | "markup.link.label" | "text.uri" | "text.reference" => {
+            TokenKind::Function
+        }
+        "markup.list" | "markup.quote" => TokenKind::Punctuation,
+        // ── markup end ──────────────────────────────────────────────────────
+        //
+        // An HTML/XML/JSX element name. Themes conventionally paint it like a
+        // type, and it is the same idea: the name of the thing, not its value.
+        "tag" => TokenKind::TypeName,
+        "tag.attribute" => TokenKind::Property,
+        "tag.delimiter" => TokenKind::Punctuation,
         // fallback by base
         _ => match base {
             "keyword" => TokenKind::Keyword,
             "string" => TokenKind::String,
+            "character" => TokenKind::String,
             "comment" => TokenKind::Comment,
             "number" => TokenKind::Number,
             "type" => TokenKind::TypeName,
@@ -91,6 +148,10 @@ pub fn from_capture(name: &str) -> Option<TokenKind> {
             "punctuation" => TokenKind::Punctuation,
             "attribute" => TokenKind::Attribute,
             "constructor" => TokenKind::TypeName,
+            "tag" => TokenKind::TypeName,
+            // A bare `@markup` is "some marked-up run" with no further claim;
+            // body text is the honest painting of that.
+            "markup" => TokenKind::Variable,
             _ => return None,
         },
     })
@@ -99,7 +160,30 @@ pub fn from_capture(name: &str) -> Option<TokenKind> {
 // ── Fallback line tokenizer ─────────────────────────────
 
 pub fn highlight_line(line: &str, ext: Option<&str>) -> Vec<(TokenKind, usize, usize)> {
-    let rules = match ext {
+    let rules = rules_for_ext(ext);
+    tokenize(line, &rules, ext)
+}
+
+/// The fallback ruleset for an extension — reserved words, types, imports and
+/// control words.
+///
+/// Public because it is also the answer to "what are this language's
+/// keywords", which `completion.rs` needs and used to keep a second, shorter
+/// list of. That list covered fifteen spellings; this one covers every
+/// language the fallback highlighter knows, which is more languages than have
+/// grammars.
+///
+/// Extensions are normalised through [`crate::lang::Lang`] first, so the
+/// eleven spellings the language table added (`c++`, `hxx`, `rake`, `csx`,
+/// `phtml`, `sbt`, …) resolve to their language's rules instead of falling
+/// through to the generic set. Anything with no grammar — `nim`, `kt`, `vue`,
+/// `sql` — is still matched by its own spelling below.
+pub fn rules_for_ext(ext: Option<&str>) -> LangRules {
+    let canonical = ext
+        .and_then(crate::lang::Lang::from_ext)
+        .map(|l| l.extensions()[0])
+        .or(ext);
+    match canonical {
         Some("rs") => rust_rules(),
         Some("py" | "pyi") => py_rules(),
         Some("ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs") => js_rules(),
@@ -127,17 +211,17 @@ pub fn highlight_line(line: &str, ext: Option<&str>) -> Vec<(TokenKind, usize, u
         Some("ex" | "exs") => elixir_rules(),
         Some("nim") => nim_rules(),
         Some("vue" | "svelte") => js_rules(),
+        Some("m") => objc_rules(),
         _ => generic_rules(),
-    };
-    tokenize(line, &rules, ext)
+    }
 }
 
-struct LangRules {
+pub struct LangRules {
     line_comment: Option<&'static str>,
-    keywords: &'static [&'static str],
-    types: &'static [&'static str],
-    imports: &'static [&'static str],
-    controls: &'static [&'static str],
+    pub keywords: &'static [&'static str],
+    pub types: &'static [&'static str],
+    pub imports: &'static [&'static str],
+    pub controls: &'static [&'static str],
 }
 
 fn rust_rules() -> LangRules {
@@ -286,6 +370,95 @@ fn c_rules() -> LangRules {
         controls: &[
             "if", "else", "for", "while", "do", "switch", "case", "return", "break", "continue",
             "goto",
+        ],
+    }
+}
+
+/// Objective-C: C, plus the `@`-prefixed declarations and the Foundation
+/// spellings of the primitive types.
+fn objc_rules() -> LangRules {
+    LangRules {
+        line_comment: Some("//"),
+        keywords: &[
+            "return",
+            "if",
+            "else",
+            "for",
+            "while",
+            "do",
+            "switch",
+            "case",
+            "break",
+            "continue",
+            "struct",
+            "enum",
+            "typedef",
+            "sizeof",
+            "static",
+            "const",
+            "void",
+            "extern",
+            "goto",
+            "default",
+            "union",
+            "volatile",
+            "self",
+            "super",
+            "nil",
+            "YES",
+            "NO",
+            "in",
+            "id",
+            "@interface",
+            "@implementation",
+            "@protocol",
+            "@end",
+            "@property",
+            "@synthesize",
+            "@selector",
+            "@class",
+            "@autoreleasepool",
+            "@synchronized",
+            "@try",
+            "@catch",
+            "@finally",
+            "@throw",
+            "instancetype",
+            "nonatomic",
+            "atomic",
+            "strong",
+            "weak",
+            "assign",
+            "copy",
+            "readonly",
+            "readwrite",
+        ],
+        types: &[
+            "int",
+            "char",
+            "float",
+            "double",
+            "long",
+            "short",
+            "unsigned",
+            "signed",
+            "size_t",
+            "BOOL",
+            "NSInteger",
+            "NSUInteger",
+            "CGFloat",
+            "NSString",
+            "NSArray",
+            "NSDictionary",
+            "NSNumber",
+            "NSObject",
+            "IBOutlet",
+            "IBAction",
+        ],
+        imports: &["import", "include"],
+        controls: &[
+            "if", "else", "for", "while", "do", "switch", "case", "return", "break", "continue",
+            "goto", "@try", "@catch", "@finally", "@throw",
         ],
     }
 }

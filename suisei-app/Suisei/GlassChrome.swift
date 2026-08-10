@@ -3,10 +3,10 @@ import SwiftUI
 /// List-row hover wash shared by navigator / git / palette rows.
 /// iOS-quality: quick fade in, slightly slower fade out, no layout shift.
 struct HoverRow<Content: View>: View {
+    @State private var hovering = false
     var corner: CGFloat = 6
     var tint: Color = .primary
     @ViewBuilder var content: () -> Content
-    @State private var hovering = false
 
     var body: some View {
         content()
@@ -104,10 +104,11 @@ struct ToolbarTabChip: View {
     /// Shared namespace for the active capsule, so it TRAVELS between chips
     /// instead of one fading out while another fades in.
     var pillSpace: Namespace.ID
+    /// Hover comes from the strip's single hit test, not from this chip.
+    var hovered: Bool = false
     var action: () -> Void
     var onClose: (() -> Void)? = nil
 
-    @State private var hovering = false
 
     /// Show the trailing control (dirty or close) — always reserve space when either applies.
     private var showTrailing: Bool {
@@ -158,7 +159,7 @@ struct ToolbarTabChip: View {
                                 AnimationTraceProbe(key: "layout-chip-\(tabId)")
                             )
                     }
-                    if hovering, !active {
+                    if hovered, !active {
                         Capsule(style: .continuous)
                             .fill(
                                 inLayoutGroup
@@ -175,16 +176,7 @@ struct ToolbarTabChip: View {
             .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
-        .onHover {
-            hovering = $0
-            // Hover never reaches `tabSlot`: `TabStripMouse.hitTest` only calls
-            // it for `.leftMouseDown` and declines everything else, so the strip
-            // hit-test log is blind to this path. Report which chip SwiftUI
-            // itself believes the cursor is over, so "hovered the layout chip,
-            // Cargo.lock lit up" becomes a checkable statement.
-            TabLog.hover(title, entered: $0)
-        }
-        .animation(.snappy(duration: 0.16), value: hovering)
+        .animation(.snappy(duration: 0.16), value: hovered)
         // NOT `value: active` — the travelling capsule is animated by the
         // strip, which is the only view that contains both the chip it leaves
         // and the chip it arrives at. Animating it here as well gave the shared
@@ -202,14 +194,14 @@ struct ToolbarTabChip: View {
     @ViewBuilder
     private var trailingSlot: some View {
         ZStack {
-            // Dirty dot — visible only when dirty AND not hovering.
+            // Dirty dot — visible only when dirty AND not hovered.
             Circle()
                 .fill(Color(nsColor: .systemOrange))
                 .frame(width: 6, height: 6)
-                .opacity(dirty && !hovering ? 1 : 0)
-                .scaleEffect(dirty && !hovering ? 1 : 0.55)
+                .opacity(dirty && !hovered ? 1 : 0)
+                .scaleEffect(dirty && !hovered ? 1 : 0.55)
 
-            // Close × — visible only while hovering (replaces dirty).
+            // Close × — visible only while hovered (replaces dirty).
             if let onClose {
                 Button {
                     onClose()
@@ -225,13 +217,13 @@ struct ToolbarTabChip: View {
                 }
                 .buttonStyle(.plain)
                 .help("Close tab")
-                .opacity(hovering ? 1 : 0)
-                .scaleEffect(hovering ? 1 : 0.55)
+                .opacity(hovered ? 1 : 0)
+                .scaleEffect(hovered ? 1 : 0.55)
                 // Keep hit target only when visible
-                .allowsHitTesting(hovering)
+                .allowsHitTesting(hovered)
             }
         }
         .frame(width: 14, height: 14)
-        .animation(.easeInOut(duration: 0.14), value: hovering)
+        .animation(.easeInOut(duration: 0.14), value: hovered)
     }
 }

@@ -8,24 +8,46 @@ cd "$ROOT"
 FORCE="${SUISEI_FORCE:-0}"
 PROFILE="${SUISEI_PROFILE:-release}"
 
-# Swift optimisation level. Measured on this tree (11 files, ~11.3k lines):
+# Swift optimisation level. Measured on the original tree (11 files, ~11.3k lines):
 #   -O        3:59
 #   -Onone    0:27   ← 9x
-# 89% of a build is the optimiser, and it runs on ONE of this machine's ten
-# cores. Do NOT reach for `-enable-batch-mode` to parallelise it: combined with
+# Do NOT reach for `-enable-batch-mode` to parallelise single-file compilation:
+# combined with
 # `-import-objc-header` the frontends report success but emit no object files,
 # and the build dies at link with "no such file or directory: ContentView-1.o".
 # It looks 8% faster only because a build that never links is a build that did
 # less work.
+#
+# Release instead uses Swift's supported whole-module mode. Without it the
+# driver repeats optimisation for every primary file; after the native
+# workbench grew the face to 22 files, EngineBridge.swift alone took 17 minutes
+# and the driver then started over for ContentView.swift. WMO type-checks and
+# optimises the module once, gives the optimiser cross-file visibility, and
+# lets the LLVM backend use `-num-threads` safely. This is distinct from the
+# broken batch-mode experiment above and matches SwiftPM's release defaults.
 #
 # `-O` stays the default because the editor canvas draws its text in Swift
 # (EditorHost) — an unoptimised build is a bad place to judge input latency.
 # Set SUISEI_FAST=1 for a throwaway UI-iteration build.
 if [[ "${SUISEI_FAST:-0}" == "1" ]]; then
   SWIFT_OPT="-Onone"
+  SWIFT_COMPILE_FLAGS=()
 else
   SWIFT_OPT="${SUISEI_OPT:--O}"
+  if [[ -n "${SUISEI_SWIFT_THREADS:-}" ]]; then
+    SWIFT_THREADS="$SUISEI_SWIFT_THREADS"
+  elif command -v sysctl >/dev/null 2>&1; then
+    SWIFT_THREADS="$(sysctl -n hw.activecpu 2>/dev/null || echo 4)"
+  else
+    SWIFT_THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+  fi
+  SWIFT_COMPILE_FLAGS=(-whole-module-optimization -num-threads "$SWIFT_THREADS")
 fi
+# `${arr[*]}` on an EMPTY array is an unbound variable under `set -u` in the
+# bash 3.2 macOS ships, so `SUISEI_FAST=1` — which is the branch that leaves
+# this array empty — failed before it compiled anything. The documented
+# fast-iteration build had never run.
+SWIFT_BUILD_MODE="$SWIFT_OPT ${SWIFT_COMPILE_FLAGS[*]:-}"
 
 STAGE="$ROOT/suisei-app/.engine"
 BUILD="$ROOT/suisei-app/.build"
@@ -43,14 +65,19 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/EngineBridge.swift"
   "$ROOT/suisei-app/Suisei/EditorTickStore.swift"
   "$ROOT/suisei-app/Suisei/EditorHost.swift"
+  "$ROOT/suisei-app/Suisei/EditorDiagnostics.swift"
   "$ROOT/suisei-app/Suisei/MetalTextRenderer.swift"
   "$ROOT/suisei-app/Suisei/TabStripLayout.swift"
+  "$ROOT/suisei-app/Suisei/TabStripModel.swift"
+  "$ROOT/suisei-app/Suisei/TabStripView.swift"
   "$ROOT/suisei-app/Suisei/TabChipMetrics.swift"
   "$ROOT/suisei-app/Suisei/GlassBackdrop.swift"
   "$ROOT/suisei-app/Suisei/WelcomeView.swift"
   "$ROOT/suisei-app/Suisei/ProjectTreeView.swift"
   "$ROOT/suisei-app/Suisei/ProjectIndex.swift"
   "$ROOT/suisei-app/Suisei/SettingsWindowView.swift"
+  "$ROOT/suisei-app/Suisei/GitWorkbenchWindowView.swift"
+  "$ROOT/suisei-app/Suisei/AboutPanel.swift"
   "$ROOT/suisei-app/Suisei/GlassChrome.swift"
   "$ROOT/suisei-app/Suisei/WindowChrome.swift"
   "$ROOT/suisei-app/Suisei/DaemonLauncher.swift"
@@ -96,7 +123,7 @@ else
   # Opt level changed since the last build? No mtime can see that, and a stale
   # -Onone binary passing itself off as a release is exactly the kind of trap
   # the embedded-dylib one already cost us an afternoon on.
-  if [[ ! -f "$OPT_STAMP" || "$(cat "$OPT_STAMP" 2>/dev/null)" != "$SWIFT_OPT" ]]; then
+  if [[ ! -f "$OPT_STAMP" || "$(cat "$OPT_STAMP" 2>/dev/null)" != "$SWIFT_BUILD_MODE" ]]; then
     need_swift=1
   fi
 
@@ -138,14 +165,14 @@ MACOS_TARGET="${MACOS_TARGET:-arm64-apple-macos26.0}"
 MACOS_MIN="${MACOS_TARGET##*macos}"
 
 if [[ "$need_swift" == "1" ]]; then
-  echo "→ swiftc → Contents/MacOS/Suisei (sdk=$(basename "$SDKROOT"), $MACOS_TARGET, $SWIFT_OPT)"
+  echo "→ swiftc → Contents/MacOS/Suisei (sdk=$(basename "$SDKROOT"), $MACOS_TARGET, $SWIFT_BUILD_MODE)"
   if [[ "$SWIFT_OPT" == "-Onone" ]]; then
     echo "   ⚠︎  UNOPTIMIZED build — fast to compile, slower at runtime."
     echo "      Never judge editor latency or ship a release from this."
   fi
   # Compile to temp then move — avoids partial binary on failure
   TMP_BIN=$(mktemp /tmp/Suisei.XXXXXX)
-  swiftc "$SWIFT_OPT" \
+  swiftc "$SWIFT_OPT" ${SWIFT_COMPILE_FLAGS[@]+"${SWIFT_COMPILE_FLAGS[@]}"} \
     -parse-as-library \
     -sdk "$SDKROOT" \
     -target "$MACOS_TARGET" \
@@ -160,7 +187,7 @@ if [[ "$need_swift" == "1" ]]; then
     -o "$TMP_BIN"
   mv -f "$TMP_BIN" "$BIN"
   chmod +x "$BIN"
-  printf '%s' "$SWIFT_OPT" > "$OPT_STAMP"
+  printf '%s' "$SWIFT_BUILD_MODE" > "$OPT_STAMP"
 
   echo "→ embed libsuisei_engine.dylib"
   cp -f "$STAGE/libsuisei_engine.dylib" "$FW/"
@@ -208,7 +235,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>${SUISEI_VERSION}</string>
   <key>NSHumanReadableCopyright</key>
-  <string>© 2026 Stremtec. Closed source — see LICENSE. Suisei is not open-source.</string>
+  <string>Copyright © 2026 Stremtec. All rights reserved.</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
@@ -227,6 +254,10 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# Presented from the native About panel. Keep the shipped text identical to
+# the repository license rather than maintaining a second UI-only copy.
+cp -f "$ROOT/LICENSE" "$RES/LICENSE"
 
 ICON_SRC_DIR="$ROOT/suisei-app/Resources"
 if [[ "$need_icon" == "1" || ! -f "$RES/Suisei.icns" ]]; then

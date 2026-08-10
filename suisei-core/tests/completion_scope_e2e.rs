@@ -164,3 +164,125 @@ fn a_stale_tree_falls_back_to_keywords_rather_than_lying() {
         );
     }
 }
+
+// ------------------------------------------------------------------ Python
+
+const PY_SRC: &str = r#"SHARED_LIMIT = 10
+
+def scaled_helper(scale_factor):
+    scaled_inner = scale_factor * 2
+    return scaled_inner
+
+def other_place(input_value):
+    scoped_local = input_value + 1
+    sc
+"#;
+
+/// The same wiring for a Python file.
+///
+/// Worth its own case: the whole suite drove Rust, where a closing `}` keeps
+/// the caret inside the block. Python has no such character, so a caret at the
+/// end of the prefix resolved to the ROOT and completion offered `def` names
+/// only — no locals, no parameters. The unit suite missed it because its one
+/// Python test asserted an ABSENCE ("A's locals don't leak into B"), which
+/// passes trivially when no local is ever offered.
+fn py_app_at(row: usize, col: usize) -> App {
+    let mut app = App::default();
+    app.buffer = Buffer::from_string(PY_SRC);
+    app.filename = Some(std::path::PathBuf::from("/tmp/suisei_completion.py"));
+    app.syntax.parse(PY_SRC, Some("py"));
+    let at = Position { row, col };
+    app.buffer.cursor = at;
+    app.sel = SelectionSet::single(Selection::caret(at));
+    app
+}
+
+#[test]
+fn python_offers_locals_and_parameters_at_the_caret() {
+    // Caret at the end of the bare `    sc` line, inside `other_place`.
+    let row = PY_SRC
+        .lines()
+        .position(|l| l.trim() == "sc")
+        .expect("the prefix line exists");
+    let mut app = py_app_at(row, "    sc".chars().count());
+    app.completion_after_typing();
+
+    let got = labels(&app);
+    assert!(
+        got.iter().any(|l| l == "scoped_local"),
+        "this function's own local must be offered, got {got:?}"
+    );
+    assert!(
+        got.iter().any(|l| l == "scaled_helper"),
+        "a top-level def must be offered, got {got:?}"
+    );
+    assert!(
+        !got.iter().any(|l| l == "scaled_inner"),
+        "the OTHER function's local must not be offered, got {got:?}"
+    );
+}
+
+#[test]
+fn python_parameters_do_not_leak_between_functions() {
+    let row = PY_SRC
+        .lines()
+        .position(|l| l.trim() == "sc")
+        .expect("the prefix line exists");
+    let mut app = py_app_at(row, "    sc".chars().count());
+    app.completion_after_typing();
+    let got = labels(&app);
+    assert!(
+        !got.iter().any(|l| l == "scale_factor"),
+        "another function's parameter must not be offered, got {got:?}"
+    );
+}
+
+// --------------------------------------------------------------------- C++
+
+const CPP_SRC: &str = r#"int SHARED_LIMIT = 10;
+
+void scaled_helper(int scale_factor) {
+    int scaled_inner = scale_factor * 2;
+}
+
+void other_place(int input_value) {
+    int scoped_local = input_value + 1;
+    sc
+}
+"#;
+
+/// A `.cpp` file, driven through the real path.
+///
+/// `syntax.rs` has always parsed C++ with the C grammar and the LSP catalog
+/// advertises the entry as "C / C++", but `ScopeLang::from_ext` did not know
+/// the C++ spellings — so these files parsed, highlighted, and silently offered
+/// no buffer symbol at all. Extension-map coverage is asserted in
+/// `scope_language_conformance.rs`; this checks the whole path actually lands.
+#[test]
+fn cpp_files_offer_buffer_symbols() {
+    let mut app = App::default();
+    app.buffer = Buffer::from_string(CPP_SRC);
+    app.filename = Some(std::path::PathBuf::from("/tmp/suisei_completion.cpp"));
+    app.syntax.parse(CPP_SRC, Some("cpp"));
+    let row = CPP_SRC
+        .lines()
+        .position(|l| l.trim() == "sc")
+        .expect("the prefix line exists");
+    let at = Position {
+        row,
+        col: "    sc".chars().count(),
+    };
+    app.buffer.cursor = at;
+    app.sel = SelectionSet::single(Selection::caret(at));
+    app.completion_after_typing();
+
+    let got = labels(&app);
+    assert!(
+        got.iter().any(|l| l == "scoped_local"),
+        ".cpp must offer this function's own local, got {got:?}"
+    );
+    assert!(
+        !got.iter().any(|l| l == "scaled_inner"),
+        ".cpp must not offer the other function's local, got {got:?}"
+    );
+}

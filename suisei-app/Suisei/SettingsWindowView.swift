@@ -6,8 +6,13 @@ import AppKit
 struct SettingsWindowView: View {
     @ObservedObject var engine: EngineBridge
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("suisei.appearance") private var appearanceMode: String = "system"
     @State private var engineReferenceExpanded = false
+    @State private var searchText = ""
+    @State private var selectedPageID: PageID = .general
+    @State private var pageHistory: [PageID] = [.general]
+    @State private var historyIndex = 0
+
+    private static let sidebarWidth: CGFloat = 240
 
     private var s: SettingsSnap { engine.chrome.settings }
     private var theme: ThemeSnap { engine.chrome.theme }
@@ -22,36 +27,147 @@ struct SettingsWindowView: View {
 
     private var preferredScheme: ColorScheme? {
         switch appearanceMode {
-        case "light": return .light
-        case "dark": return .dark
-        default: return nil
+        case "light": .light
+        case "dark": .dark
+        default: nil
         }
+    }
+
+    private var appearanceMode: String {
+        guard let index = rows(.appearanceMode).first?.valueIndex else { return "system" }
+        switch index {
+        case 1: return "light"
+        case 2: return "dark"
+        default: return "system"
+        }
+    }
+
+    private var glassStyle: String {
+        rows(.glassStyle).first?.valueIndex == 1 ? "tinted" : "clear"
+    }
+
+    private enum PageID: String, Hashable {
+        case general
+        case accounts
+        case appearance
+        case editor
+        case languageServers
+        case sourceControl
+        case extensions
+        case shortcuts
+        case softwareUpdate
     }
 
     private struct Page: Identifiable {
-        let id: Int
+        let id: PageID
         let title: String
         let symbol: String
-        let tint: Color
+        let searchTerms: String
+        let corePage: Int
     }
 
+    private struct PresentedSettingGroup: Identifiable {
+        let id: String
+        let title: String
+        var rows: [SettingsRowItem]
+    }
+
+    private struct AccentPreset: Identifiable {
+        let name: String
+        let hex: String
+        let color: Color
+        var id: String { hex }
+    }
+
+    /// Pages are deliberately task-oriented rather than mirroring Core's four
+    /// implementation pages. Several sidebar destinations share Core page 1,
+    /// but present a much smaller, focused settings surface.
     private let pages: [Page] = [
-        Page(id: 1, title: "General", symbol: "gearshape.fill", tint: .gray),
-        Page(id: 0, title: "About", symbol: "info.circle.fill", tint: .blue),
-        Page(id: 2, title: "Extensions", symbol: "puzzlepiece.extension.fill", tint: .purple),
-        Page(id: 3, title: "Shortcuts", symbol: "keyboard.fill", tint: .indigo),
+        Page(
+            id: .general, title: "General", symbol: "gearshape",
+            searchTerms: "overview settings preferences", corePage: 1
+        ),
+        Page(
+            id: .accounts, title: "Accounts", symbol: "at",
+            searchTerms: "account google sign in sync", corePage: 1
+        ),
+        Page(
+            id: .appearance, title: "Appearance", symbol: "paintbrush",
+            searchTerms: "theme light dark auto color", corePage: 1
+        ),
+        Page(
+            id: .editor, title: "Editor", symbol: "square.and.pencil",
+            searchTerms: "editing wrap line tab gpu clipboard undo", corePage: 1
+        ),
+        Page(
+            id: .languageServers, title: "Language Servers", symbol: "square.stack.3d.up",
+            searchTerms: "lsp language server command", corePage: 1
+        ),
+        Page(
+            id: .sourceControl, title: "Source Control", symbol: "arrow.triangle.branch",
+            searchTerms: "git scm repository workbench", corePage: 1
+        ),
+        Page(
+            id: .extensions, title: "Extensions", symbol: "puzzlepiece.extension",
+            searchTerms: "extension language syntax grammar", corePage: 2
+        ),
+        Page(
+            id: .shortcuts, title: "Shortcuts", symbol: "keyboard",
+            searchTerms: "keyboard key binding command", corePage: 3
+        ),
+        Page(
+            id: .softwareUpdate, title: "Software Update", symbol: "arrow.triangle.2.circlepath",
+            searchTerms: "software update version release", corePage: 1
+        ),
     ]
 
-    var body: some View {
-        HSplitView {
-            settingsSidebar
-                .frame(minWidth: 176, idealWidth: 188, maxWidth: 208)
-
-            settingsDetail
-                .frame(minWidth: 536, maxWidth: .infinity, maxHeight: .infinity)
+    private var visiblePages: [Page] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return pages }
+        return pages.filter {
+            $0.title.localizedCaseInsensitiveContains(query)
+                || $0.searchTerms.localizedCaseInsensitiveContains(query)
         }
-        .frame(minWidth: 760, minHeight: 520)
+    }
+
+    /// Page selection as a binding, so the sidebar can be a real `List`.
+    ///
+    /// The selection still lives in Core (`settingsGotoPage`); this only adapts
+    /// it to the shape `List(selection:)` wants. Rows used to be hand-rolled
+    /// `Button`s, which meant no keyboard navigation, no focus ring, and a
+    /// selection drawn as a 14%-accent wash instead of the filled capsule every
+    /// other Mac sidebar uses.
+    private var currentPage: Page {
+        pages.first(where: { $0.id == selectedPageID }) ?? pages[0]
+    }
+
+    private var selectedPage: Binding<PageID?> {
+        Binding(
+            get: { selectedPageID },
+            set: { if let id = $0 { navigate(to: id) } }
+        )
+    }
+
+    var body: some View {
+        NavigationSplitView {
+            sidebar
+        } detail: {
+            settingsDetail
+        }
+        .navigationTitle(currentPage.title)
+        .toolbarTitleDisplayMode(.inlineLarge)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                historyControl
+            }
+        }
+        // Keep the split view responsible for the entire resizable window so
+        // the sidebar material and the detail background both reach the bottom.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(minWidth: 740, minHeight: 480)
         .preferredColorScheme(preferredScheme)
+        .tint(theme.color(theme.accent))
+        .accentColor(theme.color(theme.accent))
         .background(
             ThemedWindowChrome(
                 background: NSColor.windowBackgroundColor,
@@ -60,151 +176,228 @@ struct SettingsWindowView: View {
             )
         )
         .onAppear {
-            if !engine.chrome.settings.open { engine.openSettings() }
-            // Land on General (not About) like Xcode.
-            if s.pageIndex == 0 { engine.settingsGotoPage(1) }
+            // A `Window` scene may build this view while its Core model is
+            // still closed. In that case `settingsGotoPage` intentionally
+            // ignores the request; the real open transition below will sync
+            // the page once the model is ready.
+            if s.open {
+                navigate(to: selectedPageID, recordingHistory: false)
+            }
             retheme()
         }
-        .onDisappear {
-            if engine.chrome.settings.open { engine.closeSettings() }
-        }
         .onChange(of: engine.chrome.settings.open) { _, open in
-            if !open { dismiss() }
+            if open {
+                // Scene creation and Core opening are independent. Always
+                // re-publish the visible native destination at the moment the
+                // Core panel becomes available, otherwise a pre-created
+                // Settings scene can remain backed by About/empty rows.
+                navigate(to: selectedPageID, recordingHistory: false)
+                retheme()
+            } else {
+                dismiss()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
+            guard let window = note.object as? NSWindow,
+                  window.identifier == WindowChrome.settingsIdentifier else { return }
+            if engine.chrome.settings.open { engine.closeSettings() }
         }
         .onChange(of: appearanceMode) { _, _ in retheme() }
     }
 
-    // MARK: - Sidebar (System Settings style)
-
-    private var settingsSidebar: some View {
-        VStack(spacing: 0) {
-            // App identity header
-            HStack(spacing: 10) {
-                if let ns = NSImage(named: "Suisei") {
-                    Image(nsImage: ns)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(1, contentMode: .fit)
-                        .frame(width: 36, height: 36)
-                        .shadow(color: .black.opacity(0.22), radius: 4, y: 1)
-                } else {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 36, height: 36)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Suisei")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("Version \(EngineBridge.engineVersion)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 14)
-            .padding(.top, 12)
-            .padding(.bottom, 10)
-
-            ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(pages) { page in
-                        Button {
-                            engine.settingsGotoPage(page.id)
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: page.symbol)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 22, height: 22)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                            .fill(page.tint.gradient)
-                                    )
-                                Text(page.title)
-                                    .font(.system(size: 13))
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.horizontal, 8)
-                            .frame(height: 32)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .fill(
-                                        s.pageIndex == page.id
-                                            ? Color.accentColor.opacity(0.14)
-                                            : Color.clear
-                                    )
-                            )
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(page.title)
-                        .accessibilityValue(s.pageIndex == page.id ? "Selected" : "")
-                    }
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+    /// A native source-list sidebar. The `List` owns the sidebar material;
+    /// adding a second effect view inside the column creates an inset card
+    /// below the titlebar safe area instead of one full-height surface.
+    private var sidebar: some View {
+        List(selection: selectedPage) {
+            ForEach(visiblePages) { page in
+                sidebarRow(page).tag(page.id)
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .listStyle(.sidebar)
+        // macOS 26's native pinned-bar path: the list is inset at rest, then
+        // scrolls below the search field with the same soft edge blur used by
+        // System Settings. This replaces the old fake spacer row and manual
+        // rectangular overlay, both of which left a visible horizontal seam.
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .safeAreaBar(edge: .top, spacing: 0) {
+            sidebarSearchField
+        }
+        .navigationSplitViewColumnWidth(
+            min: Self.sidebarWidth,
+            ideal: Self.sidebarWidth,
+            max: Self.sidebarWidth
+        )
+        .toolbar(removing: .sidebarToggle)
+        // A toolbar participant makes SwiftUI use the modern full-height
+        // sidebar/titlebar arrangement on macOS 26. It is intentionally
+        // invisible and carries no interaction or accessibility surface.
+        .toolbar {
+            Rectangle()
+                .hidden()
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// System Settings keeps search inside the source-list column, below the
+    /// traffic lights. `searchable` is intentionally not used here: in a
+    /// two-column settings window SwiftUI promotes it to the detail toolbar,
+    /// even when its requested placement is `.sidebar`.
+    private var sidebarSearchField: some View {
+        NativeSidebarSearchField(text: $searchText)
+        .frame(height: 28)
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+    }
+
+    /// One sidebar row. Hoisted out of the `List` builder — inline, the tile's
+    /// modifier chain pushed the whole split view past what the type-checker
+    /// will solve in reasonable time.
+    private func sidebarRow(_ page: Page) -> some View {
+        Label {
+            Text(page.title)
+        } icon: {
+            sidebarIcon(for: page, size: 20)
+        }
+    }
+
+    private func sidebarIcon(for page: Page, size: CGFloat) -> some View {
+        Image(systemName: page.symbol)
+            .symbolRenderingMode(.monochrome)
+            .font(.system(size: size * 0.68, weight: .regular))
+            .foregroundStyle(.secondary)
+            .frame(width: size, height: size)
+    }
+
+    private var historyControl: some View {
+        ControlGroup {
+            Button {
+                historyIndex -= 1
+                navigate(to: pageHistory[historyIndex], recordingHistory: false)
+            } label: {
+                Image(systemName: "chevron.backward")
+            }
+            .disabled(historyIndex == 0)
+            .help("Back")
+
+            Button {
+                historyIndex += 1
+                navigate(to: pageHistory[historyIndex], recordingHistory: false)
+            } label: {
+                Image(systemName: "chevron.forward")
+            }
+            .disabled(historyIndex >= pageHistory.count - 1)
+            .help("Forward")
+        }
+        .controlGroupStyle(.navigation)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func navigate(to id: PageID, recordingHistory: Bool = true) {
+        guard let page = pages.first(where: { $0.id == id }) else { return }
+
+        if recordingHistory, id != selectedPageID {
+            pageHistory = Array(pageHistory.prefix(historyIndex + 1))
+            pageHistory.append(id)
+            historyIndex = pageHistory.count - 1
+        }
+
+        selectedPageID = id
+        // Always publish the requested Core page. During a newly-created scene
+        // `s` can still be the previous/empty snapshot for one SwiftUI pass;
+        // using that stale page index as a guard left the native shell visible
+        // but backed by About/empty rows. The Core operation is idempotent and
+        // is the correct authority for this transition.
+        engine.settingsGotoPage(page.corePage)
+    }
+
+    /// Rows of one kind, in Core's order.
+    private func rows(_ kind: SettingKind) -> [SettingsRowItem] {
+        s.rows.filter { $0.kind == kind }
+    }
+
+    private func presentedRows(
+        on page: SettingSurfacePage,
+        advanced: Bool? = nil
+    ) -> [SettingsRowItem] {
+        s.rows.filter { row in
+            guard !row.isHeader, row.control != .none, row.page == page else { return false }
+            return advanced.map { row.advanced == $0 } ?? true
+        }
+    }
+
+    private func presentedGroups(
+        on page: SettingSurfacePage,
+        advanced: Bool = false
+    ) -> [PresentedSettingGroup] {
+        var groups: [PresentedSettingGroup] = []
+        for row in presentedRows(on: page, advanced: advanced) {
+            if let index = groups.firstIndex(where: { $0.title == row.group }) {
+                groups[index].rows.append(row)
+            } else {
+                groups.append(PresentedSettingGroup(
+                    id: "\(page.rawValue):\(row.group):\(advanced)",
+                    title: row.group,
+                    rows: [row]
+                ))
+            }
+        }
+        return groups
     }
 
     // MARK: - Detail
 
     private var settingsDetail: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text(pages.first(where: { $0.id == s.pageIndex })?.title ?? "Settings")
-                    .font(.title2.weight(.semibold))
-                if s.dirty {
-                    Text("Unsaved")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.orange)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.orange.opacity(0.15)))
-                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                } else if !s.status.isEmpty {
-                    Text(s.status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .transition(.opacity)
-                }
-                Spacer()
-                // About, Extensions and Shortcuts are read-only surfaces.
-                // Showing a permanently disabled Save button on every page
-                // implied that those pages contained unsaved controls.
-                if s.pageIndex == 1 {
-                    Button("Save") {
-                        engine.saveSettings()
-                    }
-                    .keyboardShortcut("s", modifiers: .command)
-                    .disabled(!s.dirty)
-                    .controlSize(.small)
+            // No `ScrollView` around this: `.formStyle(.grouped)` already
+            // scrolls, and nesting the two gave the page a second scroller and
+            // its own inset that never lined up with the group insets.
+            //
+            // The big inline page title is gone too — the window title carries
+            // it now, which is where System Settings puts it, and it stops the
+            // heading from scrolling away from the groups it names.
+            Form {
+                switch selectedPageID {
+                case .general: generalSections
+                case .accounts: accountSections
+                case .appearance: appearanceSections
+                case .editor: editorSections
+                case .languageServers: languageServerSections
+                case .sourceControl: sourceControlSections
+                case .extensions: extensionsSections
+                case .shortcuts: helpSections
+                case .softwareUpdate: softwareUpdateSections
                 }
             }
-            .animation(.snappy(duration: 0.2), value: s.dirty)
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-            .padding(.bottom, 8)
+            .formStyle(.grouped)
+            .animation(nil, value: selectedPageID)
 
-            ScrollView {
-                Form {
-                    switch s.pageIndex {
-                    case 0: aboutSections
-                    case 2: extensionsSections
-                    case 3: helpSections
-                    default: generalSections
-                    }
+            // Apply bar, only where something can be applied.
+            //
+            // System Settings has no Save at all — it commits as you type. This
+            // window still needs an explicit commit (Core owns the rows and
+            // writing on each keystroke would rewrite the config file per
+            // character), so the affordance stays; what changes is that it now
+            // reads as a sheet's action bar at the bottom rather than as a
+            // toolbar button beside a title, and the "Unsaved" badge became the
+            // plain sentence it always meant.
+            if s.dirty {
+                Divider()
+                HStack(spacing: 10) {
+                    Image(systemName: "pencil.circle.fill")
+                        .foregroundStyle(.orange)
+                    Text("You have unsaved changes.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button("Save") { engine.saveSettings() }
+                        .keyboardShortcut("s", modifiers: .command)
                 }
-                .formStyle(.grouped)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 24)
-                .frame(maxWidth: 720, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .animation(nil, value: s.pageIndex)
+                .animation(.snappy(duration: 0.2), value: s.dirty)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(.bar)
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -223,39 +416,59 @@ struct SettingsWindowView: View {
         }
     }
 
-    // MARK: About
-
-    @ViewBuilder private var aboutSections: some View {
+    @ViewBuilder private var accountSections: some View {
         Section {
-            HStack(spacing: 16) {
-                if let ns = NSImage(named: "Suisei") {
-                    Image(nsImage: ns)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(1, contentMode: .fit)
-                        .frame(width: 64, height: 64)
-                        .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
-                } else {
-                    Image(systemName: "app.dashed")
-                        .font(.system(size: 40))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 64, height: 64)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Suisei").font(.title3.weight(.semibold))
-                    Text("Version \(EngineBridge.engineVersion)").foregroundStyle(.secondary)
-                    Text("Native macOS editor powered by the Suisei engine")
-                        .font(.caption)
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 28, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Sign in to a Google Account")
+                        .fontWeight(.medium)
+                    Text("Account sync is planned but is not available in this build.")
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.vertical, 6)
+            .padding(.vertical, 4)
         }
-        Section("Details") {
-            LabeledContent("Engine", value: "suisei-core \(EngineBridge.engineVersion)")
-            LabeledContent("Theme", value: theme.name)
-            LabeledContent("Config", value: "~/.suisei.toml")
+
+        Section {
+            LabeledContent("Status", value: "Not Connected")
+        } footer: {
+            Text("Suisei does not store placeholder credentials or make an account request from this page.")
+        }
+    }
+
+    @ViewBuilder private var softwareUpdateSections: some View {
+        Section {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 24, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Software Update")
+                        .fontWeight(.medium)
+                    Text("Suisei can check for a newer release in the background at launch.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 4)
+        }
+
+        Section {
+            LabeledContent("Current Version", value: EngineBridge.engineVersion)
+            LabeledContent("Release Channel", value: "Development")
+            if let updateCheck = rows(.updateCheck).first {
+                settingControl(updateCheck)
+            }
+        } footer: {
+            Text("Automatic checks are throttled and do not block editor startup.")
         }
     }
 
@@ -263,106 +476,145 @@ struct SettingsWindowView: View {
 
     @ViewBuilder private var generalSections: some View {
         Section {
+            appearanceModeSelector
+        } header: {
+            Text("Appearance")
+        }
+
+        ForEach(presentedGroups(on: .general)) { group in
+            Section(group.title) {
+                ForEach(group.rows) { row in
+                    settingControl(row)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var appearanceSections: some View {
+        Section {
+            appearanceModeSelector
+            glassStyleSelector
+        } header: {
+            Text("Appearance")
+        } footer: {
+            Text("Automatic follows macOS. Liquid Glass changes floating editor controls without changing syntax colours.")
+        }
+
+        if let highlight = rows(.highlightColor).first {
+            Section {
+                accentColorSelector(highlight)
+                customAccentColorSelector(highlight)
+            } header: {
+                Text("Theme")
+            } footer: {
+                Text("Default follows the selected palette. A custom accent changes selections, focus, links, and active controls.")
+            }
+        }
+    }
+
+    private var appearanceModeSelector: some View {
+        HStack(alignment: .top, spacing: 24) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Color Scheme")
+                Text("Choose the editor’s light or dark appearance.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             HStack(spacing: 10) {
-                appearanceTile("system", "Auto", preview: .system)
+                appearanceTile("system", "Automatic", preview: .automatic)
                 appearanceTile("light", "Light", preview: .light)
                 appearanceTile("dark", "Dark", preview: .dark)
             }
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.vertical, 6)
-        } header: {
-            Text("Window Appearance")
-        } footer: {
-            Text("Affects window chrome and materials. The editor colors follow the theme below.")
+            .fixedSize(horizontal: true, vertical: false)
         }
+        .padding(.vertical, 4)
+    }
 
-        Section {
-            Picker("Theme", selection: themePicker) {
-                ForEach(themeNames, id: \.self) { name in
-                    Text(displayThemeName(name)).tag(name)
-                }
+    private var glassStyleSelector: some View {
+        HStack(alignment: .top, spacing: 24) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Liquid Glass")
+                Text("Choose the clarity of floating editor controls.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            themePreviewCard
-        } header: {
-            Text("Editor Theme")
-        } footer: {
-            Text("“Light” and “Dark” are the production defaults; the rest match the Suisei terminal themes.")
+            HStack(spacing: 10) {
+                glassStyleTile("clear", "Clear", tinted: false)
+                glassStyleTile("tinted", "Tinted", tinted: true)
+            }
+            .fixedSize(horizontal: true, vertical: false)
         }
+        .padding(.vertical, 4)
+    }
 
-        Section("Editor") {
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: 8),
-                    GridItem(.flexible(), spacing: 8),
-                ],
-                spacing: 8
-            ) {
-                ForEach(editorToggles) { row in
-                    settingsToggleTile(row)
-                }
-            }
-            if let tab = s.rows.first(where: { $0.label == "Tab width" }) {
-                Picker("Tab width", selection: bindTabWidth(tab)) {
-                    Text("2").tag(2)
-                    Text("4").tag(4)
-                    Text("8").tag(8)
-                }
-                .pickerStyle(.segmented)
-            }
-        }
-
-        Section("Language Servers") {
-            ForEach(s.rows.filter { $0.label == "LSP enabled" }) { row in
-                Toggle("Enable LSP", isOn: bindToggle(row))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-            }
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), spacing: 8),
-                    GridItem(.flexible(), spacing: 8),
-                    GridItem(.flexible(), spacing: 8),
-                ],
-                spacing: 6
-            ) {
-                ForEach(s.rows.filter { $0.label.hasPrefix("LSP ·") }) { row in
-                    languageServerTile(row)
+    @ViewBuilder private var editorSections: some View {
+        ForEach(presentedGroups(on: .editor)) { group in
+            Section(group.title) {
+                ForEach(group.rows) { row in
+                    settingControl(row)
                 }
             }
         }
 
-        Section("Source Control") {
-            HStack(spacing: 8) {
-                ForEach(s.rows.filter {
-                    $0.label.localizedCaseInsensitiveContains("workbench")
-                        || $0.label.localizedCaseInsensitiveContains("SCM")
-                }) { row in
-                    Button {
-                        engine.settingsSelect(row.id)
-                        engine.settingsActivate(row.id)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: row.label.localizedCaseInsensitiveContains("workbench")
-                                  ? "arrow.triangle.branch" : "sidebar.left")
-                                .foregroundStyle(Color.accentColor)
-                            Text(clean(row.label))
-                                .lineLimit(1)
-                            Spacer(minLength: 4)
-                            Image(systemName: "arrow.up.right")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+        let advancedRows = presentedRows(on: .editor, advanced: true)
+        if !advancedRows.isEmpty {
+            Section {
+                DisclosureGroup("Terminal Compatibility") {
+                    VStack(spacing: 0) {
+                        ForEach(Array(advancedRows.enumerated()), id: \.element.id) { index, row in
+                            settingControl(row)
+                                .padding(.vertical, 7)
+                            if index < advancedRows.count - 1 {
+                                Divider()
+                            }
                         }
-                        .padding(.horizontal, 10)
-                        .frame(maxWidth: .infinity, minHeight: 32)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(Color.primary.opacity(0.045))
-                        )
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                }
+            } header: {
+                Text("Advanced")
+            } footer: {
+                Text("These options affect terminal frontends. The native Mac editor does not require them.")
+            }
+        }
+    }
+
+    @ViewBuilder private var languageServerSections: some View {
+        let primaryRows = presentedRows(on: .languageServers)
+            .filter { $0.kind == .lspEnabled }
+        Section {
+            ForEach(primaryRows) { row in
+                settingControl(row)
+            }
+        } header: {
+            Text("Language Servers")
+        } footer: {
+            Text("Provide completion, navigation, diagnostics, and refactoring for supported languages.")
+        }
+
+        // The server list is its own group and collapsed by default: fourteen
+        // languages is a long list to walk past every time you open General,
+        // and only the ones you have edited are usually worth seeing.
+        Section {
+            DisclosureGroup("Configured Servers") {
+                ForEach(rows(.lspLang)) { row in
+                    settingControl(row)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var sourceControlSections: some View {
+        ForEach(presentedGroups(on: .sourceControl)) { group in
+            Section(group.title) {
+                ForEach(group.rows) { row in
+                    settingControl(row)
                 }
             }
         }
@@ -370,7 +622,7 @@ struct SettingsWindowView: View {
 
     /// Live swatch strip of the active theme (bg / fg / accent / syntax hues).
     private var themePreviewCard: some View {
-        HStack(spacing: 0) {
+        Group {
             RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
                 .fill(theme.color(theme.editorBg))
                 .overlay(
@@ -398,60 +650,237 @@ struct SettingsWindowView: View {
                 )
                 .frame(height: 76)
 
-            VStack(alignment: .trailing, spacing: 4) {
-                ForEach(
-                    [("Accent", theme.accent), ("Text", theme.fg),
-                     ("Selection", theme.selection), ("Caret", theme.caret)],
-                    id: \.0
-                ) { name, packed in
-                    HStack(spacing: 6) {
-                        Text(name)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                        Circle()
-                            .fill(theme.color(packed))
-                            .frame(width: 10, height: 10)
-                            .overlay(Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
-                    }
-                }
-            }
-            .padding(.leading, 14)
         }
         .padding(.vertical, 4)
     }
 
-    private func displayThemeName(_ raw: String) -> String {
-        switch raw {
-        case "light": return "Light (Default)"
-        case "dark": return "Dark (Default)"
-        default: return raw.prefix(1).uppercased() + raw.dropFirst()
+    /// Swatches, on their own line under the sample.
+    ///
+    /// They used to be a right-hand column beside it, which squeezed four
+    /// 9-point labels into whatever width the sample left over — the labels
+    /// ended up jammed against the window edge and too small to read. Laid out
+    /// horizontally they get the full width and a legible size, and the code
+    /// sample gets the whole card.
+    private var themeSwatches: some View {
+        HStack(spacing: 16) {
+            ForEach(
+                [("Accent", theme.accent), ("Text", theme.fg),
+                 ("Selection", theme.selection), ("Caret", theme.caret)],
+                id: \.0
+            ) { name, packed in
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(theme.color(packed))
+                        .frame(width: 10, height: 10)
+                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
+                    Text(name)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
         }
     }
 
-    private enum PreviewKind { case system, light, dark }
+    private var accentPresets: [AccentPreset] {
+        [
+            AccentPreset(name: "Blue", hex: "#0A84FF", color: Color(nsColor: .systemBlue)),
+            AccentPreset(name: "Purple", hex: "#BF5AF2", color: Color(nsColor: .systemPurple)),
+            AccentPreset(name: "Pink", hex: "#FF375F", color: Color(nsColor: .systemPink)),
+            AccentPreset(name: "Red", hex: "#FF453A", color: Color(nsColor: .systemRed)),
+            AccentPreset(name: "Orange", hex: "#FF9F0A", color: Color(nsColor: .systemOrange)),
+            AccentPreset(name: "Yellow", hex: "#FFD60A", color: Color(nsColor: .systemYellow)),
+            AccentPreset(name: "Green", hex: "#30D158", color: Color(nsColor: .systemGreen)),
+            AccentPreset(name: "Gray", hex: "#98989D", color: Color(nsColor: .systemGray)),
+        ]
+    }
 
-    private func appearanceTile(_ key: String, _ title: String, preview: PreviewKind) -> some View {
-        let on = appearanceMode == key
-        return Button { appearanceMode = key } label: {
-            VStack(spacing: 6) {
-                ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .fill(previewFill(preview))
-                .frame(width: 82, height: 50)
-                    HStack(spacing: 3) {
-                        Circle().fill(.red.opacity(0.9)).frame(width: 6, height: 6)
-                        Circle().fill(.yellow.opacity(0.9)).frame(width: 6, height: 6)
-                        Circle().fill(.green.opacity(0.9)).frame(width: 6, height: 6)
-                    }
-                    .padding(7)
+    private func accentColorSelector(_ row: SettingsRowItem) -> some View {
+        let selected = row.value.uppercased()
+        return HStack(alignment: .center, spacing: 20) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Accent Color")
+                Text("Selections, focus, links, and active controls.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 8) {
+                Button { engine.settingsSetHighlightColor("default") } label: {
+                    Circle()
+                        .fill(
+                            AngularGradient(
+                                colors: [.red, .orange, .yellow, .green, .blue, .purple, .red],
+                                center: .center
+                            )
+                        )
+                        .frame(width: 22, height: 22)
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.38), lineWidth: 0.5))
+                        .overlay(
+                            Circle()
+                                .strokeBorder(Color.accentColor, lineWidth: 2)
+                                .padding(-3)
+                                .opacity(selected == "DEFAULT" ? 1 : 0)
+                        )
                 }
+                .buttonStyle(.plain)
+                .help("Default")
+
+                ForEach(accentPresets) { preset in
+                    Button { engine.settingsSetHighlightColor(preset.hex) } label: {
+                        Circle()
+                            .fill(preset.color)
+                            .frame(width: 22, height: 22)
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
+                            .overlay(
+                                Circle()
+                                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                                    .padding(-3)
+                                    .opacity(selected == preset.hex ? 1 : 0)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(preset.name)
+                }
+
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.vertical, 5)
+    }
+
+    private func customAccentColorSelector(_ row: SettingsRowItem) -> some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Custom Accent Color")
+                Text("Choose any sRGB colour or return to the palette default.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 16)
+            Button("Default") {
+                engine.settingsSetHighlightColor("default")
+            }
+            .buttonStyle(.borderless)
+            .disabled(row.value.caseInsensitiveCompare("default") == .orderedSame)
+            CompactColorWell(color: bindHighlightColor(row))
+                .frame(width: 44, height: 22)
+                .help("Choose Custom Accent Color")
+        }
+        .padding(.vertical, 5)
+    }
+
+    private func glassStyleTile(_ key: String, _ title: String, tinted: Bool) -> some View {
+        let on = glassStyle == key
+        let shape = RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+        let base = tinted
+            ? [
+                Color(red: 0.23, green: 0.14, blue: 0.49),
+                Color(red: 0.18, green: 0.10, blue: 0.39),
+                Color(red: 0.11, green: 0.07, blue: 0.25),
+            ]
+            : [
+                Color(red: 0.26, green: 0.18, blue: 0.88),
+                Color(red: 0.31, green: 0.11, blue: 0.72),
+                Color(red: 0.14, green: 0.07, blue: 0.42),
+            ]
+        return Button { chooseGlassStyle(key) } label: {
+            VStack(spacing: 6) {
+                ZStack {
+                    LinearGradient(
+                        colors: base,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+
+                    RadialGradient(
+                        colors: [
+                            Color(red: 0.24, green: 0.55, blue: 1.0)
+                                .opacity(tinted ? 0.12 : 0.42),
+                            .clear,
+                        ],
+                        center: .topLeading,
+                        startRadius: 0,
+                        endRadius: 62
+                    )
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.10, green: 0.18, blue: 0.55)
+                                        .opacity(tinted ? 0.72 : 0.52),
+                                    Color(red: 0.025, green: 0.035, blue: 0.16)
+                                        .opacity(tinted ? 0.88 : 0.76),
+                                    Color(red: 0.15, green: 0.10, blue: 0.42)
+                                        .opacity(tinted ? 0.72 : 0.52),
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: [
+                                            Color(red: 0.28, green: 0.62, blue: 1.0)
+                                                .opacity(tinted ? 0.18 : 0.62),
+                                            Color.white.opacity(tinted ? 0.06 : 0.18),
+                                            .clear,
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 0.9
+                                )
+                        )
+                        .frame(width: 104, height: 27)
+                        .rotationEffect(.degrees(-20))
+                        .offset(x: 13, y: 7)
+                        .shadow(
+                            color: Color.blue.opacity(tinted ? 0.08 : 0.24),
+                            radius: 4,
+                            x: -2,
+                            y: -2
+                        )
+
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(tinted ? 0.04 : 0.19),
+                                    Color.blue.opacity(tinted ? 0.03 : 0.12),
+                                    .clear,
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: 76, height: 6)
+                        .rotationEffect(.degrees(-20))
+                        .offset(x: 4, y: -2)
+                        .blur(radius: 0.7)
+                }
+                .frame(width: 82, height: 50)
+                .clipShape(shape)
                 .overlay(
-                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                    shape.strokeBorder(
+                        Color.white.opacity(tinted ? 0.10 : 0.22),
+                        lineWidth: 0.6
+                    )
+                )
+                .overlay(
+                    shape
                         .strokeBorder(on ? Color.accentColor : Color.secondary.opacity(0.3),
                                       lineWidth: on ? 2.5 : 1)
                 )
                 .scaleEffect(on ? 1.0 : 0.97)
-                Text(title).font(.caption).foregroundStyle(on ? .primary : .secondary)
+
+                Text(title)
+                    .font(.system(size: 11, weight: on ? .medium : .regular))
+                    .foregroundStyle(on ? .primary : .secondary)
             }
             .frame(width: 88)
             .contentShape(Rectangle())
@@ -460,15 +889,142 @@ struct SettingsWindowView: View {
         .animation(.snappy(duration: 0.18), value: on)
     }
 
-    private func previewFill(_ k: PreviewKind) -> some ShapeStyle {
-        switch k {
-        case .light:
-            return AnyShapeStyle(LinearGradient(colors: [Color(white: 0.97), Color(white: 0.90)], startPoint: .top, endPoint: .bottom))
-        case .dark:
-            return AnyShapeStyle(LinearGradient(colors: [Color(white: 0.24), Color(white: 0.12)], startPoint: .top, endPoint: .bottom))
-        case .system:
-            return AnyShapeStyle(LinearGradient(colors: [Color(white: 0.93), Color(white: 0.16)], startPoint: .leading, endPoint: .trailing))
+    private enum PreviewKind { case automatic, light, dark }
+
+    private struct PreviewPalette {
+        let sidebar: Color
+        let toolbar: Color
+        let editor: Color
+        let line: Color
+        let mutedLine: Color
+    }
+
+    private func appearanceTile(_ key: String, _ title: String, preview: PreviewKind) -> some View {
+        let on = appearanceMode == key
+        return Button { chooseAppearance(key) } label: {
+            VStack(spacing: 6) {
+                appearancePreview(preview)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+                        .strokeBorder(on ? Color.accentColor : Color.secondary.opacity(0.3),
+                                      lineWidth: on ? 2.5 : 1)
+                )
+                .scaleEffect(on ? 1.0 : 0.97)
+                Text(title)
+                    .font(.system(size: 11, weight: on ? .medium : .regular))
+                    .foregroundStyle(on ? .primary : .secondary)
+            }
+            .frame(width: 88)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .animation(.snappy(duration: 0.18), value: on)
+    }
+
+    /// A tiny but structurally faithful editor window. The former previews
+    /// were three empty gradients with traffic lights pasted on top; at this
+    /// scale that reads as placeholder art. Xcode's previews remain legible
+    /// because their navigator, toolbar, selection and editor are visible.
+    private func appearancePreview(_ kind: PreviewKind) -> some View {
+        let palette = previewPalette(kind)
+
+        return ZStack(alignment: .topLeading) {
+            HStack(spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    Rectangle().fill(palette.sidebar)
+
+                    VStack(alignment: .leading, spacing: 2.5) {
+                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.85))
+                            .frame(width: 17, height: 6)
+                        ForEach([13.0, 16.0, 11.0], id: \.self) { width in
+                            Capsule()
+                                .fill(palette.mutedLine)
+                                .frame(width: width, height: 2)
+                        }
+                    }
+                    .padding(.top, 17)
+                    .padding(.leading, 4)
+                }
+                .frame(width: 25)
+
+                VStack(spacing: 0) {
+                    Rectangle()
+                        .fill(palette.toolbar)
+                        .frame(height: 13)
+
+                    ZStack(alignment: .topLeading) {
+                        Rectangle().fill(palette.editor)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                                .fill(Color.accentColor.opacity(0.82))
+                                .frame(width: 24, height: 3)
+                            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                                .fill(palette.line)
+                                .frame(width: 37, height: 3)
+                            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                                .fill(palette.mutedLine)
+                                .frame(width: 29, height: 3)
+                        }
+                        .padding(.top, 7)
+                        .padding(.leading, 7)
+                    }
+                }
+            }
+
+            HStack(spacing: 2.5) {
+                Circle().fill(Color(red: 1.0, green: 0.32, blue: 0.31))
+                Circle().fill(Color(red: 1.0, green: 0.73, blue: 0.18))
+                Circle().fill(Color(red: 0.18, green: 0.78, blue: 0.35))
+            }
+            .frame(width: 18, height: 5)
+            .padding(.top, 5)
+            .padding(.leading, 4)
+        }
+        .frame(width: 82, height: 50)
+        .clipShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
+    }
+
+    private func previewPalette(_ kind: PreviewKind) -> PreviewPalette {
+        switch kind {
+        case .automatic:
+            return PreviewPalette(
+                sidebar: Color(white: 0.84),
+                toolbar: Color(white: 0.92),
+                editor: Color(white: 0.11),
+                line: Color(white: 0.80),
+                mutedLine: Color(white: 0.48)
+            )
+        case .light:
+            return PreviewPalette(
+                sidebar: Color(white: 0.86),
+                toolbar: Color(white: 0.95),
+                editor: Color(white: 0.99),
+                line: Color(white: 0.34),
+                mutedLine: Color(white: 0.66)
+            )
+        case .dark:
+            return PreviewPalette(
+                sidebar: Color(white: 0.16),
+                toolbar: Color(white: 0.22),
+                editor: Color(white: 0.10),
+                line: Color(white: 0.78),
+                mutedLine: Color(white: 0.38)
+            )
+        }
+    }
+
+    private func chooseAppearance(_ key: String) {
+        guard let value = ["system": 0, "light": 1, "dark": 2][key],
+              let row = rows(.appearanceMode).first else { return }
+        engine.settingsSetValue(row.id, value: value)
+    }
+
+    private func chooseGlassStyle(_ key: String) {
+        guard let value = ["clear": 0, "tinted": 1][key],
+              let row = rows(.glassStyle).first else { return }
+        engine.settingsSetValue(row.id, value: value)
     }
 
     // MARK: Other pages
@@ -577,95 +1133,150 @@ struct SettingsWindowView: View {
         }
     }
 
-    private func settingsToggleTile(_ row: SettingsRowItem) -> some View {
-        HStack(spacing: 8) {
-            Text(clean(row.label))
-                .font(.system(size: 12))
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            Toggle("", isOn: bindToggle(row))
+
+
+    // MARK: Core-described controls
+
+    @ViewBuilder
+    private func settingControl(_ row: SettingsRowItem) -> some View {
+        switch row.control {
+        case .toggle:
+            Toggle(isOn: bindToggle(row)) {
+                settingLabel(row)
+            }
+            .accessibilityLabel(row.label)
+            .accessibilityHint(row.detail)
+        case .menu:
+            HStack(alignment: .center, spacing: 16) {
+                settingLabel(row)
+                Spacer(minLength: 12)
+                if row.options.isEmpty {
+                    Text(row.value)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("", selection: bindOption(row)) {
+                        ForEach(Array(row.options.enumerated()), id: \.offset) { index, option in
+                            Text(option)
+                                .tag(index)
+                                .disabled(
+                                    row.kind == .lspLang
+                                        && index == 2
+                                        && row.valueIndex != 2
+                                )
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel(row.label)
+                    .accessibilityHint(row.detail)
+                }
+            }
+        case .segmented:
+            HStack(alignment: .center, spacing: 16) {
+                settingLabel(row)
+                Spacer(minLength: 12)
+                Picker("", selection: bindOption(row)) {
+                    ForEach(Array(row.options.enumerated()), id: \.offset) { index, option in
+                        Text(option).tag(index)
+                    }
+                }
                 .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
+                .pickerStyle(.segmented)
+                .fixedSize()
+                .accessibilityLabel(row.label)
+                .accessibilityHint(row.detail)
+            }
+        case .action:
+            Button {
+                engine.settingsSelect(row.id)
+                engine.settingsActivate(row.id)
+            } label: {
+                HStack(spacing: 12) {
+                    settingLabel(row)
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(row.label)
+            .accessibilityHint(row.detail)
+        case .color:
+            HStack(alignment: .center, spacing: 12) {
+                settingLabel(row)
+                Spacer(minLength: 12)
+                Button("Default") {
+                    engine.settingsSetHighlightColor("default")
+                }
+                .buttonStyle(.borderless)
+                .disabled(row.value.caseInsensitiveCompare("default") == .orderedSame)
+                ColorPicker(
+                    "Highlight Color",
+                    selection: bindHighlightColor(row),
+                    supportsOpacity: false
+                )
+                .labelsHidden()
+                .accessibilityHint(row.detail)
+            }
+        case .none:
+            EmptyView()
         }
-        .padding(.horizontal, 10)
-        .frame(minHeight: 34)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.primary.opacity(0.045))
-        )
     }
 
-    private func languageServerTile(_ row: SettingsRowItem) -> some View {
-        let language = clean(row.label)
-            .replacingOccurrences(of: "LSP ·", with: "")
-            .trimmingCharacters(in: .whitespaces)
-        return HStack(spacing: 6) {
-            Circle()
-                .fill(row.value == "default" ? Color.secondary.opacity(0.45) : Color.accentColor)
-                .frame(width: 5, height: 5)
-            Text(language)
-                .font(.system(size: 11))
-                .lineLimit(1)
-            Spacer(minLength: 2)
-            Text(row.value)
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+    private func settingLabel(_ row: SettingsRowItem) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(row.label)
+            if !row.detail.isEmpty {
+                Text(row.detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .padding(.horizontal, 8)
-        .frame(minHeight: 28)
-        .background(
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(Color.primary.opacity(0.035))
-        )
     }
 
     // MARK: Bindings
 
-    private var themeNames: [String] {
-        s.rows
-            .filter { $0.value == "Enter to apply" || $0.label.contains("●") || $0.label.hasPrefix(" ") }
-            .map { clean($0.label) }
-            .filter { !$0.isEmpty }
-    }
-
-    private var themePicker: Binding<String> {
-        Binding(
-            get: { theme.name },
-            set: { name in
-                if let row = s.rows.first(where: { clean($0.label) == name }) {
-                    engine.settingsSelect(row.id)
-                    engine.settingsActivate(row.id)
-                }
-            }
-        )
-    }
-
-    private var editorToggles: [SettingsRowItem] {
-        let labels = [
-            "Relative number", "Wrap lines", "Undo caching", "Clipboard sync", "Key hints",
-        ]
-        return s.rows.filter { labels.contains($0.label) }
-    }
-
     private func bindToggle(_ row: SettingsRowItem) -> Binding<Bool> {
         Binding(
-            get: { row.value == "on" },
-            set: { _ in
-                engine.settingsSelect(row.id)
-                engine.settingsActivate(row.id)
+            get: { row.valueIndex != 0 },
+            set: { enabled in
+                engine.settingsSetValue(row.id, value: enabled ? 1 : 0)
             }
         )
     }
 
-    private func bindTabWidth(_ row: SettingsRowItem) -> Binding<Int> {
+    private func bindOption(_ row: SettingsRowItem) -> Binding<Int> {
         Binding(
-            get: { Int(row.value) ?? 4 },
-            set: { _ in
-                engine.settingsSelect(row.id)
-                engine.settingsActivate(row.id)
+            get: { row.valueIndex },
+            set: { option in
+                engine.settingsSetValue(row.id, value: option)
             }
+        )
+    }
+
+    private func bindHighlightColor(_ row: SettingsRowItem) -> Binding<Color> {
+        Binding(
+            get: { theme.color(theme.accent) },
+            set: { engine.settingsSetHighlightColor(hexString(for: $0)) }
+        )
+    }
+
+    private func hexString(for color: Color) -> String {
+        let source = NSColor(color)
+        let converted = source.usingColorSpace(.sRGB) ?? source
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        converted.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        return String(
+            format: "#%02X%02X%02X",
+            Int((red * 255).rounded()),
+            Int((green * 255).rounded()),
+            Int((blue * 255).rounded())
         )
     }
 
@@ -673,5 +1284,110 @@ struct SettingsWindowView: View {
         label
             .replacingOccurrences(of: "●", with: "")
             .trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// AppKit's minimal color well is the same compact circular control used in
+/// System Settings. SwiftUI's `ColorPicker` expands into a wide capsule on
+/// macOS 26, which breaks a horizontal palette even when its host is framed.
+private struct CompactColorWell: NSViewRepresentable {
+    @Binding var color: Color
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(color: $color)
+    }
+
+    func makeNSView(context: Context) -> CircularColorWellHost {
+        let host = CircularColorWellHost()
+        let well = host.well
+        well.supportsAlpha = false
+        well.target = context.coordinator
+        well.action = #selector(Coordinator.colorChanged(_:))
+        well.color = NSColor(color)
+        return host
+    }
+
+    func updateNSView(_ host: CircularColorWellHost, context: Context) {
+        context.coordinator.color = $color
+        let well = host.well
+        let next = NSColor(color).usingColorSpace(.sRGB) ?? NSColor(color)
+        let current = well.color.usingColorSpace(.sRGB) ?? well.color
+        if next != current { well.color = next }
+    }
+
+    final class Coordinator: NSObject {
+        var color: Binding<Color>
+
+        init(color: Binding<Color>) {
+            self.color = color
+        }
+
+        @objc func colorChanged(_ sender: NSColorWell) {
+            color.wrappedValue = Color(nsColor: sender.color)
+        }
+    }
+}
+
+private final class CircularColorWellHost: NSView {
+    let well = NSColorWell(style: .minimal)
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 22, height: 22) }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 11
+        layer?.masksToBounds = true
+        well.frame = bounds
+        well.autoresizingMask = [.width, .height]
+        addSubview(well)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+/// Use the same AppKit control as System Settings instead of rebuilding its
+/// icon, bezel, clear button and focus behavior from independent SwiftUI views.
+/// Its host remains transparent, so source-list rows can scroll beneath the
+/// rounded search bezel without exposing a rectangular header boundary.
+private struct NativeSidebarSearchField: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.placeholderString = "Search"
+        field.controlSize = .regular
+        field.font = .systemFont(ofSize: 13)
+        field.sendsWholeSearchString = false
+        field.sendsSearchStringImmediately = true
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.searchChanged(_:))
+        field.setAccessibilityLabel("Search Settings")
+        return field
+    }
+
+    func updateNSView(_ nsView: NSSearchField, context: Context) {
+        context.coordinator.parent = self
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var parent: NativeSidebarSearchField
+
+        init(parent: NativeSidebarSearchField) {
+            self.parent = parent
+        }
+
+        @objc func searchChanged(_ sender: NSSearchField) {
+            parent.text = sender.stringValue
+        }
     }
 }

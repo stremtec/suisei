@@ -72,6 +72,11 @@ pub struct Engine {
     pub shell: ShellState,
     pub last_diff: FrameDiff,
     pub frame_gen: u64,
+    /// Native Source Control has an independent observation channel. Its C
+    /// snapshot is large, so editor frame generations must not be used as its
+    /// invalidation token.
+    git_wb_signature: u64,
+    git_wb_generation: u64,
     /// True after mouse-down until mouse-up (face pointer lifecycle).
     pointer_down: bool,
     /// True once the pointer moved off the down cell (enters Visual).
@@ -176,6 +181,10 @@ impl Engine {
         self.frame_gen
     }
 
+    pub fn git_wb_generation(&self) -> u64 {
+        self.git_wb_generation
+    }
+
     pub fn new() -> Self {
         let mut app = App::new();
         // Same as TUI main: load ~/.xei.toml theme + editor opts.
@@ -183,11 +192,14 @@ impl Engine {
         app.message = "Suisei · same keys as xei · Ctrl+, settings".into();
         app.stage.w = 900.0; // 100 columns
         app.stage.h = 720.0; // 40 rows
+        let git_wb_signature = app.git_wb.native_snapshot_signature();
         Self {
             app,
             shell: ShellState::default(),
             last_diff: FrameDiff::empty(0),
             frame_gen: 0,
+            git_wb_signature,
+            git_wb_generation: 0,
             pointer_down: false,
             pointer_moved: false,
             outline_cache: Vec::new(),
@@ -361,18 +373,59 @@ impl Engine {
         if !self.is_editing_mode() {
             return;
         }
-        self.app.gui_insert_text(&ch.to_string());
+        self.editing_with_optimistic_colour(|e| e.app.gui_insert_text(&ch.to_string()));
+
         self.app.completion_after_typing();
         self.app.update_scroll();
         self.recompose_scroll();
     }
 
     /// Backspace: delete the selection, or one grapheme before each caret.
+    /// Run a single-line edit and slide the painted spans to match it.
+    ///
+    /// Optimistic colour: the parse is async and correct, but its answer is a
+    /// tick away, so a just-typed character would otherwise be painted with the
+    /// PREVIOUS frame's spans — the reported "colour is one beat late".
+    /// Sliding what is already on screen costs a pass over one row's spans
+    /// (measured 0.22 ms / 0.57 ms per key at 1k / 4.5k lines, against 4.1 /
+    /// 6.7 ms for waiting on the parse).
+    ///
+    /// Caret captured before the edit and the width taken from the line's own
+    /// length, so auto-pair — two characters inserted, caret moved one — is
+    /// still described exactly. Multi-caret edits are skipped: they are not the
+    /// typing case and one row's arithmetic cannot describe them.
+    fn editing_with_optimistic_colour(&mut self, edit: impl FnOnce(&mut Self)) {
+        let before = (self.app.sel.len() == 1).then(|| {
+            let at = self.app.sel.primary().head;
+            (at, self.app.buffer.line(at.row).chars().count())
+        });
+
+        edit(self);
+
+        let Some((at, before_len)) = before else {
+            return;
+        };
+        let after_len = self.app.buffer.line(at.row).chars().count();
+        match after_len.cmp(&before_len) {
+            std::cmp::Ordering::Greater => {
+                self.app
+                    .syntax
+                    .nudge_for_insert(at.row, at.col, after_len - before_len)
+            }
+            std::cmp::Ordering::Less => {
+                self.app
+                    .syntax
+                    .nudge_for_delete(at.row, at.col, before_len - after_len)
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+
     pub fn gui_delete_backward(&mut self) {
         if !self.is_editing_mode() {
             return;
         }
-        self.app.gui_delete_backward();
+        self.editing_with_optimistic_colour(|e| e.app.gui_delete_backward());
         self.app.update_scroll();
         self.recompose_scroll();
     }
@@ -512,7 +565,7 @@ impl Engine {
             }
             KeyCode::Enter => self.app.gui_insert_newline(INDENT),
             KeyCode::Backspace => {
-                self.app.gui_delete_backward();
+                self.editing_with_optimistic_colour(|e| e.app.gui_delete_backward());
                 self.app.completion_after_typing();
             }
             KeyCode::Delete => self.app.gui_delete_forward(),
@@ -760,7 +813,7 @@ impl Engine {
         }
         // completions / palette need live paint while open
         if self.shell.dirty || self.app.completions.active || self.app.palette.open {
-            if need_full || self.app.git_wb.open || self.app.scm.visible() {
+            if need_full || self.app.scm.visible() {
                 self.recompose();
             } else {
                 // PTY / which-key / completions: paint only (no outline/SCM rebuild).
@@ -929,6 +982,9 @@ impl Engine {
                 window,
                 tokens,
                 active,
+                tree,
+                text,
+                ext,
             } => {
                 let current = self
                     .app
@@ -937,7 +993,10 @@ impl Engine {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
                 if path == current && version == self.app.buffer.version() {
-                    let changed = self.app.syntax.apply_frame(path, window, tokens, active);
+                    let changed = self
+                        .app
+                        .syntax
+                        .apply_frame(path, window, tokens, active, tree, text, ext);
                     self.syntax_applied = version;
                     // Mark the frame dirty only when the tokens actually
                     // changed — an empty answer for an untitled document
@@ -952,10 +1011,21 @@ impl Engine {
         }
     }
 
-    /// Block until the worker's parse of the live document lands. Tests only
-    /// — the app never waits; it paints stale and moves on.
-    #[cfg(test)]
-    fn flush_syntax(&mut self) {
+    /// Buffer version the painted tokens describe.
+    ///
+    /// Exposed so a test can assert that a keystroke returns with colours for
+    /// the text it just produced, rather than the previous frame's.
+    pub fn syntax_version_applied(&self) -> u64 {
+        self.syntax_applied
+    }
+
+    /// Block until the worker's parse of the live document lands.
+    ///
+    /// Tests only — the app never waits; it paints stale and moves on. Public
+    /// rather than `#[cfg(test)]` so integration tests can drive the real
+    /// worker path; that path is exactly where scope-aware completion was
+    /// broken while every in-crate test passed.
+    pub fn flush_syntax(&mut self) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             self.refresh_syntax();
@@ -986,6 +1056,11 @@ impl Engine {
         if self.app.git_wb.open {
             let _ = self.app.git_wb.poll_loading();
             self.app.git_wb.ensure_tab_data();
+        }
+        let git_wb_signature = self.app.git_wb.native_snapshot_signature();
+        if git_wb_signature != self.git_wb_signature {
+            self.git_wb_signature = git_wb_signature;
+            self.git_wb_generation = self.git_wb_generation.wrapping_add(1);
         }
         // Outline: full-buffer scan — skip when only scroll/caret chrome changed.
         let ver = self.app.buffer.version();
@@ -1304,6 +1379,27 @@ impl Engine {
         self.recompose();
     }
 
+    /// Accept the native find field before AppKit gives focus back to the
+    /// editor. Keeping this semantic avoids a raw Return being reinterpreted
+    /// as a document newline if first-responder changes during dismissal.
+    pub fn find_accept(&mut self) {
+        if !matches!(self.app.mode, Mode::Search) {
+            return;
+        }
+        self.app.commit_search();
+        self.app.update_scroll();
+        self.recompose();
+    }
+
+    /// Dismiss the native find field and restore its opening cursor/scroll.
+    pub fn find_cancel(&mut self) {
+        if !matches!(self.app.mode, Mode::Search) {
+            return;
+        }
+        self.app.cancel_search();
+        self.recompose();
+    }
+
     pub fn palette_set_query(&mut self, query: &str) {
         if !self.app.palette.open {
             return;
@@ -1404,7 +1500,19 @@ impl Engine {
         let doc = (focus_doc != 0).then(|| suisei_core::BufferId(focus_doc));
         let ok = self.app.activate_layout(id, doc);
         if ok {
-            self.app.update_scroll();
+            // NO `update_scroll()` — the same rule `goto_tab_id` states.
+            //
+            // `App::activate_layout` restores the parked tree AND its panes,
+            // and a pane carries its own viewport, so the arrangement comes
+            // back looking at what it was looking at. `update_scroll` then
+            // zeroed `scroll_frac` and recomputed the offset from the caret
+            // row, which for a pane scrolled well down its document means the
+            // viewport snaps to the top: measured, a pane parked at line 180
+            // came back at line 0.
+            //
+            // Both positions reach the face — the panes are installed at the
+            // restored offset and immediately moved to the derived one. That
+            // is the "switching to a layout tab makes the editor shake".
             self.recompose();
         }
         ok
@@ -2012,6 +2120,50 @@ impl Engine {
         self.recompose();
     }
 
+    /// Set an option-bearing Settings row to an explicit value. Native menus
+    /// and segmented controls must not emulate selection by repeatedly
+    /// activating a cyclic TUI row.
+    pub fn settings_set_value(&mut self, row: u32, value: u32) {
+        use suisei_core::settings::SettingsAction;
+        if !self.app.settings.visible() {
+            return;
+        }
+        self.settings_select(row);
+        match self.app.settings.set_value(value) {
+            SettingsAction::ApplyTheme | SettingsAction::ApplyGpuAcc | SettingsAction::ApplyLsp => {
+                self.app.apply_settings_draft()
+            }
+            SettingsAction::OpenWorkbench => {
+                self.app.close_settings();
+                self.app.toggle_git_workbench();
+            }
+            SettingsAction::OpenScm => {
+                self.app.close_settings();
+                self.app.toggle_scm();
+            }
+            SettingsAction::None => {}
+        }
+        if self.app.settings.dirty {
+            self.app.save_settings();
+        }
+        self.recompose();
+    }
+
+    /// Apply the arbitrary colour carried by the native macOS color well.
+    pub fn settings_set_highlight_color(&mut self, value: &str) {
+        use suisei_core::settings::SettingsAction;
+        if !self.app.settings.visible() {
+            return;
+        }
+        if self.app.settings.set_highlight_color(value) == SettingsAction::ApplyTheme {
+            self.app.apply_settings_draft();
+        }
+        if self.app.settings.dirty {
+            self.app.save_settings();
+        }
+        self.recompose();
+    }
+
     /// Explicit save (also used when Settings window closes).
     pub fn settings_save(&mut self) {
         // Always persist draft when panel open (covers dirty races + face Save).
@@ -2081,10 +2233,9 @@ impl Engine {
     }
 
     pub fn git_wb_select_change(&mut self, row: u32) {
-        match self.app.git_wb.select_change_preview(row as usize) {
+        match self.app.git_wb.request_change_preview(row as usize) {
             Ok(()) => {
-                let path = self.app.git_wb.diff_path.clone().unwrap_or_default();
-                self.app.message = format!("Diff · {path}");
+                self.app.message = self.app.git_wb.message.clone().unwrap_or_default();
             }
             Err(error) => self.app.message = error,
         }
@@ -2092,16 +2243,9 @@ impl Engine {
     }
 
     pub fn git_wb_select_history(&mut self, row: u32) {
-        match self.app.git_wb.select_history_preview(row as usize) {
+        match self.app.git_wb.request_history_preview(row as usize) {
             Ok(()) => {
-                let short = self
-                    .app
-                    .git_wb
-                    .commit_detail
-                    .as_ref()
-                    .map(|detail| detail.short.clone())
-                    .unwrap_or_default();
-                self.app.message = format!("Commit · {short}");
+                self.app.message = self.app.git_wb.message.clone().unwrap_or_default();
             }
             Err(error) => self.app.message = error,
         }
@@ -2109,10 +2253,9 @@ impl Engine {
     }
 
     pub fn git_wb_select_commit_file(&mut self, row: u32) {
-        match self.app.git_wb.select_commit_file_preview(row as usize) {
+        match self.app.git_wb.request_commit_file_preview(row as usize) {
             Ok(()) => {
-                let path = self.app.git_wb.diff_path.clone().unwrap_or_default();
-                self.app.message = format!("Diff · {path}");
+                self.app.message = self.app.git_wb.message.clone().unwrap_or_default();
             }
             Err(error) => self.app.message = error,
         }
@@ -2121,6 +2264,218 @@ impl Engine {
 
     pub fn git_wb_select_special(&mut self, row: u32) {
         self.app.git_wb.select_special_row(row as usize);
+        self.recompose();
+    }
+
+    pub fn git_wb_select_branch_history(&mut self, row: u32) {
+        match self.app.git_wb.select_branch_history(row as usize) {
+            Ok(()) => {
+                let branch = self
+                    .app
+                    .git_wb
+                    .branches
+                    .get(self.app.git_wb.branch_sel)
+                    .map(|branch| branch.name.as_str())
+                    .unwrap_or("branch");
+                self.app.message = format!("History · {branch}");
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_refresh_window(&mut self) {
+        self.app.git_wb.refresh_native_window();
+        self.app.message = self
+            .app
+            .git_wb
+            .message
+            .clone()
+            .unwrap_or_else(|| "Source Control refreshed".into());
+        self.recompose();
+    }
+
+    pub fn git_wb_toggle_stage(&mut self, row: u32) {
+        let count = self.app.git_wb.total_files();
+        if count == 0 {
+            return;
+        }
+        let selected = (row as usize).min(count - 1);
+        let path = self
+            .app
+            .git_wb
+            .entry_at(selected)
+            .map(|entry| entry.path.clone());
+        self.app.git_wb.selected = selected;
+        match self.app.git_wb.stage_selected() {
+            Ok(()) => {
+                if let Some(path) = path {
+                    if let Some(index) = self
+                        .app
+                        .git_wb
+                        .staged
+                        .iter()
+                        .chain(self.app.git_wb.changes.iter())
+                        .position(|entry| entry.path == path)
+                    {
+                        let _ = self.app.git_wb.request_change_preview(index);
+                    }
+                }
+                self.app.message = self.app.git_wb.message.clone().unwrap_or_default();
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_stage_all(&mut self) {
+        match self.app.git_wb.stage_all() {
+            Ok(()) => {
+                self.app.message = self.app.git_wb.message.clone().unwrap_or_default();
+                if self.app.git_wb.total_files() > 0 {
+                    let _ = self.app.git_wb.request_change_preview(0);
+                }
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_unstage_all(&mut self) {
+        match self.app.git_wb.unstage_all() {
+            Ok(()) => {
+                self.app.message = self.app.git_wb.message.clone().unwrap_or_default();
+                if self.app.git_wb.total_files() > 0 {
+                    let _ = self.app.git_wb.request_change_preview(0);
+                }
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_commit(&mut self, message: &str, amend: bool) {
+        match self.app.git_wb.commit_with_message(message, amend) {
+            Ok(()) => {
+                self.app.message = self.app.git_wb.message.clone().unwrap_or_default();
+                self.app.refresh_git();
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_stash(&mut self) {
+        match self.app.git_wb.stash() {
+            Ok(()) => {
+                self.app.message = self.app.git_wb.message.clone().unwrap_or_default();
+                self.app.refresh_git();
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_discard_change(&mut self, row: u32) {
+        let count = self.app.git_wb.total_files();
+        if count == 0 {
+            return;
+        }
+        self.app.git_wb.selected = (row as usize).min(count - 1);
+        let result = self
+            .app
+            .git_wb
+            .begin_discard_selected()
+            .and_then(|()| self.app.git_wb.confirm_discard());
+        match result {
+            Ok(()) => {
+                self.app.message = self.app.git_wb.message.clone().unwrap_or_default();
+                self.app.refresh_git();
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    /// Open the model that backs the native Source Control window.
+    ///
+    /// This is deliberately not a toggle: a window can become key, resign key,
+    /// and be ordered front repeatedly without its model being torn down.
+    pub fn git_wb_open_window(&mut self) {
+        if !self.app.git_wb.open {
+            self.app.open_git_workbench();
+        } else {
+            self.app.mode = Mode::GitWorkbench;
+            self.app.git_wb.ensure_tab_data();
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_focus_window(&mut self) {
+        if self.app.git_wb.open {
+            self.app.mode = Mode::GitWorkbench;
+            self.app.git_wb.ensure_tab_data();
+            self.recompose();
+        }
+    }
+
+    pub fn git_wb_close_window(&mut self) {
+        if self.app.git_wb.open {
+            self.app.close_git_workbench();
+            self.recompose();
+        }
+    }
+
+    pub fn git_wb_checkout_selected_branch(&mut self) {
+        match self.app.git_wb.checkout_selected_branch() {
+            Ok(()) => {
+                self.app.message = self
+                    .app
+                    .git_wb
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "Checked out".into());
+                self.app.refresh_git();
+            }
+            Err(error) => self.app.message = error,
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_create_branch(&mut self, name: &str) {
+        self.app.git_wb.begin_new_branch();
+        self.app.git_wb.input_buf = name.trim().to_string();
+        match self.app.git_wb.submit_input() {
+            Ok(()) => {
+                self.app.message = self
+                    .app
+                    .git_wb
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "Branch created".into());
+                self.app.refresh_git();
+            }
+            Err(error) => {
+                self.app.git_wb.cancel_input();
+                self.app.message = error;
+            }
+        }
+        self.recompose();
+    }
+
+    pub fn git_wb_delete_selected_branch(&mut self) {
+        match self.app.git_wb.delete_selected_branch() {
+            Ok(()) => {
+                self.app.message = self
+                    .app
+                    .git_wb
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "Branch deleted".into());
+                self.app.refresh_git();
+            }
+            Err(error) => self.app.message = error,
+        }
         self.recompose();
     }
 
@@ -2935,17 +3290,29 @@ mod tests {
         eng.app.open_new_tab(b.to_str().unwrap());
         eng.recompose();
         let panes_before = eng.app.split.pane_count();
-        assert!(eng.app.buffer.text().contains("DOC_BBB"), "pane 1 shows b.txt");
+        assert!(
+            eng.app.buffer.text().contains("DOC_BBB"),
+            "pane 1 shows b.txt"
+        );
 
         // ⌃⇧T over pane 1 → terminal tab takes the pane.
         eng.app.toggle_terminal_full();
-        assert!(eng.app.terminal_window_focused(), "pane 1 is now a terminal");
-        assert!(!eng.app.buffer.text().contains("DOC_BBB"), "b.txt displaced");
+        assert!(
+            eng.app.terminal_window_focused(),
+            "pane 1 is now a terminal"
+        );
+        assert!(
+            !eng.app.buffer.text().contains("DOC_BBB"),
+            "b.txt displaced"
+        );
 
         // Close the terminal tab → split kept, b.txt restored into the pane.
         eng.app.toggle_terminal_full();
         assert_eq!(eng.app.split.pane_count(), panes_before, "split is kept");
-        assert!(!eng.app.terminal_window_focused(), "pane is a document again");
+        assert!(
+            !eng.app.terminal_window_focused(),
+            "pane is a document again"
+        );
         assert!(
             eng.app.buffer.text().contains("DOC_BBB"),
             "the pane's pre-terminal document (b.txt) is restored, not collapsed away"
@@ -3461,8 +3828,14 @@ mod tests {
             eng.app.settings.page,
             suisei_core::settings::SettingsPage::Setting
         );
-        // Row 1 = first Theme(i) after ThemeHeader
-        eng.settings_activate(1);
+        let theme_row = eng
+            .app
+            .settings
+            .setting_rows()
+            .iter()
+            .position(|row| matches!(row, suisei_core::settings::SettingRow::Theme(_)))
+            .expect("theme row") as u32;
+        eng.settings_activate(theme_row);
         let theme_name = eng.last_diff.chrome.as_ref().unwrap().theme.name.clone();
         assert!(!theme_name.is_empty());
         assert_eq!(eng.app.theme.name, theme_name);
@@ -3760,7 +4133,11 @@ mod tests {
         for _ in 0..10 {
             eng.app.undo();
         }
-        assert_eq!(eng.app.buffer.text(), "alpha", "undo-all restores saved text");
+        assert_eq!(
+            eng.app.buffer.text(),
+            "alpha",
+            "undo-all restores saved text"
+        );
         assert!(!eng.app.modified, "undo-all back to saved must be CLEAN");
     }
 
@@ -3793,7 +4170,10 @@ mod tests {
             eng.tick(50);
         }
         assert_eq!(eng.app.buffer.text(), "hello");
-        assert!(!eng.app.modified, "a no-op edit must not leave the file dirty");
+        assert!(
+            !eng.app.modified,
+            "a no-op edit must not leave the file dirty"
+        );
     }
 
     /// A clean file deleted on disk closes after a confirming second poll:
@@ -3839,10 +4219,8 @@ mod tests {
 
     #[test]
     fn idle_tick_surfaces_a_dirty_file_deleted_on_disk() {
-        let dir = std::env::temp_dir().join(format!(
-            "suisei_tick_dirty_del_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("suisei_tick_dirty_del_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join("gone.txt");
         std::fs::write(&f, "hello\n").unwrap();
@@ -3866,10 +4244,8 @@ mod tests {
 
     #[test]
     fn idle_tick_closes_a_clean_file_after_two_missing_polls() {
-        let dir = std::env::temp_dir().join(format!(
-            "suisei_tick_clean_del_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("suisei_tick_clean_del_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join("gone.txt");
         std::fs::write(&f, "hello\n").unwrap();
@@ -3913,7 +4289,10 @@ mod tests {
             eng.app.undo();
         }
         assert_eq!(eng.app.buffer.text(), "line1\nline2\nline3\n");
-        assert!(!eng.app.modified, "undo-all clears dirty via the real open path");
+        assert!(
+            !eng.app.modified,
+            "undo-all clears dirty via the real open path"
+        );
     }
 
     /// The exact live repro: click mid-line, type a run, press Enter (splitting
@@ -4326,6 +4705,37 @@ mod tests {
     }
 
     #[test]
+    fn native_find_accept_closes_without_editing_the_document() {
+        let mut eng = eng_with_text("suisei alpha suisei");
+        eng.find_open();
+        eng.find_set_input("suisei");
+        let before = eng.app.buffer.text();
+
+        eng.find_accept();
+
+        assert_eq!(eng.app.mode, Mode::Editor);
+        assert_eq!(eng.app.buffer.text(), before);
+        assert_eq!(eng.app.search.pattern.as_deref(), Some("suisei"));
+        assert!(!eng.last_diff.chrome.as_ref().unwrap().search.open);
+    }
+
+    #[test]
+    fn native_find_cancel_restores_origin_without_editing_the_document() {
+        let mut eng = eng_with_text("suisei alpha suisei");
+        let origin = eng.app.buffer.cursor();
+        eng.find_open();
+        eng.find_set_input("suisei");
+        let before = eng.app.buffer.text();
+
+        eng.find_cancel();
+
+        assert_eq!(eng.app.mode, Mode::Editor);
+        assert_eq!(eng.app.buffer.text(), before);
+        assert_eq!(eng.app.buffer.cursor(), origin);
+        assert!(!eng.last_diff.chrome.as_ref().unwrap().search.open);
+    }
+
+    #[test]
     fn explorer_keyboard_selection_updates_scene() {
         let dir = std::env::temp_dir().join("suisei_expl_kb_nav");
         let _ = std::fs::create_dir_all(&dir);
@@ -4457,5 +4867,35 @@ mod tests {
             !eng.app.message.contains("Preview"),
             "closed preview must not leave stale status text"
         );
+    }
+
+    #[test]
+    fn git_workbench_generation_ignores_unrelated_editor_recomposes() {
+        let mut eng = eng_with_text("fn main() {}\n");
+        let closed_generation = eng.git_wb_generation();
+
+        eng.recompose();
+        assert_eq!(
+            eng.git_wb_generation(),
+            closed_generation,
+            "an unchanged editor frame must not invalidate Source Control"
+        );
+
+        eng.app.git_wb.open = true;
+        eng.recompose();
+        let open_generation = eng.git_wb_generation();
+        assert_ne!(open_generation, closed_generation);
+
+        eng.app.message = "LSP finished indexing".into();
+        eng.recompose();
+        assert_eq!(
+            eng.git_wb_generation(),
+            open_generation,
+            "editor/LSP chrome must stay outside the workbench generation"
+        );
+
+        eng.app.git_wb.branch = "performance-work".into();
+        eng.recompose();
+        assert_ne!(eng.git_wb_generation(), open_generation);
     }
 }

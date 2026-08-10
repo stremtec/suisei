@@ -968,9 +968,22 @@ a frame budget is **0.459 ms**.
 The CoreText baseline here (1.788 ms) independently corroborates the 1.6 ms in
 `EditorHost.swift:1500`, on heavier content.
 
-**G2-2 — wire it into the canvas.** Not started. This is where
-`NSTextInputClient` must survive intact (§12), and where selection, caret, find
-spans, git stripes and the gutter become `RectInstance`s.
+**G2-2 — wire it into the canvas. Landed 2026-08-09.**
+`EditorCanvasView` keeps its complete `NSTextInputClient` implementation and
+uses a viewport-sized `CAMetalLayer` above the scroll document. CoreText still
+shapes each cached line; the renderer consumes the resulting runs and moves
+glyph rasterization/drawing, selection, carets, find spans, git stripes, gutter
+numbers and diagnostics to instanced Metal passes. The layer tracks the visible
+clip rather than the document's potentially enormous full height.
+
+**Production rollback — 2026-08-09.** Field use found that G2-2 was not yet
+feature-equivalent: matching-bracket animation geometry regressed and submitting
+a drawable for every fractional clip movement fought AppKit responsive
+scrolling. CoreText is therefore the default again. `SUISEI_RENDERER=metal`
+explicitly enables the experimental path for A/B work; a failed drawable/atlas
+frame still falls back to CoreText. Metal should not become automatic again
+until bracket/find/IME overlays and live-scroll pacing have visual regression
+tests, not merely glyph-pixel benchmarks.
 
 **G3 — Metal terminal canvas.** `TermCanvas` has the same shape and benefits
 more, because PTY damage is continuous. Its ANSI runs map directly onto

@@ -11,7 +11,12 @@ keywords = ["editor", "gui", "core", "headless"]
 unicode-width = "0.2"
 portable-pty = "0.8"
 image = { version = "0.25", default-features = false, features = ["gif", "png", "jpeg", "webp", "bmp"] }
-tree-sitter = "0.24"
+# 0.25, not 0.24: eight of the grammars below are generated with a newer
+# tree-sitter CLI and declare language ABI 15, which a 0.24 runtime refuses to
+# load ("Expected minimum 13, maximum 14"). That refusal is silent in the app —
+# the file just falls back to regex — which is why
+# `tests/every_grammar_loads.rs` asserts the load rather than trusting it.
+tree-sitter = "0.25"
 tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-javascript = "0.23"
@@ -20,6 +25,40 @@ tree-sitter-c = "0.23"
 tree-sitter-go = "0.23"
 tree-sitter-bash = "0.23"
 tree-sitter-json = "0.24"
+# Grammars added by the language patch. Every one of these is reached through
+# `lang.rs` — the single extension table — and every one is asserted to load,
+# compile its highlight query and actually emit tokens by
+# `tests/every_grammar_loads.rs`. A grammar that fails any of those is removed
+# from the table rather than left to degrade silently to the regex fallback.
+tree-sitter-cpp = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-lua = "0.5"
+tree-sitter-swift = "0.7"
+tree-sitter-php = "0.24"
+tree-sitter-zig = "1.1"
+tree-sitter-scala = "0.26"
+tree-sitter-haskell = "0.23"
+tree-sitter-elixir = "0.3"
+tree-sitter-dart = "0.2"
+tree-sitter-objc = "3"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-yaml = "0.7"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-md = "0.5"
+tree-sitter-xml = "0.7"
+tree-sitter-cmake = "0.7"
+# Considered and rejected, so the next reader does not re-derive it:
+#   tree-sitter-kotlin-ng — ships a grammar but NO highlights query, so it would
+#     parse and paint nothing. Kotlin keeps the regex fallback (`java_rules`).
+#   tree-sitter-dockerfile, tree-sitter-make — still on tree-sitter 0.20's
+#     `fn language() -> Language`; that `Language` is a different type from
+#     0.24's and does not type-check. Both are also filename-, not
+#     extension-identified, so they would rarely be reached anyway.
+#   tree-sitter-sql 0.0.2, tree-sitter-vue 0.0.3, tree-sitter-nim 0.1.0 — too
+#     early to trust; the regex fallback already covers them.
 streaming-iterator = "0.1"
 serde_json = "1"
 unicode-segmentation = "1"

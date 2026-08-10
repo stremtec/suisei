@@ -6,7 +6,7 @@
 //! cargo test -p suisei-core --test scope_visibility
 //! ```
 
-use suisei_core::scope::{visible_at, ScopeLang, SymbolKind};
+use suisei_core::scope::{ScopeLang, SymbolKind, visible_at};
 use tree_sitter::Parser;
 
 fn parse(src: &str, lang: tree_sitter::Language) -> tree_sitter::Tree {
@@ -18,7 +18,9 @@ fn parse(src: &str, lang: tree_sitter::Language) -> tree_sitter::Tree {
 /// Byte offset just after `needle`'s first occurrence — a stand-in for "the
 /// caret is here".
 fn caret(src: &str, needle: &str) -> usize {
-    src.find(needle).unwrap_or_else(|| panic!("marker {needle:?} not in source")) + needle.len()
+    src.find(needle)
+        .unwrap_or_else(|| panic!("marker {needle:?} not in source"))
+        + needle.len()
 }
 
 fn names_at(src: &str, marker: &str, lang: ScopeLang, ts: tree_sitter::Language) -> Vec<String> {
@@ -91,10 +93,9 @@ fn top_level_items_are_visible_everywhere() {
 
 #[test]
 fn a_function_sees_its_own_locals_and_not_its_siblings() {
-    let src = RUST_SRC.replace("/*CARET_C*/", "").replace(
-        "    a_only\n",
-        "    /*CARET_A*/\n    a_only\n",
-    );
+    let src = RUST_SRC
+        .replace("/*CARET_C*/", "")
+        .replace("    a_only\n", "    /*CARET_A*/\n    a_only\n");
     let names = names_at(
         &src,
         "/*CARET_A*/",
@@ -102,7 +103,10 @@ fn a_function_sees_its_own_locals_and_not_its_siblings() {
         tree_sitter_rust::LANGUAGE.into(),
     );
     assert!(names.contains(&"doubled".to_string()), "got {names:?}");
-    assert!(names.contains(&"scale".to_string()), "parameter; got {names:?}");
+    assert!(
+        names.contains(&"scale".to_string()),
+        "parameter; got {names:?}"
+    );
     assert!(
         !names.contains(&"c_only".to_string()),
         "`c_only` belongs to `other`; got {names:?}"
@@ -179,8 +183,14 @@ def other(value):
         tree_sitter_python::LANGUAGE.into(),
     );
     assert!(names.contains(&"mine".to_string()), "got {names:?}");
-    assert!(names.contains(&"TOP".to_string()), "module level; got {names:?}");
-    assert!(names.contains(&"helper".to_string()), "module level; got {names:?}");
+    assert!(
+        names.contains(&"TOP".to_string()),
+        "module level; got {names:?}"
+    );
+    assert!(
+        names.contains(&"helper".to_string()),
+        "module level; got {names:?}"
+    );
     assert!(
         !names.contains(&"doubled".to_string()),
         "`doubled` is local to `helper`; got {names:?}"

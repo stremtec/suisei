@@ -689,7 +689,11 @@ mod tests {
         app.gui_insert_text("("); // -> "(|)"
         app.gui_insert_text(")"); // type-over, not a second ")"
         assert_eq!(app.buffer.text(), "()");
-        assert_eq!(app.sel.primary().head, Position::new(0, 2), "caret past closer");
+        assert_eq!(
+            app.sel.primary().head,
+            Position::new(0, 2),
+            "caret past closer"
+        );
     }
 
     #[test]

@@ -24,9 +24,8 @@ use std::time::Instant;
 
 use suisei_engine::ffi::{
     SuiseiBandC, SuiseiChromeSnapshot, SuiseiEngine, suisei_engine_chrome,
-    suisei_engine_editor_band, suisei_engine_free, suisei_engine_new,
-    suisei_engine_open_blank_tab, suisei_engine_split_horizontal, suisei_engine_split_vertical,
-    suisei_engine_tick,
+    suisei_engine_editor_band, suisei_engine_free, suisei_engine_new, suisei_engine_open_blank_tab,
+    suisei_engine_split_horizontal, suisei_engine_split_vertical, suisei_engine_tick,
 };
 
 /// The face hands these in uninitialised (Swift zero-fills; the FFI memsets
@@ -94,7 +93,10 @@ fn band_ms(e: *mut SuiseiEngine, panes: usize, iters: usize) -> f64 {
 fn chrome_cost_by_tab_count() {
     println!();
     println!("=== suisei_engine_chrome, by open tab count ===");
-    println!("{:>6} {:>14} {:>26}", "tabs", "chrome pull", "per added tab");
+    println!(
+        "{:>6} {:>14} {:>26}",
+        "tabs", "chrome pull", "per added tab"
+    );
     let mut base = 0.0;
     for (i, tabs) in [1usize, 8, 16, 32, 64].into_iter().enumerate() {
         let e = engine_with(tabs, 1);

@@ -68,8 +68,7 @@ impl App {
             style: crate::layout_tab::LayoutStyle::Grouped,
         });
         self.active_layout = Some(id);
-        self.message =
-            "Grouped into a layout tab · scroll up to unify · down to unfold".into();
+        self.message = "Grouped into a layout tab · scroll up to unify · down to unfold".into();
         true
     }
     /// Reorder `buffers` so the folded documents form one contiguous run,

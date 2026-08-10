@@ -662,6 +662,10 @@ pub fn help_entries() -> &'static [HelpEntry] {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingRow {
     ThemeHeader,
+    /// System-following, explicitly light, or explicitly dark.
+    AppearanceMode,
+    /// Native floating-chrome density: clear or tinted Liquid Glass.
+    GlassStyle,
     Theme(usize),
     EditorHeader,
     TabWidth,
@@ -680,17 +684,387 @@ pub enum SettingRow {
     GitHeader,
     OpenWorkbench,
     OpenScm,
+    /// Semantic accent/selection hue. The value itself is a hex string.
+    HighlightColor,
+    UpdateCheck,
+}
+
+/// Native Settings destinations. These values cross the engine/Swift ABI;
+/// append only. They are deliberately independent from the four legacy TUI
+/// tabs in [`SettingsPage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingSurfacePage {
+    None,
+    General,
+    Appearance,
+    Editor,
+    LanguageServers,
+    SourceControl,
+}
+
+impl SettingSurfacePage {
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::General => 1,
+            Self::Appearance => 2,
+            Self::Editor => 3,
+            Self::LanguageServers => 4,
+            Self::SourceControl => 5,
+        }
+    }
+}
+
+/// How a native face should edit a setting. This is presentation semantics,
+/// not merely the storage type: RelativeNumber is stored as bool, but a
+/// Line-number-style menu communicates the choice better than another switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingControl {
+    None,
+    Toggle,
+    Menu,
+    Segmented,
+    Action,
+    Color,
+}
+
+impl SettingControl {
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::Toggle => 1,
+            Self::Menu => 2,
+            Self::Segmented => 3,
+            Self::Action => 4,
+            Self::Color => 5,
+        }
+    }
+}
+
+/// Layout and copy for one native Settings row. Keeping this beside
+/// [`SettingRow`] makes Core the source of truth for both behavior and the
+/// shape needed to present it; the Swift face no longer reconstructs a form
+/// from labels and a pile of booleans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingPresentation {
+    pub page: SettingSurfacePage,
+    pub group: &'static str,
+    pub control: SettingControl,
+    pub label: &'static str,
+    pub detail: &'static str,
+    /// Pipe-delimited choices for menu/segmented controls.
+    pub options: &'static str,
+    pub advanced: bool,
+}
+
+impl SettingRow {
+    /// Stable numeric tag for the face, and the row's payload index.
+    ///
+    /// The GUI used to recover a row's meaning by matching its DISPLAY LABEL —
+    /// `label == "LSP enabled"`, `label.hasPrefix("LSP ·")`,
+    /// `label.contains("●")`, a hard-coded list of five toggle names. The type
+    /// was right here and was thrown away at the FFI boundary, so every control
+    /// in Settings was a string guess: renaming a label silently broke a
+    /// control, and three rows (the GPU ones) were simply never listed and so
+    /// could not be reached at all.
+    ///
+    /// These numbers are ABI. Append only; never renumber.
+    pub fn kind(self) -> u32 {
+        match self {
+            SettingRow::ThemeHeader => 1,
+            SettingRow::Theme(_) => 2,
+            SettingRow::EditorHeader => 3,
+            SettingRow::TabWidth => 4,
+            SettingRow::RelativeNumber => 5,
+            SettingRow::WrapLines => 6,
+            SettingRow::UndoCaching => 7,
+            SettingRow::ClipboardSync => 8,
+            SettingRow::GpuAcc => 9,
+            SettingRow::GpuGraphics => 10,
+            SettingRow::GpuHyperlinks => 11,
+            SettingRow::KeyHints => 12,
+            SettingRow::LspHeader => 13,
+            SettingRow::LspEnabled => 14,
+            SettingRow::LspLang(_) => 15,
+            SettingRow::GitHeader => 16,
+            SettingRow::OpenWorkbench => 17,
+            SettingRow::OpenScm => 18,
+            SettingRow::HighlightColor => 19,
+            SettingRow::UpdateCheck => 20,
+            SettingRow::AppearanceMode => 21,
+            SettingRow::GlassStyle => 22,
+        }
+    }
+
+    /// Which theme / which language — 0 for rows that carry no payload.
+    pub fn payload(self) -> u32 {
+        match self {
+            SettingRow::Theme(i) | SettingRow::LspLang(i) => i as u32,
+            _ => 0,
+        }
+    }
+
+    pub fn presentation(self) -> SettingPresentation {
+        use SettingControl::{Action, Color, Menu, None, Segmented, Toggle};
+        use SettingSurfacePage::{Appearance, Editor, General, LanguageServers, SourceControl};
+
+        match self {
+            Self::ThemeHeader => SettingPresentation {
+                page: Appearance,
+                group: "Appearance",
+                control: None,
+                label: "Appearance",
+                detail: "",
+                options: "",
+                advanced: false,
+            },
+            Self::AppearanceMode => SettingPresentation {
+                page: Appearance,
+                group: "Appearance",
+                control: Segmented,
+                label: "Color Scheme",
+                detail: "Follow macOS automatically or keep Suisei light or dark.",
+                options: "Automatic|Light|Dark",
+                advanced: false,
+            },
+            Self::GlassStyle => SettingPresentation {
+                page: Appearance,
+                group: "Appearance",
+                control: Segmented,
+                label: "Liquid Glass",
+                detail: "Choose how strongly floating controls separate from editor content.",
+                options: "Clear|Tinted",
+                advanced: false,
+            },
+            Self::Theme(_) => SettingPresentation {
+                page: Appearance,
+                group: "Theme",
+                control: Menu,
+                label: "Theme",
+                detail: "Controls editor colors and syntax highlighting.",
+                options: "",
+                advanced: false,
+            },
+            Self::HighlightColor => SettingPresentation {
+                page: Appearance,
+                group: "Highlight",
+                control: Color,
+                label: "Highlight Color",
+                detail: "Used for selections, focus, links, and active controls.",
+                options: "",
+                advanced: false,
+            },
+            Self::EditorHeader => SettingPresentation {
+                page: General,
+                group: "Editor Defaults",
+                control: None,
+                label: "Editor Defaults",
+                detail: "",
+                options: "",
+                advanced: false,
+            },
+            Self::TabWidth => SettingPresentation {
+                page: General,
+                group: "Editor Defaults",
+                control: Menu,
+                label: "Tab Width",
+                detail: "Number of spaces used when inserting a tab.",
+                options: "2 Spaces|4 Spaces|8 Spaces",
+                advanced: false,
+            },
+            Self::UpdateCheck => SettingPresentation {
+                page: General,
+                group: "Application",
+                control: Menu,
+                label: "Check for Updates",
+                detail: "Choose whether Suisei checks for a newer release at launch.",
+                options: "Manually|Automatically",
+                advanced: false,
+            },
+            Self::RelativeNumber => SettingPresentation {
+                page: General,
+                group: "Editor Defaults",
+                control: Menu,
+                label: "Line Numbers",
+                detail: "Relative numbers show the distance from the current line.",
+                options: "Absolute|Relative",
+                advanced: false,
+            },
+            Self::WrapLines => SettingPresentation {
+                page: General,
+                group: "Editor Defaults",
+                control: Menu,
+                label: "Line Wrapping",
+                detail: "Wrap long lines at the window edge or scroll horizontally.",
+                options: "No Wrapping|Wrap to Window",
+                advanced: false,
+            },
+            Self::UndoCaching => SettingPresentation {
+                page: Editor,
+                group: "Editing",
+                control: Toggle,
+                label: "Keep Undo History",
+                detail: "Preserve undo history after a file is closed.",
+                options: "",
+                advanced: false,
+            },
+            Self::ClipboardSync => SettingPresentation {
+                page: Editor,
+                group: "Editing",
+                control: Toggle,
+                label: "Use System Clipboard",
+                detail: "Share copy and paste operations with other Mac apps.",
+                options: "",
+                advanced: false,
+            },
+            Self::KeyHints => SettingPresentation {
+                page: Editor,
+                group: "Editing",
+                control: Toggle,
+                label: "Show Key Hints",
+                detail: "Show available continuations while a command prefix is active.",
+                options: "",
+                advanced: false,
+            },
+            Self::GpuAcc => SettingPresentation {
+                page: Editor,
+                group: "Terminal Compatibility",
+                control: Menu,
+                label: "Terminal Rendering",
+                detail: "Enhanced mode uses supported Ghostty and Kitty terminal features.",
+                options: "Compatibility|Enhanced",
+                advanced: true,
+            },
+            Self::GpuGraphics => SettingPresentation {
+                page: Editor,
+                group: "Terminal Compatibility",
+                control: Toggle,
+                label: "Inline Terminal Graphics",
+                detail: "Allow image protocols in compatible terminal frontends.",
+                options: "",
+                advanced: true,
+            },
+            Self::GpuHyperlinks => SettingPresentation {
+                page: Editor,
+                group: "Terminal Compatibility",
+                control: Toggle,
+                label: "Terminal Hyperlinks",
+                detail: "Emit clickable links in compatible terminal frontends.",
+                options: "",
+                advanced: true,
+            },
+            Self::LspHeader => SettingPresentation {
+                page: LanguageServers,
+                group: "Language Servers",
+                control: None,
+                label: "Language Servers",
+                detail: "",
+                options: "",
+                advanced: false,
+            },
+            Self::LspEnabled => SettingPresentation {
+                page: LanguageServers,
+                group: "Language Servers",
+                control: Toggle,
+                label: "Enable Language Servers",
+                detail: "Provide completion, navigation, diagnostics, and refactoring.",
+                options: "",
+                advanced: false,
+            },
+            Self::LspLang(_) => SettingPresentation {
+                page: LanguageServers,
+                group: "Configured Servers",
+                control: Menu,
+                label: "Language Server",
+                detail: "Use the built-in command, disable it, or preserve a custom command.",
+                options: "Default|Off|Custom",
+                advanced: false,
+            },
+            Self::GitHeader => SettingPresentation {
+                page: SourceControl,
+                group: "Source Control",
+                control: None,
+                label: "Source Control",
+                detail: "",
+                options: "",
+                advanced: false,
+            },
+            Self::OpenWorkbench => SettingPresentation {
+                page: SourceControl,
+                group: "Source Control",
+                control: Action,
+                label: "Open Git Workbench",
+                detail: "Review changes, history, branches, pull requests, and issues.",
+                options: "",
+                advanced: false,
+            },
+            Self::OpenScm => SettingPresentation {
+                page: SourceControl,
+                group: "Source Control",
+                control: Action,
+                label: "Open Changes Navigator",
+                detail: "Stage files and create a commit without leaving the editor.",
+                options: "",
+                advanced: false,
+            },
+        }
+    }
+
+    /// Selected option for the native control described by `presentation()`.
+    pub fn value_index(self, draft: &Config) -> u32 {
+        match self {
+            Self::AppearanceMode => match draft.theme.as_str() {
+                "light" => 1,
+                "dark" => 2,
+                _ => 0,
+            },
+            Self::GlassStyle => u32::from(draft.glass_style == "tinted"),
+            Self::TabWidth => match draft.tab_width {
+                2 => 0,
+                8 => 2,
+                _ => 1,
+            },
+            Self::RelativeNumber => u32::from(draft.relative_number),
+            Self::WrapLines => u32::from(draft.wrap_lines),
+            Self::UndoCaching => u32::from(draft.undo_caching),
+            Self::ClipboardSync => u32::from(draft.clipboard_sync),
+            Self::GpuAcc => u32::from(draft.gpu_acc),
+            Self::GpuGraphics => u32::from(draft.gpu_graphics),
+            Self::GpuHyperlinks => u32::from(draft.gpu_hyperlinks),
+            Self::KeyHints => u32::from(draft.key_hints),
+            Self::LspEnabled => u32::from(draft.lsp_enabled),
+            Self::HighlightColor => u32::from(draft.highlight_color != "default"),
+            Self::UpdateCheck => u32::from(draft.update_check),
+            Self::LspLang(i) => config::lsp_lang_catalog()
+                .get(i)
+                .map(
+                    |(key, _, _)| match draft.lsp_servers.get(*key).map(String::as_str) {
+                        None => 0,
+                        Some("") => 1,
+                        Some(_) => 2,
+                    },
+                )
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
 }
 
 fn setting_rows() -> Vec<SettingRow> {
-    let mut rows = vec![SettingRow::ThemeHeader];
+    let mut rows = vec![
+        SettingRow::ThemeHeader,
+        SettingRow::AppearanceMode,
+        SettingRow::GlassStyle,
+    ];
     for i in 0..theme::all_themes().len() {
         rows.push(SettingRow::Theme(i));
     }
+    rows.push(SettingRow::HighlightColor);
     rows.push(SettingRow::EditorHeader);
-    rows.push(SettingRow::TabWidth);
     rows.push(SettingRow::RelativeNumber);
     rows.push(SettingRow::WrapLines);
+    rows.push(SettingRow::TabWidth);
+    rows.push(SettingRow::UpdateCheck);
     rows.push(SettingRow::UndoCaching);
     rows.push(SettingRow::ClipboardSync);
     rows.push(SettingRow::GpuAcc);
@@ -870,149 +1244,218 @@ impl SettingsPanel {
 
     /// Activate / toggle the selected row. Returns optional UI action.
     pub fn activate(&mut self) -> SettingsAction {
-        match self.page {
-            SettingsPage::About | SettingsPage::Help => SettingsAction::None,
-            // The plugin store was a TUI full-screen surface; the GUI has no
-            // equivalent yet, so this page is informational.
-            SettingsPage::Extensions => SettingsAction::None,
-            SettingsPage::Setting => {
-                let rows = setting_rows();
-                let Some(row) = rows.get(self.selected).copied() else {
+        if self.page != SettingsPage::Setting {
+            return SettingsAction::None;
+        }
+        let Some(row) = setting_rows().get(self.selected).copied() else {
+            return SettingsAction::None;
+        };
+
+        let current = row.value_index(&self.draft);
+        let next = match row.presentation().control {
+            SettingControl::Toggle => u32::from(current == 0),
+            SettingControl::Segmented => {
+                let count = row
+                    .presentation()
+                    .options
+                    .split('|')
+                    .filter(|option| !option.is_empty())
+                    .count()
+                    .max(1) as u32;
+                (current + 1) % count
+            }
+            SettingControl::Menu => match row {
+                SettingRow::Theme(_) => current,
+                SettingRow::LspLang(_) => {
+                    if current == 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                _ => u32::from(current == 0),
+            },
+            SettingControl::Action => 0,
+            SettingControl::Color => return SettingsAction::None,
+            SettingControl::None => return SettingsAction::None,
+        };
+        self.apply_row_value(row, next)
+    }
+
+    /// Set the selected row to an explicit native-control option. Unlike the
+    /// legacy `activate` cycle, this lets a face choose Tab Width 8 directly
+    /// from 2 without landing on 4 first.
+    pub fn set_value(&mut self, option: u32) -> SettingsAction {
+        if self.page != SettingsPage::Setting {
+            return SettingsAction::None;
+        }
+        let Some(row) = setting_rows().get(self.selected).copied() else {
+            return SettingsAction::None;
+        };
+        self.apply_row_value(row, option)
+    }
+
+    /// Set the arbitrary sRGB value carried by the native color well.
+    pub fn set_highlight_color(&mut self, value: &str) -> SettingsAction {
+        let value = value.trim();
+        let hex = value.strip_prefix('#').unwrap_or(value);
+        let normalized = if value.eq_ignore_ascii_case("default") {
+            "default".to_string()
+        } else if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            format!("#{}", hex.to_ascii_uppercase())
+        } else {
+            return SettingsAction::None;
+        };
+        if self.draft.highlight_color == normalized {
+            return SettingsAction::None;
+        }
+        self.draft.highlight_color = normalized.clone();
+        self.status = Some(format!("highlight_color = {normalized}"));
+        self.dirty = true;
+        SettingsAction::ApplyTheme
+    }
+
+    fn apply_row_value(&mut self, row: SettingRow, option: u32) -> SettingsAction {
+        let action = match row {
+            SettingRow::AppearanceMode => {
+                let Some(mode) = ["system", "light", "dark"].get(option as usize) else {
                     return SettingsAction::None;
                 };
-                match row {
-                    SettingRow::Theme(i) => {
-                        let themes = theme::all_themes();
-                        if let Some(t) = themes.get(i) {
-                            self.draft.theme = t.name.to_string();
-                            self.dirty = true;
-                            self.status = Some(format!("Theme → {}", t.name));
-                            return SettingsAction::ApplyTheme;
-                        }
-                    }
-                    SettingRow::TabWidth => {
-                        self.draft.tab_width = match self.draft.tab_width {
-                            2 => 4,
-                            4 => 8,
-                            _ => 2,
-                        };
-                        self.dirty = true;
-                        self.status = Some(format!("tab_width = {}", self.draft.tab_width));
-                    }
-                    SettingRow::RelativeNumber => {
-                        self.draft.relative_number = !self.draft.relative_number;
-                        self.dirty = true;
-                        self.status =
-                            Some(format!("relative_number = {}", self.draft.relative_number));
-                    }
-                    SettingRow::UndoCaching => {
-                        self.draft.undo_caching = !self.draft.undo_caching;
-                        self.dirty = true;
-                        self.status = Some(if self.draft.undo_caching {
-                            "undo_caching = true  (history survives close · ~/.suisei/undo)".into()
-                        } else {
-                            "undo_caching = false  (history discarded on close)".into()
-                        });
-                    }
-                    SettingRow::WrapLines => {
-                        self.draft.wrap_lines = !self.draft.wrap_lines;
-                        self.dirty = true;
-                        self.status = Some(if self.draft.wrap_lines {
-                            "wrap_lines = true  (soft-wrap long lines)".into()
-                        } else {
-                            "wrap_lines = false  (horizontal scroll · zh/zl pan)".into()
-                        });
-                    }
-                    SettingRow::ClipboardSync => {
-                        self.draft.clipboard_sync = !self.draft.clipboard_sync;
-                        self.dirty = true;
-                        self.status =
-                            Some(format!("clipboard_sync = {}", self.draft.clipboard_sync));
-                    }
-                    SettingRow::GpuAcc => {
-                        self.draft.gpu_acc = !self.draft.gpu_acc;
-                        self.dirty = true;
-                        self.status = Some(if self.draft.gpu_acc {
-                            "gpu_acc = true  (Ghostty/Kitty enhancements on)".into()
-                        } else {
-                            "gpu_acc = false  (plain cell TUI)".into()
-                        });
-                        return SettingsAction::ApplyGpuAcc;
-                    }
-                    SettingRow::GpuGraphics => {
-                        self.draft.gpu_graphics = !self.draft.gpu_graphics;
-                        self.dirty = true;
-                        self.status = Some(format!("gpu_graphics = {}", self.draft.gpu_graphics));
-                    }
-                    SettingRow::GpuHyperlinks => {
-                        self.draft.gpu_hyperlinks = !self.draft.gpu_hyperlinks;
-                        self.dirty = true;
-                        self.status =
-                            Some(format!("gpu_hyperlinks = {}", self.draft.gpu_hyperlinks));
-                    }
-                    SettingRow::KeyHints => {
-                        self.draft.key_hints = !self.draft.key_hints;
-                        self.dirty = true;
-                        self.status = Some(format!(
-                            "key_hints = {}",
-                            if self.draft.key_hints {
-                                "true"
-                            } else {
-                                "false"
-                            }
-                        ));
-                    }
-                    SettingRow::LspEnabled => {
-                        self.draft.lsp_enabled = !self.draft.lsp_enabled;
-                        self.dirty = true;
-                        self.status = Some(format!("lsp_enabled = {}", self.draft.lsp_enabled));
-                        return SettingsAction::ApplyLsp;
-                    }
-                    SettingRow::LspLang(i) => {
-                        // Cycle: default → off → default
-                        let catalog = config::lsp_lang_catalog();
-                        if let Some((key, _label, default_cmd)) = catalog.get(i) {
-                            let cur = self.draft.lsp_servers.get(*key).cloned();
-                            match cur.as_deref() {
-                                None => {
-                                    // was default → turn off
-                                    self.draft
-                                        .lsp_servers
-                                        .insert((*key).to_string(), String::new());
-                                    self.status = Some(format!("lsp.{key} = off"));
-                                }
-                                Some("") => {
-                                    // was off → restore default (remove override)
-                                    self.draft.lsp_servers.remove(*key);
-                                    self.status =
-                                        Some(format!("lsp.{key} = default ({default_cmd})"));
-                                }
-                                Some(_) => {
-                                    // custom → off
-                                    self.draft
-                                        .lsp_servers
-                                        .insert((*key).to_string(), String::new());
-                                    self.status = Some(format!("lsp.{key} = off"));
-                                }
-                            }
-                            self.dirty = true;
-                            return SettingsAction::ApplyLsp;
-                        }
-                    }
-                    SettingRow::OpenWorkbench => {
-                        return SettingsAction::OpenWorkbench;
-                    }
-                    SettingRow::OpenScm => {
-                        return SettingsAction::OpenScm;
-                    }
-                    SettingRow::ThemeHeader
-                    | SettingRow::EditorHeader
-                    | SettingRow::LspHeader
-                    | SettingRow::GitHeader => {}
-                }
+                self.draft.theme = (*mode).to_string();
+                self.status = Some(format!("appearance = {mode}"));
+                SettingsAction::ApplyTheme
+            }
+            SettingRow::GlassStyle => {
+                let Some(style) = ["clear", "tinted"].get(option as usize) else {
+                    return SettingsAction::None;
+                };
+                self.draft.glass_style = (*style).to_string();
+                self.status = Some(format!("glass_style = {style}"));
                 SettingsAction::None
             }
-        }
+            SettingRow::Theme(i) => {
+                let Some(t) = theme::all_themes().get(i) else {
+                    return SettingsAction::None;
+                };
+                self.draft.theme = t.name.to_string();
+                self.status = Some(format!("Theme → {}", t.name));
+                SettingsAction::ApplyTheme
+            }
+            SettingRow::TabWidth => {
+                let Some(width) = [2, 4, 8].get(option as usize).copied() else {
+                    return SettingsAction::None;
+                };
+                self.draft.tab_width = width;
+                self.status = Some(format!("tab_width = {width}"));
+                SettingsAction::None
+            }
+            SettingRow::UpdateCheck => {
+                self.draft.update_check = option != 0;
+                self.status = Some(if self.draft.update_check {
+                    "update_check = true  (check at launch)".into()
+                } else {
+                    "update_check = false  (manual checks only)".into()
+                });
+                SettingsAction::None
+            }
+            SettingRow::RelativeNumber => {
+                self.draft.relative_number = option != 0;
+                self.status = Some(format!("relative_number = {}", self.draft.relative_number));
+                SettingsAction::None
+            }
+            SettingRow::WrapLines => {
+                self.draft.wrap_lines = option != 0;
+                self.status = Some(if self.draft.wrap_lines {
+                    "wrap_lines = true  (soft-wrap long lines)".into()
+                } else {
+                    "wrap_lines = false  (horizontal scroll · zh/zl pan)".into()
+                });
+                SettingsAction::None
+            }
+            SettingRow::UndoCaching => {
+                self.draft.undo_caching = option != 0;
+                self.status = Some(if self.draft.undo_caching {
+                    "undo_caching = true  (history survives close · ~/.suisei/undo)".into()
+                } else {
+                    "undo_caching = false  (history discarded on close)".into()
+                });
+                SettingsAction::None
+            }
+            SettingRow::ClipboardSync => {
+                self.draft.clipboard_sync = option != 0;
+                self.status = Some(format!("clipboard_sync = {}", self.draft.clipboard_sync));
+                SettingsAction::None
+            }
+            SettingRow::GpuAcc => {
+                self.draft.gpu_acc = option != 0;
+                self.status = Some(if self.draft.gpu_acc {
+                    "gpu_acc = true  (Ghostty/Kitty enhancements on)".into()
+                } else {
+                    "gpu_acc = false  (plain cell TUI)".into()
+                });
+                SettingsAction::ApplyGpuAcc
+            }
+            SettingRow::GpuGraphics => {
+                self.draft.gpu_graphics = option != 0;
+                self.status = Some(format!("gpu_graphics = {}", self.draft.gpu_graphics));
+                SettingsAction::ApplyGpuAcc
+            }
+            SettingRow::GpuHyperlinks => {
+                self.draft.gpu_hyperlinks = option != 0;
+                self.status = Some(format!("gpu_hyperlinks = {}", self.draft.gpu_hyperlinks));
+                SettingsAction::ApplyGpuAcc
+            }
+            SettingRow::KeyHints => {
+                self.draft.key_hints = option != 0;
+                self.status = Some(format!("key_hints = {}", self.draft.key_hints));
+                SettingsAction::None
+            }
+            SettingRow::LspEnabled => {
+                self.draft.lsp_enabled = option != 0;
+                self.status = Some(format!("lsp_enabled = {}", self.draft.lsp_enabled));
+                SettingsAction::ApplyLsp
+            }
+            SettingRow::LspLang(i) => {
+                let Some((key, _label, default_cmd)) = config::lsp_lang_catalog().get(i) else {
+                    return SettingsAction::None;
+                };
+                match option {
+                    0 => {
+                        self.draft.lsp_servers.remove(*key);
+                        self.status = Some(format!("lsp.{key} = default ({default_cmd})"));
+                    }
+                    1 => {
+                        self.draft
+                            .lsp_servers
+                            .insert((*key).to_string(), String::new());
+                        self.status = Some(format!("lsp.{key} = off"));
+                    }
+                    // "Custom" reports an existing override but cannot invent
+                    // a command. Editing custom commands gets a dedicated text
+                    // field in the future.
+                    2 if self
+                        .draft
+                        .lsp_servers
+                        .get(*key)
+                        .is_some_and(|v| !v.is_empty()) =>
+                    {
+                        return SettingsAction::None;
+                    }
+                    _ => return SettingsAction::None,
+                }
+                SettingsAction::ApplyLsp
+            }
+            SettingRow::OpenWorkbench => return SettingsAction::OpenWorkbench,
+            SettingRow::OpenScm => return SettingsAction::OpenScm,
+            SettingRow::HighlightColor => return SettingsAction::None,
+            SettingRow::ThemeHeader
+            | SettingRow::EditorHeader
+            | SettingRow::LspHeader
+            | SettingRow::GitHeader => return SettingsAction::None,
+        };
+
+        self.dirty = true;
+        action
     }
 
     pub fn save(&mut self) {

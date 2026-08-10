@@ -574,11 +574,7 @@ impl SplitState {
             if self.panes.len() < 2 {
                 break;
             }
-            let at = self
-                .panes
-                .iter()
-                .position(|p| p.id == id)
-                .unwrap_or(0);
+            let at = self.panes.iter().position(|p| p.id == id).unwrap_or(0);
             let was_focus = self.focus == id;
             Self::remove_leaf(&mut self.root, id);
             if let Some(i) = self.panes.iter().position(|p| p.id == id) {

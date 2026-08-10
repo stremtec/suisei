@@ -99,6 +99,38 @@ pub fn run_git_ok(root: &Path, args: &[&str]) -> Result<String, String> {
     run_git(root, args)
 }
 
+/// Read one effective Git configuration value for a repository.
+///
+/// Keeping this in the Git layer avoids frontends trying to infer commit
+/// identity from the macOS login account, which can differ from Git's local or
+/// global `user.*` configuration.
+pub fn config_value(root: &Path, key: &str) -> String {
+    run_git(root, &["config", "--get", key])
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Resolve both author fields with one Git process. Workbench status used to
+/// launch `git config` twice on every refresh even though both values live in
+/// the same effective repository configuration.
+pub fn author_identity(root: &Path) -> (String, String) {
+    let output =
+        run_git(root, &["config", "--get-regexp", r"^user\.(name|email)$"]).unwrap_or_default();
+    let mut name = String::new();
+    let mut email = String::new();
+    for line in output.lines() {
+        let Some((key, value)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        match key {
+            "user.name" => name = value.trim().to_string(),
+            "user.email" => email = value.trim().to_string(),
+            _ => {}
+        }
+    }
+    (name, email)
+}
+
 pub fn list_branches(root: &Path) -> Result<Vec<BranchInfo>, String> {
     // Local branches
     let local = run_git(
@@ -136,11 +168,17 @@ pub fn list_branches(root: &Path) -> Result<Vec<BranchInfo>, String> {
     // Remote branches (no current)
     if let Ok(remote) = run_git(
         root,
-        &["for-each-ref", "--format=%(refname:short)", "refs/remotes"],
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%00%(symref)",
+            "refs/remotes",
+        ],
     ) {
         for line in remote.lines() {
-            let name = line.trim();
-            if name.is_empty() || name.ends_with("/HEAD") {
+            let mut parts = line.split('\0');
+            let name = parts.next().unwrap_or("").trim();
+            let symbolic_target = parts.next().unwrap_or("").trim();
+            if name.is_empty() || !symbolic_target.is_empty() || name.ends_with("/HEAD") {
                 continue;
             }
             // skip if already have local with same short name? keep remotes as remote/foo
@@ -166,19 +204,22 @@ pub fn list_branches(root: &Path) -> Result<Vec<BranchInfo>, String> {
     Ok(out)
 }
 
-pub fn checkout_branch(root: &Path, name: &str) -> Result<String, String> {
-    // Remote-only: checkout -b local --track remote
-    if name.contains('/') && name.starts_with("origin/") {
-        let local = name.trim_start_matches("origin/");
-        // try create tracking branch
-        match run_git(root, &["checkout", "-B", local, "--track", name]) {
-            Ok(o) => return Ok(o.lines().next().unwrap_or("Checked out").to_string()),
-            Err(_) => {
-                // already exists
-                return run_git(root, &["checkout", local])
-                    .map(|o| o.lines().next().unwrap_or("Checked out").to_string());
-            }
+pub fn checkout_branch(root: &Path, name: &str, remote: bool) -> Result<String, String> {
+    if remote {
+        let local = name
+            .split_once('/')
+            .map(|(_, local)| local)
+            .filter(|local| !local.is_empty())
+            .ok_or_else(|| format!("Invalid remote branch: {name}"))?;
+
+        // Prefer an existing local branch. Creating with `-B` used to reset
+        // that branch to the remote ref, which is an unexpectedly destructive
+        // side effect for a UI action labelled simply “Check Out”.
+        if let Ok(output) = run_git(root, &["checkout", local]) {
+            return Ok(output.lines().next().unwrap_or("Checked out").to_string());
         }
+        return run_git(root, &["checkout", "-b", local, "--track", name])
+            .map(|o| o.lines().next().unwrap_or("Checked out").to_string());
     }
     run_git(root, &["checkout", name])
         .map(|o| o.lines().next().unwrap_or("Checked out").to_string())
@@ -555,6 +596,17 @@ pub struct CommitDetail {
 
 /// Newest-first commit list (`git log --all` when `all` is true).
 pub fn list_commits(root: &Path, limit: usize, all: bool) -> Result<Vec<CommitSummary>, String> {
+    list_commits_for_ref(root, limit, if all { Some("--all") } else { None })
+}
+
+/// Newest-first history for one branch/ref. Passing `--all` preserves the
+/// historical graph caller's behavior; passing a branch name gives native
+/// repository browsers the history of the selected outline item.
+pub fn list_commits_for_ref(
+    root: &Path,
+    limit: usize,
+    reference: Option<&str>,
+) -> Result<Vec<CommitSummary>, String> {
     let n = limit.clamp(20, 2000).to_string();
     let mut args = vec![
         "log",
@@ -562,8 +614,8 @@ pub fn list_commits(root: &Path, limit: usize, all: bool) -> Result<Vec<CommitSu
         n.as_str(),
         "--pretty=format:%H%x00%h%x00%s%x00%an%x00%ae%x00%ar%x00%P",
     ];
-    if all {
-        args.insert(1, "--all");
+    if let Some(reference) = reference {
+        args.push(reference);
     }
     let out = run_git(root, &args)?;
     let mut commits = Vec::new();
@@ -597,43 +649,26 @@ pub fn list_commits(root: &Path, limit: usize, all: bool) -> Result<Vec<CommitSu
 
 /// Message + file list + numstat for one commit (GitHub commit page).
 pub fn commit_detail(root: &Path, hash: &str) -> Result<CommitDetail, String> {
-    // Metadata: subject, body, author, date
-    let meta = run_git(
-        root,
-        &[
-            "show",
-            "-s",
-            "--format=%H%x00%h%x00%s%x00%b%x00%an%x00%ae%x00%aI",
-            hash,
-        ],
-    )?;
-    // git show -s with body can be multi-line; use null-separated carefully.
-    // Body may contain newlines but not NULs. Format uses %x00 between fields;
-    // body is field 3 and can have newlines until next field... actually
-    // pretty format with %b then %x00 is tricky with newlines.
-    // Safer: separate calls.
+    // Keep the multiline body as the final NUL-separated field. This retrieves
+    // all metadata in one process; the previous implementation launched an
+    // unused `show` and then a second `log` solely for the body.
     let head = run_git(
         root,
         &[
             "show",
             "-s",
-            "--format=%H%x00%h%x00%s%x00%an%x00%ae%x00%aI%x00%P",
+            "--format=%H%x00%h%x00%s%x00%an%x00%ae%x00%aI%x00%b",
             hash,
         ],
     )?;
-    let line = head.lines().next().unwrap_or("");
-    let p: Vec<&str> = line.split('\0').collect();
+    let p: Vec<&str> = head.splitn(7, '\0').collect();
     let full = p.first().unwrap_or(&hash).to_string();
     let short = p.get(1).unwrap_or(&"").to_string();
     let subject = p.get(2).unwrap_or(&"").to_string();
     let author = p.get(3).unwrap_or(&"").to_string();
     let email = p.get(4).unwrap_or(&"").to_string();
     let date = p.get(5).unwrap_or(&"").to_string();
-
-    let body = run_git(root, &["log", "-1", "--format=%b", hash])
-        .map(|s| s.trim_end().to_string())
-        .unwrap_or_default();
-    let _ = meta;
+    let body = p.get(6).unwrap_or(&"").trim_end().to_string();
 
     // name-status
     let ns = run_git(root, &["show", "--name-status", "--format=", hash]).unwrap_or_default();

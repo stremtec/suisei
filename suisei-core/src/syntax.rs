@@ -4,9 +4,10 @@
 //! Query captures map to [`TokenKind`] through [`crate::highlight::from_capture`].
 
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Language, Parser, Query, QueryCursor, Tree};
+use tree_sitter::{QueryCursor, Tree};
 
 use crate::highlight::{self, TokenKind};
+use crate::lang::{Grammars, Lang, LangBundle};
 
 /// A parse kept for a file the user is not looking at right now.
 ///
@@ -22,21 +23,10 @@ struct CachedParse {
 /// One highlight span: (kind, start_col, end_col, row) — char columns, end exclusive.
 pub type HlToken = (TokenKind, usize, usize, usize);
 
-struct LangBundle {
-    parser: Parser,
-    query: Query,
-}
-
 pub struct SyntaxEngine {
-    rust: Option<LangBundle>,
-    python: Option<LangBundle>,
-    javascript: Option<LangBundle>,
-    typescript: Option<LangBundle>,
-    tsx: Option<LangBundle>,
-    c: Option<LangBundle>,
-    go: Option<LangBundle>,
-    bash: Option<LangBundle>,
-    json: Option<LangBundle>,
+    /// Every grammar, behind one lookup. See `crate::lang` for why this is a
+    /// field of its own rather than a method on the engine.
+    grammars: Grammars,
     tree: Option<Tree>,
     last_ext: String,
     last_len: usize,
@@ -67,16 +57,9 @@ impl Default for SyntaxEngine {
         Self {
             // Grammars compile their highlight queries on first use (A1-6):
             // the main-thread engine only ADOPTS worker frames and may never
-            // parse at all, so nine query compiles at startup would be waste.
-            rust: None,
-            python: None,
-            javascript: None,
-            typescript: None,
-            tsx: None,
-            c: None,
-            go: None,
-            bash: None,
-            json: None,
+            // parse at all, so compiling every query at startup would be waste
+            // — and at 29 grammars it would be a very expensive waste.
+            grammars: Grammars::default(),
             tree: None,
             last_ext: String::new(),
             last_len: 0,
@@ -90,28 +73,6 @@ impl Default for SyntaxEngine {
             active: false,
         }
     }
-}
-
-/// First-use grammar init: the highlight query compiles once, lazily, so an
-/// engine that never parses a language never pays for it.
-fn lazy<'a>(
-    slot: &'a mut Option<LangBundle>,
-    language: Language,
-    source: &str,
-) -> Option<&'a mut LangBundle> {
-    if slot.is_none() {
-        *slot = make_lang(language, source);
-    }
-    slot.as_mut()
-}
-
-fn make_lang(language: Language, source: &str) -> Option<LangBundle> {
-    let mut parser = Parser::new();
-    if parser.set_language(&language).is_err() {
-        return None;
-    }
-    let query = Query::new(&language, source).ok()?;
-    Some(LangBundle { parser, query })
 }
 
 impl SyntaxEngine {
@@ -224,6 +185,12 @@ impl SyntaxEngine {
         self.cache.len()
     }
 
+    /// How many grammars are compiled right now. Used by the tests that pin
+    /// what a first parse is allowed to cost.
+    pub fn grammars_loaded(&self) -> usize {
+        self.grammars.loaded_count()
+    }
+
     fn store_cached(&mut self, path: String, text: String, tree: Tree, ext: String) {
         const MAX_CACHED: usize = 48;
         if self
@@ -244,75 +211,23 @@ impl SyntaxEngine {
     /// otherwise lazy — the first file of a type pays a cold parser+`Query`
     /// build (query compilation is the slow part). The boot pipeline warms
     /// them off the worker thread so the first highlight of the first file
-    /// opened — of any language — is instant. Idempotent: `lazy`/`make_lang`
-    /// no-op once a slot is filled.
+    /// opened — of any language — is instant. Idempotent: `Grammars::get`
+    /// no-ops once a slot is filled.
     pub fn warm_all(&mut self) {
-        for ext in ["rs", "py", "js", "ts", "tsx", "c", "go", "sh", "json"] {
-            let _ = self.bundle_for(Some(ext));
+        for lang in Lang::ALL {
+            self.warm_one(*lang);
         }
     }
 
+    /// Build one grammar. The worker drains the table a language at a time on
+    /// idle turns rather than calling `warm_all`, because the whole table is
+    /// 780 ms and a parse waiting behind it is a file with no colours.
+    pub fn warm_one(&mut self, lang: Lang) {
+        let _ = self.grammars.get(lang);
+    }
+
     fn bundle_for(&mut self, ext: Option<&str>) -> Option<&mut LangBundle> {
-        match ext {
-            Some("rs") => lazy(
-                &mut self.rust,
-                tree_sitter_rust::LANGUAGE.into(),
-                tree_sitter_rust::HIGHLIGHTS_QUERY,
-            ),
-            Some("py" | "pyi") => lazy(
-                &mut self.python,
-                tree_sitter_python::LANGUAGE.into(),
-                tree_sitter_python::HIGHLIGHTS_QUERY,
-            ),
-            Some("js" | "mjs" | "cjs") | Some("jsx") => lazy(
-                &mut self.javascript,
-                tree_sitter_javascript::LANGUAGE.into(),
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-            ),
-            Some("ts" | "mts" | "cts") => lazy(
-                &mut self.typescript,
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
-            ),
-            Some("tsx") => {
-                if self.tsx.is_none() {
-                    self.tsx = make_lang(
-                        tree_sitter_typescript::LANGUAGE_TSX.into(),
-                        tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                    );
-                }
-                if self.tsx.is_some() {
-                    return self.tsx.as_mut();
-                }
-                // TSX grammar unavailable — degrade to plain TypeScript.
-                lazy(
-                    &mut self.typescript,
-                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                )
-            }
-            Some("c" | "h") | Some("cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx") => lazy(
-                &mut self.c,
-                tree_sitter_c::LANGUAGE.into(),
-                tree_sitter_c::HIGHLIGHT_QUERY,
-            ),
-            Some("go") => lazy(
-                &mut self.go,
-                tree_sitter_go::LANGUAGE.into(),
-                tree_sitter_go::HIGHLIGHTS_QUERY,
-            ),
-            Some("sh" | "bash" | "zsh") => lazy(
-                &mut self.bash,
-                tree_sitter_bash::LANGUAGE.into(),
-                tree_sitter_bash::HIGHLIGHT_QUERY,
-            ),
-            Some("json" | "jsonc") => lazy(
-                &mut self.json,
-                tree_sitter_json::LANGUAGE.into(),
-                tree_sitter_json::HIGHLIGHTS_QUERY,
-            ),
-            _ => None,
-        }
+        self.grammars.for_ext(ext)
     }
 
     /// `rows` limits the highlight query to a row window — pass the viewport
@@ -379,82 +294,26 @@ impl SyntaxEngine {
             None
         };
 
-        let bundle: Option<&mut LangBundle> = match ext {
-            Some("rs") => lazy(
-                &mut self.rust,
-                tree_sitter_rust::LANGUAGE.into(),
-                tree_sitter_rust::HIGHLIGHTS_QUERY,
-            ),
-            Some("py" | "pyi") => lazy(
-                &mut self.python,
-                tree_sitter_python::LANGUAGE.into(),
-                tree_sitter_python::HIGHLIGHTS_QUERY,
-            ),
-            Some("js" | "mjs" | "cjs") => lazy(
-                &mut self.javascript,
-                tree_sitter_javascript::LANGUAGE.into(),
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-            ),
-            Some("jsx") => lazy(
-                &mut self.javascript,
-                tree_sitter_javascript::LANGUAGE.into(),
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-            ),
-            Some("ts" | "mts" | "cts") => lazy(
-                &mut self.typescript,
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
-            ),
-            Some("tsx") => {
-                if self.tsx.is_none() {
-                    self.tsx = make_lang(
-                        tree_sitter_typescript::LANGUAGE_TSX.into(),
-                        tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                    );
-                }
-                if self.tsx.is_some() {
-                    self.tsx.as_mut()
-                } else {
-                    lazy(
-                        &mut self.typescript,
-                        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                        tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                    )
-                }
-            }
-            Some("c" | "h") | Some("cpp" | "hpp" | "cc" | "cxx" | "hh" | "hxx") => lazy(
-                &mut self.c,
-                tree_sitter_c::LANGUAGE.into(),
-                tree_sitter_c::HIGHLIGHT_QUERY,
-            ),
-            Some("go") => lazy(
-                &mut self.go,
-                tree_sitter_go::LANGUAGE.into(),
-                tree_sitter_go::HIGHLIGHTS_QUERY,
-            ),
-            Some("sh" | "bash" | "zsh") => lazy(
-                &mut self.bash,
-                tree_sitter_bash::LANGUAGE.into(),
-                tree_sitter_bash::HIGHLIGHT_QUERY,
-            ),
-            Some("json" | "jsonc") => lazy(
-                &mut self.json,
-                tree_sitter_json::LANGUAGE.into(),
-                tree_sitter_json::HIGHLIGHTS_QUERY,
-            ),
-            _ => {
-                self.tokens.clear();
-                self.token_rows = 0..0;
-                self.tree = None;
-                self.last_ext.clear();
-                self.last_len = 0;
-                self.last_fingerprint = 0;
-                self.active = false;
-                return;
-            }
-        };
+        // No grammar for this extension: the file is not tier 1, so drop any
+        // state left from the previous document and let the regex fallback in
+        // `highlight.rs` take it. Distinct from "grammar exists but failed to
+        // build", handled just below — that one keeps `last_ext` so the next
+        // parse of the same file does not look like a language switch.
+        if Lang::from_ext(ext.unwrap_or("")).is_none() {
+            self.tokens.clear();
+            self.token_rows = 0..0;
+            self.tree = None;
+            self.last_ext.clear();
+            self.last_len = 0;
+            self.last_fingerprint = 0;
+            self.active = false;
+            return;
+        }
 
-        let Some(bundle) = bundle else {
+        // Borrows `self.grammars` alone, which is what lets the rest of the
+        // engine stay writable below. That borrow is the entire reason this
+        // table used to be written out twice.
+        let Some(bundle) = self.grammars.for_ext(ext) else {
             self.tokens.clear();
             self.token_rows = 0..0;
             self.active = false;
@@ -517,6 +376,70 @@ impl SyntaxEngine {
     /// row (see the `sort_by_key` in `parse`), so this is an O(log n) binary
     /// search instead of the O(n) whole-file filter the renderer used to run for
     /// every visible row on every frame.
+    /// Slide the painted spans on `row` to match a single-line insertion, so a
+    /// just-typed character is coloured NOW instead of one tick from now.
+    ///
+    /// The real answer still comes from the worker; this only keeps what is
+    /// already on screen honest until it lands. Waiting for the parse instead
+    /// was measured at 4.1 ms (1k lines) to 6.7 ms (4.5k lines) per keystroke
+    /// against 0.4 ms without — half a frame, on the hottest path in the app.
+    /// This costs a pass over one row's spans.
+    ///
+    /// Three cases, and the third is the one that matters:
+    ///
+    /// * a span entirely after the caret — shift it right;
+    /// * a span containing the caret — stretch it;
+    /// * a span ENDING exactly at the caret — stretch it too, because that is
+    ///   what typing at the end of a word is, and the new character belongs to
+    ///   the word being typed.
+    ///
+    /// Wrong only at a boundary where the edit changes what the token IS — say
+    /// typing `"` mid-identifier — and then only until the parse lands.
+    pub fn nudge_for_insert(&mut self, row: usize, col: usize, chars: usize) {
+        if chars == 0 {
+            return;
+        }
+        for t in &mut self.tokens {
+            if t.3 != row {
+                continue;
+            }
+            if t.1 >= col {
+                t.1 += chars;
+                t.2 += chars;
+            } else if t.2 >= col {
+                t.2 += chars;
+            }
+        }
+    }
+
+    /// The same, for a single-line deletion of `chars` ending at `col`.
+    ///
+    /// Spans that the deletion empties are dropped rather than left as
+    /// zero-width, which would paint nothing but still cost a span.
+    pub fn nudge_for_delete(&mut self, row: usize, col: usize, chars: usize) {
+        if chars == 0 {
+            return;
+        }
+        let start = col.saturating_sub(chars);
+        let clamp = |v: usize| -> usize {
+            if v <= start {
+                v
+            } else if v >= col {
+                v - chars
+            } else {
+                start
+            }
+        };
+        for t in &mut self.tokens {
+            if t.3 != row {
+                continue;
+            }
+            t.1 = clamp(t.1);
+            t.2 = clamp(t.2);
+        }
+        self.tokens.retain(|t| t.3 != row || t.2 > t.1);
+    }
+
     pub fn tokens_for_row(&self, row: usize) -> &[HlToken] {
         let lo = self.tokens.partition_point(|t| t.3 < row);
         let hi = self.tokens.partition_point(|t| t.3 <= row);
@@ -530,20 +453,48 @@ impl SyntaxEngine {
     /// `active`) — adopting an empty frame over an empty state (untitled
     /// document, first answer) must not schedule a redraw that draws
     /// nothing.
+    /// Adopt a worker frame: its tokens AND its parse.
+    ///
+    /// This used to end with `self.tree = None; self.last_text.clear()`, on the
+    /// reasoning that the tree lived on the worker and the main thread only
+    /// painted tokens. True for highlighting — and fatal for anything else that
+    /// asks about structure. `live_tree()` was therefore `None` for the entire
+    /// life of the GUI, so scope-aware completion returned an empty symbol list
+    /// on every keystroke and quietly degraded to keywords. It passed its tests
+    /// because they call `parse()` directly, which is the TUI path.
+    ///
+    /// The tree now travels with the tokens. Callers that have no tree to give
+    /// still clear it, so a frame can never leave a tree that disagrees with
+    /// the text beside it.
     pub fn apply_frame(
         &mut self,
         path: String,
         window: std::ops::Range<usize>,
         tokens: Vec<HlToken>,
         active: bool,
+        tree: Option<Tree>,
+        text: String,
+        ext: String,
     ) -> bool {
         let changed = self.tokens != tokens || self.active != active;
         self.last_path = path;
         self.tokens = tokens;
         self.token_rows = window;
         self.active = active;
-        self.tree = None;
-        self.last_text.clear();
+        // Tree and text are one fact. Byte offsets from `visible_at` index into
+        // `last_text`, so a tree without its own text would resolve carets
+        // against a different document.
+        match tree {
+            Some(t) => {
+                self.tree = Some(t);
+                self.last_text = text;
+                self.last_ext = ext;
+            }
+            None => {
+                self.tree = None;
+                self.last_text.clear();
+            }
+        }
         changed
     }
 
@@ -606,8 +557,72 @@ fn query_tree(
             push_node_tokens(node, &lines, kind, &mut tokens);
         }
     }
-    tokens.sort_by_key(|(_, st, ed, row)| (*row, ed.saturating_sub(*st), *st));
-    tokens
+    flatten_overlaps(tokens)
+}
+
+/// Turn overlapping captures into non-overlapping spans, letting the INNER one
+/// win.
+///
+/// Captures nest, because they are tree nodes: an escape sequence sits inside a
+/// string, a type argument's brackets sit inside a type. The face paints spans
+/// in array order with `addAttributes`, so whichever span is applied LAST is
+/// the colour that shows. The old ordering was by width ascending, which meant
+/// the widest — least specific — span was applied last and overwrote every
+/// precise one inside it. Escapes never showed a different colour from their
+/// string; nothing did.
+///
+/// Two things depend on this being resolved here rather than at paint time:
+/// the face's `.take(32)` per row now keeps the leftmost 32 real spans instead
+/// of the 32 narrowest fragments, and composing two highlight queries (see
+/// `lang.rs`) becomes well defined — for the same range the later pattern wins,
+/// which is why the language-specific overlay is concatenated last.
+pub fn flatten_overlaps(mut tokens: Vec<HlToken>) -> Vec<HlToken> {
+    if tokens.len() < 2 {
+        return tokens;
+    }
+    // Pre-order within a row: outer before inner. For two captures on the exact
+    // same range the sort is a tie, and a stable sort keeps the order they were
+    // pushed in — so the later pattern ends up "inside" the earlier one and
+    // wins, which is the composition rule `lang.rs` relies on.
+    tokens.sort_by(|a, b| (a.3, a.1).cmp(&(b.3, b.1)).then(b.2.cmp(&a.2)));
+
+    let mut out: Vec<HlToken> = Vec::with_capacity(tokens.len());
+    // (kind, cursor, end, row) — `cursor` is the next column of this span not
+    // yet covered by something nested inside it.
+    let mut stack: Vec<HlToken> = Vec::new();
+    let close = |stack: &mut Vec<HlToken>, out: &mut Vec<HlToken>, upto: Option<(usize, usize)>| {
+        while let Some(top) = stack.last() {
+            let done = match upto {
+                Some((row, col)) => top.3 != row || top.2 <= col,
+                None => true,
+            };
+            if !done {
+                break;
+            }
+            let top = stack.pop().expect("just peeked");
+            if top.1 < top.2 {
+                out.push(top);
+            }
+        }
+    };
+
+    for t in tokens {
+        close(&mut stack, &mut out, Some((t.3, t.1)));
+        if let Some(top) = stack.last_mut() {
+            if top.1 < t.1 {
+                out.push((top.0, top.1, t.1, top.3));
+            }
+            // Resume the enclosing span after the nested one. Clamped both
+            // ways: a capture that starts before the cursor or runs past the
+            // parent's end must not move it backwards or beyond.
+            top.1 = top.1.max(t.2).min(top.2);
+        }
+        stack.push(t);
+    }
+    close(&mut stack, &mut out, None);
+
+    out.sort_by_key(|t| (t.3, t.1));
+    out
 }
 
 fn push_node_tokens(

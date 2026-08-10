@@ -2726,6 +2726,7 @@ pub fn has_server_for(path: &str) -> bool {
 
 /// Map file extension → settings language key.
 pub fn ext_to_lang_key(ext: &str) -> Option<&'static str> {
+    let ext = canonical_ext(ext);
     Some(match ext {
         "rs" => "rust",
         "py" | "pyi" => "python",
@@ -2755,11 +2756,33 @@ pub fn ext_to_lang_key(ext: &str) -> Option<&'static str> {
         "ex" | "exs" => "elixir",
         "scala" => "scala",
         "nim" => "nim",
+        // Added with their grammars: a language that parses and highlights but
+        // resolves to no server key here starts none, which reads as the
+        // editor not supporting it.
+        "m" | "mm" => "objective-c",
+        "xml" | "xsd" | "xsl" | "xslt" | "svg" | "plist" => "xml",
+        "cmake" => "cmake",
         _ => return None,
     })
 }
 
+/// The spelling of an extension that the tables below are written in.
+///
+/// The language table knows eleven spellings these tables never did — `c++`,
+/// `hxx`, `ipp`, `csx`, `rake`, `gemspec`, `phtml`, `sbt`, `ksh`, `pyw`,
+/// `xhtml`. Without this, a `.rake` file highlighted as Ruby and then started
+/// no language server, which reads as "the editor does not support Ruby".
+/// Extensions with no grammar — `kt`, `nim`, `vue`, `svelte`, `scss` — pass
+/// through untouched and keep their own arms.
+fn canonical_ext(ext: &str) -> &str {
+    match crate::lang::Lang::from_ext(ext) {
+        Some(l) => l.extensions()[0],
+        None => ext,
+    }
+}
+
 fn default_server_for_ext(ext: &str) -> Option<&'static str> {
+    let ext = canonical_ext(ext);
     // Prefer catalog defaults when available
     if let Some(lang) = ext_to_lang_key(ext) {
         for (key, _, cmd) in config::lsp_lang_catalog() {
@@ -2799,6 +2822,10 @@ fn default_server_for_ext(ext: &str) -> Option<&'static str> {
         "svelte" => "svelteserver --stdio",
         "dart" => "dart language-server",
         "r" | "R" => "r-languageserver",
+        // clangd handles Objective-C from the same install that handles C.
+        "m" | "mm" => "clangd",
+        "xml" | "xsd" | "xsl" | "xslt" | "svg" | "plist" => "lemminx",
+        "cmake" => "cmake-language-server",
         _ => return None,
     })
 }
@@ -2815,7 +2842,7 @@ fn lang_id(path: &str) -> &'static str {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    match ext.as_str() {
+    match canonical_ext(&ext) {
         "rs" => "rust",
         "py" | "pyi" => "python",
         "ts" | "mts" | "cts" => "typescript",
@@ -2850,6 +2877,12 @@ fn lang_id(path: &str) -> &'static str {
         "ex" | "exs" => "elixir",
         "scala" => "scala",
         "nim" => "nim",
+        // The LSP spec's own ids: `.mm` is Objective-C++, not Objective-C, and
+        // clangd chooses a different dialect on the strength of it.
+        "m" => "objective-c",
+        "mm" => "objective-cpp",
+        "xml" | "xsd" | "xsl" | "xslt" | "svg" | "plist" => "xml",
+        "cmake" => "cmake",
         _ => "plaintext",
     }
 }
