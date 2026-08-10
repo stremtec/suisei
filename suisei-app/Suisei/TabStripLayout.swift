@@ -46,7 +46,7 @@ struct TabStripLayout: Equatable {
     /// Its own number, not the inter-chip `gap`. The button is not another
     /// chip — it reads as crowded at the 4pt that separates two tabs, and it is
     /// the last thing before the toolbar cluster.
-    static let plusGap: CGFloat = 12
+    static let plusGap: CGFloat = 15
 
     let chips: [Chip]
     /// Total width of the chip run, excluding any trailing gap.

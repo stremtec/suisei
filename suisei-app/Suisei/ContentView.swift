@@ -1662,7 +1662,31 @@ struct ContentView: View {
                 height: Self.tabLabelFrameH,
                 alignment: .topLeading
             )
-            .clipped()
+            // The fades live HERE, on the container that actually cuts.
+            //
+            // They used to be a `.mask` on the outer `viewport`-wide box while
+            // this clipped at `runWidth` — 26pt narrower — so the gradients
+            // dissolved empty space and the chips met a hard edge. Same class
+            // of mistake as the "+" overlap: two spans, one of them the real
+            // boundary. This mask both clips and softens, so there is one.
+            .mask(
+                HStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [.clear, .black],
+                        startPoint: .leading, endPoint: .trailing
+                    )
+                    .frame(
+                        width: layout.overflow
+                            ? Self.tabLeadingFadeW : Self.tabEdgeFadeW
+                    )
+                    Rectangle().fill(Color.black)
+                    LinearGradient(
+                        colors: [.black, .clear],
+                        startPoint: .leading, endPoint: .trailing
+                    )
+                    .frame(width: Self.tabEdgeFadeW)
+                }
+            )
 
             // Tabs past the ABI cap don't vanish silently.
             if engine.chrome.tabsOverflow > 0 {
@@ -1680,34 +1704,8 @@ struct ContentView: View {
         // structural curve directly — no one-pass lag to hide.
         .animation(engine.tabStructuralAnimation, value: tabStripPresentationKey)
         .frame(height: 26)
-        // Chips dissolve at both ends rather than being cut.
-        //
-        // The LEADING fade is the longer of the two, and that asymmetry is the
-        // point: the sidebar is what a scrolled run disappears towards, and a
-        // 14pt cut against a translucent panel reads as clipping while a long
-        // dissolve reads as passing behind it. It cannot actually pass behind —
-        // the strip lives in the detail column and a split view clips its
-        // columns — so the gradient is doing the work the geometry cannot.
-        //
-        // Only while the run OVERFLOWS. A run that fits is centred and can
-        // legitimately start at the strip's leading edge, and a long fade there
-        // would dissolve a chip into nothing for no reason. Overflow is a
-        // stable state, not a per-frame one, so the length never pops mid-scroll.
-        .mask(
-            HStack(spacing: 0) {
-                LinearGradient(
-                    colors: [.clear, .black], startPoint: .leading, endPoint: .trailing
-                )
-                .frame(
-                    width: layout.overflow ? Self.tabLeadingFadeW : Self.tabEdgeFadeW
-                )
-                Rectangle().fill(Color.black)
-                LinearGradient(
-                    colors: [.black, .clear], startPoint: .leading, endPoint: .trailing
-                )
-                .frame(width: Self.tabEdgeFadeW)
-            }
-        )
+        // The chip run's own fades are on its clipping container above; the
+        // "+" and the overflow badge sit outside them, and must not be masked.
         // Keep the selection reachable when the run outgrows the viewport.
         // `scrollToReveal` returns nil when the chip is already whole on
         // screen, so this writes nothing in the common case — the strip no
@@ -1794,6 +1792,18 @@ struct ContentView: View {
                 },
                 onEnd: { draggingTab = nil },
                 onScroll: { dx in tabScroll.scroll(by: dx, layout: layout) },
+                plusAt: { p in
+                    // The button's own rect, from the layout that placed it —
+                    // widened a little, because a 22pt target is small and the
+                    // pointer is arriving through a claimed press either way.
+                    let x = Self.tabEdgeFadeW + layout.plusX
+                    return CGRect(
+                        x: x, y: 0, width: Self.tabPlusW, height: Self.tabLabelFrameH
+                    )
+                    .insetBy(dx: -4, dy: -4)
+                    .contains(p)
+                },
+                onPlus: { showTabPlusMenu() },
                 onFoldUp: { engine.advanceLayoutPresentation() },
                 onFoldDown: { engine.retreatLayoutPresentation() }
             )
@@ -2106,8 +2116,15 @@ struct ContentView: View {
     /// own baseline and the glyph permanently sat ~2pt high next to the tab
     /// chips no matter what frames wrapped it (the recurring "+가 위로 튐").
     /// A Button glyph centers exactly like every other chip.
-    private var tabPlusMenu: some View {
-        Button {
+    /// Build and pop the "+" menu.
+    ///
+    /// A function, not a Button action, because the Button was never what
+    /// received the click. `TabStripMouse` claims every press in the titlebar
+    /// region — that is the entire reason it exists — so it sits above this
+    /// overlay and the SwiftUI action never fired. The catcher routes the press
+    /// here instead, hit-tested against the same layout that placed the button,
+    /// which also means the menu pops from a real mouse event.
+    private func showTabPlusMenu() {
             plusBridge.engine = engine
             let menu = NSMenu()
             func add(_ title: String, _ sel: Selector) {
@@ -2128,23 +2145,24 @@ struct ContentView: View {
             {
                 NSMenu.popUpContextMenu(menu, with: event, for: view)
             }
-        } label: {
-            // Literal text "+" — NOT an SF Symbol, NOT drawn shapes. Rendered
-            // through the exact same text layout as the tab labels, so the
-            // glyph rides the same baseline and lands at the tabs' OPTICAL
-            // position on its own. Geometric centering (a symbol's alignment
-            // rect, or crossed shapes) parks the glyph at the line-box center,
-            // which sits ~1-2px ABOVE where text visually reads — that was the
-            // persistent "+ too high". Text has no such offset to fight.
-            Text("+")
-                .font(.system(size: Self.plusPointSize, weight: .regular))
-                .foregroundStyle(.secondary)
-                .frame(width: 22, height: Self.plusFrameH)
-                .offset(y: Self.plusInkNudge)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Tabs · ⌃⇥ cycle · split editors")
+    }
+
+    /// The "+" itself — visual only. `TabStripMouse` delivers its clicks.
+    ///
+    /// Literal text "+", NOT an SF Symbol and NOT drawn shapes. Rendered
+    /// through the exact same text layout as the tab labels, so the glyph rides
+    /// the same baseline and lands at the tabs' OPTICAL position on its own.
+    /// Geometric centering (a symbol's alignment rect, or crossed shapes) parks
+    /// the glyph at the line-box centre, which sits ~1-2px ABOVE where text
+    /// visually reads — that was the persistent "+ too high". Text has no such
+    /// offset to fight.
+    private var tabPlusMenu: some View {
+        Text("+")
+            .font(.system(size: Self.plusPointSize, weight: .regular))
+            .foregroundStyle(.secondary)
+            .frame(width: 22, height: Self.plusFrameH)
+            .offset(y: Self.plusInkNudge)
+            .help("Tabs · ⌃⇥ cycle · split editors")
     }
 
     // Type metrics for the tab strip's "+". Kept next to the button they
@@ -6518,10 +6536,17 @@ private struct TabStripMouse: NSViewRepresentable {
     var onEnd: () -> Void
     /// Horizontal scroll; returns whether the strip consumed it.
     var onScroll: (CGFloat) -> Bool
+    /// Is this point on the "+"? It lives under this catcher, which claims
+    /// every press in the titlebar region, so it can never be clicked by
+    /// SwiftUI — the click has to be routed from here like every other one.
+    var plusAt: (CGPoint) -> Bool = { _ in false }
+    var onPlus: () -> Void = {}
     var onFoldUp: () -> Void = {}
     var onFoldDown: () -> Void = {}
 
     final class Catcher: NSView {
+        var plusAt: ((CGPoint) -> Bool)?
+        var onPlus: (() -> Void)?
         var slotAt: ((CGFloat) -> Int?)?
         var closeAt: ((CGPoint) -> Int?)?
         var targetFor: ((Int, CGFloat) -> Int?)?
@@ -6784,7 +6809,9 @@ private struct TabStripMouse: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             if !moved {
                 let point = convert(event.locationInWindow, from: nil)
-                if let slot = closeAt?(point) {
+                if plusAt?(point) == true {
+                    onPlus?()
+                } else if let slot = closeAt?(point) {
                     onClose?(slot)
                 } else if let slot = slotAt?(point.x) {
                     if event.clickCount >= 2 {
@@ -6821,6 +6848,8 @@ private struct TabStripMouse: NSViewRepresentable {
         v.onDoubleClick = onDoubleClick
         v.onClose = onClose
         v.onEnd = onEnd
+        v.plusAt = plusAt
+        v.onPlus = onPlus
         v.onFoldUp = onFoldUp
         v.onFoldDown = onFoldDown
     }
