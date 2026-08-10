@@ -1628,11 +1628,11 @@ struct ContentView: View {
         }
     }
 
-    private func documentTabStrip(maxWidth: CGFloat) -> some View {
+    private func documentTabStrip(maxWidth: CGFloat, centreOn: CGFloat) -> some View {
         let tabs = engine.chrome.tabs
         // Chips rest inside the fade at both ends rather than under it.
         let viewport = max(1, maxWidth - Self.tabEdgeFadeW * 2)
-        let layout = stripLayout(viewportWidth: viewport)
+        let layout = stripLayout(viewportWidth: viewport, centreOn: centreOn)
 
         return ZStack(alignment: .topLeading) {
             // Chip layers are CLIPPED to the run's span, not the viewport's.
@@ -1880,7 +1880,9 @@ struct ContentView: View {
 
     /// The strip's geometry for this pass — the only authority for where a chip
     /// is, used by the renderer and the hit test alike.
-    private func stripLayout(viewportWidth: CGFloat) -> TabStripLayout {
+    private func stripLayout(
+        viewportWidth: CGFloat, centreOn: CGFloat? = nil
+    ) -> TabStripLayout {
         let tabs = engine.chrome.tabs
         return TabStripLayout(
             tabs: tabs.map { (stableId: $0.stableId, group: $0.group) },
@@ -1888,6 +1890,7 @@ struct ContentView: View {
             // Owned, not observed. A `ScrollView` reported this back a pass
             // late, which is the lag the whole strip used to be built around.
             scrollOffset: tabScroll.offset,
+            centreOn: centreOn,
             widthFor: { slot in
                 let t = tabs[slot]
                 return TabChipMetrics.width(
@@ -1976,14 +1979,29 @@ struct ContentView: View {
             let sidebar = navLiveWidth
             // Window centre, expressed in this column's coordinates.
             let centre = (geo.size.width - sidebar) / 2
-            // Clamped by both neighbours: the splitter on one side, the toolbar
-            // cluster on the other. Whichever is nearer sets the half-width, so
-            // the strip stays symmetric about `centre` and can never slide
-            // under the sidebar or under the toolbar.
+            // The strip gets the WHOLE span between its neighbours — the
+            // splitter on one side, the toolbar cluster on the other — and the
+            // centring happens INSIDE it, as an offset the layout applies to
+            // the run (`TabStripLayout.init(centreOn:)`).
+            //
+            // It used to be a span symmetric about `centre`, and that symmetry
+            // is what made the strip's WIDTH depend on the sidebar. With the
+            // sidebar open the window centre sits nearer the detail's left
+            // edge, so the near side clamped the far side: at 1280x820 the
+            // strip went 916 → 648 while 134pt of perfectly good room on the
+            // right went unused. A 308pt panel cost the strip 268pt, and every
+            // open/close reflowed the chips, flipped the overflow state and
+            // moved the scroll clamp.
+            //
+            // Same centreline, no narrowing: one number decides the box, a
+            // different one decides where the run sits in it.
             let leftLimit: CGFloat = 8
             let rightLimit = geo.size.width - 150
-            let half = max(30, min(centre - leftLimit, rightLimit - centre))
-            let wideCap = max(60, half * 2) - 22
+            let span = max(60, rightLimit - leftLimit)
+            let wideCap = span - 22
+            // The window centre, expressed relative to the strip's own leading
+            // edge, which is what the layout wants.
+            let centreInStrip = centre - leftLimit - Self.tabEdgeFadeW
 
             ZStack {
                 // Empty areas drag the window; double-click zooms (titlebar
@@ -2017,8 +2035,8 @@ struct ContentView: View {
                 // and stays hit-testable at all times: yanking hit-testing
                 // off a Menu mid-tracking wedges the app's event loop.
                 HStack(spacing: 0) {
-                    Spacer().frame(width: max(0, centre - half))
-                    documentTabStrip(maxWidth: wideCap)
+                    Spacer().frame(width: leftLimit)
+                    documentTabStrip(maxWidth: wideCap, centreOn: centreInStrip)
                     Spacer(minLength: 0)
                 }
 
@@ -6634,17 +6652,29 @@ private struct TabStripMouse: NSViewRepresentable {
                 // run is moved here. A trackpad's horizontal component is
                 // `scrollingDeltaX`; a plain wheel with shift held reports on
                 // the same axis, so both arrive as one number.
-                // A trackpad's horizontal component is `scrollingDeltaX`. A
-                // plain mouse wheel has none — it only reports Y — and a tab
-                // strip is expected to scroll from that too (every browser does
-                // it), so a vertical wheel that is NOT a fold flick drives the
-                // run sideways.
-                let dx = event.scrollingDeltaX
-                let raw = dx != 0 ? dx : event.scrollingDeltaY
-                // Trackpads already report point deltas and a momentum tail.
-                // Mouse-wheel detents are tiny unit steps; map those to one
-                // conventional text-line distance so both devices feel direct.
-                let delta = event.hasPreciseScrollingDeltas ? raw : raw * 24
+                // The Y axis substitutes for X on a WHEEL only.
+                //
+                // A plain mouse wheel has no horizontal axis, and a tab strip
+                // is expected to scroll from its one axis (every browser does
+                // it). A trackpad has both, and taking its Y as well meant any
+                // two-finger scroll that drifted vertically over the strip
+                // yanked the tabs sideways by the full vertical delta — a
+                // gesture aimed at the editor moving the chrome, which is the
+                // "가로 스크롤 느낌이 별로" of it. Precise devices get X only.
+                let delta: CGFloat
+                if event.hasPreciseScrollingDeltas {
+                    // Already point deltas with their own momentum tail: pass
+                    // them through untouched, which is what makes a trackpad
+                    // feel like the surface it is moving.
+                    delta = event.scrollingDeltaX
+                } else {
+                    // Wheel detents are tiny unit steps. One conventional text
+                    // line per detent, from whichever axis the device reports.
+                    let raw = event.scrollingDeltaX != 0
+                        ? event.scrollingDeltaX
+                        : event.scrollingDeltaY
+                    delta = raw * 24
+                }
                 if delta != 0, onScroll?(delta) == true { return }
                 super.scrollWheel(with: event)
                 return

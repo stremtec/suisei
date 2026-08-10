@@ -65,10 +65,13 @@ struct TabStripLayout: Equatable {
     /// `widthFor` is injected rather than called directly so this stays pure:
     /// tests supply fixed widths, the app supplies a cached CoreText
     /// measurement. It is the only thing here that needs a font.
+    /// - Parameter centreOn: where the run should be centred, in viewport
+    ///   coordinates, when it fits. `nil` centres it in its own span.
     init(
         tabs: [(stableId: UInt64, group: UInt64)],
         viewportWidth: CGFloat,
         scrollOffset: CGFloat,
+        centreOn: CGFloat? = nil,
         widthFor: (Int) -> CGFloat
     ) {
         var built: [Chip] = []
@@ -102,10 +105,23 @@ struct TabStripLayout: Equatable {
             let maxScroll = content - run
             originX = -min(max(0, scrollOffset), maxScroll)
         } else {
-            // Centred in the RUN's span, not the viewport's: the reserved "+"
-            // slot is part of the strip, so centring against the full width
-            // would push the chips half a slot left of where they read.
-            originX = ((run - content) / 2).rounded()
+            // Where the run sits when it fits is decided HERE, and only here.
+            //
+            // It used to be decided twice: `topBar` narrowed the strip's box to
+            // a span symmetric about the window's centreline, and this centred
+            // the run inside that box. Symmetry is what made the strip's WIDTH
+            // depend on the sidebar — with the sidebar open the window centre
+            // sits nearer the detail's left edge, so the near side clamped the
+            // far side and 134pt of perfectly good room on the right went
+            // unused, at 1280x820. Opening the sidebar cost the strip 268pt for
+            // a 308pt panel.
+            //
+            // So the box is the whole available span now, and the CENTRING is
+            // an offset inside it — clamped to the ends, so a run that cannot
+            // be centred without leaving the viewport slides instead of
+            // shrinking the viewport.
+            let wanted = centreOn.map { $0 - content / 2 } ?? (run - content) / 2
+            originX = min(max(0, wanted), max(0, run - content)).rounded()
         }
     }
 
@@ -170,6 +186,12 @@ struct TabStripLayout: Equatable {
         guard let first = members.first, let last = members.last else { return nil }
         return (originX + first.x, originX + last.maxX)
     }
+
+    /// How far the run may be scrolled. Against `runWidth`, like everything
+    /// else that asks where chips go — measured against `viewportWidth` it was
+    /// 26pt too generous, so the last stretch of a scroll moved nothing and the
+    /// strip read as sticking at the end.
+    var maxScroll: CGFloat { max(0, contentWidth - runWidth) }
 
     /// Leading inset for the "+", which rides the run's trailing edge.
     ///
