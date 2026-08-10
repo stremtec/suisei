@@ -8008,6 +8008,14 @@ private struct EditorWindowChrome: NSViewRepresentable {
         if !window.styleMask.contains(.fullSizeContentView) {
             window.styleMask.insert(.fullSizeContentView)
         }
+        // Belt and braces with `allowsAutomaticWindowTabbing = false` in the
+        // app delegate. That flag is class-wide and set once at launch; this is
+        // the editor window saying it for itself, on every update, because the
+        // editor is the only WindowGroup here — the one scene that can produce
+        // a second window for AppKit to want to tab together.
+        if window.tabbingMode != .disallowed {
+            window.tabbingMode = .disallowed
+        }
         // No `titleVisibility = .hidden` here, deliberately. It hides the title
         // by removing the toolbar's title ITEM, and that item is what anchors
         // the `.primaryAction` group to the trailing edge — hiding it moved the

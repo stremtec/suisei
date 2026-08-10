@@ -568,6 +568,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        // No native window tabbing, anywhere in this app.
+        //
+        // AppKit's tab bar groups WINDOWS; the editor's tab strip groups
+        // BUFFERS. Two different things called tabs, stacked one above the
+        // other, and the layout feature — fold a split arrangement into a tab,
+        // unfold it again — hangs off the buffer side. Nothing about a window
+        // tab can carry a pane arrangement, so building layouts on the native
+        // bar would mean reimplementing the buffer model inside it.
+        //
+        // This also takes Show Tab Bar / Show All Tabs / Merge All Windows /
+        // Move Tab to New Window out of the Window menu, which is the visible
+        // half of the problem: those four items were reachable and every one of
+        // them put a second tab bar above ours.
+        NSWindow.allowsAutomaticWindowTabbing = false
         // Welcome window is presented by Scene.defaultLaunchBehavior(.presented).
         // Do not force AppKit traffic-light hacks here.
     }
