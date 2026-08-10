@@ -17,6 +17,15 @@ struct SettingsWindowView: View {
     private var s: SettingsSnap { engine.chrome.settings }
     private var theme: ThemeSnap { engine.chrome.theme }
 
+    /// The highlight the user actually chose, not the system's.
+    ///
+    /// `Color.accentColor` is the SYSTEM accent and `.tint()` does not redirect
+    /// it — so every ring and swatch here stayed blue while Appearance's own
+    /// highlight setting said otherwise, which is a confusing thing for the
+    /// window that sets it. `theme.accent` already carries the choice: Core
+    /// builds the theme through `theme::with_highlight(t, cfg.highlight_color)`.
+    private var liveAccent: Color { theme.color(theme.accent) }
+
     private var isLightTheme: Bool {
         let c = theme.editorBg
         let r = Double((c >> 16) & 0xFF)
@@ -719,7 +728,7 @@ struct SettingsWindowView: View {
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.38), lineWidth: 0.5))
                         .overlay(
                             Circle()
-                                .strokeBorder(Color.accentColor, lineWidth: 2)
+                                .strokeBorder(liveAccent, lineWidth: 2)
                                 .padding(-3)
                                 .opacity(selected == "DEFAULT" ? 1 : 0)
                         )
@@ -735,7 +744,7 @@ struct SettingsWindowView: View {
                             .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5))
                             .overlay(
                                 Circle()
-                                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                                    .strokeBorder(liveAccent, lineWidth: 2)
                                     .padding(-3)
                                     .opacity(selected == preset.hex ? 1 : 0)
                             )
@@ -873,7 +882,7 @@ struct SettingsWindowView: View {
                 )
                 .overlay(
                     shape
-                        .strokeBorder(on ? Color.accentColor : Color.secondary.opacity(0.3),
+                        .strokeBorder(on ? liveAccent : Color.secondary.opacity(0.3),
                                       lineWidth: on ? 2.5 : 1)
                 )
                 .scaleEffect(on ? 1.0 : 0.97)
@@ -906,7 +915,7 @@ struct SettingsWindowView: View {
                 appearancePreview(preview)
                 .overlay(
                     RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                        .strokeBorder(on ? Color.accentColor : Color.secondary.opacity(0.3),
+                        .strokeBorder(on ? liveAccent : Color.secondary.opacity(0.3),
                                       lineWidth: on ? 2.5 : 1)
                 )
                 .scaleEffect(on ? 1.0 : 0.97)
@@ -935,7 +944,7 @@ struct SettingsWindowView: View {
 
                     VStack(alignment: .leading, spacing: 2.5) {
                         RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.85))
+                            .fill(liveAccent.opacity(0.85))
                             .frame(width: 17, height: 6)
                         ForEach([13.0, 16.0, 11.0], id: \.self) { width in
                             Capsule()
@@ -958,7 +967,7 @@ struct SettingsWindowView: View {
 
                         VStack(alignment: .leading, spacing: 3) {
                             RoundedRectangle(cornerRadius: 1, style: .continuous)
-                                .fill(Color.accentColor.opacity(0.82))
+                                .fill(liveAccent.opacity(0.82))
                                 .frame(width: 24, height: 3)
                             RoundedRectangle(cornerRadius: 1, style: .continuous)
                                 .fill(palette.line)

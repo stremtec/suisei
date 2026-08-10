@@ -1321,7 +1321,7 @@ struct ContentView: View {
                                 to: pillDragX ?? CGFloat(selectionTo) * slot,
                                 width: slot
                             )
-                            .fill(Color.accentColor)
+                            .fill(accent)
                         }
                     }
 
@@ -1595,7 +1595,7 @@ struct ContentView: View {
     private func navStripToggleIcon(_ systemImage: String, on: Bool) -> some View {
         navStripIcon(systemImage, lit: on ? 1 : 0)
             .background(
-                Capsule(style: .continuous).fill(on ? Color.accentColor : Color.clear)
+                Capsule(style: .continuous).fill(on ? accent : Color.clear)
             )
     }
 
@@ -1751,7 +1751,14 @@ struct ContentView: View {
         // The band is the row's own height (`topBandHeight`), so the slack is
         // derived rather than picked. Points are shifted back by it before they
         // reach the layout, which still speaks in row coordinates.
-        .padding(.vertical, -Self.tabRowSlack)
+        //
+        // Given to the OVERLAY as its own frame, not taken with negative
+        // padding on the parent. `.padding(.vertical, -11)` looks like it grows
+        // the box and does the opposite: it proposes 22pt more to the child and
+        // reports 22pt LESS, so a 26pt row became a 4pt one and the tracking
+        // area with it — which is why the first attempt at this made the glyph
+        // harder to reach rather than easier. An overlay child may be larger
+        // than its parent; it centres and overflows, which is exactly wanted.
         .overlay(
             TabStripMouse(
                 // Every query goes to the one layout this pass was drawn from.
@@ -1824,6 +1831,7 @@ struct ContentView: View {
                 onFoldUp: { engine.advanceLayoutPresentation() },
                 onFoldDown: { engine.retreatLayoutPresentation() }
             )
+            .frame(height: ContentView.topBandHeight)
             .accessibilityLabel("Document tabs")
             .accessibilityHint(
                 "Scroll up to group or unify the active layout; scroll down to expand it"
@@ -1892,7 +1900,7 @@ struct ContentView: View {
             dirty: tab.dirty,
             deleted: tab.deleted,
             active: tab.active,
-            accent: inLayout ? Color.black : Color.accentColor,
+            accent: inLayout ? Color.black : accent,
             fg: inLayout ? Color.black : Color.primary,
             dim: inLayout ? Color.black.opacity(0.72) : Color.secondary,
             isLight: isLightTheme,
@@ -2306,21 +2314,21 @@ struct ContentView: View {
                     // refresh is the header's own action, as before.
                     ToolbarPlainIcon(
                         systemImage: "doc.badge.plus", help: "New File in Folder",
-                        accent: Color.accentColor, dim: Color.secondary,
+                        accent: accent, dim: Color.secondary,
                         iconSize: 11.5, opticalNudgeY: 1.5
                     ) {
                         NotificationCenter.default.post(name: .suiseiNavNewFile, object: nil)
                     }
                     ToolbarPlainIcon(
                         systemImage: "folder.badge.plus", help: "New Folder",
-                        accent: Color.accentColor, dim: Color.secondary,
+                        accent: accent, dim: Color.secondary,
                         iconSize: 12.5, opticalNudgeY: 0.5
                     ) {
                         NotificationCenter.default.post(name: .suiseiNavNewFolder, object: nil)
                     }
                     ToolbarPlainIcon(
                         systemImage: "arrow.clockwise", help: "Refresh",
-                        accent: Color.accentColor, dim: Color.secondary,
+                        accent: accent, dim: Color.secondary,
                         iconSize: 13.5, opticalNudgeY: 1
                     ) {
                         ProjectTreeView.invalidateCache()
@@ -2332,7 +2340,7 @@ struct ContentView: View {
                         // its nominal point size. 12pt matches the measured
                         // visual mass of the adjacent action glyphs.
                         systemImage: "rectangle.compress.vertical", help: "Collapse All",
-                        accent: Color.accentColor, dim: Color.secondary,
+                        accent: accent, dim: Color.secondary,
                         iconSize: 12, opticalNudgeY: 1
                     ) {
                         NotificationCenter.default.post(name: .suiseiNavCollapseAll, object: nil)
@@ -2400,7 +2408,7 @@ struct ContentView: View {
             }(),
             engine: engine,
             rootPath: engine.projectRoot.isEmpty ? engine.chrome.explorer.cwd : engine.projectRoot,
-            accent: Color.accentColor,
+            accent: accent,
             fg: Color.primary,
             dim: Color.secondary,
             editorBg: editorBg,
@@ -2759,8 +2767,8 @@ struct ContentView: View {
                                         .font(.system(size: 11, weight: .semibold))
                                         .foregroundStyle(
                                             bp.verified
-                                                ? Color.accentColor
-                                                : Color.accentColor.opacity(0.55)
+                                                ? accent
+                                                : accent.opacity(0.55)
                                         )
                                         .frame(width: 14, height: 16)
                                     VStack(alignment: .leading, spacing: 2) {
@@ -3099,12 +3107,12 @@ struct ContentView: View {
                     .help("Close Shell")
                 }
             }
-            .foregroundStyle(active ? Color.accentColor : Color.secondary)
+            .foregroundStyle(active ? accent : Color.secondary)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
             .background(
                 Capsule(style: .continuous)
-                    .fill(active ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.05))
+                    .fill(active ? accent.opacity(0.14) : Color.primary.opacity(0.05))
             )
             .contentShape(Capsule(style: .continuous))
         }
@@ -4676,7 +4684,7 @@ struct ContentView: View {
                                             .frame(maxWidth: .infinity, alignment: .leading)
                                             .background(
                                                 Rectangle()
-                                                    .fill(item.selected ? Color.accentColor.opacity(0.14) : Color.clear)
+                                                    .fill(item.selected ? accent.opacity(0.14) : Color.clear)
                                             )
                                             .overlay(alignment: .leading) {
                                                 Rectangle()
@@ -5082,7 +5090,7 @@ struct ContentView: View {
                     to: CGFloat(inspectorTo) * slot,
                     width: slot
                 )
-                .fill(Color.accentColor)
+                .fill(accent)
             }
             .background {
                 // Behind the glyph row like the navigator's — but as a plain
@@ -6141,10 +6149,10 @@ struct ContentView: View {
                     Text("Terminal")
                 }
                 .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(accent)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 2)
-                .background(Capsule(style: .continuous).fill(Color.accentColor.opacity(0.12)))
+                .background(Capsule(style: .continuous).fill(accent.opacity(0.12)))
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
                 .help("Keys go to the shell — Esc or click the editor to leave")
             }
