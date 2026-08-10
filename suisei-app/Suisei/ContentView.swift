@@ -1793,6 +1793,7 @@ struct ContentView: View {
             tabId: tab.id,
             pillSpace: tabPillSpace,
             hovered: hoveredSlot == tab.id,
+            glassStyle: engine.glassStyle,
             action: {
                 focused = true
                 applyStripClick(chip: tab.stableId)
@@ -1960,6 +1961,21 @@ struct ContentView: View {
                 HStack(spacing: 0) {
                     Spacer().frame(width: max(0, centre - half))
                     documentTabStrip(maxWidth: wideCap)
+                        // The trough the chips sit in.
+                        //
+                        // AppKit's tab bar is a subdued glass container —
+                        // `NSLessExpensiveSubduedGlassEffectView`, 28pt tall,
+                        // inset 8pt from the window's edges — holding one
+                        // `NSGlassEffectView` per tab (measured,
+                        // `scripts/tabbar_probe2.swift`). The chips are the
+                        // inner glass; this is the outer one, at the same 28pt.
+                        //
+                        // `.clear`, not `.regular`: the trough's whole job is to
+                        // group the run without competing with the chips
+                        // floating in it, which is what "subdued" means here.
+                        .padding(.horizontal, 6)
+                        .frame(height: 28)
+                        .glassEffect(.clear, in: Capsule(style: .continuous))
                     Spacer(minLength: 0)
                 }
 
@@ -2025,6 +2041,22 @@ struct ContentView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // Same glass as the chips it sits beside. AppKit's own is a bezelled
+        // `NSTabBarNewTabButton`, 28×28, parked outside the track at the bar's
+        // trailing end (measured, `scripts/tabbar_probe2.swift`); ours hugs the
+        // last tab instead, so it takes the chips' 24pt height rather than the
+        // bar's 28 — but it is a control on glass either way, not bare ink on
+        // the titlebar.
+        //
+        // The frame stays 22pt wide: `tabPlusW` is what `TabStripLayout` uses
+        // to place this button, and widening it here alone would put the glyph
+        // and its slot in two different places.
+        .glassEffect(
+            SuiseiGlass.chrome(
+                light: isLightTheme, style: engine.glassStyle
+            ).interactive(),
+            in: Capsule(style: .continuous)
+        )
         .help("Tabs · ⌃⇥ cycle · split editors")
     }
 

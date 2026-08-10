@@ -106,6 +106,8 @@ struct ToolbarTabChip: View {
     var pillSpace: Namespace.ID
     /// Hover comes from the strip's single hit test, not from this chip.
     var hovered: Bool = false
+    /// Which glass family the window is using (Settings owns the choice).
+    var glassStyle: SuiseiGlassStyle = .tinted
     var action: () -> Void
     var onClose: (() -> Void)? = nil
 
@@ -172,6 +174,22 @@ struct ToolbarTabChip: View {
                         .matchedGeometryEffect(id: tabId, in: pillSpace, isSource: true)
                 }
             }
+            // Every chip is its own glass, selected or not.
+            //
+            // This is what a macOS 26 window tab is made of, read off a real
+            // one rather than recalled (`scripts/tabbar_probe2.swift`): each
+            // `NSTabButton` contains an `NSGlassEffectView`, and they all do —
+            // selection is not what turns the glass on. The strip's travelling
+            // capsule still says which chip is active, on top of the glass.
+            //
+            // Glass inside glass is normally the confused-hierarchy case the
+            // HIG warns about, and it is exactly what AppKit does here: the
+            // bar is one `NSLessExpensiveSubduedGlassEffectView` trough with a
+            // glass chip per tab inside it. The strip draws that trough.
+            .glassEffect(
+                SuiseiGlass.chrome(light: isLight, style: glassStyle).interactive(),
+                in: Capsule(style: .continuous)
+            )
             .scaleEffect(pressed ? 0.96 : 1)
             .contentShape(Capsule(style: .continuous))
         }
@@ -202,17 +220,33 @@ struct ToolbarTabChip: View {
                 .scaleEffect(dirty && !hovered ? 1 : 0.55)
 
             // Close × — visible only while hovered (replaces dirty).
+            //
+            // 16×16 and a real bordered circle, which is what AppKit puts in a
+            // window tab: `NSButton`, 16×16, `bordered = true`, circular bezel
+            // (measured, `scripts/tabbar_probe2.swift`). The 14pt flat disc
+            // this had read as a hover wash rather than a control.
+            //
+            // Still the TRAILING slot, and still sharing it with the dirty dot.
+            // AppKit puts its close button at the leading edge because a native
+            // tab has no dirty indicator to share the space with; this one does,
+            // and "one place, never both" is the rule that slot exists for.
             if let onClose {
                 Button {
                     onClose()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(dim.opacity(0.90))
-                        .frame(width: 14, height: 14)
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(dim.opacity(0.95))
+                        .frame(width: 16, height: 16)
                         .background(
                             Circle()
-                                .fill(Color.primary.opacity(isLight ? 0.10 : 0.16))
+                                .fill(Color.primary.opacity(isLight ? 0.08 : 0.12))
+                                .overlay(
+                                    Circle().strokeBorder(
+                                        Color(nsColor: .separatorColor).opacity(0.8),
+                                        lineWidth: 1
+                                    )
+                                )
                         )
                 }
                 .buttonStyle(.plain)
@@ -223,7 +257,7 @@ struct ToolbarTabChip: View {
                 .allowsHitTesting(hovered)
             }
         }
-        .frame(width: 14, height: 14)
+        .frame(width: 16, height: 16)
         .animation(.easeInOut(duration: 0.14), value: hovered)
     }
 }
