@@ -395,12 +395,20 @@ struct ContentView: View {
         // the sidebar displaces it rather than floating over it.
         // `.prominentDetail` is the overlay idiom, which is what the previous
         // hand-drawn navigator was imitating.
-        //
-        // The navigator's show/hide spring goes with the offset that needed it.
-        // A split view column animates its own collapse, and driving an
-        // `offset` alongside it would be two authorities for one motion — the
-        // defect five earlier attempts at that animation were all instances of.
         .navigationSplitViewStyle(.balanced)
+        // The navigator's show/hide motion.
+        //
+        // I removed this when the root became a split view, on the belief that
+        // a column animates its own collapse. It does not, when the visibility
+        // change arrives from a binding written outside a transaction — so the
+        // sidebar snapped.
+        //
+        // An IMPLICIT animation keyed on the value, which is the shape
+        // `animatingPanels` argues for and the inspector has always used: it
+        // deliberately runs no `withAnimation`, because an explicit transaction
+        // plus this modifier is two animators for one value, and that is what
+        // used to make the navigator stutter where the inspector never did.
+        .animation(.snappy(duration: 0.25), value: engine.uiNavVisible)
         // An EMPTY title, not a removed one. This is the whole reason the
         // toolbar items sit at the trailing edge — see `editorToolbar`.
         //
@@ -1672,13 +1680,27 @@ struct ContentView: View {
         // structural curve directly — no one-pass lag to hide.
         .animation(engine.tabStructuralAnimation, value: tabStripPresentationKey)
         .frame(height: 26)
-        // Chips dissolve while scrolling through an end, and rest fully visible.
+        // Chips dissolve at both ends rather than being cut.
+        //
+        // The LEADING fade is the longer of the two, and that asymmetry is the
+        // point: the sidebar is what a scrolled run disappears towards, and a
+        // 14pt cut against a translucent panel reads as clipping while a long
+        // dissolve reads as passing behind it. It cannot actually pass behind —
+        // the strip lives in the detail column and a split view clips its
+        // columns — so the gradient is doing the work the geometry cannot.
+        //
+        // Only while the run OVERFLOWS. A run that fits is centred and can
+        // legitimately start at the strip's leading edge, and a long fade there
+        // would dissolve a chip into nothing for no reason. Overflow is a
+        // stable state, not a per-frame one, so the length never pops mid-scroll.
         .mask(
             HStack(spacing: 0) {
                 LinearGradient(
                     colors: [.clear, .black], startPoint: .leading, endPoint: .trailing
                 )
-                .frame(width: Self.tabEdgeFadeW)
+                .frame(
+                    width: layout.overflow ? Self.tabLeadingFadeW : Self.tabEdgeFadeW
+                )
                 Rectangle().fill(Color.black)
                 LinearGradient(
                     colors: [.black, .clear], startPoint: .leading, endPoint: .trailing
@@ -1995,7 +2017,21 @@ struct ContentView: View {
             //
             // Same centreline, no narrowing: one number decides the box, a
             // different one decides where the run sits in it.
-            let leftLimit: CGFloat = 8
+            // The leading limit depends on the sidebar, and this is the ONE
+            // thing about the strip that legitimately does.
+            //
+            // The traffic lights and the navigator toggle occupy the window's
+            // leading ~148pt. While the sidebar is open they sit over IT, so
+            // the detail's leading edge is free and 8pt is right. Collapse the
+            // sidebar and that same zone lands on the detail — which is how
+            // tabs ended up drawn over the lights and the toggle.
+            //
+            // Expressed in detail coordinates, the zone is `148 - sidebar`, so
+            // it retreats to nothing exactly as the sidebar grows past it. That
+            // is a position moving with a panel, not a width doing so; the run
+            // keeps whatever room is left.
+            let leadingControls: CGFloat = 148
+            let leftLimit = max(8, leadingControls - sidebar)
             let rightLimit = geo.size.width - 150
             let span = max(60, rightLimit - leftLimit)
             let wideCap = span - 22
@@ -2039,6 +2075,12 @@ struct ContentView: View {
                     documentTabStrip(maxWidth: wideCap, centreOn: centreInStrip)
                     Spacer(minLength: 0)
                 }
+                // Explicitly NOT animated. `navLiveWidth` is already published
+                // from the splitter on every frame of the collapse, so the
+                // strip's geometry is a smooth curve before it gets here —
+                // animating each reported step would be a second animator on
+                // one motion, which is the trap `animatingPanels` documents.
+                .animation(nil, value: sidebar)
 
             // Nothing else in this row. The trailing controls are real toolbar
             // items now — see `editorToolbar`. The sidebar toggle went to the
@@ -2116,6 +2158,8 @@ struct ContentView: View {
     private static let tabLabelPointSize: CGFloat = 12
     private static let tabLabelFrameH: CGFloat = 24
     private static let tabEdgeFadeW: CGFloat = 14
+    /// The leading fade — see the strip's mask for why it is the longer one.
+    private static let tabLeadingFadeW: CGFloat = 34
 
     /// Nudge that lands the "+" on the tab labels' optical line.
     ///

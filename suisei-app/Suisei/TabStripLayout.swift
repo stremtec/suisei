@@ -41,6 +41,12 @@ struct TabStripLayout: Equatable {
     static let gap: CGFloat = 4
     /// Width of the "+" slot.
     static let plusWidth: CGFloat = 22
+    /// Gap between the run's trailing edge and the "+".
+    ///
+    /// Its own number, not the inter-chip `gap`. The button is not another
+    /// chip — it reads as crowded at the 4pt that separates two tabs, and it is
+    /// the last thing before the toolbar cluster.
+    static let plusGap: CGFloat = 12
 
     let chips: [Chip]
     /// Total width of the chip run, excluding any trailing gap.
@@ -96,7 +102,7 @@ struct TabStripLayout: Equatable {
         // `plusX`'s clamp then parked the button back on top of the last chips
         // — the reported overlap. Reserving the slot up front is what makes
         // that clamp unreachable rather than merely survivable.
-        let run = max(0, viewportWidth - (Self.plusWidth + Self.gap))
+        let run = max(0, viewportWidth - (Self.plusWidth + Self.plusGap))
         runWidth = run
         overflow = content > run
         if overflow {
@@ -200,7 +206,7 @@ struct TabStripLayout: Equatable {
     /// `viewportWidth - plusWidth` by construction. It stays because a
     /// zero-width viewport still has to produce a number.
     var plusX: CGFloat {
-        let trailing = originX + contentWidth + Self.gap
+        let trailing = originX + contentWidth + Self.plusGap
         return min(max(0, trailing), max(0, viewportWidth - Self.plusWidth))
     }
 
