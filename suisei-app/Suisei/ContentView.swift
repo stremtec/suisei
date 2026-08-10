@@ -422,6 +422,7 @@ struct ContentView: View {
                 opaque: true
             )
         )
+        .background(EditorWindowChrome())
     }
 
     /// One authority for "is the navigator showing" — Core's flag — restated in
@@ -2944,10 +2945,10 @@ struct ContentView: View {
             if window.appearance?.name != name {
                 window.appearance = appearance
             }
-            guard isEditorWindow(window) else { continue }
-            if window.titleVisibility != .hidden {
-                window.titleVisibility = .hidden
-            }
+            // Nothing else: the editor window's own geometry is
+            // `EditorWindowChrome`'s, which reads its window directly instead
+            // of matching an identifier this function may run before anyone
+            // has set.
         }
     }
 
@@ -7891,6 +7892,49 @@ private struct JumpBarSegmentButton: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.1), value: hovering)
+    }
+}
+
+/// The two window bits that are the EDITOR's alone, applied to its own window.
+///
+/// Full-size content is what lets the split view's sidebar rise THROUGH the
+/// transparent titlebar with AppKit's traffic lights floating over it. Without
+/// it the content view starts below the titlebar, `detailStack`'s
+/// `.ignoresSafeArea(.top)` has nothing to ignore, and the window grows a 28pt
+/// empty strip above the tab row. Hidden title, because this window has nowhere
+/// to draw one.
+///
+/// Settings deliberately gets neither — SwiftUI owns its titlebar geometry —
+/// which is why these are here and not in `applyThemedTitlebar`.
+///
+/// A representable rather than a branch inside `applyWindowAppearance`: that
+/// function finds its windows by `identifier`, and the identifier is set
+/// asynchronously by `ThemedWindowChrome`, so on a cold launch it could run
+/// against a window that matched nothing yet. This reads `nsView.window`.
+///
+/// Guarded, like everything else that touches window style here: re-assigning
+/// identical values on reactivation rebuilds the window's view bridge and kills
+/// NSHostingView hit-testing.
+private struct EditorWindowChrome: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.isHidden = true
+        DispatchQueue.main.async { apply(view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { apply(nsView) }
+    }
+
+    private func apply(_ view: NSView) {
+        guard let window = view.window else { return }
+        if !window.styleMask.contains(.fullSizeContentView) {
+            window.styleMask.insert(.fullSizeContentView)
+        }
+        if window.titleVisibility != .hidden {
+            window.titleVisibility = .hidden
+        }
     }
 }
 
