@@ -1610,6 +1610,22 @@ struct ContentView: View {
     /// What made this possible was noticing the viewport width is an INPUT
     /// (`maxWidth`), not something to discover. With that and exact chip widths,
     /// every position is arithmetic and there is nothing left to measure.
+    /// The chips themselves, hoisted so `documentTabStrip`'s two nested stacks
+    /// stay within what the type-checker will solve.
+    @ViewBuilder
+    private func chipRow(_ layout: TabStripLayout, tabs: [TabItem]) -> some View {
+        TabStripRow(layout: layout, rowHeight: Self.tabLabelFrameH) {
+            // Keyed by the DOCUMENT, not the slot: with the slot index as
+            // identity a reorder leaves the identity list unchanged and only
+            // the titles swap in place, so there is nothing for SwiftUI to
+            // move. Order here must match `layout.chips` — both come from
+            // `engine.chrome.tabs` in the same pass.
+            ForEach(tabs, id: \.stableId) { tab in
+                stripChip(tab)
+            }
+        }
+    }
+
     private func documentTabStrip(maxWidth: CGFloat) -> some View {
         let tabs = engine.chrome.tabs
         // Chips rest inside the fade at both ends rather than under it.
@@ -1617,19 +1633,26 @@ struct ContentView: View {
         let layout = stripLayout(viewportWidth: viewport)
 
         return ZStack(alignment: .topLeading) {
-            stripBandsView(layout)
-            stripActivePill(layout)
-
-            TabStripRow(layout: layout, rowHeight: Self.tabLabelFrameH) {
-                // Keyed by the DOCUMENT, not the slot: with the slot index as
-                // identity a reorder leaves the identity list unchanged and only
-                // the titles swap in place, so there is nothing for SwiftUI to
-                // move. Order here must match `layout.chips` — both come from
-                // `engine.chrome.tabs` in the same pass.
-                ForEach(tabs, id: \.stableId) { tab in
-                    stripChip(tab)
-                }
+            // Chip layers are CLIPPED to the run's span, not the viewport's.
+            //
+            // Reserving the "+" slot in `TabStripLayout` was necessary and not
+            // sufficient: it stopped the layout from placing chips there, but a
+            // scrolled run is longer than its span by definition, and this
+            // container is `viewport` wide — so the overflowing tail was still
+            // being drawn straight through the reserved slot and under the
+            // button. The layout says where chips go; this says how far they
+            // may be seen.
+            ZStack(alignment: .topLeading) {
+                stripBandsView(layout)
+                stripActivePill(layout)
+                chipRow(layout, tabs: tabs)
             }
+            .frame(
+                width: layout.runWidth,
+                height: Self.tabLabelFrameH,
+                alignment: .topLeading
+            )
+            .clipped()
 
             // Tabs past the ABI cap don't vanish silently.
             if engine.chrome.tabsOverflow > 0 {
