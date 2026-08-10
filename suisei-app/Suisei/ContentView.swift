@@ -1637,18 +1637,13 @@ struct ContentView: View {
                 tabScroll.reveal(slot: slot, layout: layout)
             }
         }
-        // "+" rides the chips' trailing edge, at the layout's own clamp.
-        .overlay(alignment: .leading) {
-            tabPlusMenu
-                .fixedSize()
-                .frame(width: Self.tabPlusW, height: 26)
-                .opacity(tabStripHover ? 1 : 0)
-                .animation(.easeOut(duration: 0.12), value: tabStripHover)
-                .offset(x: Self.tabEdgeFadeW + layout.plusX)
-                // Only moves when the tab set changes, so the hover target
-                // never shifts under a resting cursor.
-                .animation(.snappy(duration: 0.22), value: tabStripPresentationKey)
-        }
+        // No "+" inside the strip any more. It used to ride the chips' trailing
+        // edge, inside the viewport, appearing on hover — which put it on the
+        // same surface as the chips and moving whenever the tab set changed.
+        // AppKit parks its own OUTSIDE the track, at a fixed spot, always
+        // visible: `NSTabBarNewTabButton`, 4pt past the track's trailing edge
+        // (measured, `scripts/newtab_button_probe.swift`). `topBar` places ours
+        // the same way, beside the trough rather than in it.
         .background(AnimationTraceProbe(key: "tab-strip"))
         .contentShape(Rectangle())
         .coordinateSpace(name: Self.tabStripSpace)
@@ -1922,8 +1917,11 @@ struct ContentView: View {
             // cluster on the other. Whichever is nearer sets the half-width, so
             // the strip stays symmetric about `centre` and can never slide
             // under the sidebar or under the toolbar.
+            // The "+" sits OUTSIDE the trough, so the right limit has to hold
+            // its slot as well — otherwise the trough would centre correctly
+            // and then push the button under the toolbar.
             let leftLimit: CGFloat = 8
-            let rightLimit = geo.size.width - 150
+            let rightLimit = geo.size.width - 150 - (Self.newTabSize + Self.newTabGap)
             let half = max(30, min(centre - leftLimit, rightLimit - centre))
             let wideCap = max(60, half * 2) - 22
 
@@ -1976,6 +1974,10 @@ struct ContentView: View {
                         .padding(.horizontal, 6)
                         .frame(height: 28)
                         .glassEffect(.clear, in: Capsule(style: .continuous))
+                    // Beside the trough, not in it — AppKit's own gap is 4pt
+                    // past the track's trailing edge.
+                    Spacer().frame(width: Self.newTabGap)
+                    tabPlusMenu
                     Spacer(minLength: 0)
                 }
 
@@ -2033,86 +2035,47 @@ struct ContentView: View {
             // rect, or crossed shapes) parks the glyph at the line-box center,
             // which sits ~1-2px ABOVE where text visually reads — that was the
             // persistent "+ too high". Text has no such offset to fight.
-            Text("+")
-                .font(.system(size: Self.plusPointSize, weight: .regular))
-                .foregroundStyle(.secondary)
-                .frame(width: 22, height: Self.plusFrameH)
-                .offset(y: Self.plusInkNudge)
+            Image(systemName: "plus")
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: Self.newTabSize, height: Self.newTabSize)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        // Same glass as the chips it sits beside. AppKit's own is a bezelled
-        // `NSTabBarNewTabButton`, 28×28, parked outside the track at the bar's
-        // trailing end (measured, `scripts/tabbar_probe2.swift`); ours hugs the
-        // last tab instead, so it takes the chips' 24pt height rather than the
-        // bar's 28 — but it is a control on glass either way, not bare ink on
-        // the titlebar.
+        // The system's own material for exactly this control.
         //
-        // The frame stays 22pt wide: `tabPlusW` is what `TabStripLayout` uses
-        // to place this button, and widening it here alone would put the glyph
-        // and its slot in two different places.
-        .glassEffect(
-            SuiseiGlass.chrome(
-                light: isLightTheme, style: engine.glassStyle
-            ).interactive(),
-            in: Capsule(style: .continuous)
-        )
+        // `NSTabBarNewTabButton` reports `bezelStyle` raw 16, which the macOS 26
+        // SDK names `NSBezelStyleGlass`, with `isBordered = true` and an
+        // image-only template symbol — and it is hosted by
+        // `_NSCoreHostingView<AppKitButton>`, i.e. AppKit draws it through
+        // SwiftUI already (measured, `scripts/newtab_button_probe.swift`).
+        // `.buttonStyle(.glass)` is that same style, so this is the control
+        // itself rather than a glass circle shaped to look like it.
+        //
+        // The literal "+" Text is gone with the hand-drawn treatment. That
+        // glyph existed to ride the tab labels' baseline while sitting among
+        // them; parked outside the trough in its own 28pt button there is no
+        // baseline to share, and a template symbol is what the system uses.
+        .buttonStyle(.glass)
+        .frame(width: Self.newTabSize, height: Self.newTabSize)
         .help("Tabs · ⌃⇥ cycle · split editors")
     }
 
-    // Type metrics for the tab strip's "+". Kept next to the button they
-    // correct, and DERIVED rather than eyeballed: the previous constant here
-    // was hand-measured at one font size, in the wrong direction, and left the
-    // glyph about 1.2pt low.
-    private static let plusPointSize: CGFloat = 20
-    /// Same box as a tab chip, so the two are centred by the same rule and only
-    /// the glyph-ink difference below is left to correct.
-    private static let plusFrameH: CGFloat = 24
+    /// The new-tab button's box, and its gap from the trough.
+    ///
+    /// AppKit's numbers: `NSTabBarNewTabButton` is 28x28 and starts 4pt past the
+    /// track's trailing edge, itself inset 8pt from the window
+    /// (`scripts/newtab_button_probe.swift`).
+    ///
+    /// The type metrics that used to live here — `plusPointSize`, `plusFrameH`
+    /// and a derived `plusInkNudge` — are gone with the literal "+" Text they
+    /// corrected. Three attempts went into that nudge, all of them landing the
+    /// glyph on the tab labels' optical line while it sat among them. It does
+    /// not sit among them any more, and a template symbol in its own button has
+    /// no baseline to share.
+    static let newTabSize: CGFloat = 28
+    static let newTabGap: CGFloat = 4
     private static let tabLabelPointSize: CGFloat = 12
     private static let tabLabelFrameH: CGFloat = 24
     private static let tabEdgeFadeW: CGFloat = 14
-
-    /// Nudge that lands the "+" on the tab labels' optical line.
-    ///
-    /// Three attempts, and the useful part is what each ruled out. Frame height
-    /// is irrelevant: it cancels out of `(H - lineH)/2 + ascender - H/2`, so
-    /// matching box sizes changed nothing. Deriving from the label's INK box
-    /// (−0.50…−0.70pt) still read low — brackets and descenders stretch that box
-    /// below where the eye puts the line. Deriving from the baseline–cap band
-    /// (−1.57pt) overshot high.
-    ///
-    /// Those two bracket it. The optical centre of mixed-case text sits between
-    /// its x-height and cap-height midpoints — the usual reference for centring
-    /// a symbol against running text — and a "+" is drawn on the maths axis, so
-    /// its own ink centre already is its optical centre. That derivation gives
-    /// −1.03pt, which read very slightly high; the bracket is now
-    /// −0.70 (low) … −1.03 (slightly high), and `opticalTrim` takes the
-    /// remainder. It is the one number here that is observed rather than
-    /// derived, which is why it is named and isolated instead of folded into
-    /// the formula.
-    private static let plusInkNudge: CGFloat = {
-        /// How far below a centred `Text`'s frame centre its baseline sits.
-        func baselineBelowCentre(_ size: CGFloat) -> CGFloat {
-            let f = NSFont.systemFont(ofSize: size, weight: .regular)
-            return f.ascender - (f.ascender - f.descender) / 2
-        }
-        let labelFont = NSFont.systemFont(ofSize: tabLabelPointSize, weight: .regular)
-        let opticalBand = (labelFont.capHeight / 2 + labelFont.xHeight / 2) / 2
-        let labelCentre = baselineBelowCentre(tabLabelPointSize) - opticalBand
-
-        let plusFont = NSFont.systemFont(ofSize: plusPointSize, weight: .regular)
-        let plusLine = CTLineCreateWithAttributedString(
-            NSAttributedString(string: "+", attributes: [.font: plusFont])
-        )
-        let plusCentre = baselineBelowCentre(plusPointSize)
-            - CTLineGetImageBounds(plusLine, nil).midY
-
-        return labelCentre - plusCentre + opticalTrim
-    }()
-
-    /// Residual from eyeballing on a Retina display: the derived value sat a
-    /// touch high. Positive moves the glyph down.
-    private static let opticalTrim: CGFloat = 0.2
 
     private func applyNavMode(_ mode: NavMode) {
         switch mode {

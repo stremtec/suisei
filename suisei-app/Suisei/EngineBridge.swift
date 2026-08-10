@@ -3275,12 +3275,23 @@ final class EngineBridge: ObservableObject {
     // names a different document than the same buffer index, so chips are
     // addressed by `stableId` and the engine translates.
 
+    /// Switch tabs. No animation, deliberately.
+    ///
+    /// This used to wrap `refreshChrome()` in `withAnimation(.snappy(0.22))`,
+    /// which animated the selection capsule's travel to the clicked chip — and
+    /// everything else the refresh republished along with it. Switching tabs is
+    /// a jump, not a journey: the content under the strip is replaced outright,
+    /// so a capsule gliding across to catch up arrives after the thing it is
+    /// meant to be pointing at.
+    ///
+    /// Structural motion is unaffected: opening and closing tabs still animate,
+    /// through `refreshChromeWithTabMotion` and the strip's own
+    /// `tabStructuralAnimation`, which key off the tab SET rather than the
+    /// selection.
     func gotoTabId(_ stableId: UInt64) {
         guard let engine else { return }
         suisei_engine_goto_tab_id(engine, stableId)
-        withAnimation(.snappy(duration: 0.22 * Self.animationSlowmo)) {
-            refreshChrome()
-        }
+        refreshChrome()
     }
 
     func closeTabId(_ stableId: UInt64) {
