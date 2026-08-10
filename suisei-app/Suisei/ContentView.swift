@@ -401,6 +401,7 @@ struct ContentView: View {
         // leading tab should be. Source Control wants its title there; this
         // window has a tab strip in that row.
         .toolbar(removing: .title)
+        .toolbar { editorToolbar }
         .frame(minWidth: 640, minHeight: 400)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .foregroundStyle(.primary)
@@ -432,6 +433,90 @@ struct ContentView: View {
         .background(EditorWindowChrome())
     }
 
+    /// The document controls, as real toolbar items — Source Control's toolbar,
+    /// same shape: plain `Button { Image(systemName:) }` with a `.help`, and no
+    /// styling of our own anywhere.
+    ///
+    /// That absence is the point. These three were hand-drawn `ToolbarPlainIcon`
+    /// buttons in the titlebar row, and they could not look like the workbench's
+    /// because the workbench's look is not something it draws — macOS 26 wraps
+    /// toolbar items in an `NSToolbarPlatterView` holding an `NSGlassEffectView`
+    /// and groups them into one capsule. Measured
+    /// (`scripts/sidebar_probe4.swift`): a 112×36 platter for three items.
+    /// Nothing short of being a toolbar item gets that.
+    ///
+    /// Three things had to be true before this was safe to adopt, and all three
+    /// were measured rather than assumed (`sidebar_probe5/6.swift`):
+    ///
+    /// * the toolbar does NOT swallow clicks over the tab strip — `hitTest` at
+    ///   the strip's centre reaches the SwiftUI content view with the toolbar
+    ///   present, exactly as without it;
+    /// * it does not move `topBar`, which stays at 0–48 either way;
+    /// * it moves the traffic lights from 16pt to 26pt below the window top —
+    ///   which is `topBandHeight / 2 + titlebarDrop`, i.e. the tab row's own
+    ///   optical centreline. The lights and the tabs now share a line for the
+    ///   first time without anyone positioning them.
+    ///
+    /// The tab strip itself stays SwiftUI content, for the reason it always
+    /// has: it must be blurable and coverable, which a toolbar item is not.
+    @ToolbarContentBuilder
+    private var editorToolbar: some ToolbarContent {
+        // These land at the top RIGHT, but not from anything declared here —
+        // see `EditorWindowChrome`, which inserts the flexible space into the
+        // NSToolbar itself.
+        //
+        // `.primaryAction` does not mean trailing in a `NavigationSplitView`:
+        // measured in a 1280pt window (`scripts/sidebar_probe7.swift`), the
+        // glass platter sits at x 298…410 — packed against the sidebar — under
+        // `.primaryAction`, `.confirmationAction` and `ToolbarItemGroup` alike,
+        // with or without a navigation title. A leading
+        // `ToolbarSpacer(.flexible)` moved it to x 1158…1270 in two probes,
+        // including one mirroring this view's entire modifier chain
+        // (`sidebar_probe8.swift`) — and did not move it in the app. Measured
+        // right twice, wrong on screen twice, so the declarative form is not
+        // used here at all.
+        //
+        // Source Control leaves its items packed left, which is right for a
+        // window whose titlebar row is otherwise empty. This row is not: the
+        // tab strip runs through the middle of it.
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                engine.openFilePalette()
+            } label: {
+                Image(systemName: "magnifyingglass")
+            }
+            .help("Go to File · ⌘P")
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                engine.openSettings()
+                openWindow(id: "settings")
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .help("Settings · ⌘,")
+        }
+
+        // A Toggle, not a Button: "is the inspector showing" is a state, and
+        // the system draws a toolbar toggle's selected appearance itself. The
+        // old icon carried an `active:` flag and painted its own highlight,
+        // which is the same imitation the platter above replaces.
+        ToolbarItem(placement: .primaryAction) {
+            Toggle(isOn: Binding(
+                get: { engine.uiInspectorVisible },
+                set: { on in
+                    guard on != engine.uiInspectorVisible else { return }
+                    animatePanels { engine.uiInspectorVisible = on }
+                    focused = true
+                }
+            )) {
+                Image(systemName: "sidebar.right")
+            }
+            .toggleStyle(.button)
+            .help("Outline · ⌥⌘0")
+        }
+    }
 
     /// One authority for "is the navigator showing" — Core's flag — restated in
     /// the split view's own vocabulary. A second, SwiftUI-owned visibility
@@ -1837,67 +1922,10 @@ struct ContentView: View {
                     Spacer(minLength: rightTight - 22)
                 }
 
-            // Trailing document controls, in ONE Liquid Glass capsule.
-            //
-            // These were briefly real `.toolbar` items, which is how Source
-            // Control gets its look: macOS 26 puts toolbar items inside an
-            // `NSToolbarPlatterView` holding an `NSGlassEffectView` and groups
-            // them into a single capsule — measured at 112×36 for three items
-            // (`scripts/sidebar_probe4.swift`). What could not be made to hold
-            // was the POSITION. In a `NavigationSplitView`, `.primaryAction`
-            // does not mean trailing: the platter lands at x 298…410 in a
-            // 1280pt window under `.primaryAction`, `.confirmationAction` and
-            // `ToolbarItemGroup` alike (`sidebar_probe7.swift`). A leading
-            // `ToolbarSpacer(.flexible)` moves it to x 1158…1270 in two
-            // separate probes, including one mirroring this view's whole
-            // modifier chain (`sidebar_probe8.swift`) — and did not move it in
-            // the app. Twice measured, twice wrong on screen.
-            //
-            // So the material is adopted and the placement is not. This is the
-            // same `Glass` the platter is made of — `.glassEffect` produces an
-            // `NSGlassEffectView` — in a capsule of the measured height, laid
-            // out where this row can guarantee it lands.
-            //
-            // No sidebar toggle among them: `NavigationSplitView` puts one in
-            // the sidebar's own titlebar row, and two controls for one state is
-            // what this row already had once.
-            HStack(spacing: 0) {
-                Spacer()
-                HStack(spacing: 0) {
-                    ToolbarPlainIcon(
-                        systemImage: "magnifyingglass", help: "Go to File · ⌘P",
-                        accent: Color.accentColor, dim: Color.secondary
-                    ) { engine.openFilePalette() }
-                    // No terminal toggle here — it lives detached at the
-                    // trailing end of the navigator strip. Two visible copies
-                    // of one switch is the thing that framing was meant to fix.
-                    ToolbarPlainIcon(
-                        systemImage: "gearshape", help: "Settings · ⌘,",
-                        accent: Color.accentColor, dim: Color.secondary
-                    ) {
-                        engine.openSettings()
-                        openWindow(id: "settings")
-                    }
-                    ToolbarPlainIcon(
-                        systemImage: "sidebar.right", help: "Outline · ⌥⌘0",
-                        active: engine.uiInspectorVisible,
-                        accent: Color.accentColor, dim: Color.secondary,
-                        opticalNudgeX: -0.6
-                    ) {
-                        animatePanels { engine.uiInspectorVisible.toggle() }
-                        focused = true
-                    }
-                }
-                .padding(.horizontal, 8)
-                .frame(height: 36)
-                .glassEffect(
-                    SuiseiGlass.chrome(
-                        light: isLightTheme, style: engine.glassStyle
-                    ).interactive(),
-                    in: Capsule(style: .continuous)
-                )
-            }
-            .padding(.trailing, 12)
+            // Nothing else in this row. The trailing controls are real toolbar
+            // items now — see `editorToolbar`. The sidebar toggle went to the
+            // split view's own, and the traffic-light zone went with the cloned
+            // lights, so the tab strip is all that is left here.
             }
             // The entire titlebar row uses the 48pt Swiss-grid band. Compressing
             // this to AppKit's 28pt default moved every control centre from
@@ -3014,13 +3042,15 @@ struct ContentView: View {
     /// Gap between a panel and the window edge.
     static let panelGap: CGFloat = 6
 
-    /// The editor island starts below this band; the tab strip and the trailing
-    /// control capsule sit on its 24pt optical centreline.
+    /// The editor island starts below this band, and the tab strip sits on its
+    /// 24pt optical centreline.
     ///
-    /// It no longer positions the traffic lights — those are AppKit's own, in
-    /// AppKit's own titlebar row over the sidebar column, at 16pt from the
-    /// window top (measured, `scripts/sidebar_probe3.swift`). Nothing in this
-    /// file writes them any more.
+    /// It no longer positions anything but the tabs. The traffic lights and the
+    /// document controls are AppKit's own, in AppKit's own titlebar row over
+    /// the sidebar column — and with a toolbar present AppKit puts the lights
+    /// at 26pt from the window top, which is `topBandHeight / 2 + titlebarDrop`
+    /// exactly. The row that used to be aligned by hand now agrees with the
+    /// system by arithmetic (measured, `scripts/sidebar_probe6.swift`).
     static let topBandHeight: CGFloat = 48
 
     /// How far the titlebar row sits below that centreline. One constant for
@@ -7971,6 +8001,31 @@ private struct EditorWindowChrome: NSViewRepresentable {
         if window.titleVisibility != .hidden {
             window.titleVisibility = .hidden
         }
+        pushToolbarItemsTrailing(window)
+    }
+
+    /// Put a flexible space in front of SwiftUI's toolbar items, so they sit at
+    /// the top RIGHT instead of packed against the sidebar.
+    ///
+    /// This is an AppKit edit to the real `NSToolbar` rather than the
+    /// declarative `ToolbarSpacer(.flexible)`, and the difference is not taste.
+    /// The declarative form measured correct twice — the platter moves from
+    /// x 298…410 to x 1158…1270 in a 1280pt window, in a probe mirroring this
+    /// view's entire modifier chain — and did not move anything in the running
+    /// app, twice. `scripts/sidebar_probe9.swift` measures this route instead:
+    /// insert `NSToolbarFlexibleSpaceItem` at index 0 and the platter lands at
+    /// x 1158…1270, ten points off the right edge.
+    ///
+    /// Guarded on the FIRST item's identifier, not on a flag. SwiftUI names its
+    /// items with fresh UUIDs whenever it rebuilds the toolbar, and a rebuild
+    /// drops anything we inserted — so this has to be re-checked on every
+    /// update, and must be a no-op on all the ones where nothing changed.
+    private func pushToolbarItemsTrailing(_ window: NSWindow) {
+        guard let toolbar = window.toolbar,
+              let first = toolbar.items.first?.itemIdentifier,
+              first != .flexibleSpace
+        else { return }
+        toolbar.insertItem(withItemIdentifier: .flexibleSpace, at: 0)
     }
 }
 
