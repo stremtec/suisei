@@ -298,6 +298,10 @@ uint8_t suisei_engine_toggle_layout_style(SuiseiEngine *e, uint64_t id);
 /* Non-zero when a layout currently owns the desk (`App::active_layout`). */
 uint64_t suisei_engine_active_layout_id(const SuiseiEngine *e);
 void suisei_engine_toggle_terminal_dock(SuiseiEngine *e);
+/* Pretty document preview. Direct, because ⇧⌘V means "paste" in a terminal. */
+void suisei_engine_toggle_preview(SuiseiEngine *e);
+/* Full terminal TAB (second call closes it). Direct, for the same reason. */
+void suisei_engine_toggle_terminal_tab(SuiseiEngine *e);
 void suisei_engine_focus_terminal(SuiseiEngine *ptr, uint8_t on);
 /* Multi-session shells (active session lives in Core; parked ones keep running). */
 uint32_t suisei_engine_terminal_sessions(const SuiseiEngine *ptr);

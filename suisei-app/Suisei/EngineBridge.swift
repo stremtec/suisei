@@ -1616,20 +1616,30 @@ final class EngineBridge: ObservableObject {
         lastPreviewKey = key
     }
 
+    /// Pretty document preview.
+    ///
+    /// Calls the thing it names. This used to dispatch ⇧⌘V, and that chord is
+    /// "pretty preview" only while the editor holds focus — a focused terminal
+    /// pane claims it as "paste the clipboard into the shell", so the menu item
+    /// could paste into a running process. Same lesson as
+    /// `toggleTerminalDock`'s.
     func togglePreview() {
-        var m = SuiseiMod.superKey
-        m.insert(.shift)
-        dispatchRaw(code: .char_, ch: UInt32(UnicodeScalar("v").value), mods: m)
+        guard let engine else { return }
+        cancelPointerSession()
+        suisei_engine_toggle_preview(engine)
         refreshChrome()
         refreshPreview()
     }
 
-    func toggleTerminalFull() {
-        // Cmd/Ctrl+Shift+T — Core treats Super or Ctrl+Shift as cmd_like.
-        // Use dispatchRaw so Hybrid never injects Insert around the chord.
-        var m = SuiseiMod.superKey
-        m.insert(.shift)
-        dispatchRaw(code: .char_, ch: UInt32(UnicodeScalar("t").value), mods: m)
+    /// Open a full terminal TAB, or close it when one is already focused.
+    ///
+    /// Named for what Core does (`toggle_terminal_full` parks the pane, spawns
+    /// a shell and gives it a tab). It used to dispatch ⇧⌘T, which the terminal
+    /// pane handles on a different branch from the editor.
+    func toggleTerminalTab() {
+        guard let engine else { return }
+        cancelPointerSession()
+        suisei_engine_toggle_terminal_tab(engine)
         refreshChrome()
     }
 
@@ -4067,7 +4077,7 @@ final class EngineBridge: ObservableObject {
                     }
                 }
                 if lower == "t" {
-                    toggleTerminalFull()
+                    toggleTerminalTab()
                     return
                 }
             }

@@ -1547,6 +1547,30 @@ impl Engine {
         self.recompose();
     }
 
+    /// Pretty document preview, for a control that names it.
+    ///
+    /// Same defect as the dock button above, one step worse. The menu item
+    /// simulated ⇧⌘V, and that chord is "pretty preview" only while the editor
+    /// holds focus — a focused terminal pane claims it, quite correctly, as
+    /// "paste the clipboard into the shell". So a menu item labelled Pretty
+    /// Preview could paste into a running process.
+    pub fn toggle_preview(&mut self) {
+        self.app.toggle_preview();
+        self.shell.dirty = true;
+        self.recompose();
+    }
+
+    /// Open a terminal TAB, or close it when one is already focused.
+    ///
+    /// `App::toggle_terminal_full` spawns and starts its own shell, so there is
+    /// no `ensure_terminal_started` here — that call belongs to the docked
+    /// terminal, which shares one session.
+    pub fn toggle_terminal_tab(&mut self) {
+        self.app.toggle_terminal_full();
+        self.shell.dirty = true;
+        self.recompose();
+    }
+
     pub fn focus_terminal(&mut self, on: bool) {
         if on {
             if self.app.terminal.open {

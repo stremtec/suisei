@@ -290,13 +290,17 @@ struct SuiseiApp: App {
 
         // Terminal — shell surfaces (not only buried chords).
         CommandMenu("Terminal") {
-            Button("Toggle Debug Area") {
-                engine.setDebugArea(!engine.uiDebugVisible)
-            }
-            .keyboardShortcut("y", modifiers: [.command, .shift])
+            // "Toggle Debug Area" used to lead this menu. It was View's
+            // Show/Hide Debug Area under a second name, on the SAME ⇧⌘Y — two
+            // menu items claiming one shortcut, of which macOS fires one — and
+            // it skipped `animatingPanels`, so the panel snapped from here and
+            // glided from there. One entry for one state; View owns it.
 
-            Button("New Terminal Window") {
-                engine.toggleTerminalFull()
+            // Named for what Core does. `toggle_terminal_full` parks the
+            // focused pane, spawns a shell and gives it a TAB — it was never a
+            // window — and pressing it again closes that tab.
+            Button("New Terminal Tab") {
+                engine.toggleTerminalTab()
             }
             .keyboardShortcut("t", modifiers: [.command, .shift])
         }

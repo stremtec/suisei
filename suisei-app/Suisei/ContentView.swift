@@ -1343,18 +1343,22 @@ struct ContentView: View {
         .frame(height: NavStrip.iconH + NavStrip.inset * 2)
         .animation(NavStrip.settle, value: separated)
         .padding(.horizontal, 10)
-        // The editor jump-bar's measured centre is y≈63 while this rail's
-        // selected pill was y≈58. Keep the rail's total 40pt layout height
-        // (and therefore Project's position) but move only its chrome/content
-        // down by the measured 5pt.
-        // Keep the 40pt strip slot, but align its 26pt selection capsule with
-        // the editor's 26pt jump bar instead of bottom-aligning it 5pt lower.
-        .padding(.top, 5)
-        .padding(.bottom, 5)
-        // Post-build ink audit: the rail glyphs still centred at y=61 while
-        // the jump-bar glyphs centred at y=63. A render-only offset closes
-        // that final 2px without moving Project or changing the 40pt layout.
-        .offset(y: 2)
+        // The 26pt selection capsule and the editor's 26pt jump bar start at
+        // the same height. Both are measured from the WINDOW top:
+        //
+        //   jump bar top = topBandHeight (48) + panelGap (6)          = 54
+        //   strip top    = the column's own safe-area inset            = 52
+        //   + NavStrip.inset, which is the capsule's offset in the strip = 54
+        //
+        // so the capsule needs nothing above it. The `.padding(.top, 5)` and
+        // `.offset(y: 2)` that used to be here were tuned against the
+        // hand-drawn card, whose content began at the window top because it had
+        // no safe area to inherit; carried onto a real column they stacked on
+        // top of the system's own 52pt and pushed the capsule 7pt low.
+        //
+        // The bottom padding absorbs both, so the strip keeps its 40pt slot and
+        // nothing below it — Project, the tree — moves at all.
+        .padding(.bottom, 10)
     }
 
     /// Geometry and motion for the navigator strip. Kept together because the
@@ -5452,7 +5456,7 @@ struct ContentView: View {
                             // Close THIS pane's shell — ⌃⇧T acts on the focused
                             // pane, so focus must follow the click first.
                             if let idx = paneIndex { engine.focusPane(idx) }
-                            engine.toggleTerminalFull()
+                            engine.toggleTerminalTab()
                             focused = true
                         }
                     }
@@ -5705,7 +5709,7 @@ struct ContentView: View {
                         // pane, so without this the button killed (or created)
                         // a terminal in whichever pane happened to have focus.
                         engine.focusPane(pane.id)
-                        engine.toggleTerminalFull()
+                        engine.toggleTerminalTab()
                         focused = true
                     } label: {
                         Image(systemName: "xmark")

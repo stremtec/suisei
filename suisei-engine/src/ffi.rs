@@ -1309,6 +1309,37 @@ pub extern "C" fn suisei_engine_toggle_terminal_dock(ptr: *mut SuiseiEngine) {
     }
 }
 
+/// Toggle the pretty document preview, without going through the key path.
+///
+/// The menu item used to simulate ⇧⌘V. That chord means "pretty preview" only
+/// while the editor holds focus; in a terminal pane the same chord is "paste
+/// the clipboard into the shell", so a menu item labelled Pretty Preview could
+/// paste into a running process. A menu item names an action, not a keystroke.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_toggle_preview(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.toggle_preview();
+    }
+}
+
+
+/// Open a full terminal TAB, or close it when one is already focused.
+///
+/// Same reason as above: the menu item simulated ⇧⌘T, which the terminal pane
+/// handles on a different branch from the editor.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_toggle_terminal_tab(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.toggle_terminal_tab();
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_focus_terminal(ptr: *mut SuiseiEngine, on: u8) {
     if ptr.is_null() {
