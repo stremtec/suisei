@@ -501,22 +501,25 @@ struct ContentView: View {
             .help("Settings · ⌘,")
         }
 
-        // A Toggle, not a Button: "is the inspector showing" is a state, and
-        // the system draws a toolbar toggle's selected appearance itself. The
-        // old icon carried an `active:` flag and painted its own highlight,
-        // which is the same imitation the platter above replaces.
+        // A Button, not a Toggle — deliberately, and this is the one place in
+        // the toolbar that does NOT take the system's default.
+        //
+        // A `Toggle(.button)` draws the accent-filled selected state whenever
+        // the inspector is open, which reads as "this control is on" rather
+        // than "this control opens a panel". Its counterpart across the window,
+        // the split view's own sidebar toggle, is a plain button and stays
+        // unfilled at every state — so a filled one here would make the two
+        // sides of the same gesture disagree.
+        //
+        // The state is still visible, on the thing the state belongs to: the
+        // inspector column is either there or it is not.
         ToolbarItem(placement: .primaryAction) {
-            Toggle(isOn: Binding(
-                get: { engine.uiInspectorVisible },
-                set: { on in
-                    guard on != engine.uiInspectorVisible else { return }
-                    animatePanels { engine.uiInspectorVisible = on }
-                    focused = true
-                }
-            )) {
+            Button {
+                animatePanels { engine.uiInspectorVisible.toggle() }
+                focused = true
+            } label: {
                 Image(systemName: "sidebar.right")
             }
-            .toggleStyle(.button)
             .help("Outline · ⌥⌘0")
         }
     }
