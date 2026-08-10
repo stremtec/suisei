@@ -1739,13 +1739,29 @@ struct ContentView: View {
         // and it consumes the mouseDown BEFORE SwiftUI gesture arbitration
         // runs, so this overlay owns clicks as well as drags and routes them
         // back.
+        // The catcher covers the whole 48pt band, not the 26pt chip row.
+        //
+        // Hover comes from its tracking area, and the tracking area is its
+        // bounds — so at row height the hover released the moment the pointer
+        // drifted a few points above or below. That is exactly what happens
+        // while aiming at a 14pt close glyph, and the glyph only exists while
+        // the chip is hovered, so it vanished from under the cursor on the way
+        // to it.
+        //
+        // The band is the row's own height (`topBandHeight`), so the slack is
+        // derived rather than picked. Points are shifted back by it before they
+        // reach the layout, which still speaks in row coordinates.
+        .padding(.vertical, -Self.tabRowSlack)
         .overlay(
             TabStripMouse(
                 // Every query goes to the one layout this pass was drawn from.
                 slotAt: { x in layout.slot(at: x - Self.tabEdgeFadeW) },
                 closeAt: { p in
                     layout.closeSlot(
-                        at: CGPoint(x: p.x - Self.tabEdgeFadeW, y: p.y),
+                        at: CGPoint(
+                            x: p.x - Self.tabEdgeFadeW,
+                            y: p.y - Self.tabRowSlack
+                        ),
                         rowHeight: Self.tabLabelFrameH
                     )
                 },
@@ -1798,7 +1814,8 @@ struct ContentView: View {
                     // pointer is arriving through a claimed press either way.
                     let x = Self.tabEdgeFadeW + layout.plusX
                     return CGRect(
-                        x: x, y: 0, width: Self.tabPlusW, height: Self.tabLabelFrameH
+                        x: x, y: Self.tabRowSlack,
+                        width: Self.tabPlusW, height: Self.tabLabelFrameH
                     )
                     .insetBy(dx: -4, dy: -4)
                     .contains(p)
@@ -2178,6 +2195,13 @@ struct ContentView: View {
     private static let tabEdgeFadeW: CGFloat = 14
     /// The leading fade — see the strip's mask for why it is the longer one.
     private static let tabLeadingFadeW: CGFloat = 34
+    /// How far the strip's mouse region reaches above and below the chip row.
+    ///
+    /// Derived, not chosen: it fills the titlebar band the row sits in. Hover
+    /// is what needs it — see the catcher's placement — and a click landing a
+    /// few points high is a click on the tab either way.
+    private static let tabRowSlack: CGFloat =
+        max(0, (topBandHeight - tabLabelFrameH - 2) / 2)
 
     /// Nudge that lands the "+" on the tab labels' optical line.
     ///

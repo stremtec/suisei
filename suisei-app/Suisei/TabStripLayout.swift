@@ -155,9 +155,22 @@ struct TabStripLayout: Equatable {
     func closeSlot(at p: CGPoint, rowHeight: CGFloat) -> Int? {
         let local = CGPoint(x: p.x - originX, y: p.y)
         for chip in chips {
+            // The glyph is 14pt; the TARGET is 22x26, and deliberately not
+            // symmetric about it. A close button only as big as its ink is one
+            // you have to aim at, and this one appears on hover — so a miss
+            // takes the hover with it and the button disappears mid-approach.
+            //
+            // Grown mostly RIGHT and vertically, into the chip's trailing
+            // padding and the band above and below the row, where there is
+            // nothing to steal from. Only 2pt to the left, because that
+            // direction is the title, and a click on a filename should open
+            // the file rather than close it.
             let glyph = CGRect(
-                x: chip.maxX - 24, y: rowHeight / 2 - 7, width: 14, height: 14
-            ).insetBy(dx: -3, dy: -3)
+                x: chip.maxX - 26,
+                y: rowHeight / 2 - 13,
+                width: 22,
+                height: 26
+            )
             if glyph.contains(local) { return chip.slot }
         }
         return nil
