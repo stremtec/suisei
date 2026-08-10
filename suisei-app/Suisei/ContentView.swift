@@ -416,6 +416,11 @@ struct ContentView: View {
         // this row needs: Source Control wants its title visible, and this
         // window has a tab strip running through that space.
         .navigationTitle("")
+        // The system's sidebar toggle draws `sidebar.left` — a panel glyph.
+        // Xcode 26 uses a list glyph for the same control, which is what this
+        // navigator actually shows, so ours is replaced rather than restyled:
+        // the system item's appearance is not ours to change.
+        .toolbar(removing: .sidebarToggle)
         .toolbar { editorToolbar }
         .frame(minWidth: 640, minHeight: 400)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -476,6 +481,7 @@ struct ContentView: View {
     /// has: it must be blurable and coverable, which a toolbar item is not.
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
+
         // Nothing here places these at the trailing edge, and nothing needs to.
         // `.navigationTitle("")` on the split view does it, by keeping the
         // title item that anchors the `.primaryAction` group — see there.
@@ -999,6 +1005,34 @@ struct ContentView: View {
         .navigationSplitViewColumnWidth(
             min: 240, ideal: navIdealWidth, max: 460
         )
+        // The navigator toggle, in Xcode's glyph rather than the system's.
+        //
+        // Declared on the COLUMN, not on the split view, and that is the whole
+        // trick: a toolbar item declared here joins the sidebar's own toolbar
+        // section and lands at x≈92 — over the sidebar, just past the traffic
+        // lights, where Xcode puts it. The same item at `.navigation` placement
+        // on the split view lands at x≈312, past the splitter, in the detail
+        // area (measured, `scripts/navitem_probe.swift`). Placement names do
+        // not decide the section; where the modifier is attached does.
+        //
+        // `.toolbar(removing: .sidebarToggle)` on the split view takes the
+        // system's `sidebar.left` item away, so this is one control for one
+        // state rather than a second one beside it.
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    let visible = !engine.uiNavVisible
+                    // Content first, animation second — the 13 ms recompose on
+                    // the opening frame is what used to make the panel hitch.
+                    if visible { applyNavMode(navMode) }
+                    engine.animatingPanels { engine.uiNavVisible = visible }
+                    focused = true
+                } label: {
+                    Image(systemName: "list.bullet")
+                }
+                .help(engine.uiNavVisible ? "Hide Navigator · ⌘0" : "Show Navigator · ⌘0")
+            }
+        }
         .background(
             SplitColumnWidthReporter { width in
                 // Two different consumers, two different filters. `navLiveWidth`
