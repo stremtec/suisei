@@ -394,6 +394,13 @@ struct ContentView: View {
         // `offset` alongside it would be two authorities for one motion — the
         // defect five earlier attempts at that animation were all instances of.
         .navigationSplitViewStyle(.balanced)
+        // The window keeps its title (the Window menu needs one) but does not
+        // DRAW it. `titleVisibility = .hidden` is not enough on its own: a
+        // split view puts the navigation title in the toolbar, which is a
+        // different item — that is why "Suisei" was still sitting where the
+        // leading tab should be. Source Control wants its title there; this
+        // window has a tab strip in that row.
+        .toolbar(removing: .title)
         .frame(minWidth: 640, minHeight: 400)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .foregroundStyle(.primary)
@@ -435,9 +442,18 @@ struct ContentView: View {
             set: { visibility in
                 let visible = visibility != .detailOnly
                 guard visible != engine.uiNavVisible else { return }
+                // Content FIRST, animation second. `applyNavMode` runs a full
+                // engine recompose and a full chrome pull — measured at 13 ms —
+                // and running it after the toggle put all of that on the
+                // opening animation's first frame, which is where the panel
+                // visibly hitched on the way out. That ordering used to live in
+                // the top bar's own toggle; it belongs here now that the split
+                // view's toggle is the only one.
+                if visible { applyNavMode(navMode) }
                 // Same suppression every other panel toggle uses, so dragging
                 // the column shut doesn't recompose the editor per frame.
                 engine.animatingPanels { engine.uiNavVisible = visible }
+                focused = true
             }
         )
     }
@@ -859,10 +875,16 @@ struct ContentView: View {
     @ViewBuilder
     private var sidebarColumnBody: some View {
         VStack(spacing: 0) {
-            // AppKit's own traffic lights sit in the native titlebar row above
-            // the mode strip, over this column. 35pt clears them and puts the
-            // pill centre back at y≈55, where the original screenshot had it.
-            Spacer().frame(height: 35)
+            // No top spacer. The column's safe area already clears the titlebar
+            // row — the traffic lights AND the split view's own sidebar toggle
+            // live there — and the strip carries its own 5pt beat below that.
+            //
+            // MEASURED (`scripts/sidebar_probe3.swift`, four configurations, in
+            // a window styled exactly like this one): the lights centre 16pt
+            // from the window top, and sidebar content with no spacer starts at
+            // 42pt. The 35pt spacer that used to be here — carried over from
+            // the hand-drawn card, which had no safe area to inherit — pushed
+            // the strip to 77pt and left the gap visible in the first build.
             navigatorModeStrip
             dockedNavigator
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1814,29 +1836,11 @@ struct ContentView: View {
                 }
 
             HStack(spacing: 2) {
-                // The 86pt lights zone that used to open this row is gone with
-                // the cloned lights: AppKit's own sit over the sidebar column,
-                // outside this view entirely. The toggle now leads the detail
-                // column, which is where Xcode 26 puts its sidebar controls.
-                Spacer().frame(width: 10)
-                ToolbarPlainIcon(
-                    systemImage: "sidebar.left",
-                    help: engine.uiNavVisible ? "Hide Navigator · ⌘0" : "Show Navigator · ⌘0",
-                    active: false,
-                    accent: Color.accentColor,
-                    dim: Color.secondary,
-                    iconSize: 15.5,
-                    opticalNudgeX: 0.7
-                ) {
-                    // Content FIRST, animation second. `applyNavMode` runs a
-                    // full engine recompose and a full chrome pull — measured
-                    // at 13 ms — and running it after the toggle put all of
-                    // that on the opening animation's first frame, which is
-                    // where the panel visibly hitched on the way out.
-                    if !engine.uiNavVisible { applyNavMode(navMode) }
-                    animatePanels { engine.uiNavVisible.toggle() }
-                    focused = true
-                }
+                // No sidebar toggle here. `NavigationSplitView` already puts
+                // one in the sidebar's own titlebar row, which is where macOS
+                // puts it — ours made two controls for one state, on opposite
+                // sides of the splitter. The 86pt traffic-light zone that used
+                // to open this row went with the cloned lights.
                 Spacer()
                 ToolbarPlainIcon(
                     systemImage: "magnifyingglass", help: "Go to File · ⌘P",
