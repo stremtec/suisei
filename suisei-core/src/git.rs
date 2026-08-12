@@ -33,6 +33,13 @@ pub struct GitHunk {
     /// addition. This is what "Show Change" reveals above the hunk.
     pub removed: Vec<String>,
     pub kind: GitSign,
+    /// The change is in the index and not in the working tree's diff against
+    /// it — `git add`ed and untouched since.
+    ///
+    /// Drives the bar's SHAPE, which is the distinction Xcode makes and the
+    /// only place this state is visible without opening a panel: an unstaged
+    /// hunk is a hollow outline, a staged one is filled solid.
+    pub staged: bool,
 }
 
 impl GitHunk {
@@ -353,27 +360,54 @@ pub fn compute_gutter(path: &str) -> (bool, HashMap<usize, GitSign>, Vec<GitHunk
     let Some(parent) = abs.parent() else {
         return (false, signs, Vec::new());
     };
-    let output = Command::new("git")
-        .args([
-            "diff",
-            "HEAD",
-            "--no-color",
-            "-U0",
-            "--",
-            abs.to_str().unwrap_or(path),
-        ])
-        .current_dir(parent)
-        .output();
-    let Ok(out) = output else {
+    // TWO diffs, because one cannot answer the question.
+    //
+    // `diff HEAD` is everything uncommitted — staged and unstaged together —
+    // and its line numbers are the working tree's, which is what the gutter
+    // needs. `diff` alone is the unstaged part, in the same coordinates. A
+    // change present in the first and absent from the second has been staged.
+    //
+    // Doing it the other way round — asking `--cached` what is staged — looks
+    // more direct and is wrong: `--cached` reports INDEX line numbers, and an
+    // unstaged edit above a staged hunk shifts them out of step with the
+    // buffer the bar is drawn against.
+    let Some(all) = run_diff(parent, &abs, path, false) else {
         return (false, signs, Vec::new());
     };
-    if !out.status.success() && out.stdout.is_empty() {
-        return (false, signs, Vec::new());
+    let unstaged = run_diff(parent, &abs, path, true).unwrap_or_default();
+
+    let mut hunks = parse_diff_hunks_full(&all);
+    let dirty = parse_diff_hunks_full(&unstaged);
+    for h in &mut hunks {
+        h.staged = !dirty.iter().any(|d| overlaps(h, d));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let hunks = parse_diff_hunks_full(&text);
     signs_from_hunks(&hunks, &mut signs);
     (true, signs, hunks)
+}
+
+/// Do two hunks cover any of the same buffer lines?
+///
+/// Zero-length hunks (pure deletions) occupy the single line they are marked
+/// against, so they compare as `[start, start]`.
+fn overlaps(a: &GitHunk, b: &GitHunk) -> bool {
+    let (a0, a1) = (a.start, a.end());
+    let (b0, b1) = (b.start, b.end());
+    a0 <= b1 && b0 <= a1
+}
+
+/// One `git diff -U0` against the index (`unstaged`) or against HEAD.
+fn run_diff(parent: &Path, abs: &Path, path: &str, unstaged: bool) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("diff");
+    if !unstaged {
+        cmd.arg("HEAD");
+    }
+    cmd.args(["--no-color", "-U0", "--", abs.to_str().unwrap_or(path)]);
+    let out = cmd.current_dir(parent).output().ok()?;
+    if !out.status.success() && out.stdout.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[derive(Debug, Default, Clone)]
@@ -472,6 +506,9 @@ pub fn parse_diff_hunks_full(diff: &str) -> Vec<GitHunk> {
                 len: n,
                 removed: Vec::new(),
                 kind,
+                // Filled in by `compute_gutter`, which is the only caller with
+                // both diffs to compare.
+                staged: false,
             });
             continue;
         }

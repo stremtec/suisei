@@ -1160,11 +1160,10 @@ final class EditorCanvasView: NSView {
             let rowRect = CGRect(x: viewport.minX, y: y, width: viewport.width, height: lineH)
 
             if line.isCursor { renderer.addRect(rowRect, colors.cursorLine) }
-            if line.gitSignKind != 0 {
-                renderer.addRect(
-                    gitStripeRect(atY: y, lineH: lineH),
-                    gitColor(line.gitSignKind)
-                )
+            if line.gitSignKind & 0x0F != 0 {
+                for r in gitBarRects(line.gitSignKind, atY: y, lineH: lineH) {
+                    renderer.addRect(r, gitColor(line.gitSignKind))
+                }
             }
             if line.hasBreakpoint {
                 renderer.addRect(
@@ -1414,9 +1413,9 @@ final class EditorCanvasView: NSView {
             }
 
             let gitKind = line.gitSignKind
-            if gitKind != 0 {
+            if gitKind & 0x0F != 0 {
                 gitColor(gitKind).setFill()
-                gitStripeRect(atY: y, lineH: lineH).fill()
+                for r in gitBarRects(gitKind, atY: y, lineH: lineH) { r.fill() }
             }
             if line.hasBreakpoint {
                 drawBookmark(at: y, lineH: lineH)
@@ -1818,16 +1817,47 @@ final class EditorCanvasView: NSView {
         }
     }
 
-    /// One line's slice of the change bar.
+    /// One row's contribution to its hunk's change bar.
     ///
-    /// FULL line height, with no vertical inset. The inset used to be `y + 2`
-    /// and `lineH - 4`, which put a 4pt gap between every pair of adjacent
-    /// lines — so a hunk spanning five lines drew as five separate ticks and a
-    /// changed region read as a dotted column rather than one change. Adjacent
-    /// rows abut exactly now, which is what makes a hunk look like a hunk.
-    private func gitStripeRect(atY y: CGFloat, lineH: CGFloat) -> CGRect {
-        CGRect(x: 2, y: y, width: EditorMetrics.gitStripeWidth, height: lineH)
+    /// The bar's SHAPE carries whether the change is staged, which is the
+    /// distinction Xcode makes and the only place this state shows without
+    /// opening a panel:
+    ///
+    /// * **unstaged** — a hollow outline. Drawn as edges rather than a filled
+    ///   rect punched with the background, because whatever is behind it
+    ///   (the cursor-line wash, a selection) has to show through the middle.
+    ///   The caps only appear on the hunk's own first and last rows, so the
+    ///   sides of the intervening rows abut into one continuous outline.
+    /// * **staged** — filled solid.
+    ///
+    /// Returned as rects because both renderers here draw rects and nothing
+    /// else; a stroked path would have to exist twice and could then differ.
+    private func gitBarRects(
+        _ sign: UInt8, atY y: CGFloat, lineH: CGFloat
+    ) -> [CGRect] {
+        let w = EditorMetrics.gitStripeWidth
+        let box = CGRect(x: 2, y: y, width: w, height: lineH)
+        if sign & 0x40 != 0 { return [box] }   // staged: solid
+
+        let t = EditorCanvasView.gitBarStroke
+        var out: [CGRect] = [
+            CGRect(x: box.minX, y: box.minY, width: t, height: box.height),
+            CGRect(x: box.maxX - t, y: box.minY, width: t, height: box.height),
+        ]
+        if sign & 0x10 != 0 {
+            out.append(CGRect(x: box.minX, y: box.minY, width: w, height: t))
+        }
+        if sign & 0x20 != 0 {
+            out.append(
+                CGRect(x: box.minX, y: box.maxY - t, width: w, height: t)
+            )
+        }
+        return out
     }
+
+    /// Outline thickness. Enough to read at a glance without closing the gap
+    /// it exists to show.
+    static let gitBarStroke: CGFloat = 1.5
 
     /// Xcode paints ONE colour for "changed since HEAD" rather than sorting
     /// additions from modifications — the distinction is visible in the text
@@ -1835,7 +1865,7 @@ final class EditorCanvasView: NSView {
     /// A deletion keeps red: nothing in the text shows it, so the marker is the
     /// only evidence.
     private func gitColor(_ sign: UInt8) -> NSColor {
-        switch sign {
+        switch sign & 0x0F {
         case 1, 2: return colors.gitChange
         case 3: return .systemRed
         default: return .clear

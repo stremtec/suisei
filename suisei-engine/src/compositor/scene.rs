@@ -2617,14 +2617,41 @@ fn visual_width_str(s: &str) -> usize {
         .sum()
 }
 
+/// Gutter bar state for one row, packed into `LineScene::git_sign`.
+///
+/// Low nibble is the kind (0 none, 1 added, 2 modified, 3 deleted). The flags
+/// above it are what let the face draw ONE bar per hunk instead of a stack of
+/// per-line slices: it needs to know where the hunk starts and ends to cap the
+/// outline, and whether it is staged to decide between an outline and a fill.
+/// Bit 0x80 is the soft-wrap continuation marker and belongs to the caller.
+pub const GIT_HUNK_FIRST: u8 = 0x10;
+pub const GIT_HUNK_LAST: u8 = 0x20;
+pub const GIT_HUNK_STAGED: u8 = 0x40;
+
 fn git_sign_for_row(app: &App, row: usize) -> u8 {
     use suisei_core::git::GitSign;
-    match app.git.sign_at(row) {
+    let kind = match app.git.sign_at(row) {
         Some(GitSign::Added) => 1,
         Some(GitSign::Modified) => 2,
         Some(GitSign::Deleted) => 3,
-        None => 0,
+        None => return 0,
+    };
+    let Some(h) = app.git.hunk_at(row) else {
+        // A sign with no hunk should not happen — signs are derived from them
+        // — but a lone slice is a better failure than a missing one.
+        return kind | GIT_HUNK_FIRST | GIT_HUNK_LAST;
+    };
+    let mut out = kind;
+    if row == h.start {
+        out |= GIT_HUNK_FIRST;
     }
+    if row == h.end() {
+        out |= GIT_HUNK_LAST;
+    }
+    if h.staged {
+        out |= GIT_HUNK_STAGED;
+    }
+    out
 }
 
 /// Convert highlight tokens → visual-column spans for the face.

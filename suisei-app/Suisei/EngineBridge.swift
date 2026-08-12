@@ -642,7 +642,12 @@ enum EditorMetrics {
     static let linePad: CGFloat = 4
     /// Space between trailing line number and code (Cursor/VS Code–like air gap).
     static let gutterTextGap: CGFloat = 12
-    static let gitStripeWidth: CGFloat = 3
+    /// Width of the gutter's change bar.
+    ///
+    /// Wide enough to be HOLLOW: an unstaged hunk is drawn as an outline, and
+    /// at the old 3pt the two 1.5pt edges met and the bar read as a thin solid
+    /// line whatever its state.
+    static let gitStripeWidth: CGFloat = 6
 
     /// Live face font size — mutated by zoom; not a `let` so resize can recompute.
     static var fontSize: CGFloat = {
