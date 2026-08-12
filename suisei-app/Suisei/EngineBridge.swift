@@ -790,12 +790,6 @@ final class EngineBridge: ObservableObject {
     /// being inserted, removed, or reordered creates a second coordinate
     /// system and is the source of the visible two-stage lurch.
     @Published private(set) var tabStructuralMotionActive: Bool = false
-    /// Current structural curve consumed by the tab row. Layout chrome has a
-    /// persistent group-keyed shape and therefore no longer relies on this
-    /// transaction to keep a removed matched-geometry source alive.
-    private(set) var tabStructuralAnimation: Animation = .smooth(
-        duration: 0.30 * AnimationTraceRecorder.slowMotionMultiplier
-    )
     /// Current structural verb, read by the strip to keep layout labels out of
     /// the parent HStack transaction during grouped ⇄ unified replacement.
     private(set) var tabStructuralKind: String = ""
@@ -2904,55 +2898,62 @@ final class EngineBridge: ObservableObject {
     /// the keys.
     // MARK: - Layout tabs (J7) — sequential presentation animation
 
-    /// Layout-strip presentation curves. One transaction per step — staged
-    /// delays were documented but never implemented; a single curve per
-    /// verb keeps grouped ⇄ unified from double-driving against the strip's
-    /// implicit presentation-key animation.
+    /// How long each structural step is expected to take.
+    ///
+    /// DURATIONS ONLY. There used to be a matching `Animation` per verb, handed
+    /// to a `withAnimation` around the snapshot swap; the strip that needed
+    /// those curves is AppKit now and eases itself, and the transaction only
+    /// reached things that wanted no animation at all. What is left is how long
+    /// to hold the auto-centre suppression and what to tell the trace recorder.
     private static let animationSlowmo = AnimationTraceRecorder.slowMotionMultiplier
     private static let tabReorderDuration = 0.24 * animationSlowmo
     private static let tabCloseDuration = 0.20 * animationSlowmo
     private static let layoutGatherDuration = 0.30 * animationSlowmo
     private static let layoutContainerDuration = 0.28 * animationSlowmo
     private static let layoutMergeDuration = 0.30 * animationSlowmo
-    private static let tabReorderAnimation: Animation = .smooth(duration: tabReorderDuration)
-    private static let tabCloseAnimation: Animation = .easeInOut(duration: tabCloseDuration)
-    private static let layoutGatherAnimation: Animation = .smooth(duration: layoutGatherDuration)
-    private static let layoutContainerAnimation: Animation = .smooth(duration: layoutContainerDuration)
-    /// Slightly longer, almost no bounce — merge is a collapse of many chips
-    /// into one, and spring overshoot made the unified chip lurch past its
-    /// resting size while members were still fading.
-    private static let layoutMergeAnimation: Animation = .smooth(duration: layoutMergeDuration)
 
     /// Run one structural tab-strip transaction and keep the viewport pinned
     /// until it has settled. Rapid input retargets the same motion window: an
     /// older completion may never clear a newer transition's lock.
     private func refreshChromeWithTabMotion(
         kind: String,
-        duration: TimeInterval,
-        animation: Animation
+        duration: TimeInterval
     ) {
         tabStructuralMotionToken &+= 1
         let token = tabStructuralMotionToken
-        tabStructuralAnimation = animation
         tabStructuralKind = kind
         tabStructuralMotionActive = true
         AnimationTraceRecorder.shared.begin(kind: kind, expectedDuration: duration)
-        // The row owns insertion/removal timing. The persistent layout shape
-        // has its own group-keyed bounds animation, so member-label transitions
-        // can use a short curve without replacing the shape's transaction.
+        // NO `withAnimation` here, and this is the point of the function now.
         //
-        // Wrap the snapshot swap in an EXPLICIT transaction. Without it the
-        // tab ForEach diffs (N grouped members → 1 unified chip) collapse
-        // their layout footprint on the same frame the data changes: the tabs
-        // to the right of the group have no animated layout step to ride and
-        // TELEPORT into the freed space. A value-scoped `.animation` on the
-        // strip is not enough — it does not reach the ScrollView's internal
-        // HStack relayout. withAnimation makes the whole relayout (footprint
-        // collapse + neighbour slide) one coordinated step. The band keeps its
-        // own `.animation(value: run)`, so this does not double-drive it.
-        withAnimation(animation) {
-            refreshChrome()
-        }
+        // It used to wrap the snapshot swap in an explicit transaction, for a
+        // reason its own comment stated plainly: a value-scoped `.animation` on
+        // the strip "does not reach the ScrollView's internal HStack relayout",
+        // so without it the chips to the right of a merging group teleported
+        // into the freed space. There is no ScrollView and no HStack. The strip
+        // is `TabStripHostView`, which computes its own geometry and eases its
+        // own origin off a display link — nothing in it reads a SwiftUI
+        // transaction at all.
+        //
+        // What the transaction still reached was everything ELSE `refreshChrome`
+        // touches, and `editorSplit` is in that set. Switching a document tab
+        // for a two-pane layout tab installs the split AND removes the jump bar
+        // above the editor, and the transaction turned that 26pt height change
+        // into a 230ms animation on the OUTGOING full-width editor — which sat
+        // on top of the freshly installed panes for the whole curve. Measured,
+        // one switch:
+        //
+        //     43.4ms  pane 0  0×0 → 353×709       (the split arrives)
+        //     44.7ms  pane 1  0×0 → 353×709
+        //     89.5ms  pane 0  708×710.4 → 708×712.1
+        //      …18 steps, width pinned at the full 708…
+        //    322.8ms  pane 0  708×734.9 → 708×736.0
+        //
+        // That is the judder on the left pane. A structural change to the
+        // editor's arrangement should land in one frame — `splitEditorLayout`
+        // already says so with `.animation(nil, value: paneStructureKey)`, and
+        // this was overruling it from outside.
+        refreshChrome()
         DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.06) { [weak self] in
             guard let self, self.tabStructuralMotionToken == token else { return }
             self.tabStructuralMotionActive = false
@@ -2982,8 +2983,7 @@ final class EngineBridge: ObservableObject {
         if ok {
             refreshChromeWithTabMotion(
                 kind: "layout-loose-to-grouped",
-                duration: Self.layoutGatherDuration,
-                animation: Self.layoutGatherAnimation
+                duration: Self.layoutGatherDuration
             )
         }
         return ok
@@ -2999,8 +2999,7 @@ final class EngineBridge: ObservableObject {
         if ok {
             refreshChromeWithTabMotion(
                 kind: "layout-grouped-to-loose",
-                duration: Self.layoutContainerDuration,
-                animation: Self.layoutContainerAnimation
+                duration: Self.layoutContainerDuration
             )
         }
         return ok
@@ -3011,8 +3010,7 @@ final class EngineBridge: ObservableObject {
         if suisei_engine_activate_layout(engine, id, focusDoc) != 0 {
             refreshChromeWithTabMotion(
                 kind: "layout-activate",
-                duration: Self.layoutGatherDuration,
-                animation: Self.layoutGatherAnimation
+                duration: Self.layoutGatherDuration
             )
         }
     }
@@ -3026,8 +3024,7 @@ final class EngineBridge: ObservableObject {
                 kind: wasUnified
                     ? "layout-unified-to-grouped"
                     : "layout-grouped-to-unified",
-                duration: Self.layoutMergeDuration,
-                animation: Self.layoutMergeAnimation
+                duration: Self.layoutMergeDuration
             )
         }
     }
@@ -3263,8 +3260,7 @@ final class EngineBridge: ObservableObject {
         suisei_engine_close_tab(engine, UInt32(index))
         refreshChromeWithTabMotion(
             kind: "tab-close-index",
-            duration: Self.tabCloseDuration,
-            animation: Self.tabCloseAnimation
+            duration: Self.tabCloseDuration
         )
         ensureEditorFocus()
     }
@@ -3285,8 +3281,8 @@ final class EngineBridge: ObservableObject {
     /// thing it is meant to be pointing at.
     ///
     /// Structural motion is unaffected. Opening and closing tabs still animate,
-    /// through `refreshChromeWithTabMotion` and the strip's own
-    /// `tabStructuralAnimation`, both keyed off the tab SET rather than the
+    /// through `refreshChromeWithTabMotion` and the strip's own motion, both
+    /// keyed off the tab SET rather than the
     /// selection. ⌃⇥ / ⌃⇧⇥ inherit this, since `stepTab` routes here.
     func gotoTabId(_ stableId: UInt64) {
         guard let engine else { return }
@@ -3300,8 +3296,7 @@ final class EngineBridge: ObservableObject {
         suisei_engine_close_tab_id(engine, stableId)
         refreshChromeWithTabMotion(
             kind: "tab-close-\(stableId)",
-            duration: Self.tabCloseDuration,
-            animation: Self.tabCloseAnimation
+            duration: Self.tabCloseDuration
         )
         ensureEditorFocus()
     }
@@ -3312,8 +3307,7 @@ final class EngineBridge: ObservableObject {
         if moved {
             refreshChromeWithTabMotion(
                 kind: "tab-reorder-\(from)-to-\(to)",
-                duration: Self.tabReorderDuration,
-                animation: Self.tabReorderAnimation
+                duration: Self.tabReorderDuration
             )
         }
         return moved
@@ -3326,8 +3320,7 @@ final class EngineBridge: ObservableObject {
         if suisei_engine_drop_layout(engine, id) != 0 {
             refreshChromeWithTabMotion(
                 kind: "layout-drop-\(id)",
-                duration: Self.layoutContainerDuration,
-                animation: Self.layoutContainerAnimation
+                duration: Self.layoutContainerDuration
             )
         }
     }
