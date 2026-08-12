@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// The tab strip, hosted in AppKit.
 ///
@@ -48,11 +49,18 @@ final class TabStripHostView: NSView {
     /// Window-space keep-out at each end: traffic lights and the sidebar toggle
     /// on the left, the document toolbar on the right.
     ///
-    /// A CONSTANT, deliberately. Feeding the sidebar's live width in here is
-    /// what made the run move while the sidebar animated — the thing H1 exists
-    /// to stop. It narrows the viewport; it never moves the centre.
+    /// A STEP, deliberately — the caller passes a constant per sidebar state,
+    /// never the splitter's live width. It narrows the viewport and never moves
+    /// the centre (measured: the first chip moves 0.00pt across eleven keep-out
+    /// widths while the run fits), so the only case a live width could disturb
+    /// is an overflowing run pinned against the clamp. Feeding a value that
+    /// sweeps with the sidebar animation is exactly what H1 exists to stop.
     var leadingInset: CGFloat = 150 { didSet { needsDisplay = true } }
     var trailingInset: CGFloat = 150 { didSet { needsDisplay = true } }
+
+    /// Extra drop of the 24pt chip row inside the band, so the strip sits on
+    /// the same line as the native toolbar items beside it.
+    var rowDrop: CGFloat = 0 { didSet { needsDisplay = true } }
 
     // MARK: - Owned state
 
@@ -230,7 +238,7 @@ final class TabStripHostView: NSView {
             layout: layout,
             viewportX: vp.x - selfOriginInWindow,
             originX: liveOrigin ?? layout.originX,
-            rowY: ((bounds.height - TabChipBox.height) / 2).rounded()
+            rowY: ((bounds.height - TabChipBox.height) / 2 + rowDrop).rounded()
         )
     }
 
@@ -930,4 +938,91 @@ struct TabStripActions {
     var foldDown: (() -> Void)?
     var plusMenu: ((NSView, CGPoint, NSEvent) -> Void)?
     var contextMenu: ((NSView, Int, NSEvent) -> Void)?
+}
+
+/// Target for the strip's `NSMenu` items.
+///
+/// `NSMenuItem` needs an Objective-C target and selector, which is why the old
+/// "+" menu had a bridge object with one `@objc` method per entry. This holds a
+/// block per item instead, so a menu can be built where it is used. Retain it
+/// for as long as the menu can be open — a released target silently disables
+/// every item.
+final class TabStripMenuTarget: NSObject {
+    private var blocks: [ObjectIdentifier: () -> Void] = [:]
+
+    func item(_ title: String, _ block: @escaping () -> Void) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: title, action: #selector(fire(_:)), keyEquivalent: ""
+        )
+        item.target = self
+        blocks[ObjectIdentifier(item)] = block
+        return item
+    }
+
+    func menu(_ entries: [(String, () -> Void)?]) -> NSMenu {
+        let menu = NSMenu()
+        for entry in entries {
+            guard let entry else { menu.addItem(.separator()); continue }
+            menu.addItem(item(entry.0, entry.1))
+        }
+        return menu
+    }
+
+    @objc private func fire(_ sender: NSMenuItem) {
+        blocks[ObjectIdentifier(sender)]?()
+    }
+}
+
+// MARK: - SwiftUI seam
+
+/// The strip's one appearance in the SwiftUI tree.
+///
+/// It carries no geometry. The view reads its viewport from the window, so
+/// whatever frame SwiftUI gives this — and whatever that frame does during a
+/// sidebar animation — cannot move a chip. That is the point of H1, and it is
+/// why there is no `GeometryReader` here.
+struct TabStripHost: NSViewRepresentable {
+    var tabs: [TabItem]
+    var overflowCount: Int
+    var palette: TabStripPalette
+    var leadingInset: CGFloat
+    var trailingInset: CGFloat
+    var rowDrop: CGFloat
+    /// The focused slot. A change scrolls it into view if it is not already.
+    var activeSlot: Int?
+    var actions: TabStripActions
+
+    final class Coordinator {
+        var lastActive: Int??
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> TabStripHostView {
+        let v = TabStripHostView(frame: .zero)
+        apply(to: v, context: context)
+        return v
+    }
+
+    func updateNSView(_ v: TabStripHostView, context: Context) {
+        apply(to: v, context: context)
+    }
+
+    private func apply(to v: TabStripHostView, context: Context) {
+        // Actions first: they capture this pass's state, and a reveal below may
+        // already want the new ones.
+        v.actions = actions
+        v.palette = palette
+        v.leadingInset = leadingInset
+        v.trailingInset = trailingInset
+        v.rowDrop = rowDrop
+        v.overflowCount = overflowCount
+        v.tabs = tabs
+
+        let c = context.coordinator
+        if c.lastActive != .some(activeSlot) {
+            c.lastActive = .some(activeSlot)
+            if let activeSlot { v.reveal(slot: activeSlot) }
+        }
+    }
 }

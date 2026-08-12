@@ -224,6 +224,8 @@ struct ContentView: View {
     /// The strip's entry model — see docs/SUISEI-TAB-STRIP-BEHAVIOUR.md.
     private var stripModel: TabStripModel { TabStripModel(tabs: engine.chrome.tabs) }
     @State private var plusBridge = PlusMenuBridge()
+    /// Retains the strip's menu blocks for as long as a menu can be open.
+    @State private var stripMenus = TabStripMenuTarget()
     /// Background code-file warm-up for the project's master directory.
     @StateObject private var projectIndex = ProjectIndex()
     /// Measured shell-chip row width — the header scroller hugs it until the
@@ -1977,82 +1979,154 @@ struct ContentView: View {
 
     @ViewBuilder
     private var topBarBody: some View {
-        GeometryReader { geo in
-            // One stable viewport between the sidebar and trailing controls.
-            // Switching between a symmetric "fits" width and an overflow
-            // width while a layout merged changed the strip by 135pt in the
-            // first frame, independently of the chip animation.
-            // This row spans the WINDOW, so it has to clear the sidebar.
-            //
-            // I had made this a flat 150 after taking the SwiftUI control
-            // cluster out, reasoning that nothing occupies the row's ends any
-            // more. The controls left; the sidebar did not — and tabs drew
-            // straight across it.
-            //
-            // `navLiveWidth` comes from the splitter itself on every frame of a
-            // collapse, so the reserve follows the panel rather than jumping
-            // when the flag flips. 16pt past its edge is 4373153's own beat.
-            let leftReserve: CGFloat = engine.uiNavVisible
-                ? navLiveWidth + 16
-                : 150
-            let rightTight: CGFloat = 150
-            let wideCap = max(60, geo.size.width - leftReserve - rightTight) - 22
-
-            ZStack {
-                // Empty areas drag the window; double-click zooms (titlebar
-                // behaviors — the real titlebar container is clamped to the
-                // lights zone so it can't swallow the buttons here).
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(WindowDragGesture())
-                    // INERT while the cursor is over the tab strip.
-                    //
-                    // `WindowDragGesture` drags the window at the AppKit level,
-                    // and it won every press that began on a chip no matter
-                    // what was tried above it — five gesture shapes and a
-                    // zIndex, each one probe-confirmed to receive nothing.
-                    // Ordering cannot help when the claimant is not competing
-                    // in SwiftUI's arbitration; the layer has to stop taking
-                    // hits where the tabs are. `tabStripHover` already tracks
-                    // exactly that region.
-                    .allowsHitTesting(!tabStripHover)
-                    .zIndex(0)
-                    .simultaneousGesture(
-                        TapGesture(count: 2).onEnded {
-                            NSApp.keyWindow?.performZoom(nil)
-                        }
-                    )
-
-                // Tabs — true window center, faded at both clipped ends.
-                // "+" hugs the last tab (8pt gap) and only materializes on
-                // hover; it fades with a plain ease (a spring + scale moved
-                // the hover boundary under the cursor — visible trembling)
-                // and stays hit-testable at all times: yanking hit-testing
-                // off a Menu mid-tracking wedges the app's event loop.
-                HStack(spacing: 0) {
-                    Spacer().frame(width: leftReserve)
-                    documentTabStrip(maxWidth: wideCap)
-                    Spacer(minLength: rightTight - 22)
-                }
-
-            // No control cluster here. The navigator toggle and the three
-            // document controls are NATIVE toolbar items now — the sidebar
-            // column's own for the toggle, `editorToolbar` for the rest. This
-            // row's SwiftUI copies came back with the strip when it was
-            // restored to 4373153, and drew on top of them at both ends.
-            }
-            // The entire titlebar row uses the 48pt Swiss-grid band. Compressing
-            // this to AppKit's 28pt default moved every control centre from
-            // y=24 to y=14 and visibly pinned the row to the window top.
-            .frame(width: geo.size.width, height: ContentView.topBandHeight)
-            // Drop the whole titlebar row by the shared amount. Applied to the
-            // band, not to the tab strip and the trailing icons separately, so
-            // the two cannot end up on different lines.
-            .offset(y: ContentView.titlebarDrop)
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
-        }
+        // No `GeometryReader`, and no reserve arithmetic on a measured width.
+        //
+        // Everything that used to be here — a viewport computed from
+        // `geo.size.width`, a `Spacer` sized by the sidebar, and a `Color.clear`
+        // window-drag layer switched off by hover — is gone into
+        // `TabStripHostView`, which reads its viewport from the window and
+        // routes its own presses. `geo.size.width` swept 1120 → 820 → 1120 on
+        // every sidebar toggle and carried the whole strip with it; asking the
+        // window instead is the only way to stop asking a moving thing. See
+        // docs/SUISEI-TAB-STRIP-HOST.md.
+        //
+        // No control cluster here either. The navigator toggle and the three
+        // document controls are NATIVE toolbar items — the sidebar column's own
+        // for the toggle, `editorToolbar` for the rest.
+        TabStripHost(
+            tabs: engine.chrome.tabs,
+            overflowCount: engine.chrome.tabsOverflow,
+            palette: stripPalette,
+            leadingInset: engine.uiNavVisible
+                ? ContentView.stripReserveSidebar
+                : ContentView.stripReserveLights,
+            trailingInset: ContentView.stripReserveTrailing,
+            // The 48pt Swiss-grid band, dropped by the shared amount so the
+            // chips sit on the same line as the trailing toolbar items.
+            rowDrop: ContentView.titlebarDrop,
+            activeSlot: engine.chrome.tabs.first(where: \.active)?.id,
+            actions: stripActions
+        )
         .frame(height: ContentView.topBandHeight)
         .frame(maxWidth: .infinity)
+    }
+
+    /// Window-space keep-outs for the strip, one constant per sidebar state.
+    ///
+    /// A STEP, not the splitter's live width. The centre does not move when
+    /// these change — measured at 0.00pt across eleven widths — so the only
+    /// thing a live value could disturb is an overflowing run pinned against
+    /// the clamp, and a value that sweeps with the sidebar animation is exactly
+    /// what the rewrite exists to stop.
+    static let stripReserveLights: CGFloat = 150
+    static let stripReserveSidebar: CGFloat = 296
+    static let stripReserveTrailing: CGFloat = 150
+
+    private var stripPalette: TabStripPalette {
+        TabStripPalette(
+            isLight: isLightTheme,
+            // The THEME's accent, not `Color.accentColor` — that is the system
+            // accent and `.tint` does not redirect it.
+            accent: NSColor(accent),
+            fg: NSColor(Color.primary),
+            dim: NSColor(Color.secondary),
+            groupFill: NSColor(layoutGroupFill),
+            groupStroke: NSColor(layoutGroupStroke),
+            activeFill: NSColor(
+                Color.primary.opacity(isLightTheme ? 0.10 : 0.14)
+            ),
+            hoverFill: NSColor(
+                Color.primary.opacity(isLightTheme ? 0.06 : 0.10)
+            ),
+            hoverFillInGroup: NSColor(Color.black.opacity(0.08)),
+            closeWell: NSColor(
+                Color.primary.opacity(isLightTheme ? 0.10 : 0.16)
+            )
+        )
+    }
+
+    /// Everything the strip can do. One dispatch table, because the view has
+    /// one press router — the three-way disagreement over who owned a click is
+    /// the defect this replaced.
+    private var stripActions: TabStripActions {
+        let tabs = engine.chrome.tabs
+        return TabStripActions(
+            click: { slot in
+                focused = true
+                guard let tab = tabs.first(where: { $0.id == slot }) else {
+                    engine.gotoTab(slot)
+                    return
+                }
+                applyStripClick(chip: tab.stableId)
+            },
+            doubleClick: { slot in
+                focused = true
+                // An alternate grouped ⇄ unified gesture, routed through the
+                // same coordinator as a one-step vertical scroll so it cannot
+                // snap independently.
+                guard let tab = tabs.first(where: { $0.id == slot }),
+                      tab.group != 0
+                else { return }
+                engine.toggleLayoutStyle(tab.group)
+            },
+            close: { slot in
+                guard let tab = tabs.first(where: { $0.id == slot }) else { return }
+                focused = true
+                applyStripClose(chip: tab.stableId)
+            },
+            reorder: { held, to in
+                // By stable id: under a folded group the slots no longer line
+                // up with buffer indices, so a slot-based move would carry the
+                // wrong document.
+                guard let fromId = tabs.first(where: { $0.id == held })?.stableId,
+                      let toId = tabs.first(where: { $0.id == to })?.stableId
+                else { return }
+                _ = engine.moveTabIds(from: fromId, to: toId)
+            },
+            foldUp: { _ = engine.advanceLayoutPresentation() },
+            foldDown: { _ = engine.retreatLayoutPresentation() },
+            plusMenu: { view, _, event in
+                stripMenus.menu([
+                    ("New Untitled Tab", { engine.openBlankTab() }),
+                    ("Next Tab", { engine.nextTab() }),
+                    ("Previous Tab", { engine.prevTab() }),
+                    nil,
+                    ("Split Editor Right", { engine.splitEditorRight() }),
+                    ("Split Editor Below", { engine.splitEditorBelow() }),
+                    ("Focus Next Pane", { engine.focusNextPane() }),
+                    ("Close Focused Pane", { engine.closeFocusedPane() }),
+                ])
+                .popUp(
+                    positioning: nil,
+                    at: CGPoint(x: 0, y: view.bounds.height),
+                    in: view
+                )
+                _ = event
+            },
+            contextMenu: { view, slot, event in
+                guard let tab = tabs.first(where: { $0.id == slot }) else { return }
+                var entries: [(String, () -> Void)?] = []
+                if tab.group != 0 {
+                    entries.append((
+                        tab.isLayout
+                            ? "Show Layout as Group"
+                            : "Merge Layout into One Tab",
+                        { engine.toggleLayoutStyle(tab.group) }
+                    ))
+                    entries.append(("Unfold Layout", { _ = engine.unfoldLayout() }))
+                    entries.append(nil)
+                }
+                entries.append(("Close Tab", { applyStripClose(chip: tab.stableId) }))
+                entries.append(("Close Other Tabs", {
+                    for other in tabs.reversed() where other.stableId != tab.stableId {
+                        applyStripClose(chip: other.stableId)
+                    }
+                }))
+                NSMenu.popUpContextMenu(
+                    stripMenus.menu(entries), with: event, for: view
+                )
+            }
+        )
     }
 
 

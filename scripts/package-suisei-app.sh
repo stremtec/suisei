@@ -70,6 +70,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/TabStripLayout.swift"
   "$ROOT/suisei-app/Suisei/TabStripModel.swift"
   "$ROOT/suisei-app/Suisei/TabStripView.swift"
+  "$ROOT/suisei-app/Suisei/TabStripHost.swift"
   "$ROOT/suisei-app/Suisei/TabChipMetrics.swift"
   "$ROOT/suisei-app/Suisei/GlassBackdrop.swift"
   "$ROOT/suisei-app/Suisei/WelcomeView.swift"
