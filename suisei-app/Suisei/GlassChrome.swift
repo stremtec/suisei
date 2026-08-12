@@ -119,7 +119,12 @@ struct ToolbarTabChip: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            // Every number in this box comes from `TabChipBox` — the same
+            // constants `TabChipMetrics` sums into a width and `closeSlot`
+            // derives the × hit rect from. When this was `5` / `10` / `24` /
+            // `14` written out here, moving any of them moved the drawn × and
+            // left the hit rect behind.
+            HStack(spacing: TabChipBox.interItemGap) {
                 Image(systemName: deleted
                     ? "exclamationmark.triangle.fill"
                     : (isLayout ? "square.on.square" : "doc.text.fill"))
@@ -137,12 +142,12 @@ struct ToolbarTabChip: View {
                     trailingSlot
                 }
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, TabChipBox.horizontalPadding)
             // Match ToolbarPlainIcon's 24pt box. The chip used to size itself
             // from its text (~22pt), so the tab sat on a different rhythm from
             // the icons beside it in the same row — small enough to look like a
             // mistake rather than a choice.
-            .frame(height: 24)
+            .frame(height: TabChipBox.height)
             .background {
                 // The hover fill belongs to THIS chip. The ACTIVE fill does
                 // not live here at all — the strip draws a single capsule that
@@ -209,7 +214,10 @@ struct ToolbarTabChip: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 8, weight: .bold))
                         .foregroundStyle(dim.opacity(0.90))
-                        .frame(width: 14, height: 14)
+                        .frame(
+                            width: TabChipBox.trailingSlotWidth,
+                            height: TabChipBox.trailingSlotWidth
+                        )
                         .background(
                             Circle()
                                 .fill(Color.primary.opacity(isLight ? 0.10 : 0.16))
@@ -223,7 +231,10 @@ struct ToolbarTabChip: View {
                 .allowsHitTesting(hovered)
             }
         }
-        .frame(width: 14, height: 14)
+        .frame(
+            width: TabChipBox.trailingSlotWidth,
+            height: TabChipBox.trailingSlotWidth
+        )
         .animation(.easeInOut(duration: 0.14), value: hovered)
     }
 }

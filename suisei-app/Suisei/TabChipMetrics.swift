@@ -20,10 +20,10 @@ import CoreGraphics
 /// - `showTrailing` is `onClose != nil || dirty`, and the strip always passes
 ///   an `onClose`, so every chip in it reserves the trailing slot.
 enum TabChipMetrics {
-    static let horizontalPadding: CGFloat = 10
-    static let interItemGap: CGFloat = 5
-    static let trailingSlotWidth: CGFloat = 14
-    static let height: CGFloat = 24
+    // The box itself is `TabChipBox`, next to the hit test that reads it. This
+    // file's job is the one part that needs a font: how wide the text inside
+    // the box is. Restating the padding here is what let the chip, the width
+    // and the close rect drift apart.
 
     /// Measured once per (symbol, size); SF Symbol widths vary per glyph.
     nonisolated(unsafe) private static var symbolWidths: [String: CGFloat] = [:]
@@ -71,9 +71,10 @@ enum TabChipMetrics {
     ) -> CGFloat {
         let icon = symbolWidth(symbolName(isLayout: isLayout, deleted: deleted))
         let text = titleWidth(title, active: active)
-        var w = horizontalPadding * 2 + icon + interItemGap + text
+        var w = TabChipBox.horizontalPadding * 2
+            + icon + TabChipBox.interItemGap + text
         if showsTrailing {
-            w += interItemGap + trailingSlotWidth
+            w += TabChipBox.interItemGap + TabChipBox.trailingSlotWidth
         }
         // Rounded UP, per chip, because that is what SwiftUI does.
         //

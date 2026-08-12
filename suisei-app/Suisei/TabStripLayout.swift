@@ -1,6 +1,43 @@
 import CoreGraphics
 import Foundation
 
+/// The inside of a tab chip, stated once.
+///
+/// Three places have to agree about this box and used to each state it
+/// separately: `ToolbarTabChip` DRAWS it (`HStack(spacing:)` +
+/// `.padding(.horizontal:)` + a fixed trailing slot), `TabChipMetrics` sums it
+/// to get a width, and `TabStripLayout.closeSlot` re-derived the close glyph's
+/// rect from hand-copied numbers — `maxX - 24`, `rowHeight / 2 - 7`, `14 × 14`.
+///
+/// That `24` was `horizontalPadding + trailingSlotWidth` transcribed by hand.
+/// Nothing connected it to the padding it came from, so changing the chip's
+/// padding moved the drawn × and left the hit rect where it was, and the only
+/// symptom is the one this strip keeps producing: the × answers a few points
+/// away from where it is drawn. Every other authority in this file was
+/// collapsed into one for exactly this reason; this was the last one left.
+///
+/// Living here rather than next to the chip keeps the geometry file free of
+/// AppKit, so `TabStripLayoutGeometryTests` still compiles against this file
+/// alone.
+enum TabChipBox {
+    /// Leading/trailing inset of the chip's content.
+    static let horizontalPadding: CGFloat = 10
+    /// `HStack` spacing between icon, title and trailing slot.
+    static let interItemGap: CGFloat = 5
+    /// The dirty-dot / close-× slot. Square.
+    static let trailingSlotWidth: CGFloat = 14
+    /// The chip's own height, matching `ToolbarPlainIcon`'s 24pt box.
+    static let height: CGFloat = 24
+
+    /// Distance from the chip's trailing edge to the close slot's leading edge.
+    /// Derived — this is the number `closeSlot` used to hard-code as 24.
+    static var closeSlotInset: CGFloat { horizontalPadding + trailingSlotWidth }
+
+    /// Slack around the drawn glyph so the pointer does not have to land on a
+    /// 14pt square. Grows the hit rect only; the glyph is unmoved.
+    static let closeHitInset: CGFloat = 3
+}
+
 /// Where every tab chip is, computed rather than measured.
 ///
 /// The strip's geometry used to be four independent SwiftUI measurements —
@@ -111,15 +148,33 @@ struct TabStripLayout: Equatable {
     }
 
     /// Slot whose close glyph is under `p`.
+    ///
+    /// The rect is DERIVED from `TabChipBox`, not restated: it is the same box
+    /// the chip's `HStack` puts its trailing slot in, read off the chip's own
+    /// trailing edge. See `closeRect(for:rowHeight:)`.
     func closeSlot(at p: CGPoint, rowHeight: CGFloat) -> Int? {
         let local = CGPoint(x: p.x - originX, y: p.y)
         for chip in chips {
-            let glyph = CGRect(
-                x: chip.maxX - 24, y: rowHeight / 2 - 7, width: 14, height: 14
-            ).insetBy(dx: -3, dy: -3)
-            if glyph.contains(local) { return chip.slot }
+            if closeRect(for: chip, rowHeight: rowHeight).contains(local) {
+                return chip.slot
+            }
         }
         return nil
+    }
+
+    /// The close glyph's hit rect for one chip, in ROW space.
+    ///
+    /// Exposed so a test can assert it against the box constants rather than
+    /// against a number copied out of the chip's layout.
+    func closeRect(for chip: Chip, rowHeight: CGFloat) -> CGRect {
+        let slot = TabChipBox.trailingSlotWidth
+        return CGRect(
+            x: chip.maxX - TabChipBox.closeSlotInset,
+            y: rowHeight / 2 - slot / 2,
+            width: slot,
+            height: slot
+        )
+        .insetBy(dx: -TabChipBox.closeHitInset, dy: -TabChipBox.closeHitInset)
     }
 
     /// One-step neighbour swap while dragging, decided by the neighbour's
