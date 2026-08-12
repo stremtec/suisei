@@ -1838,19 +1838,23 @@ final class EditorCanvasView: NSView {
         func flush(bottomCap: Bool) {
             guard let start = runStart else { return }
             let color = gitColor(runKind)
-            for r in Self.barRects(
-                top: start, bottom: runEnd,
-                topCap: runTopCap, bottomCap: bottomCap, staged: runStaged
-            ) {
-                out.append((r, color))
-            }
+            // A deletion has no lines of its own — it is a boundary, and a bar
+            // is the wrong object for it. Drawn as one it was a 6pt rounded
+            // pill in the gutter, which is a breakpoint.
+            let rects = runKind == 3
+                ? Self.deletionRects(atY: start)
+                : Self.barRects(
+                    top: start, bottom: runEnd,
+                    topCap: runTopCap, bottomCap: bottomCap, staged: runStaged
+                )
+            for r in rects { out.append((r, color)) }
             runStart = nil
         }
 
         for line in band where !line.isWrapContinuation {
-            let sign = line.gitSignKind
+            let kind = line.gitSignKind
             let row = max(0, Int(line.lineNo) - 1)
-            guard sign & 0x0F != 0 else {
+            guard kind != 0 else {
                 flush(bottomCap: false)
                 lastRow = row
                 continue
@@ -1858,18 +1862,18 @@ final class EditorCanvasView: NSView {
             let y = CGFloat(row) * lineH
             let sameRun = runStart != nil
                 && row == lastRow + 1
-                && sign & 0x0F == runKind
-                && (sign & 0x40 != 0) == runStaged
+                && kind == runKind
+                && line.gitHunkStaged == runStaged
             if !sameRun {
                 flush(bottomCap: false)
                 runStart = y
-                runTopCap = sign & 0x10 != 0
-                runKind = sign & 0x0F
-                runStaged = sign & 0x40 != 0
+                runTopCap = line.gitHunkFirst
+                runKind = kind
+                runStaged = line.gitHunkStaged
             }
             runEnd = y + lineH
             lastRow = row
-            if sign & 0x20 != 0 { flush(bottomCap: true) }
+            if line.gitHunkLast { flush(bottomCap: true) }
         }
         // A hunk running past the bottom of the band gets no cap there, which
         // is right: its end is off screen.
@@ -1922,6 +1926,34 @@ final class EditorCanvasView: NSView {
         return out
     }
 
+    /// Lines were removed at this boundary.
+    ///
+    /// A small wedge pointing down at the seam, not a bar: the removed text is
+    /// not on any line, so there is no run to draw. It shares the change
+    /// colour because a deletion is a change and not an error — in red, at the
+    /// bar's width and with the bar's rounded ends, it read as a breakpoint.
+    private static func deletionRects(atY y: CGFloat) -> [CGRect] {
+        let w = EditorMetrics.gitStripeWidth
+        let x = EditorCanvasView.gitBarX
+        let step = EditorCanvasView.gitBarCapStep
+        let h = EditorCanvasView.gitDeletionHeight
+        var out: [CGRect] = []
+        var d: CGFloat = 0
+        while d < h {
+            // Widest at the seam, tapering to a point below it.
+            let half = (w / 2) * (1 - d / h)
+            if half > 0 {
+                out.append(CGRect(
+                    x: x + w / 2 - half, y: y + d, width: half * 2, height: step
+                ))
+            }
+            d += step
+        }
+        return out
+    }
+
+    static let gitDeletionHeight: CGFloat = 5
+
     /// Leading inset of the change bar inside the gutter.
     static let gitBarX: CGFloat = 2
     /// Outline thickness. Enough to read at a glance without closing the gap
@@ -1933,12 +1965,11 @@ final class EditorCanvasView: NSView {
     /// Xcode paints ONE colour for "changed since HEAD" rather than sorting
     /// additions from modifications — the distinction is visible in the text
     /// itself, and two colours down the gutter read as two kinds of warning.
-    /// A deletion keeps red: nothing in the text shows it, so the marker is the
-    /// only evidence.
-    private func gitColor(_ sign: UInt8) -> NSColor {
-        switch sign & 0x0F {
-        case 1, 2: return colors.gitChange
-        case 3: return .systemRed
+    /// Deletions share it: a deletion is a change, not an error, and in red at
+    /// the bar's width it read as a breakpoint.
+    private func gitColor(_ kind: UInt8) -> NSColor {
+        switch kind {
+        case 1, 2, 3: return colors.gitChange
         default: return .clear
         }
     }

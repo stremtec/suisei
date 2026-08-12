@@ -54,7 +54,18 @@ struct EditorLine: Equatable, Identifiable {
     var isWrapContinuation: Bool { (gitSign & 0x80) != 0 }
     /// DAP breakpoint on this buffer line (first visual segment only).
     var hasBreakpoint: Bool { (gitSign & 0x40) != 0 }
-    var gitSignKind: UInt8 { gitSign & 0x3F }
+    /// Kind alone: 0 none, 1 added, 2 modified, 3 deleted.
+    ///
+    /// `& 0x03`, not `& 0x3F`. The wider mask let the hunk flags through into
+    /// the value every `switch` compares against, so a staged or capped row
+    /// matched no case at all. See `GIT_*` in `compositor/scene.rs` for the
+    /// whole byte.
+    var gitSignKind: UInt8 { gitSign & 0x03 }
+    /// The hunk this row belongs to is staged — draw the bar filled.
+    var gitHunkStaged: Bool { (gitSign & 0x08) != 0 }
+    /// This row is the first / last of its hunk, so the bar caps here.
+    var gitHunkFirst: Bool { (gitSign & 0x10) != 0 }
+    var gitHunkLast: Bool { (gitSign & 0x20) != 0 }
 }
 
 /// One editor split surface (or the single full editor when unsplit).

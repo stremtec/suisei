@@ -2617,16 +2617,27 @@ fn visual_width_str(s: &str) -> usize {
         .sum()
 }
 
-/// Gutter bar state for one row, packed into `LineScene::git_sign`.
+/// Every bit of `LineScene::git_sign`, in one place.
 ///
-/// Low nibble is the kind (0 none, 1 added, 2 modified, 3 deleted). The flags
-/// above it are what let the face draw ONE bar per hunk instead of a stack of
-/// per-line slices: it needs to know where the hunk starts and ends to cap the
-/// outline, and whether it is staged to decide between an outline and a fill.
-/// Bit 0x80 is the soft-wrap continuation marker and belongs to the caller.
+/// The byte has four owners and had no map, which cost exactly what that
+/// usually costs: the staged flag was put on `0x40`, which is the BREAKPOINT
+/// bit, so staging a hunk drew a real breakpoint on every line of it — and the
+/// face's `gitSignKind` masks with `0x3F`, so the same flag never arrived and
+/// the bar never filled. One collision, both symptoms.
+///
+/// ```text
+///   0x03  kind: 0 none, 1 added, 2 modified, 3 deleted
+///   0x04  (free)
+///   0x08  the hunk is staged        → bar is filled rather than hollow
+///   0x10  first row of its hunk     → the bar caps here
+///   0x20  last row of its hunk      → the bar caps here
+///   0x40  breakpoint on this line   (owned by the DAP path)
+///   0x80  soft-wrap continuation    (owned by the line builder)
+/// ```
+pub const GIT_KIND_MASK: u8 = 0x03;
+pub const GIT_HUNK_STAGED: u8 = 0x08;
 pub const GIT_HUNK_FIRST: u8 = 0x10;
 pub const GIT_HUNK_LAST: u8 = 0x20;
-pub const GIT_HUNK_STAGED: u8 = 0x40;
 
 fn git_sign_for_row(app: &App, row: usize) -> u8 {
     use suisei_core::git::GitSign;

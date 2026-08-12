@@ -5,15 +5,15 @@ fn gopppppppppppppp(a: i32, b: i32) -> i32 {
 fn main() {
     println!("{}", gopppppppppppppp(4, 4));
 }
-dwqd
-wqd
-wwd
-wdw
-dw
-dwdwd
+
+
+dd
+d
+d
+d
+d
 d
 
-dw
-dw
 d
 
+d
