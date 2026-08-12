@@ -1609,6 +1609,80 @@ struct ContentView: View {
     }
 
 
+    /// The strip's one pointer surface.
+    ///
+    /// Deliberately takes NO coordinate translation. It is overlaid on the box
+    /// the chips are drawn in, so a point arriving here is already in the
+    /// layout's own space — the four `- tabEdgeFadeW` corrections this replaced
+    /// existed only because the catcher hung off a different, wider box.
+    ///
+    /// If this ever needs an offset again, the attachment point moved and that
+    /// is the bug; do not add the offset.
+    @ViewBuilder
+    private func stripPointerSurface(
+        _ layout: TabStripLayout, tabs: [TabItem]
+    ) -> some View {
+    TabStripMouse(
+            // Every query goes to the one layout this pass was drawn from.
+            slotAt: { x in layout.slot(at: x) },
+            closeAt: { p in
+                layout.closeSlot(
+                    at: p,
+                    rowHeight: Self.tabLabelFrameH
+                )
+            },
+            targetFor: { held, x in
+                layout.dragTarget(held: held, x: x)
+            },
+            onDrag: { held, to in
+                // By stable id: under a folded group the slots no longer
+                // line up with buffer indices, so a slot-based move would
+                // carry the wrong document.
+                guard let fromId = tabs.first(where: { $0.id == held })?.stableId,
+                      let toId = tabs.first(where: { $0.id == to })?.stableId,
+                      engine.moveTabIds(from: fromId, to: toId)
+                else { return }
+                draggingTab = to
+            },
+            onHoverSlot: { slot in
+                guard hoveredSlot != slot else { return }
+                hoveredSlot = slot
+            },
+            onPick: { held in draggingTab = held },
+            onClick: { slot in
+                focused = true
+                guard let tab = tabs.first(where: { $0.id == slot }) else {
+                    engine.gotoTab(slot)
+                    return
+                }
+                applyStripClick(chip: tab.stableId)
+            },
+            onDoubleClick: { slot in
+                focused = true
+                guard let tab = tabs.first(where: { $0.id == slot }),
+                      tab.group != 0
+                else { return }
+                // Double-click is an alternate grouped⇄unified gesture.
+                // Route it through the same transition coordinator as a
+                // one-step vertical scroll so it cannot snap independently.
+                engine.toggleLayoutStyle(tab.group)
+            },
+            onClose: { slot in
+                guard let tab = tabs.first(where: { $0.id == slot }) else { return }
+                focused = true
+                applyStripClose(chip: tab.stableId)
+            },
+            onEnd: { draggingTab = nil },
+            onScroll: { dx in tabScroll.scroll(by: dx, layout: layout) },
+            onFoldUp: { engine.advanceLayoutPresentation() },
+            onFoldDown: { engine.retreatLayoutPresentation() }
+        )
+        .accessibilityLabel("Document tabs")
+        .accessibilityHint(
+            "Scroll up to group or unify the active layout; scroll down to expand it"
+        )
+    }
+
     /// Center titlebar: every document tab, positioned by computed geometry.
     ///
     /// Rewritten. The previous strip was a `ScrollView` wrapping an `HStack`,
@@ -1661,7 +1735,33 @@ struct ContentView: View {
                     .offset(x: min(layout.plusX + Self.tabPlusW, viewport))
             }
         }
+        // Everything that has to agree about x is attached HERE, to the one
+        // box that is `viewport` wide and holds the chips.
+        //
+        // The "+" and the pointer catcher used to hang off the PADDED box
+        // instead, so every query carried a hand-written `- tabEdgeFadeW` to
+        // translate back — four of them, `slotAt`, `closeAt`, `targetFor` and
+        // the "+" offset, each independently restating the same fact. Nothing
+        // made them agree, and nothing would have complained if the padding, or
+        // the attachment point, changed under them. That is the shape of every
+        // defect this strip has had.
+        //
+        // Attached to the chips' own box there is no translation to write, so
+        // there is nothing left to keep in sync: the layout's coordinates ARE
+        // the catcher's coordinates.
         .frame(width: viewport, height: Self.tabLabelFrameH)
+        .overlay(alignment: .leading) {
+            tabPlusMenu
+                .fixedSize()
+                .frame(width: Self.tabPlusW, height: 26)
+                .opacity(tabStripHover ? 1 : 0)
+                .animation(.easeOut(duration: 0.12), value: tabStripHover)
+                .offset(x: layout.plusX)
+                // Only moves when the tab set changes, so the hover target
+                // never shifts under a resting cursor.
+                .animation(.snappy(duration: 0.22), value: tabStripPresentationKey)
+        }
+        .overlay(stripPointerSurface(layout, tabs: tabs))
         .padding(.horizontal, Self.tabEdgeFadeW)
         // Positions are recomputed, not re-measured, so they can ride the
         // structural curve directly — no one-pass lag to hide.
@@ -1692,17 +1792,6 @@ struct ContentView: View {
             }
         }
         // "+" rides the chips' trailing edge, at the layout's own clamp.
-        .overlay(alignment: .leading) {
-            tabPlusMenu
-                .fixedSize()
-                .frame(width: Self.tabPlusW, height: 26)
-                .opacity(tabStripHover ? 1 : 0)
-                .animation(.easeOut(duration: 0.12), value: tabStripHover)
-                .offset(x: Self.tabEdgeFadeW + layout.plusX)
-                // Only moves when the tab set changes, so the hover target
-                // never shifts under a resting cursor.
-                .animation(.snappy(duration: 0.22), value: tabStripPresentationKey)
-        }
         .background(AnimationTraceProbe(key: "tab-strip"))
         .contentShape(Rectangle())
         .coordinateSpace(name: Self.tabStripSpace)
@@ -1714,137 +1803,10 @@ struct ContentView: View {
         // and it consumes the mouseDown BEFORE SwiftUI gesture arbitration
         // runs, so this overlay owns clicks as well as drags and routes them
         // back.
-        .overlay(
-            TabStripMouse(
-                // Every query goes to the one layout this pass was drawn from.
-                slotAt: { x in layout.slot(at: x - Self.tabEdgeFadeW) },
-                closeAt: { p in
-                    layout.closeSlot(
-                        at: CGPoint(x: p.x - Self.tabEdgeFadeW, y: p.y),
-                        rowHeight: Self.tabLabelFrameH
-                    )
-                },
-                targetFor: { held, x in
-                    layout.dragTarget(held: held, x: x - Self.tabEdgeFadeW)
-                },
-                onDrag: { held, to in
-                    // By stable id: under a folded group the slots no longer
-                    // line up with buffer indices, so a slot-based move would
-                    // carry the wrong document.
-                    guard let fromId = tabs.first(where: { $0.id == held })?.stableId,
-                          let toId = tabs.first(where: { $0.id == to })?.stableId,
-                          engine.moveTabIds(from: fromId, to: toId)
-                    else { return }
-                    draggingTab = to
-                },
-                onHoverSlot: { slot in
-                    guard hoveredSlot != slot else { return }
-                    hoveredSlot = slot
-                },
-                onPick: { held in draggingTab = held },
-                onClick: { slot in
-                    focused = true
-                    guard let tab = tabs.first(where: { $0.id == slot }) else {
-                        engine.gotoTab(slot)
-                        return
-                    }
-                    applyStripClick(chip: tab.stableId)
-                },
-                onDoubleClick: { slot in
-                    focused = true
-                    guard let tab = tabs.first(where: { $0.id == slot }),
-                          tab.group != 0
-                    else { return }
-                    // Double-click is an alternate grouped⇄unified gesture.
-                    // Route it through the same transition coordinator as a
-                    // one-step vertical scroll so it cannot snap independently.
-                    engine.toggleLayoutStyle(tab.group)
-                },
-                onClose: { slot in
-                    guard let tab = tabs.first(where: { $0.id == slot }) else { return }
-                    focused = true
-                    applyStripClose(chip: tab.stableId)
-                },
-                onEnd: { draggingTab = nil },
-                onScroll: { dx in tabScroll.scroll(by: dx, layout: layout) },
-                onFoldUp: { engine.advanceLayoutPresentation() },
-                onFoldDown: { engine.retreatLayoutPresentation() }
-            )
-            .accessibilityLabel("Document tabs")
-            .accessibilityHint(
-                "Scroll up to group or unify the active layout; scroll down to expand it"
-            )
-        )
         .zIndex(1)
         .onHover { tabStripHover = $0 }
     }
 
-    /// AppKit event surface for the titlebar tab row.
-    ///
-    /// Its width includes the strip's two visual fade paddings. The layout
-    /// origin is exactly `tabEdgeFadeW` points inside that box, so every event
-    /// is converted once at this boundary. Its 48pt height is centred over the
-    /// 24pt visual row, making the visual row centre 24pt in catcher space.
-    private func tabStripMouseOverlay(
-        _ layout: TabStripLayout,
-        tabs: [TabItem]
-    ) -> some View {
-        TabStripMouse(
-            slotAt: { layout.slot(at: $0 - Self.tabEdgeFadeW) },
-            closeAt: { p in
-                layout.closeSlot(
-                    at: CGPoint(x: p.x - Self.tabEdgeFadeW, y: p.y),
-                    rowHeight: Self.tabLabelFrameH
-                )
-            },
-            targetFor: { held, x in
-                layout.dragTarget(held: held, x: x - Self.tabEdgeFadeW)
-            },
-            onDrag: { held, to in
-                // By stable id: under a folded group the slots no longer line
-                // up with buffer indices.
-                guard let fromId = tabs.first(where: { $0.id == held })?.stableId,
-                      let toId = tabs.first(where: { $0.id == to })?.stableId,
-                      engine.moveTabIds(from: fromId, to: toId)
-                else { return }
-                draggingTab = to
-            },
-            onHoverSlot: { slot in
-                guard hoveredSlot != slot else { return }
-                hoveredSlot = slot
-            },
-            onPick: { held in draggingTab = held },
-            onClick: { slot in
-                focused = true
-                guard let tab = tabs.first(where: { $0.id == slot }) else {
-                    engine.gotoTab(slot)
-                    return
-                }
-                applyStripClick(chip: tab.stableId)
-            },
-            onDoubleClick: { slot in
-                focused = true
-                guard let tab = tabs.first(where: { $0.id == slot }),
-                      tab.group != 0
-                else { return }
-                engine.toggleLayoutStyle(tab.group)
-            },
-            onClose: { slot in
-                guard let tab = tabs.first(where: { $0.id == slot }) else { return }
-                focused = true
-                applyStripClose(chip: tab.stableId)
-            },
-            onEnd: { draggingTab = nil },
-            onScroll: { dx in tabScroll.scroll(by: dx, layout: layout) },
-            onFoldUp: { engine.advanceLayoutPresentation() },
-            onFoldDown: { engine.retreatLayoutPresentation() }
-        )
-        .frame(height: ContentView.topBandHeight)
-        .accessibilityLabel("Document tabs")
-        .accessibilityHint(
-            "Scroll up to group or unify the active layout; scroll down to expand it"
-        )
-    }
 
     /// Band behind each grouped run, from the run's own computed extent.
     ///
