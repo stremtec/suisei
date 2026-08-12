@@ -8236,6 +8236,17 @@ private struct EditorWindowChrome: NSViewRepresentable {
 }
 
 /// Idempotent optical offset for the editor's real AppKit traffic lights.
+///
+/// Applied on SwiftUI updates alone this loses, and the way it loses is quiet:
+/// the lights are right at launch and sit 2pt high forever after the first
+/// sidebar toggle. Collapsing the navigator makes AppKit re-lay the titlebar,
+/// and that re-layout can land AFTER the update that nudged them — so the last
+/// write of the frame is AppKit's, and nothing asks again.
+///
+/// So the nudge follows the button instead. Each one posts frame changes, and a
+/// frame that is not the one we wrote is a fresh AppKit baseline to re-nudge
+/// from. It cannot be out of date, because the thing it reacts to is the thing
+/// that invalidates it.
 @MainActor
 private final class EditorTrafficLightNudge {
     static let shared = EditorTrafficLightNudge()
@@ -8243,6 +8254,7 @@ private final class EditorTrafficLightNudge {
     private final class Entry: NSObject {
         var nativeY: CGFloat
         var appliedY: CGFloat?
+        var observer: NSObjectProtocol?
 
         init(nativeY: CGFloat) {
             self.nativeY = nativeY
@@ -8253,35 +8265,65 @@ private final class EditorTrafficLightNudge {
         keyOptions: .weakMemory,
         valueOptions: .strongMemory
     )
+    /// Guards the notification our own `setFrameOrigin` posts.
+    private var writing = false
+    private var drop: CGFloat = 0
 
     func apply(to window: NSWindow, down: CGFloat) {
+        drop = down
         for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
             guard let button = window.standardWindowButton(kind) else { continue }
-            let currentY = button.frame.origin.y
-            let entry: Entry
-            if let existing = entries.object(forKey: button) {
-                entry = existing
-                // AppKit may legitimately re-lay the titlebar after a toolbar
-                // or scale change. A frame that is neither our last result nor
-                // the remembered native value becomes the new native baseline.
-                if let applied = entry.appliedY, abs(currentY - applied) > 0.25 {
-                    entry.nativeY = currentY
-                }
-            } else {
-                entry = Entry(nativeY: currentY)
-                entries.setObject(entry, forKey: button)
-            }
+            nudge(button)
+        }
+        relayoutAccessories(of: window)
+    }
 
-            let signedDrop = button.superview?.isFlipped == true ? down : -down
-            let targetY = entry.nativeY + signedDrop
-            if abs(currentY - targetY) > 0.25 {
-                button.setFrameOrigin(NSPoint(x: button.frame.origin.x, y: targetY))
+    private func nudge(_ button: NSButton) {
+        let currentY = button.frame.origin.y
+        let entry: Entry
+        if let existing = entries.object(forKey: button) {
+            entry = existing
+            // A frame that is neither our last result nor the remembered native
+            // value is AppKit having re-laid the titlebar; that becomes the new
+            // native baseline.
+            if let applied = entry.appliedY, abs(currentY - applied) > 0.25 {
+                entry.nativeY = currentY
             }
-            entry.appliedY = targetY
+        } else {
+            entry = Entry(nativeY: currentY)
+            entries.setObject(entry, forKey: button)
+            observe(button, entry)
         }
 
-        // The custom navigator accessory keys its centre to the zoom button.
-        // Re-layout after the nudge so those left-side controls stay on one line.
+        let signedDrop = button.superview?.isFlipped == true ? drop : -drop
+        let targetY = entry.nativeY + signedDrop
+        entry.appliedY = targetY
+        guard abs(currentY - targetY) > 0.25 else { return }
+        writing = true
+        button.setFrameOrigin(NSPoint(x: button.frame.origin.x, y: targetY))
+        writing = false
+    }
+
+    private func observe(_ button: NSButton, _ entry: Entry) {
+        button.postsFrameChangedNotifications = true
+        entry.observer = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: button,
+            queue: .main
+        ) { [weak self, weak button] _ in
+            MainActor.assumeIsolated {
+                guard let self, let button, !self.writing else { return }
+                self.nudge(button)
+                if let window = button.window {
+                    self.relayoutAccessories(of: window)
+                }
+            }
+        }
+    }
+
+    /// The custom navigator accessory keys its centre to the zoom button, so it
+    /// has to re-lay whenever the lights move.
+    private func relayoutAccessories(of window: NSWindow) {
         for controller in window.titlebarAccessoryViewControllers {
             controller.view.needsLayout = true
         }
@@ -8438,7 +8480,28 @@ private struct EditorGeneratedSidebarTogglePruner: NSViewRepresentable {
                         forName: NSToolbar.willAddItemNotification,
                         object: nextToolbar,
                         queue: .main
-                    ) { [weak self] _ in self?.normalizeOnNextRunLoop() }
+                    ) { [weak self] note in
+                        // BEFORE the add, so the item never gets a frame on
+                        // screen. `willAddItem` fires while the item is not yet
+                        // in `toolbar.items`, so it cannot be removed here —
+                        // only deferred, and that deferral is one whole frame:
+                        // switching a layout tab against a document tab
+                        // reinstalls the split view, SwiftUI regenerates the
+                        // toggle, and it flashed beside the divider before the
+                        // next run loop took it away.
+                        //
+                        // It carries the item, though, and a hidden item is
+                        // laid out at zero size. The removal below still
+                        // happens; this only makes it invisible while it
+                        // exists.
+                        if let item = note.userInfo?["item"] as? NSToolbarItem,
+                           Coordinator.isGeneratedSidebarToggle(item.itemIdentifier)
+                        {
+                            item.isHidden = true
+                            item.isEnabled = false
+                        }
+                        self?.normalizeOnNextRunLoop()
+                    }
                     didRemoveObserver = centre.addObserver(
                         forName: NSToolbar.didRemoveItemNotification,
                         object: nextToolbar,
@@ -8461,21 +8524,27 @@ private struct EditorGeneratedSidebarTogglePruner: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in self?.normalize() }
         }
 
+        /// Either form of the divider-relative system item.
+        static func isGeneratedSidebarToggle(
+            _ identifier: NSToolbarItem.Identifier
+        ) -> Bool {
+            if identifier == .toggleSidebar { return true }
+            let name = identifier.rawValue.lowercased()
+            return name.contains("navigationsplitview")
+                && name.contains("togglesidebar")
+        }
+
         private func normalize() {
             guard !normalizing, let toolbar else { return }
             normalizing = true
             defer { normalizing = false }
 
-            // Remove either form of the divider-relative system item. The
-            // visible accessory is not part of `toolbar.items`.
-            for index in toolbar.items.indices.reversed() {
-                let identity = toolbar.items[index].itemIdentifier.rawValue.lowercased()
-                if toolbar.items[index].itemIdentifier == .toggleSidebar
-                    || (identity.contains("navigationsplitview")
-                        && identity.contains("togglesidebar"))
-                {
-                    toolbar.removeItem(at: index)
-                }
+            // The visible accessory is not part of `toolbar.items`.
+            for index in toolbar.items.indices.reversed()
+            where Coordinator.isGeneratedSidebarToggle(
+                toolbar.items[index].itemIdentifier
+            ) {
+                toolbar.removeItem(at: index)
             }
         }
     }
