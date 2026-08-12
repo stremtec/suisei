@@ -14,6 +14,43 @@ pub enum GitSign {
     Deleted,
 }
 
+/// One contiguous change against HEAD.
+///
+/// The unit every gutter interaction actually works on: the bar is drawn per
+/// hunk, hovering highlights a hunk, and Stage / Discard / Show Change each
+/// take one. The per-line [`GitSign`] map is DERIVED from these — it used to be
+/// the only thing computed, which is why the gutter drew a separate 4pt-inset
+/// stripe per line and a run of changed lines read as a dotted column rather
+/// than one change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHunk {
+    /// First line of the hunk in the CURRENT buffer, 0-based.
+    pub start: usize,
+    /// How many current-buffer lines it spans. Zero for a pure deletion, which
+    /// occupies no line but is marked against `start`.
+    pub len: usize,
+    /// The lines this replaced, exactly as HEAD has them. Empty for a pure
+    /// addition. This is what "Show Change" reveals above the hunk.
+    pub removed: Vec<String>,
+    pub kind: GitSign,
+}
+
+impl GitHunk {
+    /// Last current-buffer line the hunk covers, or `start` when it covers none.
+    pub fn end(&self) -> usize {
+        self.start + self.len.saturating_sub(1)
+    }
+
+    /// Whether `row` is inside the hunk. A pure deletion answers for the single
+    /// line its marker sits on — there is nowhere else to hit it.
+    pub fn contains(&self, row: usize) -> bool {
+        if self.len == 0 {
+            return row == self.start;
+        }
+        row >= self.start && row <= self.end()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BlameLine {
     /// Short author (truncated)
@@ -307,14 +344,14 @@ pub fn parse_blame_porcelain(text: &str, out: &mut HashMap<usize, BlameLine>) {
 }
 
 /// Blocking gutter computation (runs on a background thread).
-pub fn compute_gutter(path: &str) -> (bool, HashMap<usize, GitSign>) {
+pub fn compute_gutter(path: &str) -> (bool, HashMap<usize, GitSign>, Vec<GitHunk>) {
     let mut signs = HashMap::new();
     if path.is_empty() {
-        return (false, signs);
+        return (false, signs, Vec::new());
     }
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| Path::new(path).to_path_buf());
     let Some(parent) = abs.parent() else {
-        return (false, signs);
+        return (false, signs, Vec::new());
     };
     let output = Command::new("git")
         .args([
@@ -328,20 +365,25 @@ pub fn compute_gutter(path: &str) -> (bool, HashMap<usize, GitSign>) {
         .current_dir(parent)
         .output();
     let Ok(out) = output else {
-        return (false, signs);
+        return (false, signs, Vec::new());
     };
     if !out.status.success() && out.stdout.is_empty() {
-        return (false, signs);
+        return (false, signs, Vec::new());
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    parse_diff_hunks(&text, &mut signs);
-    (true, signs)
+    let hunks = parse_diff_hunks_full(&text);
+    signs_from_hunks(&hunks, &mut signs);
+    (true, signs, hunks)
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct GitGutter {
-    /// 0-based buffer line → sign
+    /// 0-based buffer line → sign. DERIVED from `hunks`.
     pub signs: HashMap<usize, GitSign>,
+    /// The changes themselves, in buffer order. Everything the gutter can DO —
+    /// draw one bar, highlight on hover, stage, discard, reveal what was
+    /// removed — is per hunk; the sign map is just the per-line shadow of this.
+    pub hunks: Vec<GitHunk>,
     pub path: String,
     pub available: bool,
 }
@@ -353,16 +395,23 @@ impl GitGutter {
 
     pub fn clear(&mut self) {
         self.signs.clear();
+        self.hunks.clear();
         self.path.clear();
         self.available = false;
     }
 
+    /// The hunk covering `row`, if any.
+    pub fn hunk_at(&self, row: usize) -> Option<&GitHunk> {
+        self.hunks.iter().find(|h| h.contains(row))
+    }
+
     /// Sync wrapper (hot paths use App's async channel + `compute_gutter`).
     pub fn refresh(&mut self, path: &str) {
-        let (available, signs) = compute_gutter(path);
+        let (available, signs, hunks) = compute_gutter(path);
         self.path = path.to_string();
         self.available = available;
         self.signs = signs;
+        self.hunks = hunks;
     }
 
     pub fn sign_at(&self, row: usize) -> Option<GitSign> {
@@ -380,67 +429,97 @@ pub fn format_blame_gutter(b: &BlameLine, width: usize) -> String {
     s.chars().take(width).collect()
 }
 
-/// Parse unified diff hunks (`@@ -old,oc +new,nc @@`) into line signs.
-pub fn parse_diff_hunks(diff: &str, signs: &mut HashMap<usize, GitSign>) {
+/// Parse a `-U0` unified diff into hunks.
+///
+/// `-U0` means no context, so every `@@` block IS one change and the `-` lines
+/// under it are exactly what that change replaced. Keeping the removed text is
+/// what makes "Show Change" possible without going back to git.
+pub fn parse_diff_hunks_full(diff: &str) -> Vec<GitHunk> {
+    let mut out: Vec<GitHunk> = Vec::new();
     for line in diff.lines() {
-        if !line.starts_with("@@") {
-            continue;
-        }
-        // @@ -l,s +l,s @@
-        let Some(rest) = line.strip_prefix("@@") else {
-            continue;
-        };
-        let parts: Vec<&str> = rest.split_whitespace().collect();
-        // expect at least -old +new
-        let mut old_count = 1i64;
-        let mut new_start = 0i64;
-        let mut new_count = 1i64;
-        for p in parts {
-            if let Some(spec) = p.strip_prefix('-') {
-                let (_s, c) = parse_hunk_spec(spec);
-                old_count = c;
-            } else if let Some(spec) = p.strip_prefix('+') {
-                let (s, c) = parse_hunk_spec(spec);
-                new_start = s;
-                new_count = c;
-            }
-        }
-
-        // 1-based → 0-based for new file lines
-        if old_count == 0 && new_count > 0 {
-            // pure addition
-            for i in 0..new_count as usize {
-                let row = (new_start - 1).max(0) as usize + i;
-                signs.insert(row, GitSign::Added);
-            }
-        } else if new_count == 0 && old_count > 0 {
-            // pure deletion — mark the line after the deletion point (or previous)
-            let row = if new_start > 0 {
-                (new_start as usize).saturating_sub(1)
-            } else {
-                0
-            };
-            signs.entry(row).or_insert(GitSign::Deleted);
-        } else {
-            // modification / mix
-            let n = new_count.max(0) as usize;
-            let o = old_count.max(0) as usize;
-            let base = (new_start - 1).max(0) as usize;
-            for i in 0..n {
-                let row = base + i;
-                if i < o {
-                    signs.insert(row, GitSign::Modified);
-                } else {
-                    signs.insert(row, GitSign::Added);
+        if let Some(rest) = line.strip_prefix("@@") {
+            let mut old_count = 1i64;
+            let mut new_start = 0i64;
+            let mut new_count = 1i64;
+            for p in rest.split_whitespace() {
+                if let Some(spec) = p.strip_prefix('-') {
+                    let (_s, c) = parse_hunk_spec(spec);
+                    old_count = c;
+                } else if let Some(spec) = p.strip_prefix('+') {
+                    let (s, c) = parse_hunk_spec(spec);
+                    new_start = s;
+                    new_count = c;
                 }
             }
-            if o > n {
-                signs
-                    .entry(base.saturating_add(n.saturating_sub(1)).max(0))
-                    .or_insert(GitSign::Deleted);
+            let n = new_count.max(0) as usize;
+            let o = old_count.max(0) as usize;
+            let kind = if o == 0 {
+                GitSign::Added
+            } else if n == 0 {
+                GitSign::Deleted
+            } else {
+                GitSign::Modified
+            };
+            // A pure deletion has no line of its own; it is marked against the
+            // line that now sits where the removed text was.
+            let start = if n == 0 {
+                (new_start.max(0) as usize).saturating_sub(0)
+            } else {
+                (new_start - 1).max(0) as usize
+            };
+            out.push(GitHunk {
+                start,
+                len: n,
+                removed: Vec::new(),
+                kind,
+            });
+            continue;
+        }
+        // Body lines belong to the hunk most recently opened. Only the removed
+        // side is kept: the added side is already in the buffer.
+        if let Some(text) = line.strip_prefix('-') {
+            if line.starts_with("---") {
+                continue;
+            }
+            if let Some(h) = out.last_mut() {
+                h.removed.push(text.to_string());
             }
         }
     }
+    out
+}
+
+/// The per-line signs a set of hunks produces.
+///
+/// Derived, so the bar the gutter draws and the sign a line reports cannot
+/// disagree about where a change is.
+pub fn signs_from_hunks(hunks: &[GitHunk], signs: &mut HashMap<usize, GitSign>) {
+    for h in hunks {
+        if h.len == 0 {
+            signs.entry(h.start).or_insert(GitSign::Deleted);
+            continue;
+        }
+        // A modification that removed more lines than it added still only
+        // occupies the added ones; the surplus shows as a deletion marker on
+        // the hunk's last line.
+        for i in 0..h.len {
+            let row = h.start + i;
+            let sign = if h.kind == GitSign::Added || i >= h.removed.len() {
+                GitSign::Added
+            } else {
+                GitSign::Modified
+            };
+            signs.insert(row, sign);
+        }
+        if h.removed.len() > h.len {
+            signs.entry(h.end()).or_insert(GitSign::Deleted);
+        }
+    }
+}
+
+/// Parse unified diff hunks (`@@ -old,oc +new,nc @@`) into line signs.
+pub fn parse_diff_hunks(diff: &str, signs: &mut HashMap<usize, GitSign>) {
+    signs_from_hunks(&parse_diff_hunks_full(diff), signs);
 }
 
 fn parse_hunk_spec(spec: &str) -> (i64, i64) {
@@ -458,6 +537,59 @@ fn parse_hunk_spec(spec: &str) -> (i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hunks_carry_what_they_replaced() {
+        // `-U0`: no context, so each `@@` block is exactly one change and the
+        // `-` lines under it are what it replaced.
+        let diff = "@@ -10,2 +10,1 @@\n-old one\n-old two\n+new\n";
+        let hunks = parse_diff_hunks_full(diff);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].start, 9, "0-based");
+        assert_eq!(hunks[0].len, 1);
+        assert_eq!(hunks[0].kind, GitSign::Modified);
+        assert_eq!(hunks[0].removed, vec!["old one", "old two"]);
+    }
+
+    #[test]
+    fn a_pure_addition_replaced_nothing() {
+        let hunks = parse_diff_hunks_full("@@ -5,0 +6,3 @@\n+a\n+b\n+c\n");
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].kind, GitSign::Added);
+        assert_eq!(hunks[0].len, 3);
+        assert!(hunks[0].removed.is_empty());
+    }
+
+    #[test]
+    fn a_hunk_spans_its_whole_run() {
+        // The reason the gutter drew a dotted column: three consecutive lines
+        // are ONE change, not three.
+        let hunks = parse_diff_hunks_full("@@ -1,3 +1,3 @@\n-a\n-b\n-c\n+x\n+y\n+z\n");
+        assert_eq!(hunks.len(), 1);
+        assert_eq!((hunks[0].start, hunks[0].len), (0, 3));
+        assert_eq!(hunks[0].end(), 2);
+        assert!(hunks[0].contains(0) && hunks[0].contains(2));
+        assert!(!hunks[0].contains(3));
+    }
+
+    #[test]
+    fn several_hunks_keep_their_own_removed_text() {
+        let diff = "@@ -1,1 +1,1 @@\n-first\n+FIRST\n@@ -9,1 +9,1 @@\n-ninth\n+NINTH\n";
+        let hunks = parse_diff_hunks_full(diff);
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].removed, vec!["first"]);
+        assert_eq!(hunks[1].removed, vec!["ninth"]);
+        assert_eq!(hunks[1].start, 8);
+    }
+
+    #[test]
+    fn the_diff_header_is_not_a_removed_line() {
+        // `--- a/file` starts with '-' and is not content.
+        let diff = "--- a/x.rs\n+++ b/x.rs\n@@ -1,1 +1,1 @@\n-real\n+new\n";
+        let hunks = parse_diff_hunks_full(diff);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].removed, vec!["real"]);
+    }
 
     #[test]
     fn parse_added_lines() {

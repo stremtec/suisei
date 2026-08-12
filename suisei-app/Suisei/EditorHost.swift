@@ -79,7 +79,8 @@ struct EditorHost: NSViewRepresentable {
             property: NSColor(theme.color(theme.property)),
             constant: NSColor(theme.color(theme.constant)),
             operatorColor: NSColor(theme.color(theme.operatorColor)),
-            punctuation: NSColor(theme.color(theme.punctuation))
+            punctuation: NSColor(theme.color(theme.punctuation)),
+            gitChange: .systemBlue
         )
         paletteKey = key
         paletteValue = colors
@@ -584,6 +585,11 @@ final class EditorCanvasView: NSView {
         var constant: NSColor
         var operatorColor: NSColor
         var punctuation: NSColor
+        /// The gutter's "changed since HEAD" bar. Its own entry rather than
+        /// `accent`: the theme accent moves with the user's colour scheme and
+        /// this needs to stay the one colour that means "uncommitted", the way
+        /// Xcode's does.
+        var gitChange: NSColor
     }
 
     weak var engine: EngineBridge?
@@ -601,7 +607,7 @@ final class EditorCanvasView: NSView {
         number: .systemOrange, typeName: .systemTeal, function: .systemYellow,
         macroName: .systemPink, namespace: .systemMint, parameter: .labelColor,
         property: .systemTeal, constant: .systemOrange, operatorColor: .labelColor,
-        punctuation: .secondaryLabelColor
+        punctuation: .secondaryLabelColor, gitChange: .systemBlue
     )
 
     var isLiveScrolling = false
@@ -1156,7 +1162,7 @@ final class EditorCanvasView: NSView {
             if line.isCursor { renderer.addRect(rowRect, colors.cursorLine) }
             if line.gitSignKind != 0 {
                 renderer.addRect(
-                    CGRect(x: 2, y: y + 2, width: EditorMetrics.gitStripeWidth, height: lineH - 4),
+                    gitStripeRect(atY: y, lineH: lineH),
                     gitColor(line.gitSignKind)
                 )
             }
@@ -1410,7 +1416,7 @@ final class EditorCanvasView: NSView {
             let gitKind = line.gitSignKind
             if gitKind != 0 {
                 gitColor(gitKind).setFill()
-                CGRect(x: 2, y: y + 2, width: EditorMetrics.gitStripeWidth, height: lineH - 4).fill()
+                gitStripeRect(atY: y, lineH: lineH).fill()
             }
             if line.hasBreakpoint {
                 drawBookmark(at: y, lineH: lineH)
@@ -1812,10 +1818,25 @@ final class EditorCanvasView: NSView {
         }
     }
 
+    /// One line's slice of the change bar.
+    ///
+    /// FULL line height, with no vertical inset. The inset used to be `y + 2`
+    /// and `lineH - 4`, which put a 4pt gap between every pair of adjacent
+    /// lines — so a hunk spanning five lines drew as five separate ticks and a
+    /// changed region read as a dotted column rather than one change. Adjacent
+    /// rows abut exactly now, which is what makes a hunk look like a hunk.
+    private func gitStripeRect(atY y: CGFloat, lineH: CGFloat) -> CGRect {
+        CGRect(x: 2, y: y, width: EditorMetrics.gitStripeWidth, height: lineH)
+    }
+
+    /// Xcode paints ONE colour for "changed since HEAD" rather than sorting
+    /// additions from modifications — the distinction is visible in the text
+    /// itself, and two colours down the gutter read as two kinds of warning.
+    /// A deletion keeps red: nothing in the text shows it, so the marker is the
+    /// only evidence.
     private func gitColor(_ sign: UInt8) -> NSColor {
         switch sign {
-        case 1: return .systemGreen
-        case 2: return .systemOrange
+        case 1, 2: return colors.gitChange
         case 3: return .systemRed
         default: return .clear
         }

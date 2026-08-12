@@ -107,6 +107,22 @@ impl Default for TabStrip {
 
 impl App {
     pub fn open_blank_tab(&mut self) {
+        // A new untitled tab LEAVES an active layout, exactly as switching to a
+        // tab outside it does: park the arrangement, then clear the desk down
+        // to the new document.
+        //
+        // It used to just point the focused pane at the new buffer, which made
+        // the new document part of the arrangement — and a unified layout draws
+        // one chip for the whole arrangement, so the tab the user had just
+        // asked for had no chip at all. Pressing "+" appeared to do nothing,
+        // and a member had quietly been displaced to make room for it.
+        //
+        // The arrangement is not lost: it is a tab, and clicking it brings the
+        // whole desk back. That is what folding is for.
+        let left_layout = self.active_layout.take().is_some_and(|id| {
+            self.park_layout(id);
+            true
+        });
         self.save_state_to_tab();
         let buffer = Buffer::new();
         let mut undo = UndoStack::new();
@@ -125,6 +141,12 @@ impl App {
         });
         self.split.focused_pane_mut().buffer = tab_id;
         self.restore_state_from_tab();
+        // Clear the desk, the same "leave" a tab switch out of a layout does.
+        // Only when one was parked above — a free split the user built is
+        // theirs and a new tab must not collapse it.
+        if left_layout {
+            self.split.collapse_to(tab_id);
+        }
         self.refresh_git();
         self.mode = Mode::Editor;
         self.message = "New tab · i insert · Ctrl+P files · :e <file>".into();
@@ -150,7 +172,7 @@ impl App {
         let target = self.tabs.buffers[idx].id;
 
         if let Some(lid) = self.active_layout {
-            let in_layout = self.layouts.iter().any(|l| l.id == lid && l.holds(target));
+            let in_layout = self.layout_holds(lid, target);
             if in_layout {
                 // Same arrangement, different member.
                 if let Some(pidx) = self.split.panes.iter().position(|p| p.buffer == target) {
@@ -288,8 +310,8 @@ impl App {
         let group_of = |t: &BufferTab| -> u64 {
             self.layouts
                 .iter()
-                .find(|l| l.holds(t.id))
                 .map(|l| l.id)
+                .find(|id| self.layout_holds(*id, t.id))
                 .unwrap_or(0)
         };
         let mut order: Vec<u64> = self.tabs.buffers.iter().map(group_of).collect();
@@ -352,12 +374,13 @@ impl App {
         }
     }
     pub fn open_new_tab(&mut self, path: &str) {
-        // The focused pane's document BEFORE this open. Opening replaces what
-        // the focused pane shows (S2: `App` IS the focused pane), so an active
-        // layout has to swap this document out of its membership for the one
-        // being opened — else the new file lands as a loose chip outside the
-        // group while the displaced one lingers inside it, shown by no pane.
-        let replacing = self.current_buffer_id();
+        // No "displaced document" to record. Opening replaces what the focused
+        // pane shows (S2: `App` IS the focused pane), and an active layout's
+        // membership IS its panes — so the opened file joins it and the
+        // displaced one leaves, both by having happened. This used to hand a
+        // before/after pair to `swap_focused_doc_in_active_layout`, which
+        // looked the old one up in a stored member list and did nothing at all
+        // when the focused pane had been split off after the fold.
         self.save_state_to_tab();
 
         let pathbuf = PathBuf::from(path);
@@ -376,7 +399,7 @@ impl App {
         if let Some(id) = existing {
             self.split.focused_pane_mut().buffer = id;
             self.restore_state_from_tab();
-            self.swap_focused_doc_in_active_layout(replacing, self.current_buffer_id());
+            self.regather_active_layout();
             self.lsp_restart_for_current();
             self.refresh_git();
             self.message = format!("Switched to: {}", abs_path.display());
@@ -406,7 +429,7 @@ impl App {
         });
         self.split.focused_pane_mut().buffer = tab_id;
         self.restore_state_from_tab();
-        self.swap_focused_doc_in_active_layout(replacing, self.current_buffer_id());
+        self.regather_active_layout();
         let text = self.buffer.text();
         self.lsp
             .auto_start_with_text(&abs_path.display().to_string(), Some(&text));
@@ -501,7 +524,7 @@ impl App {
         // Restore layout membership (terminal → displaced document), drop the
         // terminal tab from the strip, then load the restored document into the
         // focused pane and re-point language/git services at it.
-        self.swap_focused_doc_in_active_layout(closed, replaced);
+        self.regather_active_layout();
         if let Some(at) = self.buffer_index(closed) {
             self.tabs.buffers.remove(at);
         }
@@ -665,5 +688,8 @@ impl App {
                 self.park_layout(id);
             }
         }
+        // The panes are final now, which is the only point at which "is this
+        // still an arrangement" has an answer.
+        self.dissolve_degenerate_layouts();
     }
 }

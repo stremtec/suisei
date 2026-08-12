@@ -310,7 +310,11 @@ pub struct App {
         std::sync::mpsc::Receiver<(
             u64,
             String,
-            (bool, std::collections::HashMap<usize, crate::git::GitSign>),
+            (
+                bool,
+                std::collections::HashMap<usize, crate::git::GitSign>,
+                Vec<crate::git::GitHunk>,
+            ),
             Option<(
                 bool,
                 std::collections::HashMap<usize, crate::git::BlameLine>,
@@ -1184,13 +1188,14 @@ impl App {
             return false;
         };
         match rx.try_recv() {
-            Ok((generation, path, (g_avail, signs), blame)) => {
+            Ok((generation, path, (g_avail, signs, hunks), blame)) => {
                 if generation != self.git_refresh_gen {
                     return false;
                 }
                 self.git.path = path.clone();
                 self.git.available = g_avail;
                 self.git.signs = signs;
+                self.git.hunks = hunks;
                 if let Some((b_avail, lines)) = blame {
                     self.blame.path = path;
                     self.blame.available = b_avail;
@@ -4645,7 +4650,7 @@ mod tests {
         );
         let layout_id = app.layouts[0].id;
         assert_eq!(app.active_layout, Some(layout_id));
-        assert_eq!(app.layouts[0].docs, vec![a_id, b_id]);
+        assert_eq!(app.layout_docs(app.layouts[0].id), vec![a_id, b_id]);
 
         // 2 · Switch away — the desk clears.
         app.goto_tab(2); // c
@@ -4918,7 +4923,7 @@ mod tests {
         );
 
         // …and the group's membership followed: d out, e in.
-        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        let docs = app.layout_docs(layout_id);
         assert!(docs.contains(&new_id), "the new file joined the group");
         assert!(!docs.contains(&ids[3]), "the displaced file left the group");
         assert_eq!(docs.len(), 4, "membership size is unchanged");
@@ -5525,7 +5530,7 @@ mod tests {
         assert_ne!(term_id, ids[1], "a new terminal tab was created");
         assert!(app.is_terminal_tab(term_id));
 
-        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        let docs = app.layout_docs(layout_id);
         assert!(docs.contains(&term_id), "terminal joined the group");
         assert!(!docs.contains(&ids[1]), "displaced doc left the group");
         assert_eq!(docs.len(), 4, "group size unchanged");
@@ -5554,7 +5559,7 @@ mod tests {
         let term_id = app.current_buffer_id();
         assert!(app.is_terminal_tab(term_id));
 
-        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        let docs = app.layout_docs(layout_id);
         assert!(docs.contains(&term_id));
 
         // Close the terminal tab.
@@ -5566,7 +5571,7 @@ mod tests {
         assert!(app.pane_terminals.is_empty(), "shell ended");
 
         // The group no longer contains the terminal.
-        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        let docs = app.layout_docs(layout_id);
         assert!(!docs.contains(&term_id), "terminal left the group on close");
     }
 
@@ -5820,27 +5825,144 @@ mod tests {
 
     /// 이미 그룹 멤버인 문서를 다시 열면 멤버십 불변 (swap 스킵).
     #[test]
-    fn opening_an_already_member_document_does_not_change_membership() {
+    /// Reported: with a layout grouped or unified, the tab strip's "+" →
+    /// "New Untitled Tab" misbehaves.
+    ///
+    /// It pointed the focused pane at the new buffer, which made the new
+    /// document part of the arrangement — and a unified layout draws ONE chip
+    /// for the whole arrangement, so the tab just asked for had no chip. The
+    /// button appeared to do nothing, and a member had been displaced to make
+    /// room for it.
+    #[test]
+    fn a_new_untitled_tab_leaves_an_active_layout() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+
+        app.open_blank_tab();
+        let fresh = app.current_buffer_id();
+
+        assert_eq!(app.active_layout, None, "the desk left the layout");
+        assert!(
+            !app.layout_holds(layout_id, fresh),
+            "the new tab is loose, not a member with no chip"
+        );
+        assert!(!app.split.is_split(), "the desk cleared down to the new tab");
+        assert_eq!(
+            app.layout_docs(layout_id),
+            vec![ids[0], ids[1]],
+            "the parked arrangement is intact and can be clicked back"
+        );
+    }
+
+    /// Reported: split, group, split AGAIN, focus the new pane, pick a file in
+    /// the tree — it is not added and the layout tangles.
+    ///
+    /// The pane split off after the fold was in no member list, so the swap
+    /// looked up a document it could not find and returned having done nothing.
+    #[test]
+    fn a_pane_split_after_folding_is_a_member_and_can_open_files() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+        assert_eq!(app.layout_docs(layout_id).len(), 2);
+
+        // Split again while the layout owns the desk.
+        app.split_vertical();
+        assert_eq!(app.split.panes.len(), 3, "three panes now");
+
+        let path = tmp_file("split_after_fold.txt", "hello");
+        app.open_new_tab(path.to_str().unwrap());
+        let opened = app.current_buffer_id();
+
+        assert!(
+            app.layout_holds(layout_id, opened),
+            "the file opened into the new pane joined the arrangement"
+        );
+        assert!(
+            app.layout_docs(layout_id).contains(&opened),
+            "and it is in the member list the strip draws from"
+        );
+    }
+
+    /// Reported: with more than two panes grouped, closing ONE pane dissolves
+    /// the group even though two panes remain.
+    ///
+    /// The rule was `docs.len() >= 2` against a snapshot taken at fold time. A
+    /// pane split off afterwards was not in it, so the count was already short
+    /// by one and closing that pane took it to one.
+    #[test]
+    fn closing_one_pane_of_three_keeps_the_group() {
         let mut app = app_with("a");
         let ids = tabs_named(&mut app, &["a", "b", "c"]);
         panes_on(&mut app, &ids);
         assert!(app.fold_layout());
         let layout_id = app.layouts[0].id;
-        let docs_before = app
-            .layouts
-            .iter()
-            .find(|l| l.id == layout_id)
-            .unwrap()
-            .docs
-            .clone();
 
-        // Open "b" again — it is already a member.
+        app.focus_pane_to(2);
+        app.close_split();
+
+        assert!(
+            app.layouts.iter().any(|l| l.id == layout_id),
+            "two panes are still an arrangement"
+        );
+        assert_eq!(app.layout_docs(layout_id), vec![ids[0], ids[1]]);
+    }
+
+    /// The exception the report names: A, A, B — closing B leaves two panes
+    /// showing ONE document, which is not an arrangement, so the group should
+    /// dissolve.
+    #[test]
+    fn closing_the_only_second_document_dissolves_the_group() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b"]);
+        // Three panes: a, a, b.
+        panes_on(&mut app, &[ids[0], ids[0], ids[1]]);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+        assert_eq!(app.layout_docs(layout_id), vec![ids[0], ids[1]]);
+
+        app.focus_pane_to(2);
+        app.close_split();
+
+        assert!(
+            !app.layouts.iter().any(|l| l.id == layout_id),
+            "a, a is one document, which is not an arrangement"
+        );
+    }
+
+    #[test]
+    fn a_document_no_pane_shows_is_not_a_member() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids);
+        assert!(app.fold_layout());
+        let layout_id = app.layouts[0].id;
+        assert_eq!(app.layout_docs(layout_id), vec![ids[0], ids[1], ids[2]]);
+
+        // Pane 0 shows a. Open b into it — b is already on pane 1, so the
+        // arrangement becomes b, b, c and NOTHING shows a any more.
         app.focus_pane_to(0);
         app.open_new_tab("/tmp/b.txt");
-        let docs_after = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+
+        // This assertion used to read the other way: membership was "unchanged
+        // when opening a member", because the hand-written member list bailed
+        // out early on a document it already contained and left `a` in it. A
+        // member no pane shows is precisely the phantom that made opening a
+        // file into a later-split pane do nothing at all — the arrangement is
+        // the panes, and the panes no longer include `a`.
         assert_eq!(
-            docs_before, *docs_after,
-            "membership unchanged when opening a member"
+            app.layout_docs(layout_id),
+            vec![ids[1], ids[2]],
+            "the displaced document left the group with its pane"
+        );
+        assert!(
+            app.tabs.buffers.iter().any(|t| t.id == ids[0]),
+            "it is still an open tab, just a loose one"
         );
     }
 
@@ -5859,7 +5981,7 @@ mod tests {
 
         // Now fold — both panes (terminal + b) go into the group.
         assert!(app.fold_layout());
-        let docs = &app.layouts[0].docs;
+        let docs = app.layout_docs(app.layouts[0].id);
         assert!(docs.contains(&term_id), "terminal tab is a group member");
         assert!(docs.contains(&ids[1]), "document b is a group member");
         assert_eq!(docs.len(), 2);
@@ -5917,7 +6039,7 @@ mod tests {
             "no pane still names b"
         );
 
-        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        let docs = app.layout_docs(layout_id);
         assert!(!docs.contains(&ids[1]), "b left the group");
         assert_eq!(docs.len(), 2, "a and c remain");
     }
@@ -5946,7 +6068,7 @@ mod tests {
             "no pane shows b"
         );
 
-        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        let docs = app.layout_docs(layout_id);
         assert!(!docs.contains(&ids[1]), "b left the layout group");
         assert_eq!(docs.len(), 2, "a and c remain in the group");
         // The strip still has b as a loose tab outside the group.
@@ -6096,7 +6218,7 @@ mod tests {
             .iter()
             .position(|t| t.id == term_id)
             .unwrap();
-        let docs = &app.layouts[0].docs;
+        let docs = app.layout_docs(app.layouts[0].id);
         let neighbor = if term_slot > 0 && docs.contains(&app.tabs.buffers[term_slot - 1].id) {
             term_slot - 1
         } else {
@@ -6124,13 +6246,7 @@ mod tests {
         let layout_id = app.layouts[0].id;
 
         // After gather: [a, c, e, b, d] — members contiguous.
-        let docs = app
-            .layouts
-            .iter()
-            .find(|l| l.id == layout_id)
-            .unwrap()
-            .docs
-            .clone();
+        let docs = app.layout_docs(layout_id);
         assert_eq!(docs.len(), 3);
 
         // Focus pane 1 (document c) and open a new file.
@@ -6141,7 +6257,7 @@ mod tests {
         let new_id = app.current_buffer_id();
         assert_ne!(new_id, ids[2]);
 
-        let docs = &app.layouts.iter().find(|l| l.id == layout_id).unwrap().docs;
+        let docs = app.layout_docs(layout_id);
         assert!(docs.contains(&new_id), "new file in group");
         assert!(!docs.contains(&ids[2]), "c left the group");
         assert_eq!(docs.len(), 3);

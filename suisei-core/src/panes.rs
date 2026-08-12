@@ -132,9 +132,10 @@ impl App {
         // the restore load the terminal tab.
         self.split.focused_pane_mut().buffer = tab_id;
         self.restore_state_from_tab();
-        // An active layout swaps the displaced document out of its membership
-        // for the terminal tab, and re-gathers so the group stays contiguous.
-        self.swap_focused_doc_in_active_layout(replacing, tab_id);
+        // The pane now shows the terminal tab, so the active layout already
+        // contains it — membership is the panes. Only the strip order needs a
+        // nudge to keep the group's run contiguous.
+        self.regather_active_layout();
         // Remember what this shell displaced, so closing its tab restores that
         // document into the pane and keeps the split (see
         // `close_terminal_restoring_pane`). Only meaningful while split — a
@@ -278,6 +279,9 @@ impl App {
                 self.park_layout(id);
             }
         }
+        // Two panes left out of three is still an arrangement; one distinct
+        // document across them is not. Asked here, of the panes that remain.
+        self.dissolve_degenerate_layouts();
         if self.split.is_split() {
             self.load_focused_pane();
             self.message = format!("Pane closed · {} left", self.split.pane_count());

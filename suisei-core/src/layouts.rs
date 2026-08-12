@@ -14,9 +14,46 @@ impl App {
         self.park_focused_pane();
         let (tree, panes) = self.split.snapshot();
         if let Some(l) = self.layouts.iter_mut().find(|l| l.id == id) {
+            // Membership is recomputed HERE and only here. Parking is the
+            // moment the arrangement stops changing, so it is the only moment a
+            // snapshot of it is worth taking; while the layout is active the
+            // live panes are read directly (`layout_docs`). Maintaining
+            // `docs` alongside the panes by hand is what produced every defect
+            // this feature has had.
+            l.docs = crate::layout_tab::LayoutTab::docs_of(&panes);
             l.tree = tree;
             l.panes = panes;
         }
+    }
+
+    /// The documents a layout is showing right now.
+    ///
+    /// The live desk when it owns the screen, its parked snapshot otherwise.
+    /// A pane split off after the fold is a member because it is a pane —
+    /// there is no separate list for it to be missing from.
+    pub(crate) fn layout_docs(&self, id: u64) -> Vec<BufferId> {
+        if self.active_layout == Some(id) {
+            return crate::layout_tab::LayoutTab::docs_of(&self.split.panes);
+        }
+        self.layouts
+            .iter()
+            .find(|l| l.id == id)
+            .map(|l| l.docs.clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether `doc` is in `id`'s arrangement right now.
+    pub(crate) fn layout_holds(&self, id: u64, doc: BufferId) -> bool {
+        if doc == BufferId::default() {
+            return false;
+        }
+        if self.active_layout == Some(id) {
+            return self.split.panes.iter().any(|p| p.buffer == doc);
+        }
+        self.layouts
+            .iter()
+            .find(|l| l.id == id)
+            .is_some_and(|l| l.docs.contains(&doc))
     }
     /// Fold the current arrangement into a layout tab.
     ///
@@ -34,13 +71,7 @@ impl App {
         }
         self.park_focused_pane();
         let (tree, panes) = self.split.snapshot();
-        let mut docs: Vec<BufferId> = Vec::new();
-        for p in &panes {
-            let b = p.buffer;
-            if b != BufferId::default() && !docs.contains(&b) {
-                docs.push(b);
-            }
-        }
+        let docs = crate::layout_tab::LayoutTab::docs_of(&panes);
         // The grouped presentation is a run of document chips. Two panes that
         // show the same document still produce only one chip, so accepting
         // that split creates an active one-member "group" whose container is
@@ -108,42 +139,28 @@ impl App {
         // reordering the vector changes no id — the position follows by
         // itself. No save/restore round-trip, no index to repoint.
     }
-    /// Keep the active layout's membership honest after the focused pane's
-    /// document changed from `replacing` to `opened`.
+    /// Keep the active layout's members contiguous in the strip.
     ///
-    /// Opening a file replaces what the focused pane shows. If that pane was
-    /// part of a folded layout, the layout's member list has to follow: the
-    /// displaced document leaves, the opened one takes its place. Without this
-    /// the new file appears as a loose chip outside the group while the
-    /// displaced one lingers inside it, shown by no pane.
-    pub(crate) fn swap_focused_doc_in_active_layout(
-        &mut self,
-        replacing: BufferId,
-        opened: BufferId,
-    ) {
+    /// ORDER ONLY. This replaced `swap_focused_doc_in_active_layout`, which
+    /// tried to keep a hand-written member list in step with the panes:
+    /// on an open it looked up the displaced document in `docs` and wrote the
+    /// new one over it. A pane split off after the fold was not in that list,
+    /// so the lookup missed and the function returned having done nothing —
+    /// the opened file never joined the layout and the group's idea of itself
+    /// drifted further from the desk with every split.
+    ///
+    /// Membership is derived from the panes now, so nothing here can get it
+    /// wrong. What is left is the strip's ORDER: the grouped shape draws one
+    /// container from the first member's left edge to the last member's right,
+    /// so the members have to sit together or it swallows a stranger. This is
+    /// idempotent, and a missed call costs a container drawn too wide — never
+    /// a wrong member list.
+    pub(crate) fn regather_active_layout(&mut self) {
         let Some(id) = self.active_layout else { return };
-        if replacing == opened {
-            return;
-        }
-        let Some(l) = self.layouts.iter_mut().find(|l| l.id == id) else {
-            return;
-        };
-        // Already a member (opening a document another pane of this layout
-        // shows) — membership is unchanged, only focus moves.
-        if l.docs.contains(&opened) {
-            return;
-        }
-        let Some(i) = l.docs.iter().position(|d| *d == replacing) else {
-            return;
-        };
-        l.docs[i] = opened;
-        // The new document sits at the END of `buffers` (just pushed), while
-        // the displaced one sat inside the group's run — so the members are no
-        // longer contiguous and the grey container would swallow whatever sits
-        // between them. Re-gather, exactly as `fold_layout` does.
-        let docs = l.docs.clone();
+        let docs = self.layout_docs(id);
         self.gather_folded_docs(&docs);
     }
+
     /// Unfold the **active** layout: its documents return to the strip as
     /// individual tabs and the arrangement stays exactly as it is on screen.
     ///
@@ -224,30 +241,55 @@ impl App {
     /// Whether `doc` is folded into some layout — folded documents do not get
     /// their own chip unless their layout is drawn grouped.
     pub fn layout_holding(&self, doc: BufferId) -> Option<&crate::layout_tab::LayoutTab> {
-        self.layouts.iter().find(|l| l.holds(doc))
+        let id = self
+            .layouts
+            .iter()
+            .map(|l| l.id)
+            .find(|id| self.layout_holds(*id, doc))?;
+        self.layouts.iter().find(|l| l.id == id)
     }
-    /// Remove a closed document from any layout's membership. Called by
-    /// `close_current_tab` / `close_tab_at` so the group never references a
-    /// document that no longer exists.
+    /// Drop a closed document from every PARKED layout's member snapshot.
+    ///
+    /// The active layout needs nothing here — its members are its panes, and
+    /// closing a tab retires the panes that showed it. Whether a layout is
+    /// still an arrangement is a separate question, asked by
+    /// [`App::dissolve_degenerate_layouts`] once the panes have settled.
     pub(crate) fn remove_doc_from_layouts(&mut self, doc: BufferId) {
         for l in &mut self.layouts {
             l.docs.retain(|d| *d != doc);
         }
-        // A layout with fewer than two documents is no longer an arrangement:
-        // its lone member (if any) returns to the strip as an ordinary tab.
-        // Left alive it became a zombie — invisible in grouped style (no run
-        // of two to draw a container around) and unkillable in unified style
-        // (the chip's close went through the slot-clamped `close_tab` and
-        // killed the wrong document).
-        let before = self.layouts.len();
-        self.layouts.retain(|l| l.docs.len() >= 2);
-        if self.layouts.len() != before {
-            if let Some(active) = self.active_layout {
-                if !self.layouts.iter().any(|l| l.id == active) {
-                    // An on-screen arrangement stays up — only its tab entry
-                    // is gone, exactly like an unfold.
-                    self.active_layout = None;
-                }
+    }
+
+    /// Retire any layout that is no longer an arrangement.
+    ///
+    /// Fewer than two distinct documents is not an arrangement: the lone member
+    /// returns to the strip as an ordinary tab. Left alive such a layout became
+    /// a zombie — invisible in grouped style (no run of two to draw a container
+    /// around) and unkillable in unified style (the chip's close went through
+    /// the slot-clamped `close_tab` and killed the wrong document).
+    ///
+    /// Asked of what each layout SHOWS, so the active one is judged on its live
+    /// panes. It used to be `docs.len() >= 2` against the stored snapshot, and
+    /// a snapshot taken before a pane was split off is short by one: closing
+    /// that pane took two down to one and dissolved a group with two panes
+    /// still on screen. Call it after the panes have settled, never before —
+    /// the arrangement has to be final for the question to mean anything.
+    pub(crate) fn dissolve_degenerate_layouts(&mut self) {
+        let doomed: Vec<u64> = self
+            .layouts
+            .iter()
+            .map(|l| l.id)
+            .filter(|id| self.layout_docs(*id).len() < 2)
+            .collect();
+        if doomed.is_empty() {
+            return;
+        }
+        self.layouts.retain(|l| !doomed.contains(&l.id));
+        if let Some(active) = self.active_layout {
+            if doomed.contains(&active) {
+                // An on-screen arrangement stays up — only its tab entry is
+                // gone, exactly like an unfold.
+                self.active_layout = None;
             }
         }
     }

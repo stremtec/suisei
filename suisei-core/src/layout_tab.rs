@@ -48,17 +48,38 @@ pub struct LayoutTab {
     /// carrying its document, scroll and cursor. Parked with the tree because
     /// they were snapshotted together; restoring is a lookup, not a rebuild.
     pub panes: Vec<crate::split::Pane>,
-    /// The documents this layout folded, in visual order. Kept separately
-    /// because the grouped style draws a chip per document and the tree's
-    /// leaves are not ordered for reading.
+    /// The documents this layout folded, in pane order, **as it was parked**.
+    ///
+    /// Only meaningful for a layout that is NOT active. While a layout owns the
+    /// desk its members are whatever its live panes show, and asking this field
+    /// instead is how all three of the reported layout defects happened: a pane
+    /// split off after the fold was never in here, so opening a file into it
+    /// silently did nothing, and closing that pane took the count from two to
+    /// one and dissolved a group that still had two panes.
+    ///
+    /// Use [`crate::app::App::layout_docs`] and
+    /// [`crate::app::App::layout_holds`], which read the live desk when the
+    /// layout is active and this snapshot when it is not. `park_layout`
+    /// recomputes this from the panes it parks — the one moment the
+    /// arrangement stops changing, and therefore the only moment a snapshot is
+    /// worth taking.
     pub docs: Vec<BufferId>,
     pub style: LayoutStyle,
 }
 
 impl LayoutTab {
-    /// Whether `doc` is folded into this layout.
-    pub fn holds(&self, doc: BufferId) -> bool {
-        self.docs.contains(&doc)
+    /// Distinct documents these panes show, in pane order.
+    ///
+    /// The one definition of "what a layout contains", used both to snapshot a
+    /// parked layout and to read a live one.
+    pub fn docs_of(panes: &[crate::split::Pane]) -> Vec<BufferId> {
+        let mut out: Vec<BufferId> = Vec::new();
+        for p in panes {
+            if p.buffer != BufferId::default() && !out.contains(&p.buffer) {
+                out.push(p.buffer);
+            }
+        }
+        out
     }
 }
 
