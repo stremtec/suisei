@@ -102,7 +102,8 @@ final class TabStripScroll: ObservableObject {
     /// unconsumed scroll fall through instead of swallowing it at the ends.
     func scroll(by delta: CGFloat, layout: TabStripLayout) -> Bool {
         guard layout.overflow else { return false }
-        let next = min(max(0, offset - delta), layout.maxScroll)
+        let maxScroll = max(0, layout.contentWidth - layout.viewportWidth)
+        let next = min(max(0, offset - delta), maxScroll)
         guard next != offset else { return false }
         offset = next
         return true

@@ -41,23 +41,11 @@ struct TabStripLayout: Equatable {
     static let gap: CGFloat = 4
     /// Width of the "+" slot.
     static let plusWidth: CGFloat = 22
-    /// Gap between the run's trailing edge and the "+".
-    ///
-    /// Its own number, not the inter-chip `gap`. The button is not another
-    /// chip — it reads as crowded at the 4pt that separates two tabs, and it is
-    /// the last thing before the toolbar cluster.
-    static let plusGap: CGFloat = 18
 
     let chips: [Chip]
     /// Total width of the chip run, excluding any trailing gap.
     let contentWidth: CGFloat
     let viewportWidth: CGFloat
-    /// The span the chip run may occupy: the viewport minus the "+" slot.
-    ///
-    /// Every question about where chips go is asked against this, never against
-    /// `viewportWidth` — the difference between the two is the reserved slot,
-    /// and any query that forgets it puts a chip under the button.
-    let runWidth: CGFloat
     /// Leading edge of the row within the viewport, in STRIP space.
     ///
     /// Centred while the run fits; otherwise the negated scroll offset, so the
@@ -71,13 +59,10 @@ struct TabStripLayout: Equatable {
     /// `widthFor` is injected rather than called directly so this stays pure:
     /// tests supply fixed widths, the app supplies a cached CoreText
     /// measurement. It is the only thing here that needs a font.
-    /// - Parameter centreOn: where the run should be centred, in viewport
-    ///   coordinates, when it fits. `nil` centres it in its own span.
     init(
         tabs: [(stableId: UInt64, group: UInt64)],
         viewportWidth: CGFloat,
         scrollOffset: CGFloat,
-        centreOn: CGFloat? = nil,
         widthFor: (Int) -> CGFloat
     ) {
         var built: [Chip] = []
@@ -94,40 +79,14 @@ struct TabStripLayout: Equatable {
         chips = built
         contentWidth = content
         self.viewportWidth = viewportWidth
-        // The run gets the viewport MINUS the "+" slot, in both regimes.
-        //
-        // The "+" rides the run's trailing edge, so it needs `plusWidth + gap`
-        // after the last chip whether or not the run overflows. Sizing the run
-        // to the whole viewport meant a full strip filled every point of it and
-        // `plusX`'s clamp then parked the button back on top of the last chips
-        // — the reported overlap. Reserving the slot up front is what makes
-        // that clamp unreachable rather than merely survivable.
-        let run = max(0, viewportWidth - (Self.plusWidth + Self.plusGap))
-        runWidth = run
-        overflow = content > run
+        overflow = content > viewportWidth
         if overflow {
             // Clamp so the run cannot be scrolled past either end — the ends
             // are exactly where a measured layout used to drift.
-            let maxScroll = content - run
+            let maxScroll = content - viewportWidth
             originX = -min(max(0, scrollOffset), maxScroll)
         } else {
-            // Where the run sits when it fits is decided HERE, and only here.
-            //
-            // It used to be decided twice: `topBar` narrowed the strip's box to
-            // a span symmetric about the window's centreline, and this centred
-            // the run inside that box. Symmetry is what made the strip's WIDTH
-            // depend on the sidebar — with the sidebar open the window centre
-            // sits nearer the detail's left edge, so the near side clamped the
-            // far side and 134pt of perfectly good room on the right went
-            // unused, at 1280x820. Opening the sidebar cost the strip 268pt for
-            // a 308pt panel.
-            //
-            // So the box is the whole available span now, and the CENTRING is
-            // an offset inside it — clamped to the ends, so a run that cannot
-            // be centred without leaving the viewport slides instead of
-            // shrinking the viewport.
-            let wanted = centreOn.map { $0 - content / 2 } ?? (run - content) / 2
-            originX = min(max(0, wanted), max(0, run - content)).rounded()
+            originX = ((viewportWidth - content) / 2).rounded()
         }
     }
 
@@ -152,32 +111,11 @@ struct TabStripLayout: Equatable {
     }
 
     /// Slot whose close glyph is under `p`.
-    ///
-    /// The target is the glyph's OWN box plus 3pt, and no more.
-    ///
-    /// It was 22x26 reaching 6pt past the glyph on the right and 2pt on the
-    /// left, on the theory that a small control deserves a generous target.
-    /// That theory is right for a control you can see; this one is drawn only
-    /// while its chip is hovered, so every point of slack is a point where the
-    /// pointer is over blank chip and a click closes the tab anyway — the
-    /// reported "I clicked well left of the x and it still closed".
-    ///
-    /// Reaching the glyph is a HOVER problem, and hover is solved where hover
-    /// lives: the catcher's tracking area now spans the whole titlebar band, so
-    /// the glyph stays put while the pointer travels to it. The click target
-    /// can then be honest about where the ink is.
-    ///
-    /// Geometry, from `ToolbarTabChip`: the chip is
-    /// `HStack(spacing: 5) { icon; title; trailing(14) }.padding(.horizontal, 10)`,
-    /// so the 14pt trailing slot occupies `maxX - 24 … maxX - 10`.
     func closeSlot(at p: CGPoint, rowHeight: CGFloat) -> Int? {
         let local = CGPoint(x: p.x - originX, y: p.y)
         for chip in chips {
             let glyph = CGRect(
-                x: chip.maxX - 24,
-                y: rowHeight / 2 - 7,
-                width: 14,
-                height: 14
+                x: chip.maxX - 24, y: rowHeight / 2 - 7, width: 14, height: 14
             ).insetBy(dx: -3, dy: -3)
             if glyph.contains(local) { return chip.slot }
         }
@@ -214,20 +152,12 @@ struct TabStripLayout: Equatable {
         return (originX + first.x, originX + last.maxX)
     }
 
-    /// How far the run may be scrolled. Against `runWidth`, like everything
-    /// else that asks where chips go — measured against `viewportWidth` it was
-    /// 26pt too generous, so the last stretch of a scroll moved nothing and the
-    /// strip read as sticking at the end.
-    var maxScroll: CGFloat { max(0, contentWidth - runWidth) }
-
     /// Leading inset for the "+", which rides the run's trailing edge.
     ///
-    /// The clamp is now a backstop rather than the common case: `runWidth`
-    /// already keeps the run clear of this slot, so `trailing` cannot exceed
-    /// `viewportWidth - plusWidth` by construction. It stays because a
-    /// zero-width viewport still has to produce a number.
+    /// Clamped so a run that has outgrown its viewport parks the button at the
+    /// right edge instead of pushing it out of reach.
     var plusX: CGFloat {
-        let trailing = originX + contentWidth + Self.plusGap
+        let trailing = originX + contentWidth + Self.gap
         return min(max(0, trailing), max(0, viewportWidth - Self.plusWidth))
     }
 
@@ -237,11 +167,11 @@ struct TabStripLayout: Equatable {
     func scrollToReveal(slot: Int, currentOffset: CGFloat) -> CGFloat? {
         guard overflow, let chip = chips.first(where: { $0.slot == slot }) else { return nil }
         let visibleMin = currentOffset
-        let visibleMax = currentOffset + runWidth
+        let visibleMax = currentOffset + viewportWidth
         if chip.x >= visibleMin, chip.maxX <= visibleMax { return nil }
-        let maxScroll = max(0, contentWidth - runWidth)
+        let maxScroll = max(0, contentWidth - viewportWidth)
         // Centre it, which is what the auto-reveal has always aimed for.
-        let centred = chip.x + chip.width / 2 - runWidth / 2
+        let centred = chip.x + chip.width / 2 - viewportWidth / 2
         return min(max(0, centred), maxScroll)
     }
 }

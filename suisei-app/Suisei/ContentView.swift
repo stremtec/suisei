@@ -206,6 +206,14 @@ struct ContentView: View {
     /// authority that disagreed with the click path — hovering one chip
     /// highlighted and selected another. Spec §4 requires one lookup.
     @State private var hoveredSlot: Int? = nil
+    /// `NavigationSplitView` cannot reliably reverse a column-removal
+    /// transition in place. A second toggle during the 0.25s flight used to
+    /// leave its internal splitter at an intermediate width while
+    /// `uiNavVisible` already said the column was open. Finish the current
+    /// native transition, then apply only the latest requested destination.
+    @State private var navigatorTransitionInFlight = false
+    @State private var queuedNavigatorVisibility: Bool?
+    @State private var navigatorTransitionGeneration: UInt64 = 0
     /// Horizontal scroll position of the chip run.
     ///
     /// A `StateObject`, not `@State`: this changes on every wheel tick, and as
@@ -386,15 +394,29 @@ struct ContentView: View {
         // `List(.listStyle(.sidebar))` — that list style governs row metrics,
         // not the surface. `ProjectTreeView` keeps its custom rows and still
         // gets the material.
-        NavigationSplitView(columnVisibility: navigatorVisibility) {
-            sidebarColumn
-        } detail: {
-            detailStack
+        ZStack(alignment: .top) {
+            NavigationSplitView(columnVisibility: navigatorVisibility) {
+                sidebarColumn
+            } detail: {
+                detailStack
+            }
+
+            // Keep the document strip in the window root coordinate space.
+            // `4373153` owned it here; moving it into the split view's detail
+            // host in `d471ba5` was the first commit where the drawn chips and
+            // the AppKit event catcher acquired different origins. The native
+            // split sidebar remains intact, but tab placement and pointer input
+            // once again share the window-level host that made the stable
+            // version work.
+            topBar
+                .ignoresSafeArea(.container, edges: .top)
+                .zIndex(2)
         }
-        // `.balanced`, as in Source Control: the detail keeps its own width and
-        // the sidebar displaces it rather than floating over it.
-        // `.prominentDetail` is the overlay idiom, which is what the previous
-        // hand-drawn navigator was imitating.
+        // Keep the split geometry stable while the navigator opens and closes.
+        // The editor's *backing plane* continues below the native sidebar; its
+        // usable content still starts at the splitter, just as it does in
+        // Xcode. Overlay-style column sizing moved the titlebar, inspector and
+        // editor viewport as a unit and broke their established alignment.
         .navigationSplitViewStyle(.balanced)
         // The navigator's show/hide motion.
         //
@@ -424,8 +446,10 @@ struct ContentView: View {
         // this row needs: Source Control wants its title visible, and this
         // window has a tab strip running through that space.
         .navigationTitle("")
-        // No `.toolbar(removing: .sidebarToggle)`: it does nothing in this
-        // app, and the item it claims to remove is now the toggle we keep.
+        // The generated toggle follows the split divider. The fixed titlebar
+        // slot below uses SwiftUI's native glass button instead, immediately
+        // after the traffic lights.
+        .toolbar(removing: .sidebarToggle)
         .toolbar { editorToolbar }
         .frame(minWidth: 640, minHeight: 400)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -438,11 +462,12 @@ struct ContentView: View {
         // .focusable()/.onKeyPress here double-captured input and stole focus
         // from native text fields (the tree Filter couldn't be typed into).
         .focused($focused)
-        // ONE backing surface for the entire window, at the root — which is
-        // also what the sidebar's `CABackdropLayer` samples. Source Control
-        // does exactly this; a second base colour anywhere shows up as a seam,
-        // and one placed BEHIND the sidebar would be the seam.
-        .background(shellBase.ignoresSafeArea())
+        // The editor is the window-wide backing surface. The navigator's
+        // native material is layered over it, so its backdrop samples the same
+        // editor plane that continues into the detail column. Painting the
+        // chrome colour here made the navigator and renderer two unrelated
+        // islands even when their frames touched.
+        .background(editorBg.ignoresSafeArea())
         // Source Control's chrome, verbatim. It re-applies on every SwiftUI
         // update, which is what stops AppKit from quietly restoring an opaque
         // titlebar band, and it un-hides the REAL traffic lights — the split
@@ -456,6 +481,12 @@ struct ContentView: View {
             )
         )
         .background(EditorWindowChrome())
+        .background(EditorGeneratedSidebarTogglePruner())
+        .background(
+            EditorNavigatorToolbarAccessory(isVisible: engine.uiNavVisible) {
+                toggleNavigatorVisibility()
+            }
+        )
     }
 
     /// The document controls, as real toolbar items — Source Control's toolbar,
@@ -551,21 +582,51 @@ struct ContentView: View {
             get: { engine.uiNavVisible ? .all : .detailOnly },
             set: { visibility in
                 let visible = visibility != .detailOnly
-                guard visible != engine.uiNavVisible else { return }
-                // Content FIRST, animation second. `applyNavMode` runs a full
-                // engine recompose and a full chrome pull — measured at 13 ms —
-                // and running it after the toggle put all of that on the
-                // opening animation's first frame, which is where the panel
-                // visibly hitched on the way out. That ordering used to live in
-                // the top bar's own toggle; it belongs here now that the split
-                // view's toggle is the only one.
-                if visible { applyNavMode(navMode) }
-                // Same suppression every other panel toggle uses, so dragging
-                // the column shut doesn't recompose the editor per frame.
-                engine.animatingPanels { engine.uiNavVisible = visible }
-                focused = true
+                requestNavigatorVisibility(visible)
             }
         )
+    }
+
+    /// Toggle against the latest requested destination, not merely the model's
+    /// already-written Bool. That makes three rapid clicks close→open→close
+    /// instead of treating both later clicks as duplicate requests to open.
+    private func toggleNavigatorVisibility() {
+        let latest = queuedNavigatorVisibility ?? engine.uiNavVisible
+        requestNavigatorVisibility(!latest)
+    }
+
+    private func requestNavigatorVisibility(_ visible: Bool) {
+        if navigatorTransitionInFlight {
+            queuedNavigatorVisibility = visible
+            return
+        }
+        guard visible != engine.uiNavVisible else { return }
+
+        // Content FIRST, animation second. `applyNavMode` runs a full engine
+        // recompose and chrome pull; doing it after the visibility write hitches
+        // the opening animation's first frame.
+        if visible { applyNavMode(navMode) }
+
+        navigatorTransitionInFlight = true
+        navigatorTransitionGeneration &+= 1
+        let generation = navigatorTransitionGeneration
+        engine.animatingPanels { engine.uiNavVisible = visible }
+        focused = true
+
+        // The visible curve is 0.25s, but AppKit does not commit the removed
+        // split column at the curve's nominal end. EngineBridge deliberately
+        // keeps its resize transaction open through 0.36s for that tail. Wait
+        // for the same settle boundary plus one display frame before asking
+        // NavigationSplitView to travel in the other direction; reopening at
+        // 0.28s could resurrect a logically-visible column at 3pt wide.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.38) {
+            guard generation == navigatorTransitionGeneration else { return }
+            navigatorTransitionInFlight = false
+            let queued = queuedNavigatorVisibility
+            queuedNavigatorVisibility = nil
+            guard let queued, queued != engine.uiNavVisible else { return }
+            requestNavigatorVisibility(queued)
+        }
     }
 
     /// Everything right of the navigator: the titlebar row, the editor island,
@@ -627,14 +688,6 @@ struct ContentView: View {
                 .animation(nil, value: inspectorW)
             }
 
-            // Custom titlebar row. It spans the DETAIL column now, not the
-            // window: AppKit puts the traffic lights over the sidebar, so this
-            // row no longer reserves a lights zone, and the tabs centre on the
-            // editor instead of on the window. Everything in it is still
-            // SwiftUI content (blurable, coverable — impossible with an
-            // NSToolbar), which is why it is a row here and not `.toolbar`.
-            topBar
-                .zIndex(2)
         }
         // The row starts at the true window top. The titlebar is transparent
         // and its only occupant — the traffic lights — sits over the sidebar.
@@ -1010,25 +1063,21 @@ struct ContentView: View {
         .navigationSplitViewColumnWidth(
             min: 240, ideal: navIdealWidth, max: 460
         )
-        // No toolbar item of ours here, and no removal of the system's.
-        //
-        // A `list.bullet` button was added on this column to get Xcode's glyph,
-        // and `.toolbar(removing: .sidebarToggle)` was supposed to take the
-        // system's away. It does nothing — the app's own toolbar inventory
-        // shows `com.apple.SwiftUI.navigationSplitView.toggleSidebar` still
-        // present — so there were two. Removing it from AppKit each update did
-        // not hold either: SwiftUI re-adds it on the next reconciliation, and
-        // that is a loop, not a fix.
-        //
-        // Declaring a toolbar on the column also introduced an
-        // `NSToolbarFlexibleSpaceItem` at index 0 spanning x 92…250, which
-        // right-aligned the whole sidebar section — our button at 254, the
-        // system's at 298, both far from the traffic lights.
-        //
-        // So the system's toggle is the toggle. It is one control, it sits
-        // where AppKit puts it, and nothing has to be undone every frame. The
-        // glyph is `sidebar.left` rather than Xcode's list, which is a
-        // cosmetic loss and the only one.
+        // The reporter reads the actual NSSplitView geometry. In prominent
+        // detail mode the editor itself stays window-wide, but tabs and other
+        // interactive content still need the live sidebar boundary so none of
+        // them is left half-covered during a resize or collapse animation.
+        .background {
+            SplitColumnWidthReporter { width in
+                let live = CGFloat(width)
+                if abs(navLiveWidth - live) > 0.5 {
+                    navLiveWidth = live
+                }
+                if live >= 240, abs(navW - Double(live)) > 0.5 {
+                    navW = Double(live)
+                }
+            }
+        }
     }
 
     /// Detail column: editor stage (+ outline card) + status line.
@@ -1069,38 +1118,25 @@ struct ContentView: View {
         .background(shellBase)
     }
 
-    /// Editor and terminal as ONE surface —
-    /// which is how Xcode draws them, and the only arrangement without seams.
-    /// Three floating cards could be pushed flush and would still show a
-    /// channel between them: each carried its own border and shadow, and two of
-    /// those meeting is a groove. The corners are square along the bottom so
-    /// the surface meets the status bar instead of hovering a `panelGap` above
-    /// it, which is the gap under the terminal and the inspector alike.
-    /// The editor island: editor + terminal as one card, FLOATING on the
-    /// chrome with the same `panelGap` on all four sides — which is Xcode 26's
-    /// actual grammar. Butting it flush against the inspector and the status
-    /// bar was tried and looked severed: a white slab ending in a raw cut
-    /// against flat gray, with its bottom shadow smeared across the bar
-    /// because the shadow had nowhere to land. A uniform gap gives every edge
-    /// the same soft boundary — gap, shadow, hairline — and the shadow falls
-    /// into the gap instead of onto a neighbouring surface.
+    /// Editor and terminal as one surface.
+    ///
+    /// Only the leading edge differs from the old floating card: it is square
+    /// and flush with the split boundary, while the window-wide `editorBg`
+    /// below the native sidebar supplies the continuation underneath it. The
+    /// established top, bottom and inspector-side spacing stays untouched.
     private var editorCard: some View {
         PerfProbe.measure("  body.editorCard") { editorCardBody }
     }
 
     @ViewBuilder
     private var editorCardBody: some View {
-        let shape = RoundedRectangle(
-            cornerRadius: ContentView.panelCornerRadius, style: .continuous
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: 0,
+            bottomLeadingRadius: 0,
+            bottomTrailingRadius: ContentView.panelCornerRadius,
+            topTrailingRadius: ContentView.panelCornerRadius,
+            style: .continuous
         )
-        // No leading inset any more. The island used to start at the WINDOW
-        // edge and pass beneath a floating navigator, so its CONTENT had to
-        // step aside by the navigator's width — an inset that had to know
-        // another panel's geometry, and got it wrong twice (a 7pt padding the
-        // canvas could not paint, then a navigator-wide blank gutter down the
-        // left of Git Workbench because it read the saved flag rather than the
-        // presented state). The split view gives the island a column that is
-        // already the right width, so there is nothing left to compensate for.
         return editorIsolatedStage
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
@@ -1133,7 +1169,8 @@ struct ContentView: View {
             .clipShape(shape)
             .overlay(shape.strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
             .shadow(color: .black.opacity(isLightTheme ? 0.07 : 0.30), radius: 9, y: 2)
-            .padding(ContentView.panelGap)
+            .padding(.vertical, ContentView.panelGap)
+            .padding(.trailing, ContentView.panelGap)
     }
 
     /// The terminal's junction with the editor surface.
@@ -1571,6 +1608,7 @@ struct ContentView: View {
             )
     }
 
+
     /// Center titlebar: every document tab, positioned by computed geometry.
     ///
     /// Rewritten. The previous strip was a `ScrollView` wrapping an `HStack`,
@@ -1592,73 +1630,26 @@ struct ContentView: View {
     /// What made this possible was noticing the viewport width is an INPUT
     /// (`maxWidth`), not something to discover. With that and exact chip widths,
     /// every position is arithmetic and there is nothing left to measure.
-    /// The chips themselves, hoisted so `documentTabStrip`'s two nested stacks
-    /// stay within what the type-checker will solve.
-    @ViewBuilder
-    private func chipRow(_ layout: TabStripLayout, tabs: [TabItem]) -> some View {
-        TabStripRow(layout: layout, rowHeight: Self.tabLabelFrameH) {
-            // Keyed by the DOCUMENT, not the slot: with the slot index as
-            // identity a reorder leaves the identity list unchanged and only
-            // the titles swap in place, so there is nothing for SwiftUI to
-            // move. Order here must match `layout.chips` — both come from
-            // `engine.chrome.tabs` in the same pass.
-            ForEach(tabs, id: \.stableId) { tab in
-                stripChip(tab)
-            }
-        }
-    }
-
-    private func documentTabStrip(maxWidth: CGFloat, centreOn: CGFloat) -> some View {
+    private func documentTabStrip(maxWidth: CGFloat) -> some View {
         let tabs = engine.chrome.tabs
         // Chips rest inside the fade at both ends rather than under it.
         let viewport = max(1, maxWidth - Self.tabEdgeFadeW * 2)
-        let layout = stripLayout(viewportWidth: viewport, centreOn: centreOn)
+        let layout = stripLayout(viewportWidth: viewport)
 
         return ZStack(alignment: .topLeading) {
-            // Chip layers are CLIPPED to the run's span, not the viewport's.
-            //
-            // Reserving the "+" slot in `TabStripLayout` was necessary and not
-            // sufficient: it stopped the layout from placing chips there, but a
-            // scrolled run is longer than its span by definition, and this
-            // container is `viewport` wide — so the overflowing tail was still
-            // being drawn straight through the reserved slot and under the
-            // button. The layout says where chips go; this says how far they
-            // may be seen.
-            ZStack(alignment: .topLeading) {
-                stripBandsView(layout)
-                stripActivePill(layout)
-                chipRow(layout, tabs: tabs)
-            }
-            .frame(
-                width: layout.runWidth,
-                height: Self.tabLabelFrameH,
-                alignment: .topLeading
-            )
-            // The fades live HERE, on the container that actually cuts.
-            //
-            // They used to be a `.mask` on the outer `viewport`-wide box while
-            // this clipped at `runWidth` — 26pt narrower — so the gradients
-            // dissolved empty space and the chips met a hard edge. Same class
-            // of mistake as the "+" overlap: two spans, one of them the real
-            // boundary. This mask both clips and softens, so there is one.
-            .mask(
-                HStack(spacing: 0) {
-                    LinearGradient(
-                        colors: [.clear, .black],
-                        startPoint: .leading, endPoint: .trailing
-                    )
-                    .frame(
-                        width: layout.overflow
-                            ? Self.tabLeadingFadeW : Self.tabEdgeFadeW
-                    )
-                    Rectangle().fill(Color.black)
-                    LinearGradient(
-                        colors: [.black, .clear],
-                        startPoint: .leading, endPoint: .trailing
-                    )
-                    .frame(width: Self.tabEdgeFadeW)
+            stripBandsView(layout)
+            stripActivePill(layout)
+
+            TabStripRow(layout: layout, rowHeight: Self.tabLabelFrameH) {
+                // Keyed by the DOCUMENT, not the slot: with the slot index as
+                // identity a reorder leaves the identity list unchanged and only
+                // the titles swap in place, so there is nothing for SwiftUI to
+                // move. Order here must match `layout.chips` — both come from
+                // `engine.chrome.tabs` in the same pass.
+                ForEach(tabs, id: \.stableId) { tab in
+                    stripChip(tab)
                 }
-            )
+            }
 
             // Tabs past the ABI cap don't vanish silently.
             if engine.chrome.tabsOverflow > 0 {
@@ -1676,8 +1667,20 @@ struct ContentView: View {
         // structural curve directly — no one-pass lag to hide.
         .animation(engine.tabStructuralAnimation, value: tabStripPresentationKey)
         .frame(height: 26)
-        // The chip run's own fades are on its clipping container above; the
-        // "+" and the overflow badge sit outside them, and must not be masked.
+        // Chips dissolve while scrolling through an end, and rest fully visible.
+        .mask(
+            HStack(spacing: 0) {
+                LinearGradient(
+                    colors: [.clear, .black], startPoint: .leading, endPoint: .trailing
+                )
+                .frame(width: Self.tabEdgeFadeW)
+                Rectangle().fill(Color.black)
+                LinearGradient(
+                    colors: [.black, .clear], startPoint: .leading, endPoint: .trailing
+                )
+                .frame(width: Self.tabEdgeFadeW)
+            }
+        )
         // Keep the selection reachable when the run outgrows the viewport.
         // `scrollToReveal` returns nil when the chip is already whole on
         // screen, so this writes nothing in the common case — the strip no
@@ -1711,36 +1714,13 @@ struct ContentView: View {
         // and it consumes the mouseDown BEFORE SwiftUI gesture arbitration
         // runs, so this overlay owns clicks as well as drags and routes them
         // back.
-        // The catcher covers the whole 48pt band, not the 26pt chip row.
-        //
-        // Hover comes from its tracking area, and the tracking area is its
-        // bounds — so at row height the hover released the moment the pointer
-        // drifted a few points above or below. That is exactly what happens
-        // while aiming at a 14pt close glyph, and the glyph only exists while
-        // the chip is hovered, so it vanished from under the cursor on the way
-        // to it.
-        //
-        // The band is the row's own height (`topBandHeight`), so the slack is
-        // derived rather than picked. Points are shifted back by it before they
-        // reach the layout, which still speaks in row coordinates.
-        //
-        // Given to the OVERLAY as its own frame, not taken with negative
-        // padding on the parent. `.padding(.vertical, -11)` looks like it grows
-        // the box and does the opposite: it proposes 22pt more to the child and
-        // reports 22pt LESS, so a 26pt row became a 4pt one and the tracking
-        // area with it — which is why the first attempt at this made the glyph
-        // harder to reach rather than easier. An overlay child may be larger
-        // than its parent; it centres and overflows, which is exactly wanted.
         .overlay(
             TabStripMouse(
                 // Every query goes to the one layout this pass was drawn from.
                 slotAt: { x in layout.slot(at: x - Self.tabEdgeFadeW) },
                 closeAt: { p in
                     layout.closeSlot(
-                        at: CGPoint(
-                            x: p.x - Self.tabEdgeFadeW,
-                            y: p.y - Self.tabRowSlack
-                        ),
+                        at: CGPoint(x: p.x - Self.tabEdgeFadeW, y: p.y),
                         rowHeight: Self.tabLabelFrameH
                     )
                 },
@@ -1787,23 +1767,9 @@ struct ContentView: View {
                 },
                 onEnd: { draggingTab = nil },
                 onScroll: { dx in tabScroll.scroll(by: dx, layout: layout) },
-                plusAt: { p in
-                    // The button's own rect, from the layout that placed it —
-                    // widened a little, because a 22pt target is small and the
-                    // pointer is arriving through a claimed press either way.
-                    let x = Self.tabEdgeFadeW + layout.plusX
-                    return CGRect(
-                        x: x, y: Self.tabRowSlack,
-                        width: Self.tabPlusW, height: Self.tabLabelFrameH
-                    )
-                    .insetBy(dx: -4, dy: -4)
-                    .contains(p)
-                },
-                onPlus: { showTabPlusMenu() },
                 onFoldUp: { engine.advanceLayoutPresentation() },
                 onFoldDown: { engine.retreatLayoutPresentation() }
             )
-            .frame(height: ContentView.topBandHeight)
             .accessibilityLabel("Document tabs")
             .accessibilityHint(
                 "Scroll up to group or unify the active layout; scroll down to expand it"
@@ -1811,6 +1777,73 @@ struct ContentView: View {
         )
         .zIndex(1)
         .onHover { tabStripHover = $0 }
+    }
+
+    /// AppKit event surface for the titlebar tab row.
+    ///
+    /// Its width includes the strip's two visual fade paddings. The layout
+    /// origin is exactly `tabEdgeFadeW` points inside that box, so every event
+    /// is converted once at this boundary. Its 48pt height is centred over the
+    /// 24pt visual row, making the visual row centre 24pt in catcher space.
+    private func tabStripMouseOverlay(
+        _ layout: TabStripLayout,
+        tabs: [TabItem]
+    ) -> some View {
+        TabStripMouse(
+            slotAt: { layout.slot(at: $0 - Self.tabEdgeFadeW) },
+            closeAt: { p in
+                layout.closeSlot(
+                    at: CGPoint(x: p.x - Self.tabEdgeFadeW, y: p.y),
+                    rowHeight: Self.tabLabelFrameH
+                )
+            },
+            targetFor: { held, x in
+                layout.dragTarget(held: held, x: x - Self.tabEdgeFadeW)
+            },
+            onDrag: { held, to in
+                // By stable id: under a folded group the slots no longer line
+                // up with buffer indices.
+                guard let fromId = tabs.first(where: { $0.id == held })?.stableId,
+                      let toId = tabs.first(where: { $0.id == to })?.stableId,
+                      engine.moveTabIds(from: fromId, to: toId)
+                else { return }
+                draggingTab = to
+            },
+            onHoverSlot: { slot in
+                guard hoveredSlot != slot else { return }
+                hoveredSlot = slot
+            },
+            onPick: { held in draggingTab = held },
+            onClick: { slot in
+                focused = true
+                guard let tab = tabs.first(where: { $0.id == slot }) else {
+                    engine.gotoTab(slot)
+                    return
+                }
+                applyStripClick(chip: tab.stableId)
+            },
+            onDoubleClick: { slot in
+                focused = true
+                guard let tab = tabs.first(where: { $0.id == slot }),
+                      tab.group != 0
+                else { return }
+                engine.toggleLayoutStyle(tab.group)
+            },
+            onClose: { slot in
+                guard let tab = tabs.first(where: { $0.id == slot }) else { return }
+                focused = true
+                applyStripClose(chip: tab.stableId)
+            },
+            onEnd: { draggingTab = nil },
+            onScroll: { dx in tabScroll.scroll(by: dx, layout: layout) },
+            onFoldUp: { engine.advanceLayoutPresentation() },
+            onFoldDown: { engine.retreatLayoutPresentation() }
+        )
+        .frame(height: ContentView.topBandHeight)
+        .accessibilityLabel("Document tabs")
+        .accessibilityHint(
+            "Scroll up to group or unify the active layout; scroll down to expand it"
+        )
     }
 
     /// Band behind each grouped run, from the run's own computed extent.
@@ -1872,7 +1905,7 @@ struct ContentView: View {
             dirty: tab.dirty,
             deleted: tab.deleted,
             active: tab.active,
-            accent: inLayout ? Color.black : accent,
+            accent: inLayout ? Color.black : Color.accentColor,
             fg: inLayout ? Color.black : Color.primary,
             dim: inLayout ? Color.black.opacity(0.72) : Color.secondary,
             isLight: isLightTheme,
@@ -1909,9 +1942,7 @@ struct ContentView: View {
 
     /// The strip's geometry for this pass — the only authority for where a chip
     /// is, used by the renderer and the hit test alike.
-    private func stripLayout(
-        viewportWidth: CGFloat, centreOn: CGFloat? = nil
-    ) -> TabStripLayout {
+    private func stripLayout(viewportWidth: CGFloat) -> TabStripLayout {
         let tabs = engine.chrome.tabs
         return TabStripLayout(
             tabs: tabs.map { (stableId: $0.stableId, group: $0.group) },
@@ -1919,7 +1950,6 @@ struct ContentView: View {
             // Owned, not observed. A `ScrollView` reported this back a pass
             // late, which is the lag the whole strip used to be built around.
             scrollOffset: tabScroll.offset,
-            centreOn: centreOn,
             widthFor: { slot in
                 let t = tabs[slot]
                 return TabChipMetrics.width(
@@ -1990,61 +2020,21 @@ struct ContentView: View {
             // Switching between a symmetric "fits" width and an overflow
             // width while a layout merged changed the strip by 135pt in the
             // first frame, independently of the chip animation.
-            // The tabs sit on the WINDOW's centreline, not the detail column's.
+            // This row spans the WINDOW, so it has to clear the sidebar.
             //
-            // This row is a window-wide band whose other occupants are pinned
-            // to the window's two edges — the traffic lights at the far left,
-            // over the sidebar, and the toolbar platter at the far right. Tabs
-            // centred on the detail leave a much larger gap on the left than on
-            // the right, and that imbalance is what reads as "shifted right"
-            // once the sidebar is open. Centred on the window, the three groups
-            // are a row again.
+            // I had made this a flat 150 after taking the SwiftUI control
+            // cluster out, reasoning that nothing occupies the row's ends any
+            // more. The controls left; the sidebar did not — and tabs drew
+            // straight across it.
             //
-            // The band cannot span the window — it belongs to the detail column
-            // now, so the sidebar's live width is the one thing it has to know.
-            // `navLiveWidth` comes from the splitter itself, every frame,
-            // including the frames of a collapse, so the strip slides with the
-            // sidebar instead of jumping when the flag flips.
-            let sidebar = navLiveWidth
-            // Window centre, expressed in this column's coordinates.
-            let centre = (geo.size.width - sidebar) / 2
-            // The strip gets the WHOLE span between its neighbours — the
-            // splitter on one side, the toolbar cluster on the other — and the
-            // centring happens INSIDE it, as an offset the layout applies to
-            // the run (`TabStripLayout.init(centreOn:)`).
-            //
-            // It used to be a span symmetric about `centre`, and that symmetry
-            // is what made the strip's WIDTH depend on the sidebar. With the
-            // sidebar open the window centre sits nearer the detail's left
-            // edge, so the near side clamped the far side: at 1280x820 the
-            // strip went 916 → 648 while 134pt of perfectly good room on the
-            // right went unused. A 308pt panel cost the strip 268pt, and every
-            // open/close reflowed the chips, flipped the overflow state and
-            // moved the scroll clamp.
-            //
-            // Same centreline, no narrowing: one number decides the box, a
-            // different one decides where the run sits in it.
-            // The leading limit depends on the sidebar, and this is the ONE
-            // thing about the strip that legitimately does.
-            //
-            // The traffic lights and the navigator toggle occupy the window's
-            // leading ~148pt. While the sidebar is open they sit over IT, so
-            // the detail's leading edge is free and 8pt is right. Collapse the
-            // sidebar and that same zone lands on the detail — which is how
-            // tabs ended up drawn over the lights and the toggle.
-            //
-            // Expressed in detail coordinates, the zone is `148 - sidebar`, so
-            // it retreats to nothing exactly as the sidebar grows past it. That
-            // is a position moving with a panel, not a width doing so; the run
-            // keeps whatever room is left.
-            let leadingControls: CGFloat = 148
-            let leftLimit = max(8, leadingControls - sidebar)
-            let rightLimit = geo.size.width - 150
-            let span = max(60, rightLimit - leftLimit)
-            let wideCap = span - 22
-            // The window centre, expressed relative to the strip's own leading
-            // edge, which is what the layout wants.
-            let centreInStrip = centre - leftLimit - Self.tabEdgeFadeW
+            // `navLiveWidth` comes from the splitter itself on every frame of a
+            // collapse, so the reserve follows the panel rather than jumping
+            // when the flag flips. 16pt past its edge is 4373153's own beat.
+            let leftReserve: CGFloat = engine.uiNavVisible
+                ? navLiveWidth + 16
+                : 150
+            let rightTight: CGFloat = 150
+            let wideCap = max(60, geo.size.width - leftReserve - rightTight) - 22
 
             ZStack {
                 // Empty areas drag the window; double-click zooms (titlebar
@@ -2078,21 +2068,16 @@ struct ContentView: View {
                 // and stays hit-testable at all times: yanking hit-testing
                 // off a Menu mid-tracking wedges the app's event loop.
                 HStack(spacing: 0) {
-                    Spacer().frame(width: leftLimit)
-                    documentTabStrip(maxWidth: wideCap, centreOn: centreInStrip)
-                    Spacer(minLength: 0)
+                    Spacer().frame(width: leftReserve)
+                    documentTabStrip(maxWidth: wideCap)
+                    Spacer(minLength: rightTight - 22)
                 }
-                // Explicitly NOT animated. `navLiveWidth` is already published
-                // from the splitter on every frame of the collapse, so the
-                // strip's geometry is a smooth curve before it gets here —
-                // animating each reported step would be a second animator on
-                // one motion, which is the trap `animatingPanels` documents.
-                .animation(nil, value: sidebar)
 
-            // Nothing else in this row. The trailing controls are real toolbar
-            // items now — see `editorToolbar`. The sidebar toggle went to the
-            // split view's own, and the traffic-light zone went with the cloned
-            // lights, so the tab strip is all that is left here.
+            // No control cluster here. The navigator toggle and the three
+            // document controls are NATIVE toolbar items now — the sidebar
+            // column's own for the toggle, `editorToolbar` for the rest. This
+            // row's SwiftUI copies came back with the strip when it was
+            // restored to 4373153, and drew on top of them at both ends.
             }
             // The entire titlebar row uses the 48pt Swiss-grid band. Compressing
             // this to AppKit's 28pt default moved every control centre from
@@ -2108,20 +2093,14 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
     }
 
+
     /// "+" tab/split menu. A plain BUTTON + manual NSMenu popup — SwiftUI's
     /// `Menu` (borderless popup-button control) lays its label out on AppKit's
     /// own baseline and the glyph permanently sat ~2pt high next to the tab
     /// chips no matter what frames wrapped it (the recurring "+가 위로 튐").
     /// A Button glyph centers exactly like every other chip.
-    /// Build and pop the "+" menu.
-    ///
-    /// A function, not a Button action, because the Button was never what
-    /// received the click. `TabStripMouse` claims every press in the titlebar
-    /// region — that is the entire reason it exists — so it sits above this
-    /// overlay and the SwiftUI action never fired. The catcher routes the press
-    /// here instead, hit-tested against the same layout that placed the button,
-    /// which also means the menu pops from a real mouse event.
-    private func showTabPlusMenu() {
+    private var tabPlusMenu: some View {
+        Button {
             plusBridge.engine = engine
             let menu = NSMenu()
             func add(_ title: String, _ sel: Selector) {
@@ -2142,24 +2121,23 @@ struct ContentView: View {
             {
                 NSMenu.popUpContextMenu(menu, with: event, for: view)
             }
-    }
-
-    /// The "+" itself — visual only. `TabStripMouse` delivers its clicks.
-    ///
-    /// Literal text "+", NOT an SF Symbol and NOT drawn shapes. Rendered
-    /// through the exact same text layout as the tab labels, so the glyph rides
-    /// the same baseline and lands at the tabs' OPTICAL position on its own.
-    /// Geometric centering (a symbol's alignment rect, or crossed shapes) parks
-    /// the glyph at the line-box centre, which sits ~1-2px ABOVE where text
-    /// visually reads — that was the persistent "+ too high". Text has no such
-    /// offset to fight.
-    private var tabPlusMenu: some View {
-        Text("+")
-            .font(.system(size: Self.plusPointSize, weight: .regular))
-            .foregroundStyle(.secondary)
-            .frame(width: 22, height: Self.plusFrameH)
-            .offset(y: Self.plusInkNudge)
-            .help("Tabs · ⌃⇥ cycle · split editors")
+        } label: {
+            // Literal text "+" — NOT an SF Symbol, NOT drawn shapes. Rendered
+            // through the exact same text layout as the tab labels, so the
+            // glyph rides the same baseline and lands at the tabs' OPTICAL
+            // position on its own. Geometric centering (a symbol's alignment
+            // rect, or crossed shapes) parks the glyph at the line-box center,
+            // which sits ~1-2px ABOVE where text visually reads — that was the
+            // persistent "+ too high". Text has no such offset to fight.
+            Text("+")
+                .font(.system(size: Self.plusPointSize, weight: .regular))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: Self.plusFrameH)
+                .offset(y: Self.plusInkNudge)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Tabs · ⌃⇥ cycle · split editors")
     }
 
     // Type metrics for the tab strip's "+". Kept next to the button they
@@ -2173,16 +2151,6 @@ struct ContentView: View {
     private static let tabLabelPointSize: CGFloat = 12
     private static let tabLabelFrameH: CGFloat = 24
     private static let tabEdgeFadeW: CGFloat = 14
-    /// The leading fade — see the strip's mask for why it is the longer one.
-    private static let tabLeadingFadeW: CGFloat = 34
-    /// How far the strip's mouse region reaches above and below the chip row.
-    ///
-    /// Derived, not chosen: it fills the titlebar band the row sits in. Hover
-    /// is what needs it — see the catcher's placement — and a click landing a
-    /// few points high is a click on the tab either way.
-    private static let tabRowSlack: CGFloat =
-        max(0, (topBandHeight - tabLabelFrameH - 2) / 2)
-
     /// Nudge that lands the "+" on the tab labels' optical line.
     ///
     /// Three attempts, and the useful part is what each ruled out. Frame height
@@ -6540,17 +6508,10 @@ private struct TabStripMouse: NSViewRepresentable {
     var onEnd: () -> Void
     /// Horizontal scroll; returns whether the strip consumed it.
     var onScroll: (CGFloat) -> Bool
-    /// Is this point on the "+"? It lives under this catcher, which claims
-    /// every press in the titlebar region, so it can never be clicked by
-    /// SwiftUI — the click has to be routed from here like every other one.
-    var plusAt: (CGPoint) -> Bool = { _ in false }
-    var onPlus: () -> Void = {}
     var onFoldUp: () -> Void = {}
     var onFoldDown: () -> Void = {}
 
     final class Catcher: NSView {
-        var plusAt: ((CGPoint) -> Bool)?
-        var onPlus: (() -> Void)?
         var slotAt: ((CGFloat) -> Int?)?
         var closeAt: ((CGPoint) -> Int?)?
         var targetFor: ((Int, CGFloat) -> Int?)?
@@ -6725,29 +6686,17 @@ private struct TabStripMouse: NSViewRepresentable {
                 // run is moved here. A trackpad's horizontal component is
                 // `scrollingDeltaX`; a plain wheel with shift held reports on
                 // the same axis, so both arrive as one number.
-                // The Y axis substitutes for X on a WHEEL only.
-                //
-                // A plain mouse wheel has no horizontal axis, and a tab strip
-                // is expected to scroll from its one axis (every browser does
-                // it). A trackpad has both, and taking its Y as well meant any
-                // two-finger scroll that drifted vertically over the strip
-                // yanked the tabs sideways by the full vertical delta — a
-                // gesture aimed at the editor moving the chrome, which is the
-                // "가로 스크롤 느낌이 별로" of it. Precise devices get X only.
-                let delta: CGFloat
-                if event.hasPreciseScrollingDeltas {
-                    // Already point deltas with their own momentum tail: pass
-                    // them through untouched, which is what makes a trackpad
-                    // feel like the surface it is moving.
-                    delta = event.scrollingDeltaX
-                } else {
-                    // Wheel detents are tiny unit steps. One conventional text
-                    // line per detent, from whichever axis the device reports.
-                    let raw = event.scrollingDeltaX != 0
-                        ? event.scrollingDeltaX
-                        : event.scrollingDeltaY
-                    delta = raw * 24
-                }
+                // A trackpad's horizontal component is `scrollingDeltaX`. A
+                // plain mouse wheel has none — it only reports Y — and a tab
+                // strip is expected to scroll from that too (every browser does
+                // it), so a vertical wheel that is NOT a fold flick drives the
+                // run sideways.
+                let dx = event.scrollingDeltaX
+                let raw = dx != 0 ? dx : event.scrollingDeltaY
+                // Trackpads already report point deltas and a momentum tail.
+                // Mouse-wheel detents are tiny unit steps; map those to one
+                // conventional text-line distance so both devices feel direct.
+                let delta = event.hasPreciseScrollingDeltas ? raw : raw * 24
                 if delta != 0, onScroll?(delta) == true { return }
                 super.scrollWheel(with: event)
                 return
@@ -6813,9 +6762,7 @@ private struct TabStripMouse: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             if !moved {
                 let point = convert(event.locationInWindow, from: nil)
-                if plusAt?(point) == true {
-                    onPlus?()
-                } else if let slot = closeAt?(point) {
+                if let slot = closeAt?(point) {
                     onClose?(slot)
                 } else if let slot = slotAt?(point.x) {
                     if event.clickCount >= 2 {
@@ -6852,8 +6799,6 @@ private struct TabStripMouse: NSViewRepresentable {
         v.onDoubleClick = onDoubleClick
         v.onClose = onClose
         v.onEnd = onEnd
-        v.plusAt = plusAt
-        v.onPlus = onPlus
         v.onFoldUp = onFoldUp
         v.onFoldDown = onFoldDown
     }
@@ -8213,6 +8158,12 @@ private struct EditorWindowChrome: NSViewRepresentable {
         if window.tabbingMode != .disallowed {
             window.tabbingMode = .disallowed
         }
+        // AppKit's toolbar row lands the standard controls about 2pt above the
+        // visual centre shared by the navigator toggle and document tabs on
+        // this custom 48pt band. Nudge the real controls — never clones — and
+        // remember AppKit's native frame so repeated SwiftUI updates cannot
+        // accumulate the offset.
+        EditorTrafficLightNudge.shared.apply(to: window, down: 2)
         // No `titleVisibility = .hidden` here, deliberately. It hides the title
         // by removing the toolbar's title ITEM, and that item is what anchors
         // the `.primaryAction` group to the trailing edge — hiding it moved the
@@ -8225,6 +8176,252 @@ private struct EditorWindowChrome: NSViewRepresentable {
         // out to be this line.
     }
 
+}
+
+/// Idempotent optical offset for the editor's real AppKit traffic lights.
+@MainActor
+private final class EditorTrafficLightNudge {
+    static let shared = EditorTrafficLightNudge()
+
+    private final class Entry: NSObject {
+        var nativeY: CGFloat
+        var appliedY: CGFloat?
+
+        init(nativeY: CGFloat) {
+            self.nativeY = nativeY
+        }
+    }
+
+    private let entries = NSMapTable<NSButton, Entry>(
+        keyOptions: .weakMemory,
+        valueOptions: .strongMemory
+    )
+
+    func apply(to window: NSWindow, down: CGFloat) {
+        for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = window.standardWindowButton(kind) else { continue }
+            let currentY = button.frame.origin.y
+            let entry: Entry
+            if let existing = entries.object(forKey: button) {
+                entry = existing
+                // AppKit may legitimately re-lay the titlebar after a toolbar
+                // or scale change. A frame that is neither our last result nor
+                // the remembered native value becomes the new native baseline.
+                if let applied = entry.appliedY, abs(currentY - applied) > 0.25 {
+                    entry.nativeY = currentY
+                }
+            } else {
+                entry = Entry(nativeY: currentY)
+                entries.setObject(entry, forKey: button)
+            }
+
+            let signedDrop = button.superview?.isFlipped == true ? down : -down
+            let targetY = entry.nativeY + signedDrop
+            if abs(currentY - targetY) > 0.25 {
+                button.setFrameOrigin(NSPoint(x: button.frame.origin.x, y: targetY))
+            }
+            entry.appliedY = targetY
+        }
+
+        // The custom navigator accessory keys its centre to the zoom button.
+        // Re-layout after the nudge so those left-side controls stay on one line.
+        for controller in window.titlebarAccessoryViewControllers {
+            controller.view.needsLayout = true
+        }
+    }
+}
+
+/// A fixed titlebar slot for the navigator control.
+///
+/// The accessory owns placement only: unlike `.navigation`, this slot is
+/// relative to the window and therefore never follows the sidebar divider.
+/// Its button deliberately has no resting platter; it matches the trailing
+/// toolbar symbol at rest and reveals its target only while hovering.
+private struct EditorNavigatorToolbarAccessory: NSViewRepresentable {
+    var isVisible: Bool
+    var action: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.isHidden = true
+        DispatchQueue.main.async { install(from: view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { install(from: nsView) }
+    }
+
+    private func install(from view: NSView) {
+        guard let window = view.window else { return }
+        let controller: EditorNavigatorAccessoryController
+        if let existing = window.titlebarAccessoryViewControllers
+            .compactMap({ $0 as? EditorNavigatorAccessoryController })
+            .first
+        {
+            controller = existing
+        } else {
+            controller = EditorNavigatorAccessoryController()
+            window.addTitlebarAccessoryViewController(controller)
+        }
+        controller.update(isVisible: isVisible, action: action)
+    }
+}
+
+private struct EditorNavigatorButton: View {
+    var isVisible: Bool
+    var action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "sidebar.leading")
+                // This accessory does not inherit `ToolbarItem`'s symbol
+                // environment, so its default glyph is visibly smaller than
+                // the trailing `sidebar.right`. Match that toolbar glyph's
+                // optical size without changing the right-hand control.
+                .font(.system(size: 16.5, weight: .regular))
+                .foregroundStyle(.primary)
+                .frame(width: 28, height: 28)
+                .background {
+                    Circle()
+                        .fill(Color.primary.opacity(hovering ? 0.10 : 0))
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(isVisible ? "Hide Navigator · ⌘0" : "Show Navigator · ⌘0")
+        .accessibilityLabel("Navigators")
+        .frame(width: 36, height: 36)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.10), value: hovering)
+    }
+}
+
+private final class EditorNavigatorAccessoryController: NSTitlebarAccessoryViewController {
+    private let host = EditorNavigatorAccessoryHost()
+
+    init() {
+        super.init(nibName: nil, bundle: nil)
+        layoutAttribute = .left
+        view = host
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func update(isVisible: Bool, action: @escaping () -> Void) {
+        host.hosting.rootView = EditorNavigatorButton(
+            isVisible: isVisible,
+            action: action
+        )
+    }
+}
+
+private final class EditorNavigatorAccessoryHost: NSView {
+    let hosting = NSHostingView(
+        rootView: EditorNavigatorButton(isVisible: true, action: {})
+    )
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 36, height: 52))
+        hosting.frame = NSRect(x: 0, y: 8, width: 36, height: 36)
+        addSubview(hosting)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        var centreY = bounds.midY
+        if let zoom = window?.standardWindowButton(.zoomButton) {
+            let zoomInWindow = zoom.convert(zoom.bounds, to: nil)
+            centreY = convert(NSPoint(x: 0, y: zoomInWindow.midY), from: nil).y
+        }
+        hosting.frame = NSRect(x: 0, y: centreY - 18, width: 36, height: 36)
+    }
+}
+
+/// Removes the divider-relative toggle that `NavigationSplitView` can recreate
+/// after `.toolbar(removing: .sidebarToggle)` during reconciliation.
+private struct EditorGeneratedSidebarTogglePruner: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.isHidden = true
+        context.coordinator.attach(to: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.attach(to: nsView)
+    }
+
+    final class Coordinator {
+        private weak var toolbar: NSToolbar?
+        private var willAddObserver: NSObjectProtocol?
+        private var didRemoveObserver: NSObjectProtocol?
+        private var normalizing = false
+
+        deinit {
+            if let willAddObserver { NotificationCenter.default.removeObserver(willAddObserver) }
+            if let didRemoveObserver { NotificationCenter.default.removeObserver(didRemoveObserver) }
+        }
+
+        func attach(to view: NSView) {
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self, let nextToolbar = view?.window?.toolbar else { return }
+                if toolbar !== nextToolbar {
+                    stopObserving()
+                    toolbar = nextToolbar
+                    let centre = NotificationCenter.default
+                    willAddObserver = centre.addObserver(
+                        forName: NSToolbar.willAddItemNotification,
+                        object: nextToolbar,
+                        queue: .main
+                    ) { [weak self] _ in self?.normalizeOnNextRunLoop() }
+                    didRemoveObserver = centre.addObserver(
+                        forName: NSToolbar.didRemoveItemNotification,
+                        object: nextToolbar,
+                        queue: .main
+                    ) { [weak self] _ in self?.normalizeOnNextRunLoop() }
+                }
+                normalize()
+            }
+        }
+
+        private func stopObserving() {
+            let centre = NotificationCenter.default
+            if let willAddObserver { centre.removeObserver(willAddObserver) }
+            if let didRemoveObserver { centre.removeObserver(didRemoveObserver) }
+            willAddObserver = nil
+            didRemoveObserver = nil
+        }
+
+        private func normalizeOnNextRunLoop() {
+            DispatchQueue.main.async { [weak self] in self?.normalize() }
+        }
+
+        private func normalize() {
+            guard !normalizing, let toolbar else { return }
+            normalizing = true
+            defer { normalizing = false }
+
+            // Remove either form of the divider-relative system item. The
+            // visible accessory is not part of `toolbar.items`.
+            for index in toolbar.items.indices.reversed() {
+                let identity = toolbar.items[index].itemIdentifier.rawValue.lowercased()
+                if toolbar.items[index].itemIdentifier == .toggleSidebar
+                    || (identity.contains("navigationsplitview")
+                        && identity.contains("togglesidebar"))
+                {
+                    toolbar.removeItem(at: index)
+                }
+            }
+        }
+    }
 }
 
 /// The sidebar's dragged width, reported back so it survives relaunch.
