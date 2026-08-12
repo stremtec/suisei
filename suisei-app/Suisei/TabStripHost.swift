@@ -814,7 +814,9 @@ final class TabStripHostView: NSView {
         // instead of a symbol's alignment-rect centre (the recurring "+가 위로
         // 튐"). `plusInkNudge` is the last sub-point of that.
         let s = NSAttributedString(string: "+", attributes: [
-            .font: NSFont.systemFont(ofSize: 20, weight: .regular),
+            .font: NSFont.systemFont(
+                ofSize: TabStripHostView.plusPointSize, weight: .regular
+            ),
             .foregroundColor: palette.dim,
         ])
         let size = s.size()
@@ -824,11 +826,52 @@ final class TabStripHostView: NSView {
         ))
     }
 
-    /// Lands the "+" on the tab labels' optical line. Frame height cancels out
-    /// of the centring arithmetic, so this is purely the glyph-ink difference:
-    /// a "+" is drawn on the maths axis, whose centre sits above a mixed-case
-    /// line's.
-    private static let plusInkNudge: CGFloat = -1.0
+    /// Point size of the "+", and of the tab labels it must sit on the line of.
+    private static let plusPointSize: CGFloat = 20
+    private static let tabLabelPointSize: CGFloat = 12
+
+    /// Nudge that lands the "+" on the tab labels' optical line.
+    ///
+    /// Derived, not eyeballed — this arrived with the strip it was written for
+    /// and is worth more than the −1.0 that replaced it while this view was
+    /// being built. Three attempts, and the useful part is what each ruled out.
+    /// Frame height is irrelevant: it cancels out of
+    /// `(H − lineH)/2 + ascender − H/2`, so matching box sizes changed nothing.
+    /// Deriving from the label's INK box (−0.50…−0.70pt) still read low —
+    /// brackets and descenders stretch that box below where the eye puts the
+    /// line. Deriving from the baseline–cap band (−1.57pt) overshot high.
+    ///
+    /// Those two bracket it. The optical centre of mixed-case text sits between
+    /// its x-height and cap-height midpoints — the usual reference for centring
+    /// a symbol against running text — and a "+" is drawn on the maths axis, so
+    /// its own ink centre already is its optical centre. `opticalTrim` takes
+    /// the remainder, and is the one number here that is observed rather than
+    /// derived, which is why it is named instead of folded into the formula.
+    private static let plusInkNudge: CGFloat = {
+        /// How far below a centred line's frame centre its baseline sits.
+        func baselineBelowCentre(_ size: CGFloat) -> CGFloat {
+            let f = NSFont.systemFont(ofSize: size, weight: .regular)
+            return f.ascender - (f.ascender - f.descender) / 2
+        }
+        let labelFont = NSFont.systemFont(
+            ofSize: tabLabelPointSize, weight: .regular
+        )
+        let opticalBand = (labelFont.capHeight / 2 + labelFont.xHeight / 2) / 2
+        let labelCentre = baselineBelowCentre(tabLabelPointSize) - opticalBand
+
+        let plusFont = NSFont.systemFont(ofSize: plusPointSize, weight: .regular)
+        let plusLine = CTLineCreateWithAttributedString(
+            NSAttributedString(string: "+", attributes: [.font: plusFont])
+        )
+        let plusCentre = baselineBelowCentre(plusPointSize)
+            - CTLineGetImageBounds(plusLine, nil).midY
+
+        return labelCentre - plusCentre + opticalTrim
+    }()
+
+    /// Residual from eyeballing on a Retina display: the derived value sat a
+    /// touch high. Positive moves the glyph down.
+    private static let opticalTrim: CGFloat = 0.2
 
     private func drawOverflowCounter(_ f: Frame, in ctx: CGContext) {
         guard overflowCount > 0 else { return }
