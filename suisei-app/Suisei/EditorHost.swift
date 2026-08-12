@@ -1147,6 +1147,7 @@ final class EditorCanvasView: NSView {
         let band = rows(r0, r1)
 
         renderer.beginFrame()
+        for (r, c) in gitBars(band, lineH: lineH) { renderer.addRect(r, c) }
         bracketRects.removeAll(keepingCapacity: true)
         var wrapped: Set<UInt32> = []
         if wrapLines {
@@ -1160,11 +1161,6 @@ final class EditorCanvasView: NSView {
             let rowRect = CGRect(x: viewport.minX, y: y, width: viewport.width, height: lineH)
 
             if line.isCursor { renderer.addRect(rowRect, colors.cursorLine) }
-            if line.gitSignKind & 0x0F != 0 {
-                for r in gitBarRects(line.gitSignKind, atY: y, lineH: lineH) {
-                    renderer.addRect(r, gitColor(line.gitSignKind))
-                }
-            }
             if line.hasBreakpoint {
                 renderer.addRect(
                     CGRect(x: 5, y: y + 4, width: 7, height: max(5, lineH - 8)),
@@ -1400,6 +1396,11 @@ final class EditorCanvasView: NSView {
             }
         }
 
+        for (r, c) in gitBars(band, lineH: lineH) {
+            c.setFill()
+            r.fill()
+        }
+
         for line in band {
             if line.isWrapContinuation { continue }
             let baseRow = max(0, Int(line.lineNo) - 1)
@@ -1412,11 +1413,6 @@ final class EditorCanvasView: NSView {
                 rowRect.fill()
             }
 
-            let gitKind = line.gitSignKind
-            if gitKind & 0x0F != 0 {
-                gitColor(gitKind).setFill()
-                for r in gitBarRects(gitKind, atY: y, lineH: lineH) { r.fill() }
-            }
             if line.hasBreakpoint {
                 drawBookmark(at: y, lineH: lineH)
             }
@@ -1817,47 +1813,122 @@ final class EditorCanvasView: NSView {
         }
     }
 
-    /// One row's contribution to its hunk's change bar.
+    /// Every change bar in `band`, as coloured rects.
     ///
-    /// The bar's SHAPE carries whether the change is staged, which is the
-    /// distinction Xcode makes and the only place this state shows without
-    /// opening a panel:
+    /// A SEPARATE pass, because a bar is a hunk-shaped object and the row loop
+    /// is row-shaped. Drawing it per row put a cap on every line, so a run of
+    /// changed lines came out as a column of little boxes rather than one
+    /// change — and both row loops skip rows outside the dirty rect, so a run
+    /// cannot be accumulated inside them anyway.
     ///
-    /// * **unstaged** — a hollow outline. Drawn as edges rather than a filled
-    ///   rect punched with the background, because whatever is behind it
-    ///   (the cursor-line wash, a selection) has to show through the middle.
-    ///   The caps only appear on the hunk's own first and last rows, so the
-    ///   sides of the intervening rows abut into one continuous outline.
-    /// * **staged** — filled solid.
+    /// Rects because that is the only primitive BOTH renderers have. A stroked
+    /// path would have to exist twice, once per renderer, and could then
+    /// differ; from one rect list they cannot.
+    private func gitBars<Band: Sequence<EditorLine>>(
+        _ band: Band, lineH: CGFloat
+    ) -> [(CGRect, NSColor)] {
+        var out: [(CGRect, NSColor)] = []
+        var runStart: CGFloat?
+        var runEnd: CGFloat = 0
+        var runTopCap = false
+        var runKind: UInt8 = 0
+        var runStaged = false
+        var lastRow = -2
+
+        func flush(bottomCap: Bool) {
+            guard let start = runStart else { return }
+            let color = gitColor(runKind)
+            for r in Self.barRects(
+                top: start, bottom: runEnd,
+                topCap: runTopCap, bottomCap: bottomCap, staged: runStaged
+            ) {
+                out.append((r, color))
+            }
+            runStart = nil
+        }
+
+        for line in band where !line.isWrapContinuation {
+            let sign = line.gitSignKind
+            let row = max(0, Int(line.lineNo) - 1)
+            guard sign & 0x0F != 0 else {
+                flush(bottomCap: false)
+                lastRow = row
+                continue
+            }
+            let y = CGFloat(row) * lineH
+            let sameRun = runStart != nil
+                && row == lastRow + 1
+                && sign & 0x0F == runKind
+                && (sign & 0x40 != 0) == runStaged
+            if !sameRun {
+                flush(bottomCap: false)
+                runStart = y
+                runTopCap = sign & 0x10 != 0
+                runKind = sign & 0x0F
+                runStaged = sign & 0x40 != 0
+            }
+            runEnd = y + lineH
+            lastRow = row
+            if sign & 0x20 != 0 { flush(bottomCap: true) }
+        }
+        // A hunk running past the bottom of the band gets no cap there, which
+        // is right: its end is off screen.
+        flush(bottomCap: false)
+        return out
+    }
+
+    /// One bar: a capsule, hollow while the hunk is unstaged and solid once it
+    /// is staged.
     ///
-    /// Returned as rects because both renderers here draw rects and nothing
-    /// else; a stroked path would have to exist twice and could then differ.
-    private func gitBarRects(
-        _ sign: UInt8, atY y: CGFloat, lineH: CGFloat
+    /// A cap is drawn only where the hunk actually ends. Where the run leaves
+    /// the visible band the edge is left open, so a long change reads as
+    /// continuing rather than as stopping at the viewport.
+    private static func barRects(
+        top: CGFloat, bottom: CGFloat,
+        topCap: Bool, bottomCap: Bool, staged: Bool
     ) -> [CGRect] {
         let w = EditorMetrics.gitStripeWidth
-        let box = CGRect(x: 2, y: y, width: w, height: lineH)
-        if sign & 0x40 != 0 { return [box] }   // staged: solid
-
+        let x = EditorCanvasView.gitBarX
+        let r = w / 2                       // a true capsule
         let t = EditorCanvasView.gitBarStroke
-        var out: [CGRect] = [
-            CGRect(x: box.minX, y: box.minY, width: t, height: box.height),
-            CGRect(x: box.maxX - t, y: box.minY, width: t, height: box.height),
-        ]
-        if sign & 0x10 != 0 {
-            out.append(CGRect(x: box.minX, y: box.minY, width: w, height: t))
+        let cx = x + r
+        var out: [CGRect] = []
+
+        func span(_ y: CGFloat, _ h: CGFloat, halfWidth hw: CGFloat) {
+            guard h > 0, hw > 0 else { return }
+            if staged || hw <= t {
+                out.append(CGRect(x: cx - hw, y: y, width: hw * 2, height: h))
+                return
+            }
+            out.append(CGRect(x: cx - hw, y: y, width: t, height: h))
+            out.append(CGRect(x: cx + hw - t, y: y, width: t, height: h))
         }
-        if sign & 0x20 != 0 {
-            out.append(
-                CGRect(x: box.minX, y: box.maxY - t, width: w, height: t)
-            )
+
+        // Straight middle.
+        let bodyTop = top + (topCap ? r : 0)
+        let bodyBottom = bottom - (bottomCap ? r : 0)
+        span(bodyTop, bodyBottom - bodyTop, halfWidth: r)
+
+        // Rounded ends, stepped at half a point — one pixel at 2x.
+        let step = EditorCanvasView.gitBarCapStep
+        var d: CGFloat = 0
+        while d < r {
+            let mid = d + step / 2
+            let hw = (r * r - (r - mid) * (r - mid)).squareRoot()
+            if topCap { span(top + d, step, halfWidth: hw) }
+            if bottomCap { span(bottom - d - step, step, halfWidth: hw) }
+            d += step
         }
         return out
     }
 
+    /// Leading inset of the change bar inside the gutter.
+    static let gitBarX: CGFloat = 2
     /// Outline thickness. Enough to read at a glance without closing the gap
     /// it exists to show.
     static let gitBarStroke: CGFloat = 1.5
+    /// Vertical resolution of the rounded ends.
+    static let gitBarCapStep: CGFloat = 0.5
 
     /// Xcode paints ONE colour for "changed since HEAD" rather than sorting
     /// additions from modifications — the distinction is visible in the text

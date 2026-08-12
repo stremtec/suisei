@@ -306,6 +306,11 @@ pub struct App {
     hook_msg_rx: std::sync::mpsc::Receiver<String>,
     /// Async git gutter/blame refresh (latest generation wins).
     #[allow(clippy::type_complexity)]
+    /// Last seen mtime of `.git/index`, and when it was last looked at. See
+    /// [`App::poll_git_index`].
+    git_index_stamp: Option<std::time::SystemTime>,
+    git_index_checked_at: Option<std::time::Instant>,
+    #[allow(clippy::type_complexity)]
     git_refresh_rx: Option<
         std::sync::mpsc::Receiver<(
             u64,
@@ -604,6 +609,8 @@ impl Default for App {
             update: crate::update::UpdateState::new(),
             hook_msg_tx,
             hook_msg_rx,
+            git_index_stamp: None,
+            git_index_checked_at: None,
             git_refresh_rx: None,
             git_refresh_gen: 0,
             code_lens_enabled: true,
@@ -1181,11 +1188,52 @@ impl App {
         self.rebuild_folds();
     }
 
+    /// Notice the index changing underneath us, and re-read the gutter.
+    ///
+    /// Staging is not something the editor owns. It happens in the SCM panel,
+    /// in the git workbench, and in whatever terminal the user has open —
+    /// which is why hooking each path is the wrong shape: the one that stages
+    /// from outside the app can never be hooked at all, and the gutter's bar
+    /// silently disagreed with `git status` until the file was next saved.
+    ///
+    /// `.git/index`'s mtime answers for every one of them, including the paths
+    /// that do not exist yet. Cheap enough to ask a few times a second: one
+    /// `stat` of one file.
+    fn poll_git_index(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if let Some(last) = self.git_index_checked_at {
+            if now.duration_since(last) < std::time::Duration::from_millis(400) {
+                return false;
+            }
+        }
+        self.git_index_checked_at = Some(now);
+        let hint = self.filename.clone();
+        let Some(root) = crate::git_ops::find_git_root(hint.as_deref()) else {
+            return false;
+        };
+        let stamp = std::fs::metadata(root.join(".git").join("index"))
+            .and_then(|m| m.modified())
+            .ok();
+        if stamp == self.git_index_stamp {
+            return false;
+        }
+        // The FIRST observation is not a change — it is the baseline. Kicking a
+        // refresh here would re-run two `git diff`s on every file open for no
+        // new information.
+        let known = self.git_index_stamp.is_some();
+        self.git_index_stamp = stamp;
+        if known {
+            self.refresh_git();
+        }
+        known
+    }
+
     /// Apply a finished background git refresh (call once per frame).
     pub fn poll_git_refresh(&mut self) -> bool {
         use std::sync::mpsc::TryRecvError;
+        let index_moved = self.poll_git_index();
         let Some(rx) = self.git_refresh_rx.take() else {
-            return false;
+            return index_moved;
         };
         match rx.try_recv() {
             Ok((generation, path, (g_avail, signs, hunks), blame)) => {
