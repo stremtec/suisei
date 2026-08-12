@@ -405,7 +405,41 @@ struct ContentView: View {
             topBar
                 .ignoresSafeArea(.container, edges: .top)
                 .zIndex(2)
+
+            // The palette centres on the WINDOW, which is why it is here and
+            // not on `detailStack`.
+            //
+            // It used to be an overlay on the detail column, so "centred" meant
+            // centred on the editor — right of the navigator, and then shoved
+            // another `inspectorReserved / 2` sideways by hand. Two corrections
+            // for one number, and neither of them the window. Spotlight, Open
+            // Quickly and every palette on this platform centre on the window;
+            // at the root that is what centring already means, with nothing to
+            // correct.
+            if engine.chrome.palette.open {
+                paletteOverlay
+                    .ignoresSafeArea()
+                    .zIndex(100)
+                    // Removal is IMMEDIATE (.identity): an animated removal
+                    // could wedge mid-transition, leaving an invisible view
+                    // that swallowed every click and hover in the top band
+                    // until some other state change re-evaluated the tree (the
+                    // "Esc from palette kills the right-side buttons" bug).
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(
+                            with: .scale(scale: 0.94, anchor: .center)
+                        ),
+                        removal: .identity
+                    ))
+            }
         }
+        // A short spring with a little bounce, which is what a panel arriving
+        // over a scrim does on this platform. The previous curve was a plain
+        // 0.22s ease on a scale of 0.98 — two percent, under an opaque glass
+        // panel, and the reported result was that there was no animation at
+        // all. There was; it could not be seen.
+        .animation(.snappy(duration: 0.26, extraBounce: 0.08),
+                   value: engine.chrome.palette.open)
         // Keep the split geometry stable while the navigator opens and closes.
         // The editor's *backing plane* continues below the native sidebar; its
         // usable content still starts at the splitter, just as it does in
@@ -687,31 +721,14 @@ struct ContentView: View {
         // and its only occupant — the traffic lights — sits over the sidebar.
         .ignoresSafeArea(.container, edges: .top)
         .overlay {
-            // Settings is a separate Window — not an in-app overlay.
-            if engine.chrome.palette.open {
-                paletteOverlay
-                    // Compensate for the inspector only. The navigator is a
-                    // real column now and is already outside this coordinate
-                    // space, so the old hand-measured
-                    // `(navReserved - inspectorReserved) / 2` correction is
-                    // half arithmetic the layout does for us.
-                    .offset(x: -inspectorReserved / 2)
-                    .zIndex(100)
-                    // Removal is IMMEDIATE (.identity): the animated removal
-                    // could wedge mid-transition, leaving an invisible view
-                    // that swallowed every click/hover in the top band until
-                    // some other state change re-evaluated the tree (the
-                    // "Esc from palette kills the right-side buttons" bug).
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .scale(scale: 0.98, anchor: .top)),
-                        removal: .identity
-                    ))
-            }
+            // Completions stay HERE. They are anchored to the caret, so the
+            // editor column's coordinate space is the one they want. The
+            // palette is not anchored to anything in this column and has moved
+            // to the window root — see `body`.
             if engine.chrome.completions.open {
                 completionsOverlay.zIndex(80)
             }
         }
-        .animation(.snappy(duration: 0.22), value: engine.chrome.palette.open)
         // An overlay that owns its keys has to actually be given them. Opening
         // one while the project tree's filter still holds first responder left
         // it deaf — see `reclaimKeyboardFromTextFields`. Keyed off the engine's
@@ -4046,120 +4063,161 @@ struct ContentView: View {
     // MARK: - Palette overlay (Ctrl/Cmd+P)
 
     private var paletteOverlay: some View {
-        ZStack {
-            GlassScrim(lightChrome: isLightTheme)
-                .ignoresSafeArea()
-                .onTapGesture {
-                    engine.dispatch(code: .esc)
-                    focused = true
-                }
-
-            VStack {
-                glassPanel(corner: 20) {
-                    VStack(spacing: 0) {
-                        HStack {
-                            Text(engine.chrome.palette.kind.isEmpty ? "Palette" : engine.chrome.palette.kind)
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text("Esc")
-                                .font(.system(size: 10, weight: .medium, design: .rounded))
-                                .foregroundStyle(.tertiary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                // `primary` (= labelColor), not raw white: it
-                                // resolves per appearance and moves with
-                                // Increase Contrast. White reads as a wash in
-                                // dark and as nothing at all in light.
-                                .background(Capsule().fill(Color.primary.opacity(0.08)))
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 14)
-
-                        HStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundStyle(accent.opacity(0.9))
-                            TextField(
-                                "Type to filter…",
-                                text: Binding(
-                                    get: { engine.chrome.palette.query },
-                                    set: { engine.setPaletteQuery($0) }
-                                )
-                            )
-                            .textFieldStyle(.plain)
-                            .foregroundStyle(fg)
-                            .focused($overlayTextInput, equals: .palette)
-                            Spacer()
-                        }
-                        .font(.system(size: 15, design: .rounded))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .onAppear {
-                            DispatchQueue.main.async {
-                                overlayTextInput = .palette
-                            }
-                        }
-                        .onDisappear {
-                            if overlayTextInput == .palette {
-                                overlayTextInput = nil
-                            }
-                        }
-
-                        Rectangle()
-                            .fill(Color(nsColor: .separatorColor))
-                            .frame(height: 1)
-
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 2) {
-                                ForEach(engine.chrome.palette.items) { item in
-                                    Button {
-                                        engine.paletteActivate(item.id)
-                                        focused = true
-                                    } label: {
-                                        HoverRow(corner: 4) {
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(item.label)
-                                                    .font(.system(size: 13, design: .rounded))
-                                                    .foregroundStyle(.primary)
-                                                    .lineLimit(1)
-                                                if !item.detail.isEmpty {
-                                                    Text(item.detail)
-                                                        .font(.system(size: 10, design: .monospaced))
-                                                        .foregroundStyle(.secondary)
-                                                        .lineLimit(1)
-                                                        .truncationMode(.middle)
-                                                }
-                                            }
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 9)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .background(
-                                                Rectangle()
-                                                    .fill(item.selected ? accent.opacity(0.14) : Color.clear)
-                                            )
-                                            .overlay(alignment: .leading) {
-                                                Rectangle()
-                                                    .fill(item.selected ? accent : Color.clear)
-                                                    .frame(width: 2)
-                                            }
-                                            .contentShape(Rectangle())
-                                        }
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel(item.label)
-                                    .accessibilityHint(item.detail.isEmpty ? "Activate command" : item.detail)
-                                }
-                            }
-                            .padding(8)
-                        }
-                        .frame(maxHeight: 340)
+        GeometryReader { geo in
+            ZStack(alignment: .top) {
+                GlassScrim(lightChrome: isLightTheme)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        engine.dispatch(code: .esc)
+                        focused = true
                     }
-                }
-                .frame(width: 540)
-                .padding(.top, 72)
-                Spacer()
+
+                palettePanel
+                    .frame(width: ContentView.paletteWidth)
+                    // TOP-anchored, not centred vertically. The panel grows and
+                    // shrinks as the list filters, and a vertically centred
+                    // panel moves under the pointer on every keystroke — the
+                    // field would drift while being typed into. Spotlight pins
+                    // its field and lets the list fall out of it; this is that.
+                    //
+                    // Proportional rather than a fixed 72pt, which read as
+                    // "stuck to the top" on a tall window and crowded a short
+                    // one. Clamped at both ends so neither extreme is silly.
+                    .padding(.top, min(200, max(64, geo.size.height * 0.16)))
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
         }
+    }
+
+    /// Roughly Open Quickly's. Wide enough for a path with a filename on the
+    /// end, narrow enough not to read as a sheet.
+    private static let paletteWidth: CGFloat = 560
+
+    private var palettePanel: some View {
+        glassPanel(corner: 20) {
+            VStack(spacing: 0) {
+                HStack {
+                    Text(engine.chrome.palette.kind.isEmpty
+                        ? "Palette" : engine.chrome.palette.kind)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("Esc")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        // `primary` (= labelColor), not raw white: it resolves
+                        // per appearance and moves with Increase Contrast.
+                        // White reads as a wash in dark and as nothing at all
+                        // in light.
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(accent.opacity(0.9))
+                    TextField(
+                        "Type to filter…",
+                        text: Binding(
+                            get: { engine.chrome.palette.query },
+                            set: { engine.setPaletteQuery($0) }
+                        )
+                    )
+                    .textFieldStyle(.plain)
+                    .foregroundStyle(fg)
+                    .focused($overlayTextInput, equals: .palette)
+                    Spacer()
+                }
+                .font(.system(size: 15, design: .rounded))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .onAppear {
+                    DispatchQueue.main.async { overlayTextInput = .palette }
+                }
+                .onDisappear {
+                    if overlayTextInput == .palette { overlayTextInput = nil }
+                }
+
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(height: 1)
+
+                paletteList
+            }
+        }
+    }
+
+    /// The results, with the keyboard selection kept on screen.
+    ///
+    /// The list had no `ScrollViewReader`, so arrowing past the last visible
+    /// row moved a selection nobody could see — the list only followed if the
+    /// pointer happened to scroll it. Every palette on this platform keeps its
+    /// selection visible; that is the behaviour, not a nicety.
+    private var paletteList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(engine.chrome.palette.items) { item in
+                        paletteRow(item).id(item.id)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(maxHeight: 340)
+            .onChange(of: engine.chrome.palette.items.first(where: \.selected)?.id) {
+                _, id in
+                guard let id else { return }
+                proxy.scrollTo(id, anchor: .center)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func paletteRow(_ item: PaletteItem) -> some View {
+        // A FILLED selection, the way AppKit draws a selected source-list or
+        // completion row. It was a 14%-accent wash behind a 2pt accent bar down
+        // the leading edge — a VS Code idiom, and next to a real macOS list the
+        // difference is the first thing that reads as wrong.
+        let selected = item.selected
+        Button {
+            engine.paletteActivate(item.id)
+            focused = true
+        } label: {
+            // `HoverRow` still wraps it, so an unselected row lights under the
+            // pointer as every list on this platform does. Under the selected
+            // row's opaque fill the wash is invisible, so it needs no branch.
+            HoverRow(corner: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(item.label)
+                        .font(.system(size: 13))
+                        .foregroundStyle(selected ? Color.white : Color.primary)
+                        .lineLimit(1)
+                    if !item.detail.isEmpty {
+                        Text(item.detail)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(
+                                selected ? Color.white.opacity(0.75) : Color.secondary
+                            )
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(selected ? accent : Color.clear)
+                )
+                .contentShape(Rectangle())
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(item.label)
+        .accessibilityHint(item.detail.isEmpty ? "Activate command" : item.detail)
     }
 
     // Which-key overlay removed — Suisei has no leader/prefix chords (GUI editor).
