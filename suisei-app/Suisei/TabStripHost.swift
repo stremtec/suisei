@@ -99,11 +99,8 @@ final class TabStripHostView: NSView {
     /// Points scrolled from the run's leading edge. Owned here, never observed
     /// back from a scroll view a pass late.
     private var scrollOffset: CGFloat = 0
-    /// The origin the run is drawn at RIGHT NOW. `currentFrame()` uses this,
-    /// so a press mid-animation resolves against what is on screen.
-    private var liveOrigin: CGFloat?
     private var originAnimation: OriginAnimation?
-    private var displayLink: CVDisplayLink?
+    private var displayLink: CADisplayLink?
 
     private var hoveredSlot: Int?
     /// True while the pointer is over the run or the "+", which is what reveals
@@ -163,14 +160,13 @@ final class TabStripHostView: NSView {
         // A resize re-centres the run. It does NOT animate: the window is
         // already moving under the pointer and a second easing on top reads as
         // lag. Only scrolling and tab-set changes animate.
-        liveOrigin = nil
         originAnimation = nil
         needsDisplay = true
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        if let link = displayLink { CVDisplayLinkStop(link) }
+        displayLink?.invalidate()
     }
 
     // MARK: - Geometry
@@ -282,7 +278,7 @@ final class TabStripHostView: NSView {
         return Frame(
             layout: layout,
             viewportX: vp.x - selfOriginInWindow,
-            originX: liveOrigin ?? layout.originX,
+            originX: animatedOrigin(settlingAt: layout.originX),
             rowY: ((bounds.height - TabChipBox.height) / 2 + rowDrop).rounded()
         )
     }
@@ -543,7 +539,6 @@ final class TabStripHostView: NSView {
         scrollOffset = next
         // A scroll is direct manipulation: it tracks the finger, it does not
         // ease behind it.
-        liveOrigin = nil
         originAnimation = nil
         needsDisplay = true
         return true
@@ -602,15 +597,38 @@ final class TabStripHostView: NSView {
     private static let vanishDuration: TimeInterval = 0.09
     private static let pillDuration: TimeInterval = 0.20
 
+    /// Where the run is drawn RIGHT NOW.
+    ///
+    /// Computed from the animation and the clock — never stepped into storage.
+    /// A stored value is only correct once a tick has written it, and a tick
+    /// that never comes leaves the strip parked at the animation's START: a
+    /// permanent misalignment produced by a dropped frame. Installing a layout
+    /// is heavy engine work, so the main thread can be busy for longer than the
+    /// animation lasts, and that is exactly when it happened — "레이아웃 탭으로
+    /// 만들 때 위치 정렬이 가끔 안 됨". Derived from time, a missed tick can
+    /// cost frames and nothing else.
+    private func animatedOrigin(settlingAt settled: CGFloat) -> CGFloat {
+        guard let a = originAnimation else { return settled }
+        let t = min(1, (CACurrentMediaTime() - a.start) / a.duration)
+        guard t < 1 else { return settled }
+        // Ease-out cubic: leaves quickly, settles softly. Matches the
+        // `.snappy`-family feel the strip's other motion had, without needing a
+        // spring solver here.
+        return a.from + (a.to - a.from) * CGFloat(1 - pow(1 - t, 3))
+    }
+
     private func tabsChanged(from old: [TabItem]) {
         let now = CACurrentMediaTime()
         let oldIds = Set(old.map(\.stableId))
         let newIds = Set(tabs.map(\.stableId))
 
-        // Snapshot the departing chips against the OLD layout, before the
-        // origin below starts moving — a ghost placed from the new geometry
-        // would slide as it faded.
-        if let f = frameFor(old) {
+        // The strip as it is drawn at this instant, under the OLD tab list.
+        // Ghosts are placed from it — from the new geometry they would slide as
+        // they faded — and it is also where the origin ease starts, so a fold
+        // that interrupts a previous one continues from mid-flight instead of
+        // jumping back.
+        let was = frameFor(old)
+        if let f = was {
             for chip in f.layout.chips where !newIds.contains(chip.stableId) {
                 guard let tab = old.first(where: { $0.stableId == chip.stableId })
                 else { continue }
@@ -621,13 +639,11 @@ final class TabStripHostView: NSView {
         }
         for id in newIds.subtracting(oldIds) { appearing[id] = now }
 
-        // A changed tab set moves the run's centre. Ease from wherever it is
-        // drawn to wherever it now belongs.
-        let before = liveOrigin
         needsDisplay = true
         if !ghosts.isEmpty || !appearing.isEmpty { startDisplayLink() }
-        guard let to = currentFrame()?.layout.originX else { return }
-        guard let from = before ?? previousOrigin(for: old), from != to else { return }
+        guard let to = currentFrame()?.layout.originX, let from = was?.originX,
+              from != to
+        else { return }
         animateOrigin(from: from, to: to, duration: 0.22)
     }
 
@@ -663,28 +679,10 @@ final class TabStripHostView: NSView {
         )
     }
 
-    /// The origin the previous tab set was resting at, for the ease's start.
-    private func previousOrigin(for old: [TabItem]) -> CGFloat? {
-        guard let vp = viewportInWindow() else { return nil }
-        return TabStripLayout(
-            tabs: old.map { (stableId: $0.stableId, group: $0.group) },
-            viewportWidth: vp.width,
-            scrollOffset: scrollOffset,
-            widthFor: { slot in
-                let t = old[slot]
-                return TabChipMetrics.width(
-                    title: t.title, active: t.active,
-                    isLayout: t.isLayout, deleted: t.deleted
-                )
-            }
-        ).originX
-    }
-
     private func animateOrigin(
         from: CGFloat, to: CGFloat, duration: TimeInterval
     ) {
         guard from != to else { return }
-        liveOrigin = from
         originAnimation = OriginAnimation(
             from: from, to: to,
             start: CACurrentMediaTime(), duration: duration
@@ -692,25 +690,24 @@ final class TabStripHostView: NSView {
         startDisplayLink()
     }
 
+    /// The view's own display link, on the main thread.
+    ///
+    /// Was a `CVDisplayLink` hopping every vsync onto the main queue. Two
+    /// problems: a busy main thread turns that into a burst of late blocks, and
+    /// a link that fails to create leaves the animation with no driver at all.
+    /// `NSView.displayLink(target:selector:)` is tied to this view's screen,
+    /// fires on the main thread, and pauses with the view.
     private func startDisplayLink() {
         if displayLink == nil {
-            var link: CVDisplayLink?
-            CVDisplayLinkCreateWithActiveCGDisplays(&link)
-            guard let link else { return }
-            CVDisplayLinkSetOutputHandler(link) { [weak self] _, _, _, _, _ in
-                DispatchQueue.main.async { self?.tick() }
-                return kCVReturnSuccess
-            }
+            let link = displayLink(target: self, selector: #selector(tick))
+            link.add(to: .main, forMode: .common)
             displayLink = link
         }
-        if let link = displayLink, !CVDisplayLinkIsRunning(link) {
-            CVDisplayLinkStart(link)
-        }
+        displayLink?.isPaused = false
     }
 
     private func stopDisplayLink() {
-        guard let link = displayLink, CVDisplayLinkIsRunning(link) else { return }
-        CVDisplayLinkStop(link)
+        displayLink?.isPaused = true
     }
 
     /// One frame of every animation the strip owns.
@@ -719,21 +716,16 @@ final class TabStripHostView: NSView {
     /// origin is read by `currentFrame()` — so the hit test sees the same
     /// motion the eye does. Nothing here interpolates behind the hit test's
     /// back, which is the rule this whole view exists to keep (H2).
-    private func tick() {
+    @objc private func tick() {
         let now = CACurrentMediaTime()
 
-        if let a = originAnimation {
-            let t = min(1, (now - a.start) / a.duration)
-            // Ease-out cubic: leaves quickly, settles softly. Matches the
-            // `.snappy`-family feel the strip's other motion had, without
-            // needing a spring solver here.
-            liveOrigin = a.from + (a.to - a.from) * CGFloat(1 - pow(1 - t, 3))
-            if t >= 1 {
-                originAnimation = nil
-                liveOrigin = nil
-            }
+        // Nothing here computes a position — `animatedOrigin` and
+        // `livePillRect` derive theirs from the clock. This only retires
+        // animations that have finished, so a missed tick costs frames and
+        // never correctness.
+        if let a = originAnimation, now - a.start >= a.duration {
+            originAnimation = nil
         }
-
         ghosts.removeAll { now - $0.start >= Self.vanishDuration }
         appearing = appearing.filter { now - $0.value < Self.appearDuration }
         if let start = pillStart, now - start >= Self.pillDuration {
