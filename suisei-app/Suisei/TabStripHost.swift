@@ -62,6 +62,27 @@ final class TabStripHostView: NSView {
     /// the same line as the native toolbar items beside it.
     var rowDrop: CGFloat = 0 { didSet { needsDisplay = true } }
 
+    /// Height of the titlebar band this occupies at the top of the content
+    /// view. Held here because the strip re-pins itself on every window resize.
+    var bandHeight: CGFloat = 48
+
+    /// Sit across the top of `content`, whichever way it is flipped.
+    ///
+    /// An autoresizing mask cannot express this safely: `.minYMargin` names the
+    /// min-Y EDGE, which is the bottom of an unflipped superview and the top of
+    /// a flipped one, and a SwiftUI app's `contentView` is an `NSHostingView`,
+    /// which is flipped. Pinning by mask put the strip along the bottom of the
+    /// window — "이번엔 걍 탭이 안보임".
+    func pinToTop(of content: NSView) {
+        let y = content.isFlipped ? 0 : content.bounds.height - bandHeight
+        let target = NSRect(
+            x: 0, y: y, width: content.bounds.width, height: bandHeight
+        )
+        guard frame != target else { return }
+        frame = target
+        needsDisplay = true
+    }
+
     // MARK: - Owned state
 
     /// Points scrolled from the run's leading edge. Owned here, never observed
@@ -128,6 +149,7 @@ final class TabStripHostView: NSView {
     }
 
     @objc private func windowGeometryChanged() {
+        if let content = superview { pinToTop(of: content) }
         // A resize re-centres the run. It does NOT animate: the window is
         // already moving under the pointer and a second easing on top reads as
         // lag. Only scrolling and tab-set changes animate.
@@ -370,7 +392,10 @@ final class TabStripHostView: NSView {
             }
         case .plus:
             pressedSlot = nil
-            actions.plusMenu?(self, convert(p, to: nil), event)
+            // The button's own rect, in this view's coordinates. The strip
+            // spans the whole window now, so "the strip's origin" is the
+            // window's left edge — which is where the menu opened.
+            actions.plusMenu?(self, currentFrame()?.plusRect ?? .zero, event)
         case .close(let slot):
             pressedSlot = slot
             needsDisplay = true
@@ -728,7 +753,19 @@ final class TabStripHostView: NSView {
     // Every rect drawn here comes from the same `Frame` the hit test reads.
     // There is no second set of coordinates to keep equal.
 
+    /// TEMPORARY, with the press log: tells "never drew" apart from "drew and
+    /// was covered", which is the whole question when a correctly-framed view
+    /// is invisible.
+    private var loggedDraw = false
+
     override func draw(_ dirtyRect: NSRect) {
+        if !loggedDraw {
+            loggedDraw = true
+            TabStripHostView.note(
+                "draw bounds \(bounds) tabs \(tabs.count) "
+                    + "frame \(currentFrame().map { "vpX \($0.viewportX) vw \($0.layout.viewportWidth) originX \($0.originX) rowY \($0.rowY)" } ?? "nil")"
+            )
+        }
         guard let f = currentFrame(), let ctx = NSGraphicsContext.current?.cgContext
         else { return }
 
@@ -1059,7 +1096,8 @@ struct TabStripActions {
     var dragEnded: (() -> Void)?
     var foldUp: (() -> Void)?
     var foldDown: (() -> Void)?
-    var plusMenu: ((NSView, CGPoint, NSEvent) -> Void)?
+    /// Given the "+" button's rect in the strip's own coordinates.
+    var plusMenu: ((NSView, CGRect, NSEvent) -> Void)?
     var contextMenu: ((NSView, Int, NSEvent) -> Void)?
 }
 
@@ -1163,21 +1201,30 @@ struct TabStripHost: NSViewRepresentable {
     /// top edge. SwiftUI re-adds its column hosts during reconciliation, and
     /// whichever view is added last is the one AppKit hit-tests first.
     private func attach(_ strip: TabStripHostView, near anchor: NSView) {
-        guard let content = anchor.window?.contentView else { return }
-        if strip.superview !== content || content.subviews.last !== strip {
+        guard let window = anchor.window, let content = window.contentView
+        else { return }
+        // ABOVE the SwiftUI host, not inside it.
+        //
+        // Added as the content view's last subview the strip was correctly
+        // framed — logged at (0, 0, 1280, 48) in a flipped
+        // `AppKitWindowHostingView` — and still invisible: SwiftUI re-orders
+        // its own subviews on every layout pass, and the editor's opaque
+        // background lands back on top. Ordering cannot be won inside a host
+        // that owns the ordering. The window's frame view is above the content
+        // view and the titlebar both, which is where a titlebar strip belongs.
+        let host = content.superview ?? content
+        let fresh = strip.superview !== host
+        if fresh || host.subviews.last !== strip {
             strip.removeFromSuperview()
-            content.addSubview(strip)
-            // `contentView` is unflipped, so pinning to the TOP means a fixed
-            // distance from maxY.
-            strip.autoresizingMask = [.width, .minYMargin]
+            host.addSubview(strip)
         }
-        let frame = NSRect(
-            x: 0, y: content.bounds.height - bandHeight,
-            width: content.bounds.width, height: bandHeight
-        )
-        if strip.frame != frame {
-            strip.frame = frame
-            strip.needsDisplay = true
+        strip.bandHeight = bandHeight
+        strip.pinToTop(of: host)
+        if fresh {
+            TabStripHostView.note(
+                "attach into \(type(of: host)) flipped \(host.isFlipped) "
+                    + "bounds \(host.bounds) → strip \(strip.frame)"
+            )
         }
     }
 

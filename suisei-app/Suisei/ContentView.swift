@@ -2104,7 +2104,7 @@ struct ContentView: View {
             },
             foldUp: { _ = engine.advanceLayoutPresentation() },
             foldDown: { _ = engine.retreatLayoutPresentation() },
-            plusMenu: { view, _, event in
+            plusMenu: { view, rect, event in
                 stripMenus.menu([
                     ("New Untitled Tab", { engine.openBlankTab() }),
                     ("Next Tab", { engine.nextTab() }),
@@ -2115,9 +2115,11 @@ struct ContentView: View {
                     ("Focus Next Pane", { engine.focusNextPane() }),
                     ("Close Focused Pane", { engine.closeFocusedPane() }),
                 ])
+                // Under the button, not at the strip's origin — the strip is
+                // the width of the window.
                 .popUp(
                     positioning: nil,
-                    at: CGPoint(x: 0, y: view.bounds.height),
+                    at: CGPoint(x: rect.minX, y: rect.maxY + 2),
                     in: view
                 )
                 _ = event
