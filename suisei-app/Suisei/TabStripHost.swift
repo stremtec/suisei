@@ -38,8 +38,19 @@ final class TabStripHostView: NSView {
     // MARK: - Inputs
 
     /// Everything the strip draws, in order. Set by the representable.
-    var tabs: [TabItem] = [] {
-        didSet { guard tabs != oldValue else { return }; tabsChanged(from: oldValue) }
+    ///
+    /// Backed, rather than a `didSet`, so `frameFor` can borrow a past tab list
+    /// to place a departing chip's ghost without the assignment reading as a
+    /// real change.
+    private var storedTabs: [TabItem] = []
+    var tabs: [TabItem] {
+        get { storedTabs }
+        set {
+            guard newValue != storedTabs else { return }
+            let old = storedTabs
+            storedTabs = newValue
+            tabsChanged(from: old)
+        }
     }
     var palette = TabStripPalette.dark { didSet { needsDisplay = true } }
     var actions = TabStripActions()
@@ -566,14 +577,90 @@ final class TabStripHostView: NSView {
         let duration: TimeInterval
     }
 
+    /// A chip that has left the strip, still fading where it stood.
+    ///
+    /// The layout only describes tabs that exist, so a removed chip has no
+    /// position to be drawn at any more. Its last rect and its own `TabItem`
+    /// are kept until the fade ends — which is the whole trick, and the reason
+    /// the removal curve can be shorter than the insertion one without the two
+    /// crossing.
+    private struct Ghost {
+        let tab: TabItem
+        let rect: CGRect
+        let start: TimeInterval
+    }
+
+    private var ghosts: [Ghost] = []
+    /// stableId → when it appeared.
+    private var appearing: [UInt64: TimeInterval] = [:]
+    /// The active capsule travels rather than cutting between chips.
+    private var pillFrom: CGRect?
+    private var pillTo: CGRect?
+    private var pillStart: TimeInterval?
+
+    private static let appearDuration: TimeInterval = 0.14
+    private static let vanishDuration: TimeInterval = 0.09
+    private static let pillDuration: TimeInterval = 0.20
+
     private func tabsChanged(from old: [TabItem]) {
+        let now = CACurrentMediaTime()
+        let oldIds = Set(old.map(\.stableId))
+        let newIds = Set(tabs.map(\.stableId))
+
+        // Snapshot the departing chips against the OLD layout, before the
+        // origin below starts moving — a ghost placed from the new geometry
+        // would slide as it faded.
+        if let f = frameFor(old) {
+            for chip in f.layout.chips where !newIds.contains(chip.stableId) {
+                guard let tab = old.first(where: { $0.stableId == chip.stableId })
+                else { continue }
+                ghosts.append(
+                    Ghost(tab: tab, rect: f.chipRect(chip), start: now)
+                )
+            }
+        }
+        for id in newIds.subtracting(oldIds) { appearing[id] = now }
+
         // A changed tab set moves the run's centre. Ease from wherever it is
         // drawn to wherever it now belongs.
         let before = liveOrigin
         needsDisplay = true
+        if !ghosts.isEmpty || !appearing.isEmpty { startDisplayLink() }
         guard let to = currentFrame()?.layout.originX else { return }
         guard let from = before ?? previousOrigin(for: old), from != to else { return }
         animateOrigin(from: from, to: to, duration: 0.22)
+    }
+
+    /// The strip as it was for a given tab list, at the current origin.
+    /// Borrowed for the length of one measurement; nothing observes it.
+    private func frameFor(_ list: [TabItem]) -> Frame? {
+        let live = storedTabs
+        storedTabs = list
+        defer { storedTabs = live }
+        return currentFrame()
+    }
+
+    /// Move the active capsule to `rect`, travelling from where it is drawn.
+    private func retargetPill(_ rect: CGRect?) {
+        guard pillTo != rect else { return }
+        pillFrom = livePillRect() ?? rect
+        pillTo = rect
+        pillStart = CACurrentMediaTime()
+        if rect != nil { startDisplayLink() }
+    }
+
+    /// Where the capsule is right now, interpolated.
+    private func livePillRect() -> CGRect? {
+        guard let to = pillTo else { return nil }
+        guard let from = pillFrom, let start = pillStart else { return to }
+        let t = min(1, (CACurrentMediaTime() - start) / Self.pillDuration)
+        let e = CGFloat(1 - pow(1 - t, 3))
+        return CGRect(
+            x: from.minX + (to.minX - from.minX) * e,
+            y: from.minY + (to.minY - from.minY) * e,
+            width: from.width + (to.width - from.width) * e,
+            height: from.height + (to.height - from.height) * e
+        )
     }
 
     /// The origin the previous tab set was resting at, for the ease's start.
@@ -611,7 +698,7 @@ final class TabStripHostView: NSView {
             CVDisplayLinkCreateWithActiveCGDisplays(&link)
             guard let link else { return }
             CVDisplayLinkSetOutputHandler(link) { [weak self] _, _, _, _, _ in
-                DispatchQueue.main.async { self?.stepOrigin() }
+                DispatchQueue.main.async { self?.tick() }
                 return kCVReturnSuccess
             }
             displayLink = link
@@ -626,20 +713,40 @@ final class TabStripHostView: NSView {
         CVDisplayLinkStop(link)
     }
 
-    private func stepOrigin() {
-        guard let a = originAnimation else { stopDisplayLink(); return }
-        let t = min(1, (CACurrentMediaTime() - a.start) / a.duration)
-        // Ease-out cubic: leaves quickly, settles softly. Matches the
-        // `.snappy`-family feel the strip's other motion uses without needing a
-        // spring solver here.
-        let eased = 1 - pow(1 - t, 3)
-        liveOrigin = a.from + (a.to - a.from) * CGFloat(eased)
-        if t >= 1 {
-            originAnimation = nil
-            liveOrigin = nil
+    /// One frame of every animation the strip owns.
+    ///
+    /// All of them are read straight out of stored state by `draw(_:)`, and the
+    /// origin is read by `currentFrame()` — so the hit test sees the same
+    /// motion the eye does. Nothing here interpolates behind the hit test's
+    /// back, which is the rule this whole view exists to keep (H2).
+    private func tick() {
+        let now = CACurrentMediaTime()
+
+        if let a = originAnimation {
+            let t = min(1, (now - a.start) / a.duration)
+            // Ease-out cubic: leaves quickly, settles softly. Matches the
+            // `.snappy`-family feel the strip's other motion had, without
+            // needing a spring solver here.
+            liveOrigin = a.from + (a.to - a.from) * CGFloat(1 - pow(1 - t, 3))
+            if t >= 1 {
+                originAnimation = nil
+                liveOrigin = nil
+            }
+        }
+
+        ghosts.removeAll { now - $0.start >= Self.vanishDuration }
+        appearing = appearing.filter { now - $0.value < Self.appearDuration }
+        if let start = pillStart, now - start >= Self.pillDuration {
+            pillFrom = pillTo
+            pillStart = nil
+        }
+
+        needsDisplay = true
+        if originAnimation == nil, ghosts.isEmpty, appearing.isEmpty,
+           pillStart == nil
+        {
             stopDisplayLink()
         }
-        needsDisplay = true
     }
 
     // MARK: - Drawing
@@ -663,7 +770,17 @@ final class TabStripHostView: NSView {
         drawBands(f, in: ctx)
         drawActiveCapsule(f, in: ctx)
         drawHoverCapsule(f, in: ctx)
-        for chip in f.layout.chips { drawChip(chip, f, in: ctx) }
+        drawGhosts(f, in: ctx)
+        // The dragged chip last, so it is lifted OVER its neighbours rather
+        // than under whichever one happens to be drawn after it.
+        for chip in f.layout.chips where chip.slot != draggedSlot {
+            drawChip(chip, f, in: ctx)
+        }
+        if let held = draggedSlot,
+           let chip = f.layout.chips.first(where: { $0.slot == held })
+        {
+            drawChip(chip, f, in: ctx)
+        }
 
         if f.layout.overflow { applyEdgeFade(viewport, in: ctx) }
         ctx.endTransparencyLayer()
@@ -703,11 +820,32 @@ final class TabStripHostView: NSView {
         }
     }
 
+    /// The one capsule, which TRAVELS between chips.
+    ///
+    /// It is a single drawn shape with an interpolated rect, not a fade between
+    /// two capsules. The old strip did this with `matchedGeometryEffect` against
+    /// an invisible anchor inside every chip, which made the selection's
+    /// position a SwiftUI measurement of a chip — one more authority to
+    /// disagree with the hit test. The rect is known here.
     private func drawActiveCapsule(_ f: Frame, in ctx: CGContext) {
-        guard let chip = f.layout.chips.first(where: { c in
+        let target = f.layout.chips.first { c in
             tabs.first { $0.id == c.slot }?.active == true
-        }) else { return }
-        fillCapsule(f.chipRect(chip), palette.activeFill, in: ctx)
+        }.map { f.chipRect($0) }
+        retargetPill(target)
+        guard let rect = livePillRect() else { return }
+        fillCapsule(rect, palette.activeFill, in: ctx)
+    }
+
+    /// Chips on their way out, fading where they stood.
+    private func drawGhosts(_ f: Frame, in ctx: CGContext) {
+        let now = CACurrentMediaTime()
+        for ghost in ghosts {
+            let t = min(1, (now - ghost.start) / Self.vanishDuration)
+            ctx.saveGState()
+            ctx.setAlpha(CGFloat(1 - t))
+            drawChipBody(ghost.tab, in: ghost.rect, hovered: false, ctx: ctx)
+            ctx.restoreGState()
+        }
     }
 
     private func drawHoverCapsule(_ f: Frame, in ctx: CGContext) {
@@ -729,6 +867,9 @@ final class TabStripHostView: NSView {
         ctx.fillPath()
     }
 
+    /// The slot being dragged, if the drag has actually started.
+    private var draggedSlot: Int? { dragMoved ? heldSlot : nil }
+
     private func drawChip(
         _ chip: TabStripLayout.Chip, _ f: Frame, in ctx: CGContext
     ) {
@@ -738,19 +879,52 @@ final class TabStripHostView: NSView {
               rect.minX < f.viewportX + f.layout.viewportWidth + 40
         else { return }   // fully clipped; skip the text shaping
 
+        ctx.saveGState()
+
+        // A picked-up chip is LIFTED, not merely dimmer. Without this a grabbed
+        // tab looks identical to a resting one and the reorder reads as a
+        // teleport.
+        if draggedSlot == chip.slot {
+            ctx.setShadow(
+                offset: CGSize(width: 0, height: isFlipped ? 2 : -2), blur: 7,
+                color: NSColor.black.withAlphaComponent(0.28).cgColor
+            )
+            ctx.setAlpha(0.9)
+            scale(1.06, about: rect, in: ctx)
+        } else if pressedSlot == chip.slot {
+            // Press feedback, about the chip's own centre.
+            scale(0.96, about: rect, in: ctx)
+        }
+
+        // Arriving chips grow in. `appearing` is keyed by stableId, so a chip
+        // that merely moved is not re-animated.
+        if let start = appearing[chip.stableId] {
+            let t = min(1, (CACurrentMediaTime() - start) / Self.appearDuration)
+            let e = CGFloat(1 - pow(1 - t, 3))
+            ctx.setAlpha(e)
+            scale(0.94 + 0.06 * e, about: rect, in: ctx)
+        }
+
+        drawChipBody(tab, in: rect, hovered: hoveredSlot == chip.slot, ctx: ctx)
+        ctx.restoreGState()
+    }
+
+    private func scale(_ k: CGFloat, about rect: CGRect, in ctx: CGContext) {
+        ctx.translateBy(x: rect.midX, y: rect.midY)
+        ctx.scaleBy(x: k, y: k)
+        ctx.translateBy(x: -rect.midX, y: -rect.midY)
+    }
+
+    /// A chip's contents at an arbitrary rect — used both for live chips and
+    /// for the ghosts of departed ones, so the two cannot draw differently.
+    private func drawChipBody(
+        _ tab: TabItem, in rect: CGRect, hovered: Bool, ctx: CGContext
+    ) {
         let inGroup = tab.isLayout || tab.group != 0
         let ink = palette.ink(active: tab.active, inGroup: inGroup)
         let iconColor = tab.deleted
             ? NSColor.systemOrange
             : palette.iconInk(active: tab.active, inGroup: inGroup)
-
-        ctx.saveGState()
-        if pressedSlot == chip.slot {
-            // Press feedback, about the chip's own centre.
-            ctx.translateBy(x: rect.midX, y: rect.midY)
-            ctx.scaleBy(x: 0.96, y: 0.96)
-            ctx.translateBy(x: -rect.midX, y: -rect.midY)
-        }
 
         var pen = rect.minX + TabChipBox.horizontalPadding
         let iconName = TabChipMetrics.symbolName(
@@ -774,17 +948,21 @@ final class TabStripHostView: NSView {
                 in: CGRect(x: pen, y: rect.minY, width: titleW, height: rect.height)
             )
         }
-
-        drawTrailingSlot(tab, chip, f, in: ctx)
-        ctx.restoreGState()
+        drawTrailingSlot(tab, in: rect, hovered: hovered, ctx: ctx)
     }
 
     /// The dirty dot, or the × once the chip is hovered. One slot, never both.
     private func drawTrailingSlot(
-        _ tab: TabItem, _ chip: TabStripLayout.Chip, _ f: Frame, in ctx: CGContext
+        _ tab: TabItem, in rect: CGRect, hovered showClose: Bool, ctx: CGContext
     ) {
-        let slot = f.closeRect(chip)
-        let showClose = hoveredSlot == chip.slot
+        // Derived from the rect the chip is being drawn at, so a lifted or
+        // ghosted chip carries its slot with it. `Frame.closeRect` is the same
+        // arithmetic against the layout's rect — the hit test's copy.
+        let side = TabChipBox.trailingSlotWidth
+        let slot = CGRect(
+            x: rect.maxX - TabChipBox.closeSlotInset,
+            y: rect.midY - side / 2, width: side, height: side
+        )
         if showClose {
             ctx.addEllipse(in: slot)
             ctx.setFillColor(palette.closeWell.cgColor)

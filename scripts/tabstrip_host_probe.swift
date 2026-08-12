@@ -161,6 +161,19 @@ func hover(_ view: TabStripHostView, _ window: NSWindow, at local: CGPoint) {
     view.mouseMoved(with: e)
 }
 
+
+/// Wait out the insert animation before measuring.
+///
+/// A chip grows in over 0.14s — `scale(0.94 → 1)` about its own centre — and
+/// while that runs the drawn × is up to 2pt inside the rect the hit test
+/// answers from. That is a deliberate, bounded exception and this probe found
+/// it the moment it was added, which is the point: the invariant this file
+/// guards is that draw and hit agree AT REST. Transient decorative transforms
+/// are allowed; a resting disagreement is the bug that produced this rewrite.
+func settle() {
+    Thread.sleep(forTimeInterval: 0.25)
+}
+
 /// Where the × is actually drawn for `chip`, measured off the pixels.
 ///
 /// Hovers the chip's BODY, never the × itself, so nothing about where the
@@ -218,6 +231,7 @@ enum Probe {
             let titles = ["a.rs", "medium_name.toml", "a_considerably_longer_file.swift", "z.md"]
             let tabs = makeTabs(titles, active: 2)
             let (window, view) = makeStrip(contentWidth: 1200, tabs: tabs)
+            settle()
             guard let f = view.currentFrame() else { fatalError("no frame") }
 
             for chip in f.layout.chips {
@@ -288,6 +302,7 @@ enum Probe {
             let titles = (1...14).map { "file_\($0).swift" }
             let tabs = makeTabs(titles)
             let (window, view) = makeStrip(contentWidth: 900, tabs: tabs)
+            settle()
             guard let f0 = view.currentFrame() else { fatalError("no frame") }
             check(f0.layout.overflow, "fixture overflows (content \(Int(f0.layout.contentWidth)))")
 
