@@ -169,7 +169,13 @@ struct ContentView: View {
 
     /// Dispatch a close through the model (spec §5).
     private func applyStripClose(chip stableId: UInt64) {
-        switch stripModel.close(chip: stableId) {
+        let decision = stripModel.close(chip: stableId)
+        // TEMPORARY, with the strip's press log: a `nil` here does nothing and
+        // looks identical to a click that never arrived. Remove with the rest.
+        TabStripHostView.note(
+            "  applyStripClose chip \(stableId) → \(String(describing: decision))"
+        )
+        switch decision {
         case .closeDocument(let id):
             engine.closeTabId(id)
         case .dropLayout(let id):
@@ -1997,29 +2003,42 @@ struct ContentView: View {
             tabs: engine.chrome.tabs,
             overflowCount: engine.chrome.tabsOverflow,
             palette: stripPalette,
-            leadingInset: engine.uiNavVisible
-                ? ContentView.stripReserveSidebar
-                : ContentView.stripReserveLights,
+            leadingInset: ContentView.stripReserveLeading,
             trailingInset: ContentView.stripReserveTrailing,
             // The 48pt Swiss-grid band, dropped by the shared amount so the
             // chips sit on the same line as the trailing toolbar items.
             rowDrop: ContentView.titlebarDrop,
+            bandHeight: ContentView.topBandHeight,
             activeSlot: engine.chrome.tabs.first(where: \.active)?.id,
             actions: stripActions
         )
         .frame(height: ContentView.topBandHeight)
         .frame(maxWidth: .infinity)
+        // Inert: the real strip is a subview of the window's content view, not
+        // of this tree. Left hit-testable and it would be one more claimant on
+        // the band, which is the defect it was moved out to escape.
+        .allowsHitTesting(false)
     }
 
-    /// Window-space keep-outs for the strip, one constant per sidebar state.
+    /// Window-space keep-outs for the strip. ONE constant, whatever the sidebar
+    /// is doing.
     ///
-    /// A STEP, not the splitter's live width. The centre does not move when
-    /// these change — measured at 0.00pt across eleven widths — so the only
-    /// thing a live value could disturb is an overflowing run pinned against
-    /// the clamp, and a value that sweeps with the sidebar animation is exactly
-    /// what the rewrite exists to stop.
-    static let stripReserveLights: CGFloat = 150
-    static let stripReserveSidebar: CGFloat = 296
+    /// This started as a step — 150 with the sidebar closed, 296 with it open —
+    /// on the measurement that the run's centre does not move when the keep-out
+    /// changes (0.00pt across eleven widths). That measurement is true, and it
+    /// is only true while the run FITS. An overflowing run fills its viewport,
+    /// so narrowing the viewport moves its leading edge by half the difference,
+    /// and toggling the sidebar with enough tabs open shifted the whole strip.
+    ///
+    /// So the keep-out does not depend on the sidebar at all. The cost is that
+    /// with the sidebar closed the strip does not use the leftmost 146pt, which
+    /// is invisible until the tabs overflow and is worth more than a strip that
+    /// moves. The alternative — a smaller constant — puts overflowing tabs
+    /// underneath the sidebar, which is the other complaint.
+    ///
+    /// 296 is the default navigator width plus the 16pt gap the strip has
+    /// always kept past its edge.
+    static let stripReserveLeading: CGFloat = 296
     static let stripReserveTrailing: CGFloat = 150
 
     private var stripPalette: TabStripPalette {

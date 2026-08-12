@@ -123,6 +123,7 @@ final class TabStripHostView: NSView {
                 name: name, object: window
             )
         }
+        installPressMonitor()
         needsDisplay = true
     }
 
@@ -137,6 +138,7 @@ final class TabStripHostView: NSView {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        if let m = pressMonitor { NSEvent.removeMonitor(m) }
         if let link = displayLink { CVDisplayLinkStop(link) }
     }
 
@@ -175,9 +177,21 @@ final class TabStripHostView: NSView {
             )
         }
 
+        /// The "+", riding the run's trailing edge — and allowed OUTSIDE the
+        /// chips' viewport.
+        ///
+        /// `TabStripLayout.plusX` clamps into the viewport, which parks the
+        /// button on top of the last tab as soon as the run fills it: it then
+        /// draws over a chip and cannot be pressed, because a chip owns that
+        /// point. There is no need for the clamp here. The viewport is
+        /// symmetric about the window's centre and the trailing keep-out is
+        /// 150pt, so past the viewport's right edge there is always 150pt of
+        /// empty band and the button needs 26 of it.
         var plusRect: CGRect {
-            CGRect(
-                x: viewportX + layout.plusX, y: rowY,
+            let trailing = originX + layout.contentWidth + TabStripLayout.gap
+            let parked = layout.viewportWidth + TabStripLayout.gap
+            return CGRect(
+                x: viewportX + max(0, min(trailing, parked)), y: rowY,
                 width: TabStripLayout.plusWidth, height: TabChipBox.height
             )
         }
@@ -343,6 +357,7 @@ final class TabStripHostView: NSView {
         dragMoved = false
         lastSwapX = nil
         heldSlot = nil
+        logPress(p)
 
         switch region(at: p) {
         case .empty:
@@ -366,12 +381,115 @@ final class TabStripHostView: NSView {
         }
     }
 
+    /// TEMPORARY. Every left press in the WINDOW, and who takes it.
+    ///
+    /// The first round of this log answered the geometry question and asked a
+    /// bigger one: every press that reached `mouseDown` resolved correctly —
+    /// including a `close(slot: 5)` at 799.9 inside a rect of 790…804 — but
+    /// only five arrived during a session with far more clicking than that. So
+    /// the question is no longer where the × is; it is why a press aimed at it
+    /// never reaches this view. A window-level monitor sees every press before
+    /// dispatch and can name the view that ends up with it.
+    private var pressMonitor: Any?
+
+    private func installPressMonitor() {
+        guard pressMonitor == nil else { return }
+        pressMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown]
+        ) { [weak self] event in
+            self?.logWindowPress(event)
+            return event
+        }
+    }
+
+    private func logWindowPress(_ event: NSEvent) {
+        guard let window, event.window === window else { return }
+        let inStrip = convert(event.locationInWindow, from: nil)
+        // Only the titlebar band — a press on the canvas or the sidebar says
+        // nothing about who is eating the strip's.
+        guard inStrip.y > -8, inStrip.y < bounds.height + 8 else { return }
+        let taker = window.contentView.flatMap { root -> NSView? in
+            root.hitTest(root.convert(event.locationInWindow, from: nil))
+        }
+        var line = String(
+            format: "window press win(%.1f, %.1f) strip(%.1f, %.1f) ",
+            event.locationInWindow.x, event.locationInWindow.y,
+            inStrip.x, inStrip.y
+        )
+        line += "taker \(taker.map { String(describing: type(of: $0)) } ?? "nil") "
+        line += "stripHitTest \(hitTest(superview?.convert(inStrip, from: self) ?? inStrip) != nil ? "self" : "nil") "
+        line += "region \(String(describing: region(at: inStrip)))\n"
+        append(line)
+    }
+
+    /// TEMPORARY. Every press, and what the strip thought was under it.
+    ///
+    /// `tabstrip_host_probe` says the × resolves at its own drawn centre to
+    /// within 0.41pt, and in the app it does not respond at all. One of the two
+    /// is lying about the geometry and reasoning has lost four times running on
+    /// exactly this symptom, so the app writes down what it actually sees.
+    /// Remove once the disagreement is named.
+    private func logPress(_ p: CGPoint) {
+        guard let f = currentFrame() else { return }
+        let nearest = f.layout.chips.min {
+            abs(f.closeRect($0).midX - p.x) < abs(f.closeRect($1).midX - p.x)
+        }
+        var line = String(
+            format:
+                "press (%.1f, %.1f) region %@ bounds %.0fx%.0f rowY %.1f "
+                + "viewportX %.1f originX %.1f vw %.0f overflow %@",
+            p.x, p.y, String(describing: region(at: p)),
+            bounds.width, bounds.height, f.rowY,
+            f.viewportX, f.originX, f.layout.viewportWidth,
+            f.layout.overflow ? "y" : "n"
+        )
+        if let c = nearest {
+            let chip = f.chipRect(c), close = f.closeRect(c)
+            line += String(
+                format: " | chip %d x %.1f…%.1f y %.1f…%.1f close %.1f…%.1f / %.1f…%.1f",
+                c.slot, chip.minX, chip.maxX, chip.minY, chip.maxY,
+                close.minX, close.maxX, close.minY, close.maxY
+            )
+        }
+        line += " | plus \(String(format: "%.1f…%.1f", f.plusRect.minX, f.plusRect.maxX))\n"
+        append(line)
+    }
+
+    /// TEMPORARY. Same log, reachable from the dispatch side.
+    static func note(_ line: String) {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/suisei-strip-press.txt")
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+        if let h = try? FileHandle(forWritingTo: url) {
+            h.seekToEndOfFile(); h.write(data); try? h.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    private func append(_ line: String) {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/suisei-strip-press.txt")
+        guard let data = line.data(using: .utf8) else { return }
+        if let h = try? FileHandle(forWritingTo: url) {
+            h.seekToEndOfFile(); h.write(data); try? h.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
     override func mouseDragged(with event: NSEvent) {
         advanceDrag(to: convert(event.locationInWindow, from: nil).x)
     }
 
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        append(String(
+            format: "  up (%.1f, %.1f) region %@ dragMoved %@ pressed %@\n",
+            p.x, p.y, String(describing: region(at: p)),
+            dragMoved ? "y" : "n",
+            pressedSlot.map(String.init) ?? "-"
+        ))
         if !dragMoved {
             switch region(at: p) {
             case .close(let slot):
@@ -627,12 +745,17 @@ final class TabStripHostView: NSView {
         drawActiveCapsule(f, in: ctx)
         drawHoverCapsule(f, in: ctx)
         for chip in f.layout.chips { drawChip(chip, f, in: ctx) }
-        drawPlus(f, in: ctx)
-        drawOverflowCounter(f, in: ctx)
 
         if f.layout.overflow { applyEdgeFade(viewport, in: ctx) }
         ctx.endTransparencyLayer()
         ctx.restoreGState()
+
+        // OUTSIDE the chips' clip and outside the fade. The "+" rides past the
+        // viewport's right edge when the run fills it, and clipping it back in
+        // was the same mistake as clamping its x: it put the button on the last
+        // tab, where a chip owns the point.
+        drawPlus(f, in: ctx)
+        drawOverflowCounter(f, in: ctx)
     }
 
     private func drawBands(_ f: Frame, in ctx: CGContext) {
@@ -975,12 +1098,27 @@ final class TabStripMenuTarget: NSObject {
 
 // MARK: - SwiftUI seam
 
-/// The strip's one appearance in the SwiftUI tree.
+/// The strip's one appearance in the SwiftUI tree — an ANCHOR, not the strip.
 ///
-/// It carries no geometry. The view reads its viewport from the window, so
-/// whatever frame SwiftUI gives this — and whatever that frame does during a
-/// sidebar animation — cannot move a chip. That is the point of H1, and it is
-/// why there is no `GeometryReader` here.
+/// The strip itself is installed as the last subview of the window's
+/// `contentView`, and this only carries its inputs there.
+///
+/// Living in the SwiftUI tree does not work, and the reason is worth keeping.
+/// The strip sat in the root `ZStack` above `NavigationSplitView` with
+/// `.zIndex(2)`, which put it above in DRAWING order and left it below in
+/// AppKit's hit order: a window-level press monitor named the taker of every
+/// press aimed at the strip as
+/// `NSHostingView<ModifiedContent<ColumnView, NavigationPaneModifier<…>>>` —
+/// the split view's own column host. So `mouseDown` never arrived, only
+/// `mouseUp` did, and the log said `pressed -` on every close. That single fact
+/// explains all of it: the × needs its `mouseDown` to arm `pressedSlot`, the
+/// "+" opens its menu on `mouseDown`, tab switching does not look at either and
+/// therefore worked, and window dragging is AppKit's own and also worked.
+///
+/// Reparenting is not a workaround here, it is where this view belongs. It
+/// already takes every coordinate from `NSWindow` (H1) and owns its own press
+/// routing (H3); the only thing SwiftUI was providing was a frame it does not
+/// read.
 struct TabStripHost: NSViewRepresentable {
     var tabs: [TabItem]
     var overflowCount: Int
@@ -988,27 +1126,63 @@ struct TabStripHost: NSViewRepresentable {
     var leadingInset: CGFloat
     var trailingInset: CGFloat
     var rowDrop: CGFloat
+    /// Height of the titlebar band the strip occupies at the window's top.
+    var bandHeight: CGFloat
     /// The focused slot. A change scrolls it into view if it is not already.
     var activeSlot: Int?
     var actions: TabStripActions
 
     final class Coordinator {
+        let strip = TabStripHostView(frame: .zero)
         var lastActive: Int??
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> TabStripHostView {
-        let v = TabStripHostView(frame: .zero)
-        apply(to: v, context: context)
-        return v
+    func makeNSView(context: Context) -> NSView {
+        let anchor = NSView(frame: .zero)
+        apply(context: context)
+        DispatchQueue.main.async { attach(context.coordinator.strip, near: anchor) }
+        return anchor
     }
 
-    func updateNSView(_ v: TabStripHostView, context: Context) {
-        apply(to: v, context: context)
+    func updateNSView(_ anchor: NSView, context: Context) {
+        apply(context: context)
+        if anchor.window == nil {
+            DispatchQueue.main.async { attach(context.coordinator.strip, near: anchor) }
+        } else {
+            attach(context.coordinator.strip, near: anchor)
+        }
     }
 
-    private func apply(to v: TabStripHostView, context: Context) {
+    static func dismantleNSView(_ anchor: NSView, coordinator: Coordinator) {
+        coordinator.strip.removeFromSuperview()
+    }
+
+    /// Keep the strip the topmost subview of the content view, pinned to its
+    /// top edge. SwiftUI re-adds its column hosts during reconciliation, and
+    /// whichever view is added last is the one AppKit hit-tests first.
+    private func attach(_ strip: TabStripHostView, near anchor: NSView) {
+        guard let content = anchor.window?.contentView else { return }
+        if strip.superview !== content || content.subviews.last !== strip {
+            strip.removeFromSuperview()
+            content.addSubview(strip)
+            // `contentView` is unflipped, so pinning to the TOP means a fixed
+            // distance from maxY.
+            strip.autoresizingMask = [.width, .minYMargin]
+        }
+        let frame = NSRect(
+            x: 0, y: content.bounds.height - bandHeight,
+            width: content.bounds.width, height: bandHeight
+        )
+        if strip.frame != frame {
+            strip.frame = frame
+            strip.needsDisplay = true
+        }
+    }
+
+    private func apply(context: Context) {
+        let v = context.coordinator.strip
         // Actions first: they capture this pass's state, and a reveal below may
         // already want the new ones.
         v.actions = actions
