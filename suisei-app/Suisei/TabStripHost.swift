@@ -144,7 +144,6 @@ final class TabStripHostView: NSView {
                 name: name, object: window
             )
         }
-        installPressMonitor()
         needsDisplay = true
     }
 
@@ -160,7 +159,6 @@ final class TabStripHostView: NSView {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        if let m = pressMonitor { NSEvent.removeMonitor(m) }
         if let link = displayLink { CVDisplayLinkStop(link) }
     }
 
@@ -379,7 +377,6 @@ final class TabStripHostView: NSView {
         dragMoved = false
         lastSwapX = nil
         heldSlot = nil
-        logPress(p)
 
         switch region(at: p) {
         case .empty:
@@ -406,115 +403,12 @@ final class TabStripHostView: NSView {
         }
     }
 
-    /// TEMPORARY. Every left press in the WINDOW, and who takes it.
-    ///
-    /// The first round of this log answered the geometry question and asked a
-    /// bigger one: every press that reached `mouseDown` resolved correctly —
-    /// including a `close(slot: 5)` at 799.9 inside a rect of 790…804 — but
-    /// only five arrived during a session with far more clicking than that. So
-    /// the question is no longer where the × is; it is why a press aimed at it
-    /// never reaches this view. A window-level monitor sees every press before
-    /// dispatch and can name the view that ends up with it.
-    private var pressMonitor: Any?
-
-    private func installPressMonitor() {
-        guard pressMonitor == nil else { return }
-        pressMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown]
-        ) { [weak self] event in
-            self?.logWindowPress(event)
-            return event
-        }
-    }
-
-    private func logWindowPress(_ event: NSEvent) {
-        guard let window, event.window === window else { return }
-        let inStrip = convert(event.locationInWindow, from: nil)
-        // Only the titlebar band — a press on the canvas or the sidebar says
-        // nothing about who is eating the strip's.
-        guard inStrip.y > -8, inStrip.y < bounds.height + 8 else { return }
-        let taker = window.contentView.flatMap { root -> NSView? in
-            root.hitTest(root.convert(event.locationInWindow, from: nil))
-        }
-        var line = String(
-            format: "window press win(%.1f, %.1f) strip(%.1f, %.1f) ",
-            event.locationInWindow.x, event.locationInWindow.y,
-            inStrip.x, inStrip.y
-        )
-        line += "taker \(taker.map { String(describing: type(of: $0)) } ?? "nil") "
-        line += "stripHitTest \(hitTest(superview?.convert(inStrip, from: self) ?? inStrip) != nil ? "self" : "nil") "
-        line += "region \(String(describing: region(at: inStrip)))\n"
-        append(line)
-    }
-
-    /// TEMPORARY. Every press, and what the strip thought was under it.
-    ///
-    /// `tabstrip_host_probe` says the × resolves at its own drawn centre to
-    /// within 0.41pt, and in the app it does not respond at all. One of the two
-    /// is lying about the geometry and reasoning has lost four times running on
-    /// exactly this symptom, so the app writes down what it actually sees.
-    /// Remove once the disagreement is named.
-    private func logPress(_ p: CGPoint) {
-        guard let f = currentFrame() else { return }
-        let nearest = f.layout.chips.min {
-            abs(f.closeRect($0).midX - p.x) < abs(f.closeRect($1).midX - p.x)
-        }
-        var line = String(
-            format:
-                "press (%.1f, %.1f) region %@ bounds %.0fx%.0f rowY %.1f "
-                + "viewportX %.1f originX %.1f vw %.0f overflow %@",
-            p.x, p.y, String(describing: region(at: p)),
-            bounds.width, bounds.height, f.rowY,
-            f.viewportX, f.originX, f.layout.viewportWidth,
-            f.layout.overflow ? "y" : "n"
-        )
-        if let c = nearest {
-            let chip = f.chipRect(c), close = f.closeRect(c)
-            line += String(
-                format: " | chip %d x %.1f…%.1f y %.1f…%.1f close %.1f…%.1f / %.1f…%.1f",
-                c.slot, chip.minX, chip.maxX, chip.minY, chip.maxY,
-                close.minX, close.maxX, close.minY, close.maxY
-            )
-        }
-        line += " | plus \(String(format: "%.1f…%.1f", f.plusRect.minX, f.plusRect.maxX))\n"
-        append(line)
-    }
-
-    /// TEMPORARY. Same log, reachable from the dispatch side.
-    static func note(_ line: String) {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/suisei-strip-press.txt")
-        guard let data = (line + "\n").data(using: .utf8) else { return }
-        if let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile(); h.write(data); try? h.close()
-        } else {
-            try? data.write(to: url)
-        }
-    }
-
-    private func append(_ line: String) {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/suisei-strip-press.txt")
-        guard let data = line.data(using: .utf8) else { return }
-        if let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile(); h.write(data); try? h.close()
-        } else {
-            try? data.write(to: url)
-        }
-    }
-
     override func mouseDragged(with event: NSEvent) {
         advanceDrag(to: convert(event.locationInWindow, from: nil).x)
     }
 
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        append(String(
-            format: "  up (%.1f, %.1f) region %@ dragMoved %@ pressed %@\n",
-            p.x, p.y, String(describing: region(at: p)),
-            dragMoved ? "y" : "n",
-            pressedSlot.map(String.init) ?? "-"
-        ))
         if !dragMoved {
             switch region(at: p) {
             case .close(let slot):
@@ -753,19 +647,7 @@ final class TabStripHostView: NSView {
     // Every rect drawn here comes from the same `Frame` the hit test reads.
     // There is no second set of coordinates to keep equal.
 
-    /// TEMPORARY, with the press log: tells "never drew" apart from "drew and
-    /// was covered", which is the whole question when a correctly-framed view
-    /// is invisible.
-    private var loggedDraw = false
-
     override func draw(_ dirtyRect: NSRect) {
-        if !loggedDraw {
-            loggedDraw = true
-            TabStripHostView.note(
-                "draw bounds \(bounds) tabs \(tabs.count) "
-                    + "frame \(currentFrame().map { "vpX \($0.viewportX) vw \($0.layout.viewportWidth) originX \($0.originX) rowY \($0.rowY)" } ?? "nil")"
-            )
-        }
         guard let f = currentFrame(), let ctx = NSGraphicsContext.current?.cgContext
         else { return }
 
@@ -1213,19 +1095,12 @@ struct TabStripHost: NSViewRepresentable {
         // that owns the ordering. The window's frame view is above the content
         // view and the titlebar both, which is where a titlebar strip belongs.
         let host = content.superview ?? content
-        let fresh = strip.superview !== host
-        if fresh || host.subviews.last !== strip {
+        if strip.superview !== host || host.subviews.last !== strip {
             strip.removeFromSuperview()
             host.addSubview(strip)
         }
         strip.bandHeight = bandHeight
         strip.pinToTop(of: host)
-        if fresh {
-            TabStripHostView.note(
-                "attach into \(type(of: host)) flipped \(host.isFlipped) "
-                    + "bounds \(host.bounds) → strip \(strip.frame)"
-            )
-        }
     }
 
     private func apply(context: Context) {

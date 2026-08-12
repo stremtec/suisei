@@ -169,13 +169,7 @@ struct ContentView: View {
 
     /// Dispatch a close through the model (spec §5).
     private func applyStripClose(chip stableId: UInt64) {
-        let decision = stripModel.close(chip: stableId)
-        // TEMPORARY, with the strip's press log: a `nil` here does nothing and
-        // looks identical to a click that never arrived. Remove with the rest.
-        TabStripHostView.note(
-            "  applyStripClose chip \(stableId) → \(String(describing: decision))"
-        )
-        switch decision {
+        switch stripModel.close(chip: stableId) {
         case .closeDocument(let id):
             engine.closeTabId(id)
         case .dropLayout(let id):
@@ -8215,12 +8209,32 @@ private struct EditorWindowChrome: NSViewRepresentable {
         if window.tabbingMode != .disallowed {
             window.tabbingMode = .disallowed
         }
-        // AppKit's toolbar row lands the standard controls about 2pt above the
-        // visual centre shared by the navigator toggle and document tabs on
-        // this custom 48pt band. Nudge the real controls — never clones — and
-        // remember AppKit's native frame so repeated SwiftUI updates cannot
-        // accumulate the offset.
-        EditorTrafficLightNudge.shared.apply(to: window, down: 2)
+        // The traffic lights are NOT repositioned here. There used to be a 2pt
+        // optical nudge, and it could not be made to hold: it was right at
+        // launch and gone forever after the first sidebar toggle. Logged, one
+        // toggle:
+        //
+        //     light apply        cur 19.00 → target 17.00
+        //       wrote 17.00 → frame now 17.00   constraints 4
+        //     light frameChanged cur 19.00 → target 17.00
+        //       wrote 17.00 → frame now 19.00   constraints 4
+        //
+        // The observer fired, the baseline survived, the target was right, and
+        // the write simply did not take: collapsing the navigator brings
+        // `NSTitlebarView` under Auto Layout, and a frame written into a view
+        // the layout engine owns is reverted before the next line runs. There
+        // is no version of this that holds.
+        //
+        // It was also correcting the wrong way. `topBandHeight`'s own note
+        // records the measurement (`scripts/sidebar_probe6.swift`): with a
+        // toolbar present AppKit puts the lights at 26pt from the window top,
+        // which is `topBandHeight / 2 + titlebarDrop` exactly — the tab row's
+        // centreline. Native is already aligned; the nudge was pushing them
+        // 2pt off it.
+        //
+        // If this row ever needs to move again, move `titlebarDrop`, which is
+        // our own drawing. Nothing here writes AppKit geometry now, which is
+        // the same reason `SplitColumnWidthReporter` only reads.
         // No `titleVisibility = .hidden` here, deliberately. It hides the title
         // by removing the toolbar's title ITEM, and that item is what anchors
         // the `.primaryAction` group to the trailing edge — hiding it moved the
@@ -8233,101 +8247,6 @@ private struct EditorWindowChrome: NSViewRepresentable {
         // out to be this line.
     }
 
-}
-
-/// Idempotent optical offset for the editor's real AppKit traffic lights.
-///
-/// Applied on SwiftUI updates alone this loses, and the way it loses is quiet:
-/// the lights are right at launch and sit 2pt high forever after the first
-/// sidebar toggle. Collapsing the navigator makes AppKit re-lay the titlebar,
-/// and that re-layout can land AFTER the update that nudged them — so the last
-/// write of the frame is AppKit's, and nothing asks again.
-///
-/// So the nudge follows the button instead. Each one posts frame changes, and a
-/// frame that is not the one we wrote is a fresh AppKit baseline to re-nudge
-/// from. It cannot be out of date, because the thing it reacts to is the thing
-/// that invalidates it.
-@MainActor
-private final class EditorTrafficLightNudge {
-    static let shared = EditorTrafficLightNudge()
-
-    private final class Entry: NSObject {
-        var nativeY: CGFloat
-        var appliedY: CGFloat?
-        var observer: NSObjectProtocol?
-
-        init(nativeY: CGFloat) {
-            self.nativeY = nativeY
-        }
-    }
-
-    private let entries = NSMapTable<NSButton, Entry>(
-        keyOptions: .weakMemory,
-        valueOptions: .strongMemory
-    )
-    /// Guards the notification our own `setFrameOrigin` posts.
-    private var writing = false
-    private var drop: CGFloat = 0
-
-    func apply(to window: NSWindow, down: CGFloat) {
-        drop = down
-        for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            guard let button = window.standardWindowButton(kind) else { continue }
-            nudge(button)
-        }
-        relayoutAccessories(of: window)
-    }
-
-    private func nudge(_ button: NSButton) {
-        let currentY = button.frame.origin.y
-        let entry: Entry
-        if let existing = entries.object(forKey: button) {
-            entry = existing
-            // A frame that is neither our last result nor the remembered native
-            // value is AppKit having re-laid the titlebar; that becomes the new
-            // native baseline.
-            if let applied = entry.appliedY, abs(currentY - applied) > 0.25 {
-                entry.nativeY = currentY
-            }
-        } else {
-            entry = Entry(nativeY: currentY)
-            entries.setObject(entry, forKey: button)
-            observe(button, entry)
-        }
-
-        let signedDrop = button.superview?.isFlipped == true ? drop : -drop
-        let targetY = entry.nativeY + signedDrop
-        entry.appliedY = targetY
-        guard abs(currentY - targetY) > 0.25 else { return }
-        writing = true
-        button.setFrameOrigin(NSPoint(x: button.frame.origin.x, y: targetY))
-        writing = false
-    }
-
-    private func observe(_ button: NSButton, _ entry: Entry) {
-        button.postsFrameChangedNotifications = true
-        entry.observer = NotificationCenter.default.addObserver(
-            forName: NSView.frameDidChangeNotification,
-            object: button,
-            queue: .main
-        ) { [weak self, weak button] _ in
-            MainActor.assumeIsolated {
-                guard let self, let button, !self.writing else { return }
-                self.nudge(button)
-                if let window = button.window {
-                    self.relayoutAccessories(of: window)
-                }
-            }
-        }
-    }
-
-    /// The custom navigator accessory keys its centre to the zoom button, so it
-    /// has to re-lay whenever the lights move.
-    private func relayoutAccessories(of window: NSWindow) {
-        for controller in window.titlebarAccessoryViewControllers {
-            controller.view.needsLayout = true
-        }
-    }
 }
 
 /// A fixed titlebar slot for the navigator control.
