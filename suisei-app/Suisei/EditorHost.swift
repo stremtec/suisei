@@ -2026,12 +2026,20 @@ final class EditorCanvasView: NSView {
             engine?.applyGutterHunk(line1based: line, action: 2)
         })
 
-        // Anchored at the PRESS, the way a source-list menu opens beside the
-        // thing it acts on. It used to open below the hunk's last line, which
-        // for a long change put it a screen away from the pointer.
+        // To the LEFT of the bar, at the pressed row.
+        //
+        // `popUp(positioning:at:in:)` puts the menu's LEADING edge at the
+        // point, so anchoring at the bar sent it rightwards across the code it
+        // is describing. Subtracting its own width puts its trailing edge on
+        // the bar instead, which is where the screenshot has it and which
+        // leaves the change itself visible while the menu is open. AppKit still
+        // nudges it back on screen if the window is against the left edge.
         menu.popUp(
             positioning: nil,
-            at: CGPoint(x: Self.gitBarZone, y: p.y.rounded()),
+            at: CGPoint(
+                x: Self.gitBarX - menu.size.width - 4,
+                y: p.y.rounded()
+            ),
             in: self
         )
     }

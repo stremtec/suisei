@@ -24,19 +24,7 @@ Requires: macOS 26+, Xcode toolchain (swiftc), a Rust toolchain.
 - `docs/SUISEI-ARCHITECTURE-PLAN.md` — daemon, docking, resize, settings, theme,
   menus.
 - `docs/SUISEI-TODO.md` — open bugs and the hard-won design notes (metaball
-  chrome, Liquid Glass structure, resize coordinate spaces, build traps).
-- `docs/SUISEI-TUI-RESIDUE.md` — what is still shaped like a terminal editor,
-  measured, with the ordered plan to cut it.
-
-## Status
-
-Pre-release. `v0.1.0`, actively built. Editing, project navigation, terminal,
-git, LSP completions/diagnostics/hover, and crash-recovery journaling work; the
-selection model, daemon separation, and dockable panels are in progress.
-
-## License
-
-Suisei is **closed source** and is **not** an open-source project. The
+ ** and is **not** an open-source project. The
 licensing regime has three layers:
 
 - **Suisei Source License** — [`LICENSE`](LICENSE) (`LicenseRef-Suisei`):
