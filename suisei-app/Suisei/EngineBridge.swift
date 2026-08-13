@@ -128,32 +128,36 @@ extension SplitSnap {
 
 extension EditorPaneSnap {
     /// Structural equality — the pane's shape and content, deliberately NOT
-    /// its line count.
+    /// its viewport: line count, scroll, horizontal scroll.
     ///
-    /// `docLineCount` moves on every Enter. It made `split` differ, which made
-    /// `ChromeSnapshot` differ, which published the whole shell. The perf log
-    /// named it once the probe was reading the right side of the mask:
+    /// Those three are per-frame view state. They made `split` differ, which
+    /// made `ChromeSnapshot` differ, which published the whole shell. The perf
+    /// log named each one in turn, once the probe was reading the right side
+    /// of the mask and had been drilled a level into the split:
     ///
-    ///     chrome differs: split         chrome willChange 30.9 / 31.5 ms
-    ///     chrome differs: tabs          chrome willChange  0.076 ms
-    ///     chrome differs: completions   chrome willChange  0.044 ms
+    ///     chrome differs: split.pane.scroll    chrome willChange 31.5 ms
+    ///     chrome differs: split.pane.hscroll   chrome willChange  6.2 ms
+    ///     chrome differs: tabs                 chrome willChange  0.076 ms
+    ///     chrome differs: completions          chrome willChange  0.044 ms
     ///
-    /// Publishing is not what costs — publishing a changed SPLIT costs, by
-    /// about four hundred times. This is why Enter felt different from every
-    /// other key.
+    /// Publishing is not what costs. Publishing a changed SPLIT costs, by
+    /// several hundred times. That is why Enter, scrolling and jumping each
+    /// felt different from ordinary typing, and why nothing else did.
     ///
-    /// Nothing loses the number. The canvas reads it from `EditorTickStore`
-    /// (`EditorHost` line 120), and `publishEditorTick` fills that from the
-    /// local `split` value on every pass, publishing or not. The isolated
-    /// per-keystroke store already owned this fact; `split` was a second owner
-    /// that only ever charged for it.
+    /// Nothing loses these values. The canvas reads all three from
+    /// `EditorTickStore` (`EditorHost` line 120), which `publishEditorTick`
+    /// fills from the LOCAL `split` on every pass, publishing or not — and no
+    /// SwiftUI view reads them off `editorSplit` at all. The isolated
+    /// per-keystroke store already owned them; `split` was a second owner that
+    /// only ever charged for them.
+    ///
+    /// `chrome.scroll` is already masked for exactly this reason a level up.
+    /// The pane copy was the same fact with a third owner and no mask.
     static func == (a: EditorPaneSnap, b: EditorPaneSnap) -> Bool {
         a.id == b.id
             && a.focused == b.focused
             && a.tabIndex == b.tabIndex
             && a.title == b.title
-            && a.scroll == b.scroll
-            && a.hscroll == b.hscroll
             && a.rect == b.rect
             && a.isTerminal == b.isTerminal
             && a.termGen == b.termGen
