@@ -82,7 +82,8 @@ struct EditorHost: NSViewRepresentable {
             punctuation: NSColor(theme.color(theme.punctuation)),
             gitChange: .systemBlue,
             gitDelete: .systemRed,
-            gitHoverWash: NSColor.systemBlue.withAlphaComponent(0.13)
+            gitHoverWash: NSColor.systemBlue.withAlphaComponent(0.13),
+            gitHoverEdge: NSColor.systemBlue.withAlphaComponent(0.55)
         )
         paletteKey = key
         paletteValue = colors
@@ -599,6 +600,9 @@ final class EditorCanvasView: NSView {
         /// say "this whole run is one thing" without competing with a
         /// selection, which is the other full-width wash on this surface.
         var gitHoverWash: NSColor
+        /// The rules closing the hovered hunk's top and bottom. Stronger than
+        /// the wash — they are the edges that give the region a shape.
+        var gitHoverEdge: NSColor
     }
 
     weak var engine: EngineBridge?
@@ -618,7 +622,8 @@ final class EditorCanvasView: NSView {
         property: .systemTeal, constant: .systemOrange, operatorColor: .labelColor,
         punctuation: .secondaryLabelColor, gitChange: .systemBlue,
         gitDelete: .systemRed,
-        gitHoverWash: NSColor.systemBlue.withAlphaComponent(0.13)
+        gitHoverWash: NSColor.systemBlue.withAlphaComponent(0.13),
+        gitHoverEdge: NSColor.systemBlue.withAlphaComponent(0.55)
     )
 
     var isLiveScrolling = false
@@ -1158,9 +1163,7 @@ final class EditorCanvasView: NSView {
         let band = rows(r0, r1)
 
         renderer.beginFrame()
-        if let wash = hunkHoverRect(lineH: lineH) {
-            renderer.addRect(wash, colors.gitHoverWash)
-        }
+        for (r, c) in hunkHoverRects(lineH: lineH) { renderer.addRect(r, c) }
         for (r, c) in gitBars(band, lineH: lineH) { renderer.addRect(r, c) }
         bracketRects.removeAll(keepingCapacity: true)
         var wrapped: Set<UInt32> = []
@@ -1410,9 +1413,9 @@ final class EditorCanvasView: NSView {
             }
         }
 
-        if let wash = hunkHoverRect(lineH: lineH) {
-            colors.gitHoverWash.setFill()
-            wash.fill()
+        for (r, c) in hunkHoverRects(lineH: lineH) {
+            c.setFill()
+            r.fill()
         }
         for (r, c) in gitBars(band, lineH: lineH) {
             c.setFill()
@@ -1861,9 +1864,18 @@ final class EditorCanvasView: NSView {
             // the reasoning that a deletion occupies no line of its own; but a
             // wedge answers nothing about staging and reads as neither an
             // addition nor a change. One shape, one rule.
+            // Hovered when the run lies inside the hunk the pointer is over.
+            // Compared by rows rather than by identity because a hunk can be
+            // split into several runs here — `signs_from_hunks` marks the
+            // modified head and the added tail of one change differently.
+            let hovered = hoveredHunk.map { h in
+                start >= CGFloat(h.first) * lineH - 0.5
+                    && runEnd <= CGFloat(h.last + 1) * lineH + 0.5
+            } ?? false
             for r in Self.barRects(
                 top: start, bottom: runEnd,
-                topCap: runTopCap, bottomCap: bottomCap, staged: runStaged
+                topCap: runTopCap, bottomCap: bottomCap,
+                staged: runStaged, hovered: hovered
             ) {
                 out.append((r, color))
             }
@@ -1909,6 +1921,8 @@ final class EditorCanvasView: NSView {
         y: CGFloat, height: CGFloat, halfWidth hw: CGFloat, staged: Bool
     ) -> [CGRect] {
         guard height > 0, hw > 0 else { return [] }
+        // Centre is FIXED, so a hovered bar grows about its own axis instead of
+        // sliding sideways as it thickens.
         let cx = EditorCanvasView.gitBarX + EditorMetrics.gitStripeWidth / 2
         let t = EditorCanvasView.gitBarStroke
         if staged || hw <= t {
@@ -1928,9 +1942,14 @@ final class EditorCanvasView: NSView {
     /// continuing rather than as stopping at the viewport.
     private static func barRects(
         top: CGFloat, bottom: CGFloat,
-        topCap: Bool, bottomCap: Bool, staged: Bool
+        topCap: Bool, bottomCap: Bool, staged: Bool, hovered: Bool = false
     ) -> [CGRect] {
-        let r = EditorMetrics.gitStripeWidth / 2   // a true capsule
+        // A hovered hunk thickens. Xcode does this, and it is the affordance
+        // that says the bar is a control and not a decoration — the pointer is
+        // already in its column, about to press it.
+        let w = EditorMetrics.gitStripeWidth
+            + (hovered ? EditorCanvasView.gitBarHoverGrowth : 0)
+        let r = w / 2   // a true capsule
         var out: [CGRect] = []
 
         let bodyTop = top + (topCap ? r : 0)
@@ -1965,6 +1984,10 @@ final class EditorCanvasView: NSView {
     static let gitBarStroke: CGFloat = 1.5
     /// Vertical resolution of the rounded ends.
     static let gitBarCapStep: CGFloat = 0.5
+    /// How much wider a hovered hunk's bar is.
+    static let gitBarHoverGrowth: CGFloat = 2
+    /// The rules closing the top and bottom of a hovered hunk.
+    static let gitHoverRule: CGFloat = 1
 
     /// Additions and modifications share one colour, as Xcode's do: which of
     /// the two it is can be read off the text, and two colours down the gutter
@@ -2102,14 +2125,33 @@ final class EditorCanvasView: NSView {
         return (first, last, line.gitHunkStaged)
     }
 
-    /// The wash behind a hovered hunk: the whole change, not the row under the
-    /// pointer, because the change is what the menu on it will act upon.
-    private func hunkHoverRect(lineH: CGFloat) -> CGRect? {
-        guard let h = hoveredHunk else { return nil }
-        return CGRect(
-            x: 0, y: CGFloat(h.first) * lineH,
-            width: bounds.width, height: CGFloat(h.last - h.first + 1) * lineH
-        )
+    /// The wash behind a hovered hunk, and the rules that close it.
+    ///
+    /// The wash covers the whole change, not the row under the pointer,
+    /// because the change is what the menu on it will act upon. The rules are
+    /// what make a run of lines read as ONE region with a start and an end
+    /// rather than as a stretch of tinted rows — Xcode draws them, and without
+    /// them a hunk that runs off the top of the viewport looks the same as one
+    /// that begins there.
+    private func hunkHoverRects(lineH: CGFloat) -> [(CGRect, NSColor)] {
+        guard let h = hoveredHunk else { return [] }
+        let top = CGFloat(h.first) * lineH
+        let bottom = CGFloat(h.last + 1) * lineH
+        let rule = Self.gitHoverRule
+        return [
+            (
+                CGRect(x: 0, y: top, width: bounds.width, height: bottom - top),
+                colors.gitHoverWash
+            ),
+            (
+                CGRect(x: 0, y: top, width: bounds.width, height: rule),
+                colors.gitHoverEdge
+            ),
+            (
+                CGRect(x: 0, y: bottom - rule, width: bounds.width, height: rule),
+                colors.gitHoverEdge
+            ),
+        ]
     }
 
     override func mouseDown(with event: NSEvent) {
