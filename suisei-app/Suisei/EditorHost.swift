@@ -81,9 +81,7 @@ struct EditorHost: NSViewRepresentable {
             operatorColor: NSColor(theme.color(theme.operatorColor)),
             punctuation: NSColor(theme.color(theme.punctuation)),
             gitChange: .systemBlue,
-            gitDelete: .systemRed,
-            gitHoverWash: NSColor.systemBlue.withAlphaComponent(0.13),
-            gitHoverEdge: NSColor.systemBlue.withAlphaComponent(0.55)
+            gitDelete: .systemRed
         )
         paletteKey = key
         paletteValue = colors
@@ -596,13 +594,6 @@ final class EditorCanvasView: NSView {
         /// Lines were removed here. The one change with no evidence in the
         /// text, so it gets its own colour — see `gitColor`.
         var gitDelete: NSColor
-        /// Wash behind a hovered hunk. Faint: it sits UNDER the text and has to
-        /// say "this whole run is one thing" without competing with a
-        /// selection, which is the other full-width wash on this surface.
-        var gitHoverWash: NSColor
-        /// The rules closing the hovered hunk's top and bottom. Stronger than
-        /// the wash — they are the edges that give the region a shape.
-        var gitHoverEdge: NSColor
     }
 
     weak var engine: EngineBridge?
@@ -621,9 +612,7 @@ final class EditorCanvasView: NSView {
         macroName: .systemPink, namespace: .systemMint, parameter: .labelColor,
         property: .systemTeal, constant: .systemOrange, operatorColor: .labelColor,
         punctuation: .secondaryLabelColor, gitChange: .systemBlue,
-        gitDelete: .systemRed,
-        gitHoverWash: NSColor.systemBlue.withAlphaComponent(0.13),
-        gitHoverEdge: NSColor.systemBlue.withAlphaComponent(0.55)
+        gitDelete: .systemRed
     )
 
     var isLiveScrolling = false
@@ -1868,14 +1857,15 @@ final class EditorCanvasView: NSView {
             // Compared by rows rather than by identity because a hunk can be
             // split into several runs here — `signs_from_hunks` marks the
             // modified head and the added tail of one change differently.
-            let hovered = hoveredHunk.map { h in
+            let target = hoveredHunk ?? fadingHunk
+            let inHovered = target.map { h in
                 start >= CGFloat(h.first) * lineH - 0.5
                     && runEnd <= CGFloat(h.last + 1) * lineH + 0.5
             } ?? false
             for r in Self.barRects(
                 top: start, bottom: runEnd,
                 topCap: runTopCap, bottomCap: bottomCap,
-                staged: runStaged, hovered: hovered
+                staged: runStaged, grown: inHovered ? hoverEase : 0
             ) {
                 out.append((r, color))
             }
@@ -1942,13 +1932,14 @@ final class EditorCanvasView: NSView {
     /// continuing rather than as stopping at the viewport.
     private static func barRects(
         top: CGFloat, bottom: CGFloat,
-        topCap: Bool, bottomCap: Bool, staged: Bool, hovered: Bool = false
+        topCap: Bool, bottomCap: Bool, staged: Bool, grown: CGFloat = 0
     ) -> [CGRect] {
         // A hovered hunk thickens. Xcode does this, and it is the affordance
         // that says the bar is a control and not a decoration — the pointer is
-        // already in its column, about to press it.
+        // already in its column, about to press it. `grown` is 0…1 so the swell
+        // is animated rather than stepped.
         let w = EditorMetrics.gitStripeWidth
-            + (hovered ? EditorCanvasView.gitBarHoverGrowth : 0)
+            + EditorCanvasView.gitBarHoverGrowth * max(0, min(1, grown))
         let r = w / 2   // a true capsule
         var out: [CGRect] = []
 
@@ -2037,7 +2028,15 @@ final class EditorCanvasView: NSView {
     ///
     /// Held rather than recomputed at paint time because the wash has to be
     /// drawn for rows the pointer is NOT on — a hunk is highlighted whole.
-    private var hoveredHunk: (first: Int, last: Int, staged: Bool)?
+    private var hoveredHunk: (first: Int, last: Int, staged: Bool, kind: UInt8)?
+    /// When the current hover began, for the grow-in. Zero while nothing is
+    /// hovered; the fade-out runs from `hoverLeftAt` instead.
+    private var hoverEnteredAt: CFTimeInterval = 0
+    private var hoverLeftAt: CFTimeInterval = 0
+    private var hoverAnimTimer: Timer?
+    /// The hunk being faded out. Without it the region vanishes the instant the
+    /// pointer leaves and only the bar animates, which reads as a glitch.
+    private var fadingHunk: (first: Int, last: Int, staged: Bool, kind: UInt8)?
 
     /// How far into the gutter a press or a hover belongs to the change bar
     /// rather than to the breakpoint column behind it.
@@ -2077,15 +2076,71 @@ final class EditorCanvasView: NSView {
         setHoveredHunk(hunkExtent(atRow: Int(floor(p.y / lineH))))
     }
 
-    private func setHoveredHunk(_ next: (first: Int, last: Int, staged: Bool)?) {
+    private func setHoveredHunk(
+        _ next: (first: Int, last: Int, staged: Bool, kind: UInt8)?
+    ) {
         let same = hoveredHunk?.first == next?.first
             && hoveredHunk?.last == next?.last
             && hoveredHunk?.staged == next?.staged
+            && hoveredHunk?.kind == next?.kind
         guard !same else { return }
+        let now = CACurrentMediaTime()
+        if next != nil {
+            // Moving straight from one hunk to another restarts the grow so
+            // the new region arrives rather than inheriting the old one's age.
+            hoverEnteredAt = now
+            hoverLeftAt = 0
+        } else {
+            hoverLeftAt = now
+        }
+        if next == nil { fadingHunk = hoveredHunk } else { fadingHunk = nil }
         hoveredHunk = next
         toolTip = next.map { $0.staged ? "Staged change" : "Unstaged change" }
-        needsDisplay = true
+        startHoverAnimation()
     }
+
+    /// 0 while resting, 1 while fully hovered. Eased.
+    ///
+    /// Derived from the clock rather than stepped into storage, for the same
+    /// reason the tab strip's origin is: a dropped frame then costs a frame and
+    /// not a wrong value, and the last frame of the fade lands exactly on 0
+    /// whether or not a timer fired for it.
+    private var hoverProgress: CGFloat {
+        let now = CACurrentMediaTime()
+        let d = Self.hoverGrowDuration
+        if hoveredHunk != nil {
+            return CGFloat(min(1, max(0, (now - hoverEnteredAt) / d)))
+        }
+        guard hoverLeftAt > 0 else { return 0 }
+        return CGFloat(1 - min(1, max(0, (now - hoverLeftAt) / d)))
+    }
+
+    /// Eased, so the bar swells out and settles rather than ramping linearly.
+    private var hoverEase: CGFloat {
+        let t = hoverProgress
+        return 1 - pow(1 - t, 3)
+    }
+
+    private func startHoverAnimation() {
+        hoverAnimTimer?.invalidate()
+        needsDisplay = true
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            self.needsDisplay = true
+            let settled = self.hoveredHunk != nil
+                ? self.hoverProgress >= 1
+                : self.hoverProgress <= 0
+            if settled {
+                timer.invalidate()
+                self.hoverAnimTimer = nil
+                self.needsDisplay = true
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        hoverAnimTimer = t
+    }
+
+    static let hoverGrowDuration: CFTimeInterval = 0.13
 
     /// The rows of the hunk covering `row`, walking outward from it.
     ///
@@ -2093,7 +2148,9 @@ final class EditorCanvasView: NSView {
     /// the face keeps its own copy of — the scene already marks each run's
     /// first and last row, and a second list would be one more thing to hold in
     /// step with the first.
-    private func hunkExtent(atRow row: Int) -> (first: Int, last: Int, staged: Bool)? {
+    private func hunkExtent(
+        atRow row: Int
+    ) -> (first: Int, last: Int, staged: Bool, kind: UInt8)? {
         guard row >= 0, row < Int(docLineCount) else { return nil }
         guard let here = changedLine(at: row) else { return nil }
 
@@ -2115,7 +2172,7 @@ final class EditorCanvasView: NSView {
             guard changedLine(at: last + 1) != nil else { break }
             last += 1
         }
-        return (first, last, here.gitHunkStaged)
+        return (first, last, here.gitHunkStaged, here.gitSignKind)
     }
 
     /// The line at `row`, if it carries a change.
@@ -2134,25 +2191,35 @@ final class EditorCanvasView: NSView {
     /// them a hunk that runs off the top of the viewport looks the same as one
     /// that begins there.
     private func hunkHoverRects(lineH: CGFloat) -> [(CGRect, NSColor)] {
-        guard let h = hoveredHunk else { return [] }
+        // Held through the fade-out, when `hoveredHunk` is already nil.
+        guard let h = hoveredHunk ?? fadingHunk else { return [] }
+        let e = hoverEase
+        guard e > 0.001 else { return [] }
         let top = CGFloat(h.first) * lineH
         let bottom = CGFloat(h.last + 1) * lineH
         let rule = Self.gitHoverRule
+        // The region takes the CHANGE's colour, not one fixed blue. A deletion
+        // is red in the gutter and was washing blue, which said the region and
+        // the bar were about different things.
+        let base = gitColor(h.kind)
         return [
             (
                 CGRect(x: 0, y: top, width: bounds.width, height: bottom - top),
-                colors.gitHoverWash
+                base.withAlphaComponent(Self.hoverWashAlpha * e)
             ),
             (
                 CGRect(x: 0, y: top, width: bounds.width, height: rule),
-                colors.gitHoverEdge
+                base.withAlphaComponent(Self.hoverEdgeAlpha * e)
             ),
             (
                 CGRect(x: 0, y: bottom - rule, width: bounds.width, height: rule),
-                colors.gitHoverEdge
+                base.withAlphaComponent(Self.hoverEdgeAlpha * e)
             ),
         ]
     }
+
+    static let hoverWashAlpha: CGFloat = 0.15
+    static let hoverEdgeAlpha: CGFloat = 0.60
 
     override func mouseDown(with event: NSEvent) {
         bracketKey = ""
