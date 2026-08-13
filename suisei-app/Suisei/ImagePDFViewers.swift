@@ -27,10 +27,15 @@ struct ImagePaneViewer: View {
     @State private var image: NSImage?
     @State private var sections: [ViewerInfoSection] = []
     @State private var pixelSize: CGSize = .zero
-    /// Nil means "fit" — the scroll view picks the magnification and keeps
-    /// picking it as the pane resizes. A number means the user chose.
-    @State private var zoom: CGFloat?
+    /// The scroll view picks the magnification and keeps picking it as the
+    /// pane resizes. Cleared by any zoom the user asks for.
+    @State private var fitted = true
+    /// What the magnification actually IS, reported back by the scroll view.
+    /// Read-only as far as the view is concerned — writing it back is what
+    /// broke wheel zoom, see `ImageZoomRequest`.
     @State private var liveZoom: CGFloat = 1
+    /// A one-shot instruction, cleared once carried out.
+    @State private var zoomRequest: ImageZoomRequest?
 
     @ObservedObject private var controls = EngineBridge.shared.viewerControls
 
@@ -49,8 +54,9 @@ struct ImagePaneViewer: View {
                 ZoomableImage(
                     image: image,
                     pixelSize: pixelSize,
-                    zoom: $zoom,
+                    fitted: $fitted,
                     liveZoom: $liveZoom,
+                    request: $zoomRequest,
                     palette: palette
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -69,17 +75,19 @@ struct ImagePaneViewer: View {
         // object the toolbar observes while that toolbar is being evaluated is
         // how "Modifying state during view update" gets earned.
         .onChange(of: liveZoom) { _, _ in pushZoom() }
-        .onChange(of: zoom) { _, _ in pushZoom() }
+        .onChange(of: fitted) { _, _ in pushZoom() }
     }
 
     private func claimToolbar() {
         controls.claim(.image)
         controls.perform = { cmd in
+            // Always relative to what is on screen, never to a remembered
+            // request — the two drift apart the moment a gesture zooms.
             switch cmd {
-            case .zoomOut: zoom = max(0.05, (zoom ?? liveZoom) / 1.25)
-            case .zoomIn: zoom = min(32, (zoom ?? liveZoom) * 1.25)
-            case .fit: zoom = nil
-            case .actual: zoom = 1
+            case .zoomOut: zoomRequest = .scale(max(0.05, liveZoom / 1.25))
+            case .zoomIn: zoomRequest = .scale(min(32, liveZoom * 1.25))
+            case .fit: zoomRequest = .fit
+            case .actual: zoomRequest = .actual
             }
         }
         pushZoom()
@@ -91,7 +99,7 @@ struct ImagePaneViewer: View {
         // only when a digit moves rather than on every frame of a pinch.
         let label = "\(Int((liveZoom * 100).rounded()))%"
         if controls.zoomLabel != label { controls.zoomLabel = label }
-        if controls.fitted != (zoom == nil) { controls.fitted = zoom == nil }
+        if controls.fitted != fitted { controls.fitted = fitted }
     }
 
     private func load() async {
@@ -100,7 +108,8 @@ struct ImagePaneViewer: View {
         image = nil
         sections = []
         pixelSize = .zero
-        zoom = nil
+        fitted = true
+        zoomRequest = nil
 
         let url = self.url
         let loaded: (NSImage?, CGSize, [ViewerInfoSection]) = await Task.detached(
@@ -179,6 +188,27 @@ struct ImagePaneViewer: View {
 /// `NSScrollView`'s own magnification, which brings pinch-to-zoom, momentum
 /// panning and the scroller behaviour with it — none of which is worth
 /// rebuilding on top of a SwiftUI `Image`.
+/// What the toolbar or a double-click asks for. A COMMAND, not a value.
+///
+/// It was a value — a `zoom: CGFloat?` that the view wrote back into whenever
+/// a gesture changed the magnification. Two wheel events arriving before the
+/// first write landed was enough to break it: each one set the magnification
+/// and queued a write, the writes arrived in order behind them, and the
+/// earlier one no longer matched what the coordinator had last requested, so
+/// the update pass "corrected" the view back to it. After that the state and
+/// the view disagreed and every further wheel event was undone by the next
+/// update — zoom simply stopped responding until something forced a clean
+/// pass, which is what re-focusing the window did.
+///
+/// The PDF surface never had this because it was always command-shaped. A
+/// command cannot go stale: it is carried out once and cleared, and the
+/// magnification lives in exactly one place — the scroll view.
+enum ImageZoomRequest {
+    case fit
+    case actual
+    case scale(CGFloat)
+}
+
 private struct ZoomableImage: NSViewRepresentable {
     let image: NSImage?
     /// The image's size in PIXELS, which is not `NSImage.size`.
@@ -189,8 +219,9 @@ private struct ZoomableImage: NSViewRepresentable {
     /// size" would be neither. One image pixel to one point is what 100% has
     /// to mean here.
     let pixelSize: CGSize
-    @Binding var zoom: CGFloat?
+    @Binding var fitted: Bool
     @Binding var liveZoom: CGFloat
+    @Binding var request: ImageZoomRequest?
     let palette: ViewerPalette
 
     /// The pixel size when it is known, and the point size when it is not —
@@ -221,118 +252,131 @@ private struct ZoomableImage: NSViewRepresentable {
         // white one on a light theme or a black one on a dark theme.
         iv.wantsLayer = true
         scroll.documentView = iv
-        // A wheel or pinch zoom is the user choosing a magnification, so it has
-        // to leave fit mode — otherwise the next layout pass refits and undoes
-        // the gesture as it happens.
+
+        // A gesture has already changed the magnification. All that is left is
+        // to leave fit mode and say what the number now is — nothing is sent
+        // back for the view to re-apply, which is the whole fix.
         scroll.onMagnify = { [weak scroll] in
             guard let scroll else { return }
-            context.coordinator.adopt(scroll.magnification)
+            context.coordinator.adopted(scroll.magnification)
         }
-        scroll.onDoubleClick = { [weak scroll] in
-            guard let scroll else { return }
-            context.coordinator.toggleFit(currently: scroll.magnification)
-        }
+        scroll.onDoubleClick = { context.coordinator.doubleClicked() }
         context.coordinator.scroll = scroll
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let iv = scroll.documentView as? NSImageView else { return }
-        let checker = NSColor(patternImage: Checkerboard.image(dark: palette.isDark))
         // The editor's own background, not a neutral grey field. Preview can
         // afford its own backdrop because it owns the window; a pane sits
         // inside an editor and a second background is just a grey box in it.
         scroll.backgroundColor = NSColor(palette.bg)
 
-        if iv.image !== image || iv.frame.size != documentSize {
+        // Compared against what this code last applied, not against the view's
+        // current frame: AppKit is free to adjust a document view's frame, and
+        // reading it back turns any such adjustment into a permanent refit.
+        if iv.image !== image || context.coordinator.appliedSize != documentSize {
+            context.coordinator.appliedSize = documentSize
             iv.image = image
             iv.layer?.backgroundColor = image?.hasAlphaChannel == true
-                ? checker.cgColor
+                ? NSColor(patternImage: Checkerboard.image(dark: palette.isDark)).cgColor
                 : nil
-            // A new image starts fitted, whatever the last one was left at.
             iv.frame = NSRect(origin: .zero, size: documentSize)
-            context.coordinator.lastRequested = nil
-            fit(scroll, iv)
+            fit(scroll)
         }
 
-        if zoom == nil {
-            // Refit on every layout pass while in fit mode, so resizing the
-            // pane keeps the image filling it.
-            fit(scroll, iv)
-        } else if let z = zoom, context.coordinator.lastRequested != z {
-            context.coordinator.lastRequested = z
-            scroll.setMagnification(z, centeredAt: visibleCentre(scroll))
-            context.coordinator.report(z)
+        if let req = request {
+            switch req {
+            case .fit:
+                fit(scroll)
+            case .actual:
+                apply(1, to: scroll)
+            case .scale(let f):
+                apply(f, to: scroll)
+            }
+            // Cleared here and only here: a command is carried out once.
+            Task { @MainActor in request = nil }
+        } else if fitted {
+            // Refit on every layout pass while fitted, so resizing the pane
+            // keeps the image filling it.
+            fit(scroll)
         }
     }
 
-    private func visibleCentre(_ scroll: NSScrollView) -> NSPoint {
+    private func apply(_ m: CGFloat, to scroll: NSScrollView) {
+        let clamped = min(scroll.maxMagnification, max(scroll.minMagnification, m))
         let r = scroll.contentView.documentVisibleRect
-        return NSPoint(x: r.midX, y: r.midY)
+        scroll.setMagnification(clamped, centeredAt: NSPoint(x: r.midX, y: r.midY))
+        publish(clamped, fitted: false)
     }
 
-    private func fit(_ scroll: NSScrollView, _ iv: NSImageView) {
+    private func fit(_ scroll: NSScrollView) {
         let size = documentSize
         guard size.width > 0, size.height > 0 else { return }
         let bounds = scroll.bounds.size
         guard bounds.width > 1, bounds.height > 1 else { return }
         let pad: CGFloat = 24
-        let m = min(
-            (bounds.width - pad) / size.width,
-            (bounds.height - pad) / size.height
-        )
+        let m = min((bounds.width - pad) / size.width, (bounds.height - pad) / size.height)
         // Never enlarge to fit: Preview shows a 16×16 icon at 16×16, not
         // blown up to fill the window.
         let clamped = min(1, max(scroll.minMagnification, m))
         if abs(scroll.magnification - clamped) > 0.001 {
             scroll.magnification = clamped
         }
+        publish(clamped, fitted: true)
+    }
+
+    /// Deferred, because both callers run inside `updateNSView` and these are
+    /// the view state that update is reading.
+    private func publish(_ m: CGFloat, fitted isFit: Bool) {
         Task { @MainActor in
-            if abs(liveZoom - clamped) > 0.001 { liveZoom = clamped }
+            if abs(liveZoom - m) > 0.001 { liveZoom = m }
+            if fitted != isFit { fitted = isFit }
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(zoom: $zoom, liveZoom: $liveZoom) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(fitted: $fitted, liveZoom: $liveZoom, request: $request)
+    }
 
-    /// Holds the binding, not the `ZoomableImage` that produced it.
+    /// Holds the bindings, not the `ZoomableImage` that produced them.
     ///
     /// A coordinator is made once and kept; the struct around it is rebuilt on
-    /// every update. Capturing the whole struct means reading last render's
-    /// `palette` and `image` off a copy that has since been replaced — the
-    /// binding is the only part that stays correct, so it is the only part
-    /// worth keeping.
+    /// every update, so capturing the whole struct means reading last render's
+    /// values off a copy that has since been replaced.
     final class Coordinator {
         weak var scroll: NSScrollView?
-        var lastRequested: CGFloat?
-        private let zoom: Binding<CGFloat?>
+        /// The document size this code last wrote, so a frame AppKit changed
+        /// underneath cannot masquerade as a new image.
+        var appliedSize: CGSize?
+
+        private let fitted: Binding<Bool>
         private let liveZoom: Binding<CGFloat>
+        private let request: Binding<ImageZoomRequest?>
 
-        init(zoom: Binding<CGFloat?>, liveZoom: Binding<CGFloat>) {
-            self.zoom = zoom
+        init(
+            fitted: Binding<Bool>,
+            liveZoom: Binding<CGFloat>,
+            request: Binding<ImageZoomRequest?>
+        ) {
+            self.fitted = fitted
             self.liveZoom = liveZoom
+            self.request = request
         }
 
-        /// Report a magnification the view produced itself, without asking for
-        /// it back — `lastRequested` is set so `updateNSView` does not then
-        /// re-apply the same number and fight the gesture.
-        func adopt(_ m: CGFloat) {
-            lastRequested = m
-            Task { @MainActor [zoom, liveZoom] in
+        /// A pinch or ⌘-wheel already moved the view. Record it; ask for
+        /// nothing.
+        func adopted(_ m: CGFloat) {
+            Task { @MainActor [fitted, liveZoom] in
                 if abs(liveZoom.wrappedValue - m) > 0.001 { liveZoom.wrappedValue = m }
-                if zoom.wrappedValue != m { zoom.wrappedValue = m }
-            }
-        }
-
-        func report(_ m: CGFloat) {
-            Task { @MainActor [liveZoom] in
-                if abs(liveZoom.wrappedValue - m) > 0.001 { liveZoom.wrappedValue = m }
+                if fitted.wrappedValue { fitted.wrappedValue = false }
             }
         }
 
         /// Preview's double-click: fitted → actual size, anything else → fit.
-        func toggleFit(currently: CGFloat) {
-            Task { @MainActor [zoom] in
-                zoom.wrappedValue = zoom.wrappedValue == nil ? 1 : nil
+        func doubleClicked() {
+            Task { @MainActor [fitted, request] in
+                request.wrappedValue = fitted.wrappedValue ? .actual : .fit
             }
         }
     }
@@ -380,6 +424,13 @@ private final class CenteringScrollView: NSScrollView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // A pan still marked open means its `mouseUp` never arrived. Balance
+        // the cursor stack before pushing again: an unmatched push leaves the
+        // closed hand over the whole app.
+        if panning {
+            panning = false
+            NSCursor.pop()
+        }
         if event.clickCount == 2 {
             onDoubleClick?()
             return
