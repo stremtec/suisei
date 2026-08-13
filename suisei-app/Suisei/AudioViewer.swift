@@ -38,6 +38,21 @@ final class AudioPlayerModel: ObservableObject {
     /// falls back to a plain bar rather than the view failing.
     @Published var peaks: [Float] = []
     @Published var format = ""
+    /// The inspector's contents. Built once when the file loads; the panel is
+    /// a read-only view of a file that is not changing.
+    @Published var sections: [InfoSection] = []
+
+    struct InfoRow: Identifiable {
+        var id: String { label }
+        let label: String
+        let value: String
+    }
+
+    struct InfoSection: Identifiable {
+        var id: String { title }
+        let title: String
+        let rows: [InfoRow]
+    }
 
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -101,6 +116,7 @@ final class AudioPlayerModel: ObservableObject {
         duration = 0
         peaks = []
         artwork = nil
+        sections = []
         title = ""; artist = ""; album = ""; year = ""; format = ""
     }
 
@@ -231,56 +247,242 @@ final class AudioPlayerModel: ObservableObject {
         if let d = try? await asset.load(.duration), d.isNumeric {
             duration = d.seconds
         }
-        if let items = try? await asset.load(.commonMetadata) {
+        // Every metadata format the container carries, not just the common
+        // keys: an MP3's ID3 has a genre, a track number and a composer that
+        // `commonMetadata` drops, and a pane in a development environment is
+        // the place to show them.
+        var tags: [String: String] = [:]
+        if let items = try? await asset.load(.metadata) {
             for item in items {
-                switch item.commonKey {
-                case .commonKeyTitle:
-                    if let s = try? await item.load(.stringValue), !s.isEmpty { title = s }
-                case .commonKeyArtist, .commonKeyCreator:
-                    if artist.isEmpty, let s = try? await item.load(.stringValue) { artist = s }
-                case .commonKeyAlbumName:
-                    if let s = try? await item.load(.stringValue) { album = s }
-                case .commonKeyCreationDate:
-                    if let s = try? await item.load(.stringValue) { year = String(s.prefix(4)) }
-                case .commonKeyArtwork:
-                    if let d = try? await item.load(.dataValue) { artwork = NSImage(data: d) }
-                default:
-                    break
+                if item.commonKey == .commonKeyArtwork {
+                    if artwork == nil, let d = try? await item.load(.dataValue) {
+                        artwork = NSImage(data: d)
+                    }
+                    continue
+                }
+                guard let name = Self.tagName(item) else { continue }
+                guard tags[name] == nil else { continue }
+                if let s = try? await item.load(.stringValue), !s.isEmpty {
+                    tags[name] = s
+                } else if let n = try? await item.load(.numberValue) {
+                    tags[name] = n.stringValue
                 }
             }
         }
-        format = await Self.describeFormat(asset, url: url)
+        if let s = tags["Title"], !s.isEmpty { title = s }
+        artist = tags["Artist"] ?? ""
+        album = tags["Album"] ?? ""
+        year = tags["Year"].map { String($0.prefix(4)) } ?? ""
+
+        let audio = await Self.audioFacts(asset)
+        format = Self.oneLineFormat(audio, url: url)
+        sections = Self.buildSections(audio, tags: tags, url: url, duration: duration)
     }
 
-    /// `MP3 · 320 kbps · 44.1 kHz · Stereo · 4.2 MB` — the part Music never
-    /// shows, because Music is playing a song and this is holding a file.
-    private static func describeFormat(_ asset: AVURLAsset, url: URL) async -> String {
-        var parts: [String] = []
-        let ext = url.pathExtension.uppercased()
-        if !ext.isEmpty { parts.append(ext) }
-        if let track = try? await asset.loadTracks(withMediaType: .audio).first {
-            if let rate = try? await track.load(.estimatedDataRate), rate > 0 {
-                parts.append("\(Int((rate / 1000).rounded())) kbps")
-            }
-            if let descs = try? await track.load(.formatDescriptions),
-               let d = descs.first,
-               let basic = CMAudioFormatDescriptionGetStreamBasicDescription(d)?.pointee
-            {
-                if basic.mSampleRate > 0 {
-                    parts.append(String(format: "%.4g kHz", basic.mSampleRate / 1000))
-                }
-                switch basic.mChannelsPerFrame {
-                case 1: parts.append("Mono")
-                case 2: parts.append("Stereo")
-                case let n where n > 2: parts.append("\(n) ch")
-                default: break
-                }
-            }
+    /// What the container says about the audio stream itself.
+    private struct AudioFacts {
+        var codec = ""
+        var sampleRate: Double = 0
+        var bitDepth: UInt32 = 0
+        var channels: UInt32 = 0
+        var bitrate: Float = 0
+    }
+
+    private static func audioFacts(_ asset: AVURLAsset) async -> AudioFacts {
+        var f = AudioFacts()
+        guard let track = try? await asset.loadTracks(withMediaType: .audio).first else {
+            return f
         }
+        if let rate = try? await track.load(.estimatedDataRate) { f.bitrate = rate }
+        if let descs = try? await track.load(.formatDescriptions),
+           let d = descs.first,
+           let basic = CMAudioFormatDescriptionGetStreamBasicDescription(d)?.pointee
+        {
+            f.codec = codecName(basic.mFormatID)
+            f.sampleRate = basic.mSampleRate
+            f.bitDepth = basic.mBitsPerChannel
+            f.channels = basic.mChannelsPerFrame
+        }
+        return f
+    }
+
+    /// `MP3 · 173 kbps · 48 kHz · Stereo · 3.6 MB` — the compact line under
+    /// the transport, for when the pane is too narrow for the inspector.
+    private static func oneLineFormat(_ f: AudioFacts, url: URL) -> String {
+        var parts: [String] = []
+        if !f.codec.isEmpty { parts.append(f.codec) }
+        if f.bitrate > 0 { parts.append("\(Int((f.bitrate / 1000).rounded())) kbps") }
+        if f.sampleRate > 0 { parts.append(shortHz(f.sampleRate)) }
+        if let c = channelName(f.channels) { parts.append(c) }
         if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
             parts.append(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
         }
         return parts.joined(separator: " · ")
+    }
+
+    private static func buildSections(
+        _ f: AudioFacts, tags: [String: String], url: URL, duration: Double
+    ) -> [InfoSection] {
+        var out: [InfoSection] = []
+
+        var audio: [InfoRow] = []
+        if !f.codec.isEmpty { audio.append(.init(label: "Codec", value: f.codec)) }
+        if duration > 0 {
+            audio.append(.init(label: "Duration", value: AudioViewer.clock(duration)))
+        }
+        if f.sampleRate > 0 {
+            // Exact, with separators. `48 kHz` is the label a music player
+            // uses; a development environment wants to see 48,000.
+            audio.append(.init(label: "Sample Rate", value: "\(grouped(Int(f.sampleRate))) Hz"))
+        }
+        if f.bitDepth > 0 {
+            audio.append(.init(label: "Bit Depth", value: "\(f.bitDepth)-bit"))
+        }
+        if let c = channelName(f.channels) {
+            audio.append(.init(label: "Channels", value: "\(c) (\(f.channels))"))
+        }
+        if f.bitrate > 0 {
+            audio.append(.init(label: "Bit Rate", value: "\(grouped(Int(f.bitrate / 1000))) kbps"))
+        }
+        if !audio.isEmpty { out.append(.init(title: "Audio", rows: audio)) }
+
+        var file: [InfoRow] = []
+        let values = try? url.resourceValues(forKeys: [
+            .fileSizeKey, .contentTypeKey, .creationDateKey, .contentModificationDateKey,
+        ])
+        if let t = values?.contentType?.localizedDescription {
+            file.append(.init(label: "Kind", value: t))
+        }
+        if let s = values?.fileSize {
+            file.append(.init(
+                label: "Size",
+                value: ByteCountFormatter.string(fromByteCount: Int64(s), countStyle: .file)
+            ))
+        }
+        if let d = values?.creationDate {
+            file.append(.init(label: "Created", value: stamp(d)))
+        }
+        if let d = values?.contentModificationDate {
+            file.append(.init(label: "Modified", value: stamp(d)))
+        }
+        if !file.isEmpty { out.append(.init(title: "File", rows: file)) }
+
+        // Tags in a fixed order — a dictionary's order is not one, and a panel
+        // whose rows move between files is unreadable.
+        let order = ["Title", "Artist", "Album", "Album Artist", "Year", "Genre",
+                     "Track", "Disc", "Composer", "Encoder", "Comment"]
+        var meta: [InfoRow] = order.compactMap { k in
+            guard let v = tags[k], !v.isEmpty else { return nil }
+            return InfoRow(label: k, value: v)
+        }
+        for (k, v) in tags.sorted(by: { $0.key < $1.key })
+        where !order.contains(k) && !v.isEmpty {
+            meta.append(.init(label: k, value: v))
+        }
+        if !meta.isEmpty { out.append(.init(title: "Metadata", rows: meta)) }
+
+        return out
+    }
+
+    // MARK: Small formatters
+
+    private static func codecName(_ id: AudioFormatID) -> String {
+        switch id {
+        case kAudioFormatLinearPCM: return "Linear PCM"
+        case kAudioFormatMPEGLayer3: return "MP3"
+        case kAudioFormatMPEGLayer2: return "MP2"
+        case kAudioFormatMPEG4AAC: return "AAC"
+        case kAudioFormatMPEG4AAC_HE: return "HE-AAC"
+        case kAudioFormatMPEG4AAC_HE_V2: return "HE-AAC v2"
+        case kAudioFormatAppleLossless: return "Apple Lossless"
+        case kAudioFormatFLAC: return "FLAC"
+        case kAudioFormatOpus: return "Opus"
+        case kAudioFormatAppleIMA4: return "IMA 4:1"
+        case kAudioFormatALaw: return "A-law"
+        case kAudioFormatULaw: return "µ-law"
+        default:
+            // Anything unnamed still says something useful: the four-character
+            // code is what the format actually is.
+            let b = [24, 16, 8, 0].map { UInt8((id >> UInt32($0)) & 0xFF) }
+            let s = String(bytes: b, encoding: .ascii)?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            return s.isEmpty ? "Unknown" : s
+        }
+    }
+
+    private static func channelName(_ n: UInt32) -> String? {
+        switch n {
+        case 0: return nil
+        case 1: return "Mono"
+        case 2: return "Stereo"
+        default: return "\(n) channels"
+        }
+    }
+
+    private static func shortHz(_ hz: Double) -> String {
+        String(format: "%.4g kHz", hz / 1000)
+    }
+
+    private static func grouped(_ n: Int) -> String {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        return f.string(from: NSNumber(value: n)) ?? "\(n)"
+    }
+
+    private static func stamp(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f.string(from: d)
+    }
+
+    /// A readable name for a metadata item, from whichever of the several tag
+    /// vocabularies the container happens to use.
+    private static func tagName(_ item: AVMetadataItem) -> String? {
+        if let common = item.commonKey {
+            switch common {
+            case .commonKeyTitle: return "Title"
+            case .commonKeyArtist, .commonKeyCreator: return "Artist"
+            case .commonKeyAlbumName: return "Album"
+            case .commonKeyCreationDate: return "Year"
+            case .commonKeyType: return "Genre"
+            case .commonKeyDescription: return "Comment"
+            case .commonKeySoftware: return "Encoder"
+            case .commonKeyAuthor: return "Composer"
+            case .commonKeyPublisher: return "Publisher"
+            default: return nil
+            }
+        }
+        // Not a common key: fall back to the raw key, which for ID3 and iTunes
+        // atoms is a short code.
+        guard let raw = item.key as? String else { return nil }
+        switch raw {
+        case "TRCK", "trkn", "TRK": return "Track"
+        case "TPOS", "disk": return "Disc"
+        case "TPE2", "aART": return "Album Artist"
+        case "TCOM", "©wrt": return "Composer"
+        // `TSSE` is what ffmpeg writes, and it was the encoder line this file
+        // actually had — mapping only `TENC` found nothing.
+        case "TENC", "TSSE", "©too": return "Encoder"
+        case "TCON", "©gen": return "Genre"
+        // Likewise the year: this file carries `TYER` and no common creation
+        // date, so the common key alone left the year blank.
+        case "TYER", "TDRC", "TDRL", "TDAT", "©day": return "Year"
+        case "COMM", "©cmt": return "Comment"
+        case "TIT2": return "Title"
+        case "TPE1": return "Artist"
+        case "TALB": return "Album"
+        case "TBPM": return "BPM"
+        case "TPUB": return "Publisher"
+        case "TXXX":
+            // A user-defined frame. Its real name is in the extra attributes;
+            // without it every one of them would be called "TXXX" and all but
+            // the first would be dropped as a duplicate.
+            let name = (item.extraAttributes?[.info] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (name?.isEmpty == false) ? name : "Comment"
+        default: return nil
+        }
     }
 
     /// Peak amplitude per bucket, read in chunks.
@@ -349,19 +551,36 @@ struct AudioViewer: View {
 
     @StateObject private var model = AudioPlayerModel()
 
+    /// Below this the inspector is dropped rather than squeezed — a two-column
+    /// layout in a narrow split pane gives neither column enough room.
+    private static let inspectorMinWidth: CGFloat = 620
+    private static let inspectorWidth: CGFloat = 230
+
     var body: some View {
         GeometryReader { geo in
             let compact = geo.size.height < 420
+            let showInspector = geo.size.width >= Self.inspectorMinWidth
+                && !model.sections.isEmpty
             VStack(spacing: 0) {
-                Spacer(minLength: 12)
-                artworkTile(side: artworkSide(in: geo.size))
-                titleBlock
-                    .padding(.top, compact ? 12 : 20)
-                if !compact {
-                    playButtons.padding(.top, 18)
+                HStack(alignment: .top, spacing: 0) {
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 12)
+                        artworkTile(side: artworkSide(in: geo.size, inspector: showInspector))
+                        titleBlock
+                            .padding(.top, compact ? 12 : 20)
+                        if !compact {
+                            playButtons.padding(.top, 18)
+                        }
+                        Spacer(minLength: 12)
+                    }
+                    .frame(maxWidth: .infinity)
+                    if showInspector {
+                        Divider().overlay(palette.fg.opacity(0.10))
+                        InfoInspector(sections: model.sections, palette: palette)
+                            .frame(width: Self.inspectorWidth)
+                    }
                 }
-                Spacer(minLength: 12)
-                transportCard(compact: compact)
+                transportCard(compact: compact, showFormatLine: !showInspector)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(.horizontal, 24)
@@ -372,11 +591,13 @@ struct AudioViewer: View {
         .onDisappear { model.close() }
     }
 
-    /// Square, and never taller than the space left after the text and the
-    /// card. Music can assume a window; a pane can be any shape.
-    private func artworkSide(in size: CGSize) -> CGFloat {
+    /// Never taller than the space left after the text and the card, and never
+    /// wider than the column it sits in. Music can assume a window; a pane can
+    /// be any shape, and the inspector takes a bite out of the width.
+    private func artworkSide(in size: CGSize, inspector: Bool) -> CGFloat {
+        let column = size.width - (inspector ? Self.inspectorWidth + 24 : 0)
         let byHeight = size.height - 250
-        return max(72, min(260, min(size.width - 80, byHeight)))
+        return max(72, min(260, min(column - 80, byHeight)))
     }
 
     // MARK: Artwork
@@ -403,9 +624,28 @@ struct AudioViewer: View {
                 }
             }
         }
-        .frame(width: side, height: side)
+        .frame(width: tileSize(side).width, height: tileSize(side).height)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .shadow(color: .black.opacity(0.34), radius: 16, y: 7)
+    }
+
+    /// The tile takes the artwork's own shape, bounded by `side`.
+    ///
+    /// A square frame with `.fill` cropped this cover's left and right edges
+    /// off — it is wider than it is tall, and half the text printed on the
+    /// sleeve went with them. `.fit` inside a square frame is not the fix
+    /// either: the image would letterbox, and the rounded corners and the
+    /// shadow would be drawn around the empty bands rather than around the
+    /// picture. Sizing the frame to the aspect makes fill and fit the same
+    /// thing and leaves nothing to crop.
+    private func tileSize(_ side: CGFloat) -> CGSize {
+        guard let art = model.artwork, art.size.width > 0, art.size.height > 0 else {
+            return CGSize(width: side, height: side)
+        }
+        let ar = art.size.width / art.size.height
+        return ar >= 1
+            ? CGSize(width: side, height: (side / ar).rounded())
+            : CGSize(width: (side * ar).rounded(), height: side)
     }
 
     // MARK: Title block
@@ -478,7 +718,7 @@ struct AudioViewer: View {
     /// Music docks its transport in a rounded card that floats over the page
     /// rather than a bar welded to the window edge. Same here, and it is also
     /// what makes the waveform read as a control instead of as decoration.
-    private func transportCard(compact: Bool) -> some View {
+    private func transportCard(compact: Bool, showFormatLine: Bool) -> some View {
         VStack(spacing: 8) {
             HStack(spacing: 14) {
                 iconButton("gobackward.10") { model.skip(-10) }
@@ -494,12 +734,16 @@ struct AudioViewer: View {
                     model.seek(to: frac * model.duration)
                 }
                 .frame(height: 34)
+                // `fixedSize`, or the clock loses its tail. The waveform is a
+                // GeometryReader, which has no intrinsic width and takes every
+                // point offered — the label was the only thing left that could
+                // give, so it did, and `0:01 / 2:00` rendered as `0:01 / 2`.
                 Text(timeLabel)
                     .font(.system(size: 11, weight: .medium).monospacedDigit())
                     .foregroundStyle(palette.dim)
-                    .layoutPriority(1)
+                    .fixedSize()
             }
-            if !compact, !model.format.isEmpty {
+            if !compact, showFormatLine, !model.format.isEmpty {
                 Text(model.format)
                     .font(.system(size: 10))
                     .foregroundStyle(palette.dim.opacity(0.8))
@@ -539,6 +783,82 @@ struct AudioViewer: View {
         guard s.isFinite, s >= 0 else { return "0:00" }
         let t = Int(s.rounded(.down))
         return String(format: "%d:%02d", t / 60, t % 60)
+    }
+}
+
+// MARK: - Inspector
+
+/// What the file is, listed.
+///
+/// Apple's inspector shape — Preview's Info window, Music's Get Info: a
+/// section title in small dim caps, then rows of a dim left label against a
+/// right-aligned value in the document's ink. No separators, no boxes, no
+/// alternating fill. The alignment does the work a rule would do, and the
+/// panel stays quiet enough to sit beside the artwork without competing.
+private struct InfoInspector: View {
+    let sections: [AudioPlayerModel.InfoSection]
+    let palette: ViewerPalette
+
+    var body: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 18) {
+                ForEach(sections) { section in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(section.title.uppercased())
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .tracking(0.6)
+                            .foregroundStyle(palette.dim.opacity(0.75))
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(section.rows) { row in
+                                if Self.isBlock(row.value) {
+                                    // A credits list or a URL dump does not
+                                    // belong in a right-aligned column — it
+                                    // reads as ragged noise there. Same shape
+                                    // as Get Info's Comments box: the label,
+                                    // then the text under it, full width.
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(row.label)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(palette.dim)
+                                        Text(row.value)
+                                            .font(.system(size: 10.5))
+                                            .foregroundStyle(palette.fg.opacity(0.9))
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .textSelection(.enabled)
+                                    }
+                                    .padding(.top, 2)
+                                } else {
+                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                        Text(row.label)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(palette.dim)
+                                        Spacer(minLength: 6)
+                                        Text(row.value)
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundStyle(palette.fg)
+                                            .multilineTextAlignment(.trailing)
+                                            // Wraps rather than truncates: a
+                                            // long album title is exactly what
+                                            // someone opened this panel to read.
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollIndicators(.never)
+    }
+
+    /// Too long or too many lines to sit in the value column.
+    private static func isBlock(_ v: String) -> Bool {
+        v.contains("\n") || v.count > 42
     }
 }
 
