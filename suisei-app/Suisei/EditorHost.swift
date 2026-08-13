@@ -2095,34 +2095,34 @@ final class EditorCanvasView: NSView {
     /// step with the first.
     private func hunkExtent(atRow row: Int) -> (first: Int, last: Int, staged: Bool)? {
         guard row >= 0, row < Int(docLineCount) else { return nil }
-        let here = rows(row, row)
-        guard let line = here.first(where: { Int($0.lineNo) - 1 == row }),
-              line.gitSignKind != 0
-        else { return nil }
+        guard let here = changedLine(at: row) else { return nil }
 
+        // Walk out to the hunk's own ends. Stop AT the boundary row, having
+        // included it — the previous version tested the row above and broke
+        // before stepping onto it, so the first line of every multi-line hunk
+        // was left out. That is one off-by-one and it produced both reported
+        // symptoms: the region started a line low, and the bar-thickening test
+        // then compared the run against a `first` the run began above, so the
+        // bar stayed thin unless the pointer was on that first line.
         var first = row
-        while first > 0 {
-            let above = rows(first - 1, first - 1)
-            guard let l = above.first(where: { Int($0.lineNo) - 1 == first - 1 }),
-                  l.gitSignKind != 0, !l.gitHunkFirst || first - 1 == row
-            else { break }
+        while first > 0, changedLine(at: first)?.gitHunkFirst != true {
+            guard changedLine(at: first - 1) != nil else { break }
             first -= 1
-            if l.gitHunkFirst { break }
         }
         var last = row
         let maxRow = Int(docLineCount) - 1
-        while last < maxRow {
-            let cur = rows(last, last)
-            if let l = cur.first(where: { Int($0.lineNo) - 1 == last }), l.gitHunkLast {
-                break
-            }
-            let below = rows(last + 1, last + 1)
-            guard let l = below.first(where: { Int($0.lineNo) - 1 == last + 1 }),
-                  l.gitSignKind != 0
-            else { break }
+        while last < maxRow, changedLine(at: last)?.gitHunkLast != true {
+            guard changedLine(at: last + 1) != nil else { break }
             last += 1
         }
-        return (first, last, line.gitHunkStaged)
+        return (first, last, here.gitHunkStaged)
+    }
+
+    /// The line at `row`, if it carries a change.
+    private func changedLine(at row: Int) -> EditorLine? {
+        guard row >= 0, row < Int(docLineCount) else { return nil }
+        return rows(row, row)
+            .first { Int($0.lineNo) - 1 == row && $0.gitSignKind != 0 }
     }
 
     /// The wash behind a hovered hunk, and the rules that close it.
