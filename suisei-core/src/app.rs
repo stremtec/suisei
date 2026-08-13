@@ -716,6 +716,40 @@ fn offset_to_utf16(lines: &[String], offset: usize) -> (usize, usize) {
     (row, utf16)
 }
 
+/// A NUL byte in the first 8 KiB, or bytes that are not UTF-8 at all.
+///
+/// The NUL test is what every editor uses and it is what catches the files
+/// that matter here — images, audio, executables. The UTF-8 test catches the
+/// rest, and both are deliberately conservative: a false "binary" costs the
+/// user an explicit message, a false "text" costs them the file.
+pub fn looks_binary(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(8 * 1024)];
+    if head.contains(&0) {
+        return true;
+    }
+    // A truncated multi-byte character at the 8 KiB boundary is not binary, so
+    // judge the whole file when it is small and only the head when it is not.
+    if bytes.len() <= 8 * 1024 {
+        std::str::from_utf8(bytes).is_err()
+    } else {
+        false
+    }
+}
+
+/// `looks_binary` for a path that may not exist. A missing file is not binary
+/// — that is a new document, and saving it is the point.
+pub fn file_looks_binary(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 8 * 1024];
+    match f.read(&mut head) {
+        Ok(n) => looks_binary(&head[..n]),
+        Err(_) => false,
+    }
+}
+
 impl App {
     pub fn apply_config(&mut self) {
         let cfg = config::load();
@@ -812,9 +846,22 @@ impl App {
         } else {
             env::current_dir().unwrap_or_default().join(&pathbuf)
         };
-        let content = fs::read_to_string(&abs_path).unwrap_or_default();
+        // `read_to_string().unwrap_or_default()` turned any file that is not
+        // valid UTF-8 into an EMPTY document, silently. Opening a PNG showed a
+        // blank editor, and ⌘S then wrote that blank over the PNG. Say so
+        // instead, and let `save_file` refuse.
+        let raw = fs::read(&abs_path).ok();
+        let unreadable = raw.as_deref().is_some_and(looks_binary);
+        let content = match raw {
+            Some(b) if !unreadable => String::from_utf8_lossy(&b).into_owned(),
+            _ => String::new(),
+        };
         let on_disk_hash = text_hash(&content);
-        let message = format!("Opened: {}", abs_path.display());
+        let message = if unreadable {
+            format!("Binary file — not editable: {}", abs_path.display())
+        } else {
+            format!("Opened: {}", abs_path.display())
+        };
         let buffer = Buffer::from_string(&content);
         let mut undo = UndoStack::new();
         undo.push(buffer.snapshot());
@@ -3606,6 +3653,20 @@ impl App {
 
     pub fn save_file(&mut self) {
         if let Some(path) = self.filename.clone() {
+            // Refuse to write text over something that is not text.
+            //
+            // `open_file` cannot hand this decision over as state without
+            // threading a flag through every tab constructor, and re-reading
+            // the head of the file also catches the case where it BECAME
+            // binary while open. Only the first 8 KiB, so the check costs
+            // nothing on a large document.
+            if file_looks_binary(&path) {
+                self.set_message(&format!(
+                    "Refusing to save: {} is a binary file",
+                    path.display()
+                ));
+                return;
+            }
             match atomic_write_file(&path, self.buffer.text()) {
                 Ok(_) => {
                     self.mark_clean();
@@ -6357,5 +6418,70 @@ mod tests {
             "contiguous: {strip:?}"
         );
         let _ = std::fs::remove_file(&new_path);
+    }
+}
+
+#[cfg(test)]
+mod binary_guard_tests {
+    use super::*;
+
+    fn tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "suisei-bin-guard-{}-{}-{name}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&p, bytes).expect("temp write");
+        p
+    }
+
+    #[test]
+    fn a_png_opens_as_unreadable_rather_than_as_an_empty_document() {
+        // Eight bytes of real PNG signature — the second byte alone is enough
+        // to fail UTF-8, and the NUL comes later in any real file.
+        let png = tmp("x.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR");
+        let app = App::open_file(png.to_str().unwrap());
+        assert!(
+            app.message.contains("Binary file"),
+            "expected a binary notice, got {:?}",
+            app.message
+        );
+        let _ = std::fs::remove_file(png);
+    }
+
+    #[test]
+    fn saving_over_a_binary_file_is_refused() {
+        let png = tmp("y.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR");
+        let before = std::fs::read(&png).expect("read back");
+        let mut app = App::open_file(png.to_str().unwrap());
+        app.save_file();
+        let after = std::fs::read(&png).expect("read back");
+        assert_eq!(before, after, "save truncated a binary file");
+        assert!(app.message.contains("Refusing to save"), "{:?}", app.message);
+        let _ = std::fs::remove_file(png);
+    }
+
+    #[test]
+    fn ordinary_text_is_unaffected() {
+        let rs = tmp("z.rs", b"fn main() {}\n");
+        let mut app = App::open_file(rs.to_str().unwrap());
+        assert!(app.message.contains("Opened"), "{:?}", app.message);
+        app.buffer = crate::buffer::Buffer::from_string("fn main() { }\n");
+        app.save_file();
+        assert_eq!(
+            std::fs::read_to_string(&rs).unwrap_or_default(),
+            "fn main() { }\n"
+        );
+        let _ = std::fs::remove_file(rs);
+    }
+
+    #[test]
+    fn utf8_with_multibyte_characters_is_text() {
+        assert!(!looks_binary("한글과 émoji 🎧\n".as_bytes()));
+        assert!(looks_binary(b"\x00\x01\x02"));
+        assert!(!file_looks_binary(std::path::Path::new("/no/such/file")));
     }
 }
