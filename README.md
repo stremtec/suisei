@@ -11,18 +11,7 @@ SUISEI_FAST=1 ./scripts/run-suisei-app.sh
 ./scripts/run-suisei-app.sh
 ```
 
-The Rust engine builds with plain `cargo build --release`. The packaging script
-compiles the Swift face, embeds the engine dylib, and produces a signed `.app`
-under `suisei-app/.build/`.
-
-Requires: macOS 26+, Xcode toolchain (swiftc), a Rust toolchain.
-
-## Documentation
-
-- `docs/SUISEI-CURRENT-STATE.md` — where the project stands and the ordered path
-  to an independently usable IDE.
-- `docs/SUISEI-ARCHITECTURE-PLAN.md` — daemon, docking, resize, settings, theme,
-  menus.
+The Rust
 - `docs/SUISEI-TODO.md` — open bugs and the hard-won design notes (metaball
  ** and is **not** an open-source project. The
 licensing regime has three layers:

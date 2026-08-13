@@ -237,7 +237,7 @@ final class EditorScrollView: NSScrollView {
     /// Forwarded rather than reimplemented: scrolling to a line has to land on
     /// the same y the line is painted at, and two copies of that arithmetic is
     /// how every other pair in this codebase came to disagree.
-    private func visualRow(_ bufferRow: Int) -> Int { canvas.visualRow(bufferRow) }
+    private func visualY(_ bufferRow: Int) -> CGFloat { canvas.visualY(bufferRow) }
 
     /// Size the document view to the greater of the visible area and the
     /// content. Face-only — no engine round trip, so it can run per frame.
@@ -385,7 +385,7 @@ final class EditorScrollView: NSScrollView {
         let lineH = EditorMetrics.lineHeight
         let cell = EditorMetrics.cellWidth
         suppressPush = true
-        let wantY = CGFloat(visualRow(line)) * lineH
+        let wantY = visualY(line)
         let wantX = CGFloat(hCols) * cell
         let maxY = max(0, canvas.frame.height - contentView.bounds.height)
         let maxX = max(0, canvas.frame.width - contentView.bounds.width)
@@ -422,7 +422,7 @@ final class EditorScrollView: NSScrollView {
         let lineH = EditorMetrics.lineHeight
         let cell = max(1, EditorMetrics.cellWidth)
         let row = max(0, Int(engine.chrome.cursorRow) - 1)  // cursorRow is 1-based
-        let y = CGFloat(visualRow(row)) * lineH
+        let y = visualY(row)
         // Real-time glyph x from the CURRENT snapshot (not last paint). Falls
         // back to a cell estimate only if the caret line can't be fetched.
         let x: CGFloat = canvas.liveCaretGlyphX()
@@ -448,7 +448,7 @@ final class EditorScrollView: NSScrollView {
         let visRows = Int(contentView.bounds.height / max(1, lineH))
         let target = center ? max(0, line - visRows / 2) : line
         let maxY = max(0, canvas.frame.height - contentView.bounds.height)
-        let wantY = min(max(0, CGFloat(visualRow(target)) * lineH), maxY)
+        let wantY = min(max(0, visualY(target)), maxY)
         let current = contentView.bounds.origin.y
         guard abs(wantY - current) > 0.5 else { return }
         suppressPush = true
@@ -1196,10 +1196,8 @@ final class EditorCanvasView: NSView {
         // The band is chosen in VISUAL rows and pulled in buffer rows: an
         // expanded change shifts everything below it, so the visible span is
         // not the buffer span.
-        let v0 = max(0, Int(floor(viewport.minY / lineH)))
-        let v1 = max(v0, Int(ceil(viewport.maxY / lineH)))
-        let r0 = nearestBufferRow(atVisual: v0)
-        let r1 = max(r0, nearestBufferRow(atVisual: v1))
+        let r0 = nearestBufferRow(atY: viewport.minY)
+        let r1 = max(r0, nearestBufferRow(atY: viewport.maxY))
         let band = rows(r0, r1)
 
         renderer.beginFrame()
@@ -1214,7 +1212,7 @@ final class EditorCanvasView: NSView {
 
         for line in band where !line.isWrapContinuation {
             let baseRow = max(0, Int(line.lineNo) - 1)
-            let y = CGFloat(visualRow(baseRow)) * lineH
+            let y = visualY(baseRow)
             if y + lineH < viewport.minY || y > viewport.maxY { continue }
             let rowRect = CGRect(x: viewport.minX, y: y, width: viewport.width, height: lineH)
 
@@ -1448,10 +1446,8 @@ final class EditorCanvasView: NSView {
         let gap = EditorMetrics.gutterTextGap
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
 
-        let v0 = max(0, Int(floor(dirtyRect.minY / lineH)))
-        let v1 = max(v0, Int(ceil(dirtyRect.maxY / lineH)))
-        let r0 = nearestBufferRow(atVisual: v0)
-        let r1 = max(r0, nearestBufferRow(atVisual: v1))
+        let r0 = nearestBufferRow(atY: dirtyRect.minY)
+        let r1 = max(r0, nearestBufferRow(atY: dirtyRect.maxY))
         let band = rows(r0, r1)
         // Rebuilt below by whichever rows carry a hint this pass.
         bracketRects.removeAll(keepingCapacity: true)
@@ -1478,7 +1474,7 @@ final class EditorCanvasView: NSView {
         for line in band {
             if line.isWrapContinuation { continue }
             let baseRow = max(0, Int(line.lineNo) - 1)
-            let y = CGFloat(visualRow(baseRow)) * lineH
+            let y = visualY(baseRow)
             if y + lineH < dirtyRect.minY || y > dirtyRect.maxY { continue }
 
             let rowRect = CGRect(x: 0, y: y, width: bounds.width, height: lineH)
@@ -1911,8 +1907,8 @@ final class EditorCanvasView: NSView {
             // modified head and the added tail of one change differently.
             let target = hoveredHunk ?? fadingHunk
             let inHovered = target.map { h in
-                start >= CGFloat(visualRow(h.first)) * lineH - 0.5
-                    && runEnd <= CGFloat(visualRow(h.last) + 1) * lineH + 0.5
+                start >= visualY(h.first) - 0.5
+                    && runEnd <= (visualY(h.last) + lineH) + 0.5
             } ?? false
             for r in Self.barRects(
                 top: start, bottom: runEnd,
@@ -1932,7 +1928,13 @@ final class EditorCanvasView: NSView {
                 lastRow = row
                 continue
             }
-            let y = CGFloat(visualRow(row)) * lineH
+            var y = visualY(row)
+            // A run that begins where a change is expanded starts at the TOP
+            // of the opened block, not below it: the removed lines are part of
+            // the same change and the bar has to say so.
+            if let e = shownChange, row == e.insertAt {
+                y -= insertedHeight(above: row)
+            }
             let sameRun = runStart != nil
                 && row == lastRow + 1
                 && kind == runKind
@@ -2257,78 +2259,137 @@ final class EditorCanvasView: NSView {
     /// The one change whose replaced text is on screen, if any.
     ///
     /// ONE at a time, deliberately. Several would make the row mapping a scan
-    /// instead of a comparison, and the mapping is read on every hit test, every
-    /// caret placement and every drawn row — it has to stay a subtraction.
+    /// instead of a subtraction, and it is read on every hit test, every caret
+    /// placement and every drawn row.
     private var shownChange: (insertAt: Int, lines: [String], staged: Bool)?
+    /// When the reveal started, and whether it is closing.
+    private var revealStart: CFTimeInterval = 0
+    private var revealClosing = false
+    private var revealTimer: Timer?
 
-    /// How many rows the buffer does not have are on screen above `bufferRow`.
-    private func insertedRowsAbove(_ bufferRow: Int) -> Int {
+    static let revealDuration: CFTimeInterval = 0.20
+
+    /// How far open the expanded change is, 0…1. Eased.
+    ///
+    /// Derived from the clock, like every other motion in this view: a dropped
+    /// frame costs a frame and never a wrong height, which matters more here
+    /// than anywhere else because this number also decides where every line
+    /// below it is drawn AND hit-tested.
+    private var revealProgress: CGFloat {
+        guard shownChange != nil else { return 0 }
+        let t = min(1, max(0, (CACurrentMediaTime() - revealStart) / Self.revealDuration))
+        let eased = CGFloat(1 - pow(1 - t, 3))
+        return revealClosing ? 1 - eased : eased
+    }
+
+    /// Points of inserted space above a buffer row.
+    private func insertedHeight(above bufferRow: Int) -> CGFloat {
         guard let e = shownChange, bufferRow >= e.insertAt else { return 0 }
-        return e.lines.count
+        return CGFloat(e.lines.count) * EditorMetrics.lineHeight * revealProgress
     }
 
     /// Where a buffer row is drawn.
     ///
-    /// THE mapping. Everything that turns a row into a y goes through it, and
-    /// everything that turns a y back into a row goes through `bufferRow`.
-    /// While nothing is expanded both are the identity, so the whole editor
-    /// behaves exactly as it did — the risk of this feature is confined to the
-    /// state the user asked for.
-    func visualRow(_ bufferRow: Int) -> Int {
-        bufferRow + insertedRowsAbove(bufferRow)
+    /// THE mapping, in POINTS rather than in row indices — the reveal animates,
+    /// so during it the offset is a fraction of a row and an integer mapping
+    /// could not express where anything is. Everything that turns a row into a
+    /// y goes through this, and everything that turns a y back into a row goes
+    /// through `bufferRow(atY:)`. With nothing expanded both are the identity.
+    func visualY(_ bufferRow: Int) -> CGFloat {
+        CGFloat(bufferRow) * EditorMetrics.lineHeight
+            + insertedHeight(above: bufferRow)
     }
 
-    /// The buffer row drawn at a visual row, and nil for one of the inserted
-    /// lines — those belong to no row and must never resolve to one, or a
-    /// click on deleted text would move the caret into live code.
-    func bufferRow(atVisual v: Int) -> Int? {
-        guard let e = shownChange else { return v }
-        if v < e.insertAt { return v }
-        if v < e.insertAt + e.lines.count { return nil }
-        return v - e.lines.count
+    /// The buffer row drawn at a y, and nil inside the inserted block — those
+    /// rows belong to no line and must never resolve to one, or a click on
+    /// deleted text would move the caret into live code.
+    func bufferRow(atY y: CGFloat) -> Int? {
+        let lineH = max(1, EditorMetrics.lineHeight)
+        guard let e = shownChange, revealProgress > 0 else {
+            return max(0, Int(floor(y / lineH)))
+        }
+        let top = CGFloat(e.insertAt) * lineH
+        let openH = CGFloat(e.lines.count) * lineH * revealProgress
+        if y < top { return max(0, Int(floor(y / lineH))) }
+        if y < top + openH { return nil }
+        return max(0, Int(floor((y - openH) / lineH)))
     }
 
-    /// A visual row that is one of the shown lines, and which one.
-    private func insertedLine(atVisual v: Int) -> String? {
-        guard let e = shownChange, v >= e.insertAt,
-              v < e.insertAt + e.lines.count
-        else { return nil }
-        return e.lines[v - e.insertAt]
+    /// Nearest buffer row to a y — for gestures that must land somewhere even
+    /// when they start inside the inserted block.
+    func nearestBufferRow(atY y: CGFloat) -> Int {
+        if let r = bufferRow(atY: y) { return r }
+        return shownChange?.insertAt ?? 0
     }
 
-    /// Total rows drawn, buffer plus anything expanded.
-    private var visualLineCount: Int {
-        Int(docLineCount) + extraVisualRows
+    /// The inserted block's rect, or nil when nothing is open.
+    private func revealRect() -> CGRect? {
+        guard let e = shownChange else { return nil }
+        let p = revealProgress
+        guard p > 0.001 else { return nil }
+        let lineH = EditorMetrics.lineHeight
+        return CGRect(
+            x: 0, y: CGFloat(e.insertAt) * lineH,
+            width: bounds.width,
+            height: CGFloat(e.lines.count) * lineH * p
+        )
     }
 
     /// Rows on screen that no buffer line owns. Read by the scroll view when it
     /// sizes the document, which is the other place row count means height.
     var extraVisualRows: Int { shownChange?.lines.count ?? 0 }
 
-    /// Nearest buffer row to a visual row — for gestures that must land
-    /// somewhere even when they start on an inserted line.
-    private func nearestBufferRow(atVisual v: Int) -> Int {
-        if let r = bufferRow(atVisual: v) { return r }
-        return shownChange?.insertAt ?? v
-    }
-
     private func toggleShownChange(
         _ h: (first: Int, last: Int, staged: Bool, kind: UInt8)
     ) {
-        if shownChange?.insertAt == h.first {
-            shownChange = nil
-        } else {
-            guard let text = engine?.removedTextForHunk(atLine: UInt32(h.first + 1)),
-                  !text.isEmpty
-            else { return }
+        if shownChange?.insertAt == h.first, !revealClosing {
+            // Kept alive through the close so the block can shrink; cleared by
+            // the timer once it has.
+            revealClosing = true
+            revealStart = CACurrentMediaTime()
+            startRevealAnimation()
+            return
+        }
+        guard let text = engine?.removedTextForHunk(atLine: UInt32(h.first + 1)),
+              !text.isEmpty
+        else { return }
+        do {
             shownChange = (
                 insertAt: h.first,
                 lines: text.components(separatedBy: "\n"),
                 staged: h.staged
             )
+            revealClosing = false
+            revealStart = CACurrentMediaTime()
         }
+        startRevealAnimation()
+    }
+
+    private func startRevealAnimation() {
+        revealTimer?.invalidate()
         scrollView?.refitCanvas()
         needsDisplay = true
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            // The document's height follows the reveal, or the scroller and the
+            // content disagree about how far there is to go for its duration.
+            self.scrollView?.refitCanvas()
+            self.needsDisplay = true
+            let done = self.revealClosing
+                ? self.revealProgress <= 0
+                : self.revealProgress >= 1
+            guard done else { return }
+            timer.invalidate()
+            self.revealTimer = nil
+            if self.revealClosing {
+                self.shownChange = nil
+                self.revealClosing = false
+            }
+            self.scrollView?.refitCanvas()
+            self.needsDisplay = true
+        }
+        RunLoop.main.add(t, forMode: .common)
+        revealTimer = t
     }
 
     /// The lines an expanded change replaced, in the rows made for them.
@@ -2340,12 +2401,8 @@ final class EditorCanvasView: NSView {
     /// as it used to be. The screenshot has neither: the removed rows simply
     /// have no line number, and that absence is the marker.
     private func drawShownChange(lineH: CGFloat, font: NSFont, cg: CGContext) {
-        guard let e = shownChange else { return }
-        let top = CGFloat(e.insertAt) * lineH
-        let box = CGRect(
-            x: 0, y: top,
-            width: bounds.width, height: CGFloat(e.lines.count) * lineH
-        )
+        guard let e = shownChange, let box = revealRect() else { return }
+        let top = box.minY
         colors.removedBg.setFill()
         box.fill()
 
@@ -2358,15 +2415,26 @@ final class EditorCanvasView: NSView {
             .font: font,
             .foregroundColor: colors.removedFg,
         ]
+        let markAttrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: colors.removedFg.withAlphaComponent(0.55),
+        ]
         cg.saveGState()
         cg.clip(to: box)
         for (i, text) in e.lines.enumerated() {
-            let line = NSAttributedString(string: text, attributes: attrs)
-            line.draw(at: CGPoint(
-                x: EditorMetrics.gutter,
-                y: top + CGFloat(i) * lineH
-                    + (lineH - font.ascender + font.descender) / 2
+            let y = top + CGFloat(i) * lineH
+            let baseline = y + (lineH - font.ascender + font.descender) / 2
+            // A "−" where the line number would be. These rows have no number
+            // because they have no line, and the mark says which absence it is.
+            let mark = NSAttributedString(string: "−", attributes: markAttrs)
+            mark.draw(at: CGPoint(
+                x: EditorMetrics.gutter - EditorMetrics.gutterTextGap
+                    - mark.size().width,
+                y: baseline
             ))
+            NSAttributedString(string: text, attributes: attrs).draw(
+                at: CGPoint(x: EditorMetrics.gutter, y: baseline)
+            )
         }
         cg.restoreGState()
     }
@@ -2422,8 +2490,7 @@ final class EditorCanvasView: NSView {
             return
         }
         let lineH = max(1, EditorMetrics.lineHeight)
-        let v = max(0, Int(floor(p.y / lineH)))
-        setHoveredHunk(hunkExtent(atRow: nearestBufferRow(atVisual: v)))
+        setHoveredHunk(hunkExtent(atRow: nearestBufferRow(atY: p.y)))
     }
 
     private func setHoveredHunk(
@@ -2545,8 +2612,12 @@ final class EditorCanvasView: NSView {
         guard let h = hoveredHunk ?? fadingHunk else { return [] }
         let e = hoverEase
         guard e > 0.001 else { return [] }
-        let top = CGFloat(visualRow(h.first)) * lineH
-        let bottom = CGFloat(visualRow(h.last) + 1) * lineH
+        // The region covers the opened block too — it is the same change.
+        var top = visualY(h.first)
+        if let e = shownChange, e.insertAt == h.first {
+            top -= insertedHeight(above: h.first)
+        }
+        let bottom = (visualY(h.last) + lineH)
         let rule = Self.gitHoverRule
         // The region takes the CHANGE's colour, not one fixed blue. A deletion
         // is red in the gutter and was washing blue, which said the region and
@@ -2592,16 +2663,14 @@ final class EditorCanvasView: NSView {
             // than falling through — falling through is what set a breakpoint
             // on every press meant for a hunk.
             let lineH = max(1, EditorMetrics.lineHeight)
-            let v = max(0, Int(floor(p.y / lineH)))
-            if let h = hunkExtent(atRow: nearestBufferRow(atVisual: v)) {
+            if let h = hunkExtent(atRow: nearestBufferRow(atY: p.y)) {
                 showHunkMenu(h, at: p)
             }
             return
         }
         if p.x < EditorMetrics.gutter - EditorMetrics.gutterTextGap * 0.5 {
-            let v = Int(floor(p.y / max(1, EditorMetrics.lineHeight)))
             // An inserted line has no buffer row and therefore no breakpoint.
-            guard let row = bufferRow(atVisual: max(0, v)) else { return }
+            guard let row = bufferRow(atY: p.y) else { return }
             engine.toggleBreakpointLine(UInt32(row) + 1)
             return
         }
@@ -2879,7 +2948,7 @@ final class EditorCanvasView: NSView {
         let lineH = max(1, EditorMetrics.lineHeight)
         let cell = max(1, EditorMetrics.cellWidth)
         let gutter = EditorMetrics.gutter
-        let row = UInt32(nearestBufferRow(atVisual: Int(max(0, floor(docPoint.y / lineH)))))
+        let row = UInt32(nearestBufferRow(atY: docPoint.y))
         let col = UInt32(max(0, floor((docPoint.x - gutter) / cell)))
         return (row, col)
     }
@@ -2893,7 +2962,7 @@ final class EditorCanvasView: NSView {
     /// the real advances.
     private func absoluteHitUTF16(_ docPoint: CGPoint) -> (UInt32, UInt32)? {
         let lineH = max(1, EditorMetrics.lineHeight)
-        let row = nearestBufferRow(atVisual: Int(max(0, floor(docPoint.y / lineH))))
+        let row = nearestBufferRow(atY: docPoint.y)
         let band = rows(row, row)
         guard let line = band.first(where: { Int($0.lineNo) - 1 == row && !$0.isWrapContinuation })
         else { return nil }
