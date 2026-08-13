@@ -13,3 +13,7 @@ suisei-agent/.build/
 # Editor/IDE local
 .vscode/
 .idea/
+
+# Generated performance fixtures. Multi-megabyte, reproducible from the
+# generator in the session that made them, and not worth a diff.
+/perf-fixtures/

@@ -28,6 +28,13 @@ pub struct SyntaxEngine {
     /// field of its own rather than a method on the engine.
     grammars: Grammars,
     tree: Option<Tree>,
+    /// Bumped on every replacement of `tree`, including to `None`.
+    ///
+    /// Completion's global-scope collection is keyed on this. That collection
+    /// costs 8.7 ms at 50k lines and is identical for every caret in the file,
+    /// so the only question a cache has to answer is "is this the same tree",
+    /// and a counter answers it without comparing anything.
+    tree_gen: u64,
     last_ext: String,
     last_len: usize,
     last_fingerprint: u64,
@@ -61,6 +68,7 @@ impl Default for SyntaxEngine {
             // — and at 29 grammars it would be a very expensive waste.
             grammars: Grammars::default(),
             tree: None,
+            tree_gen: 0,
             last_ext: String::new(),
             last_len: 0,
             last_fingerprint: 0,
@@ -94,6 +102,12 @@ impl SyntaxEngine {
     /// cost more than the suggestion is worth.
     pub fn live_tree(&self) -> Option<(&Tree, &str)> {
         self.tree.as_ref().map(|t| (t, self.last_text.as_str()))
+    }
+
+    /// Identity of the live tree. Changes whenever the tree is replaced, and
+    /// never otherwise — see `tree_gen`.
+    pub fn live_tree_gen(&self) -> u64 {
+        self.tree_gen
     }
 
     /// Extension the live tree was parsed as.
@@ -135,6 +149,7 @@ impl SyntaxEngine {
             match hit {
                 Some((tree, ext_cached)) => {
                     self.tree = Some(tree);
+                    self.tree_gen = self.tree_gen.wrapping_add(1);
                     self.last_text.clear();
                     self.last_text.push_str(text);
                     self.last_ext = ext_cached;
@@ -146,6 +161,7 @@ impl SyntaxEngine {
                 }
                 None => {
                     self.tree = None;
+                    self.tree_gen = self.tree_gen.wrapping_add(1);
                     self.last_text.clear();
                     self.tokens.clear();
                     self.token_rows = 0..0;
@@ -303,6 +319,7 @@ impl SyntaxEngine {
             self.tokens.clear();
             self.token_rows = 0..0;
             self.tree = None;
+            self.tree_gen = self.tree_gen.wrapping_add(1);
             self.last_ext.clear();
             self.last_len = 0;
             self.last_fingerprint = 0;
@@ -326,6 +343,7 @@ impl SyntaxEngine {
         // `reuse` (above) already took the tree and applied the edit; wrap ALL
         // ts calls in catch_unwind so a binding panic never kills the process.
         self.tree = None;
+        self.tree_gen = self.tree_gen.wrapping_add(1);
         self.tokens.clear();
         self.last_ext = ext_str.to_string();
         self.last_len = len;
@@ -342,6 +360,7 @@ impl SyntaxEngine {
         match result {
             Ok(Some((tree, tokens))) => {
                 self.tree = Some(tree);
+                self.tree_gen = self.tree_gen.wrapping_add(1);
                 self.tokens = tokens;
                 self.token_rows = rows.clone().unwrap_or(0..usize::MAX);
                 // Anchor for the next incremental parse.
@@ -350,6 +369,7 @@ impl SyntaxEngine {
             }
             Ok(None) => {
                 self.tree = None;
+                self.tree_gen = self.tree_gen.wrapping_add(1);
                 self.tokens.clear();
                 self.token_rows = 0..0;
                 self.last_text.clear();
@@ -358,6 +378,7 @@ impl SyntaxEngine {
                 // tree-sitter panicked — stay alive with no highlight, and drop
                 // the incremental anchor so the next parse starts clean.
                 self.tree = None;
+                self.tree_gen = self.tree_gen.wrapping_add(1);
                 self.tokens.clear();
                 self.token_rows = 0..0;
                 self.last_text.clear();
@@ -536,11 +557,13 @@ impl SyntaxEngine {
         match tree {
             Some(t) => {
                 self.tree = Some(t);
+                self.tree_gen = self.tree_gen.wrapping_add(1);
                 self.last_text = text;
                 self.last_ext = ext;
             }
             None => {
                 self.tree = None;
+                self.tree_gen = self.tree_gen.wrapping_add(1);
                 self.last_text.clear();
             }
         }

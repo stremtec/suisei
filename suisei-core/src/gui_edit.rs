@@ -591,10 +591,15 @@ impl App {
     /// scope here: the indexer has their trees, but "every identifier in the
     /// project" is a different feature with a different ranking problem, and it
     /// is not what lexical visibility means.
-    fn symbols_in_scope_at_caret(&self) -> Vec<crate::scope::ScopeSymbol> {
+    fn symbols_in_scope_at_caret(&mut self) -> Vec<crate::scope::ScopeSymbol> {
         let Some(lang) = crate::scope::ScopeLang::from_ext(self.syntax.live_ext()) else {
             return Vec::new();
         };
+        let tree_gen = self.syntax.live_tree_gen();
+        // Disjoint fields: `syntax` is borrowed for the tree, `scope_cache`
+        // mutably for the global list. Same `self`, different fields, so the
+        // borrow checker allows both at once.
+        let cache = &mut self.scope_cache;
         let Some((tree, text)) = self.syntax.live_tree() else {
             return Vec::new();
         };
@@ -613,7 +618,9 @@ impl App {
                     .nth(cursor.col)
                     .map(|(b, _)| b)
                     .unwrap_or(line.len());
-                return crate::scope::visible_at(tree, text, byte, lang);
+                return crate::scope::visible_at_cached(
+                    tree, text, byte, lang, cache, tree_gen,
+                );
             }
             byte += line.len() + 1;
         }
