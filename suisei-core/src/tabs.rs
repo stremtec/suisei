@@ -39,6 +39,14 @@ pub struct BufferTab {
     /// This tab is a terminal pane. The shell lives in `App::pane_terminals`
     /// keyed by this id. `None` for ordinary document tabs.
     pub terminal: Option<crate::split::TerminalId>,
+    /// What kind of file this tab holds — decided once, when the tab is built
+    /// from a path, because [`crate::media::classify_path`] can reach the disk
+    /// and the face asks this question on every frame.
+    ///
+    /// Never `Terminal`: that axis is `terminal` above, and a fact with two
+    /// owners is a fact that will disagree with itself. `App::tab_kind`
+    /// composes the two.
+    pub kind: crate::media::FileKind,
 }
 
 /// The tab strip's own state — the documents in strip order and the source
@@ -63,6 +71,7 @@ impl TabStrip {
             undo_stack: UndoStack::new(),
             file_mtime: None,
             terminal: None,
+            kind: crate::media::FileKind::Text,
         })
     }
 
@@ -138,6 +147,7 @@ impl App {
             undo_stack: undo,
             file_mtime: None,
             terminal: None,
+            kind: crate::media::FileKind::Text,
         });
         self.split.focused_pane_mut().buffer = tab_id;
         self.restore_state_from_tab();
@@ -371,7 +381,38 @@ impl App {
                 self.buffer.cursor(),
             ));
             self.edit_run = EditRun::None;
+            self.git_follow_live_document();
         }
+    }
+
+    /// Point the git gutter at whatever document is now live.
+    ///
+    /// The gutter describes exactly one file, and until now nothing enforced
+    /// that. Fifteen paths restore a tab; seven called `refresh_git` after and
+    /// eight did not — including `goto_tab`, which is what a tab-chip click
+    /// runs. So editing A and then clicking B left A's hunks in `self.git`,
+    /// and the gutter drew them against whatever rows B happened to have:
+    /// changes appearing on a file that has none.
+    ///
+    /// Clearing first matters as much as refreshing. `refresh_git` is
+    /// asynchronous — it hands the diff to a thread — so a refresh alone would
+    /// still show the old file's bars for every frame until the result lands.
+    ///
+    /// Cheap when nothing moved: a switch back to the same document, or a pane
+    /// focus change that lands on the same file, compares two strings and
+    /// returns.
+    fn git_follow_live_document(&mut self) {
+        let now = self
+            .filename
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        if self.git.path == now {
+            return;
+        }
+        self.git.clear();
+        self.blame.clear();
+        self.refresh_git();
     }
     pub fn open_new_tab(&mut self, path: &str) {
         // No "displaced document" to record. Opening replaces what the focused
@@ -406,7 +447,19 @@ impl App {
             return;
         }
 
-        let content = fs::read_to_string(&abs_path).unwrap_or_default();
+        // The same `read_to_string().unwrap_or_default()` that `App::open_file`
+        // was fixed for — and this is the path the explorer actually uses, so
+        // it is the one that mattered. A PNG failed UTF-8, became an empty
+        // document, and ⌘S wrote the emptiness back over the file.
+        let raw = fs::read(&abs_path).ok();
+        let kind = crate::media::classify_bytes(&abs_path, raw.as_deref());
+        let content = match raw {
+            Some(b) if !kind.is_viewer() => String::from_utf8_lossy(&b).into_owned(),
+            // A viewer's document stays empty on purpose: there is no text to
+            // show, the viewer draws from the path, and an empty buffer is the
+            // one thing that cannot be edited into a corrupted file.
+            _ => String::new(),
+        };
         let buffer = Buffer::from_string(&content);
         let mtime = std::fs::metadata(&abs_path)
             .ok()
@@ -426,6 +479,7 @@ impl App {
             undo_stack: undo,
             file_mtime: mtime,
             terminal: None,
+            kind,
         });
         self.split.focused_pane_mut().buffer = tab_id;
         self.restore_state_from_tab();
@@ -632,6 +686,7 @@ impl App {
                 undo_stack: self.undo_stack.clone(),
                 file_mtime: None,
                 terminal: None,
+                kind: crate::media::FileKind::Text,
             };
             // The slot survives but the document in it does not, so the id
             // changed and any pane still naming the old one has to follow.

@@ -115,6 +115,7 @@ fn pane_c_layout() {
     assert_eq!(offset_of!(SuiseiPaneC, line_start), 8);
     assert_eq!(offset_of!(SuiseiPaneC, line_count), 12);
     assert_eq!(offset_of!(SuiseiPaneC, focused), 16);
+    assert_eq!(offset_of!(SuiseiPaneC, kind), 17);
     assert_eq!(offset_of!(SuiseiPaneC, term_gen), 18);
     assert_eq!(offset_of!(SuiseiPaneC, doc_line_count), 20);
     assert_eq!(offset_of!(SuiseiPaneC, hscroll), 24);
@@ -123,6 +124,28 @@ fn pane_c_layout() {
     assert_eq!(offset_of!(SuiseiPaneC, rect_w), 36);
     assert_eq!(offset_of!(SuiseiPaneC, rect_h), 40);
     assert_eq!(size_of::<SuiseiPaneC>(), 44, "SuiseiPaneC stride");
+}
+
+/// `SuiseiPaneC::kind` is a `FileKind` discriminant, and the header hard-codes
+/// those numbers as `SUISEI_PANE_*`. Nothing in the compiler connects the two,
+/// so reordering the enum would silently make the face draw a PDF viewer over
+/// an audio file.
+///
+/// `TERMINAL == 1` carries extra weight: this byte was an `is_terminal` bool,
+/// and keeping the value means a stale face still routes terminals right.
+#[test]
+fn pane_kind_wire_values() {
+    use suisei_core::media::FileKind;
+    assert_eq!(FileKind::Text as u8, 0);
+    assert_eq!(FileKind::Terminal as u8, 1, "was u8::from(is_terminal)");
+    assert_eq!(FileKind::Image as u8, 2);
+    assert_eq!(FileKind::Pdf as u8, 3);
+    assert_eq!(FileKind::Audio as u8, 4);
+    assert_eq!(FileKind::Binary as u8, 5);
+    // The default must be the one kind that is safe to be wrong about: a pane
+    // that falls back to Text shows an editor, which is recoverable. One that
+    // fell back to a viewer would hide a file the user meant to edit.
+    assert_eq!(FileKind::default(), FileKind::Text);
 }
 
 // ─── SuiseiChromeSnapshot (key fields) ────────────────────────────────────────

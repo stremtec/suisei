@@ -69,6 +69,14 @@ typedef struct SuiseiEditorLineC {
   SuiseiSpanC spans[SUISEI_MAX_SPANS];
 } SuiseiEditorLineC;
 
+/* SuiseiPaneC::kind — mirrors suisei_core::media::FileKind. */
+#define SUISEI_PANE_TEXT 0
+#define SUISEI_PANE_TERMINAL 1
+#define SUISEI_PANE_IMAGE 2
+#define SUISEI_PANE_PDF 3
+#define SUISEI_PANE_AUDIO 4
+#define SUISEI_PANE_BINARY 5
+
 /* One split pane: slice into the packed lines[] array. */
 typedef struct SuiseiPaneC {
   uint32_t tab_index;
@@ -76,8 +84,10 @@ typedef struct SuiseiPaneC {
   uint32_t line_start; /* index into lines[] */
   uint32_t line_count;
   uint8_t focused;
-  uint8_t is_terminal; /* pane runs its own shell */
-  uint16_t term_gen;   /* pane shell content generation; face skips re-pull when unchanged */
+  /* SuiseiPaneKind — what the face should draw here. Was an is_terminal bool
+     in this byte, and TERMINAL == 1 keeps that wire value. */
+  uint8_t kind;
+  uint16_t term_gen; /* pane shell content generation; face skips re-pull when unchanged */
   uint32_t doc_line_count; /* total lines in this pane's buffer */
   uint32_t hscroll;        /* per-pane horizontal pan (0 when wrap on) */
   /* Normalised rect within the editor area (0..1), from the layout tree. */
@@ -759,6 +769,12 @@ uint8_t suisei_engine_references(const SuiseiEngine *ptr,
 
 void suisei_engine_request_hover(SuiseiEngine *ptr);
 uint8_t suisei_engine_hover_text(const SuiseiEngine *ptr, char *out, uint32_t cap);
+
+/* Absolute path of the document in a pane; 0 when it has none (untitled, or a
+   shell). The non-text viewers draw from the file, not from the buffer, so
+   this is how they find it. Pulled on demand — see the Rust doc comment. */
+uint8_t suisei_engine_pane_path(const SuiseiEngine *ptr, uint32_t idx, char *out,
+                                uint32_t cap);
 
 /* LSP face surfaces — same App methods the TUI dispatches (gd / format / rename / code actions). */
 void suisei_engine_format_document(SuiseiEngine *ptr);

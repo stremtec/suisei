@@ -73,8 +73,11 @@ pub struct SuiseiPaneC {
     pub line_start: u32,
     pub line_count: u32,
     pub focused: u8,
-    /// 1 when this pane runs its own shell (see `suisei_engine_terminal_for_pane`).
-    pub _pad0: u8,
+    /// `suisei_core::media::FileKind` as its discriminant — what the face
+    /// should draw here. Was a plain `is_terminal` bool in the same byte, and
+    /// `Terminal == 1` keeps that wire value: a face that has never heard of
+    /// the other kinds still reads terminals correctly.
+    pub kind: u8,
     /// Pane shell content generation — bumps when the grid changes, so the
     /// face skips re-pulling a ~300 KiB snapshot it already has. Reuses the
     /// two pad bytes: no size change, so the pane stride stays put.
@@ -549,8 +552,8 @@ pub extern "C" fn suisei_engine_chrome(
             line_start: 0,
             line_count: line_n as u32,
             focused: 1,
-            _pad0: u8::from(chrome.pane0_is_terminal),
-            term_gen: if chrome.pane0_is_terminal {
+            kind: chrome.pane0_kind as u8,
+            term_gen: if chrome.pane0_kind == suisei_core::media::FileKind::Terminal {
                 engine.0.pane_term_gen(0)
             } else {
                 0
@@ -581,8 +584,8 @@ pub extern "C" fn suisei_engine_chrome(
                 focused: u8::from(pane.focused),
                 // Reuses a pad byte — no size change, so the pane stride and
                 // every offset after it stay put.
-                _pad0: u8::from(pane.is_terminal),
-                term_gen: if pane.is_terminal {
+                kind: pane.kind as u8,
+                term_gen: if pane.is_terminal() {
                     engine.0.pane_term_gen(pi)
                 } else {
                     0
@@ -3359,6 +3362,42 @@ pub extern "C" fn suisei_engine_hover_text(
     };
     let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
     write_cstr(dst, text);
+    1
+}
+
+/// Absolute path of the document in pane `idx`. Returns 0 when that pane has
+/// no file — an untitled document, or a shell.
+///
+/// A pull rather than a field on the chrome snapshot, on the same reasoning as
+/// `suisei_engine_terminal_for_pane`: only the non-text viewers need it, they
+/// need it once when they appear, and four more 512-byte arrays in a struct
+/// that is rebuilt every frame would be paid for by every frame that has no
+/// viewer in it — which is nearly all of them.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_pane_path(
+    ptr: *const SuiseiEngine,
+    idx: u32,
+    out: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if ptr.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let app = unsafe { &*ptr }.0.app();
+    let Some(pane) = app.split.panes.get(idx as usize) else {
+        return 0;
+    };
+    let Some(path) = app
+        .tabs
+        .buffers
+        .iter()
+        .find(|t| t.id == pane.buffer)
+        .and_then(|t| t.filename.as_ref())
+    else {
+        return 0;
+    };
+    let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(dst, &path.display().to_string());
     1
 }
 

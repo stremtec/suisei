@@ -35,6 +35,118 @@ pub fn is_media_path(path: &Path) -> bool {
         .is_some_and(|e| is_image_ext(e) || is_csv_ext(e) || is_npy_ext(e) || is_audio_ext(e))
 }
 
+/// What a pane is showing — the single question the face asks before it
+/// decides which view goes in the pane.
+///
+/// The discriminants are the wire format. `Terminal = 1` is deliberate: the
+/// byte this travels in used to carry `is_terminal` as a plain bool, and
+/// `u8::from(true)` is 1. An engine and a face that disagree about the rest
+/// of this enum still agree about terminals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum FileKind {
+    /// Editable text — the overwhelming majority, and the safe default. Any
+    /// classification we are unsure about lands here, because being wrong in
+    /// this direction shows the user an editor full of mojibake, and being
+    /// wrong the other way hides a file they wanted to edit.
+    #[default]
+    Text = 0,
+    Terminal = 1,
+    Image = 2,
+    Pdf = 3,
+    Audio = 4,
+    Binary = 5,
+}
+
+impl FileKind {
+    /// Whether the face should route this pane away from the text editor.
+    pub fn is_viewer(self) -> bool {
+        !matches!(self, FileKind::Text | FileKind::Terminal)
+    }
+
+    /// What to call this in a message to the user.
+    pub fn noun(self) -> &'static str {
+        match self {
+            FileKind::Text => "Text file",
+            FileKind::Terminal => "Terminal",
+            FileKind::Image => "Image",
+            FileKind::Pdf => "PDF",
+            FileKind::Audio => "Audio",
+            FileKind::Binary => "Binary file",
+        }
+    }
+}
+
+pub fn is_pdf_ext(ext: &str) -> bool {
+    ext.eq_ignore_ascii_case("pdf")
+}
+
+/// Extensions macOS can display but our own decoders cannot.
+///
+/// These are deliberately not in [`is_image_ext`]: that list is what the
+/// terminal preview's `image` crate can turn into pixels, and adding HEIC to
+/// it would make that path fail rather than fall back. ImageIO — which is
+/// what the GUI viewer draws through — handles all of these. Two decoders,
+/// two capability lists, and neither one is the other's cache.
+fn is_native_image_ext(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "tif" | "tiff" | "heic" | "heif" | "avif" | "jp2" | "psd"
+    )
+}
+
+/// What the extension alone can say. `None` means it did not decide and the
+/// bytes have to be asked.
+fn classify_ext(path: &Path) -> Option<FileKind> {
+    let ext = path.extension().and_then(|e| e.to_str())?;
+    if is_image_ext(ext) || is_native_image_ext(ext) {
+        Some(FileKind::Image)
+    } else if is_pdf_ext(ext) {
+        Some(FileKind::Pdf)
+    } else if is_audio_ext(ext) {
+        Some(FileKind::Audio)
+    } else {
+        None
+    }
+}
+
+/// Classify a path for the editor. Touches the disk only when the extension
+/// does not already decide, so the common cases — `.rs`, `.png`, `.mp3` — cost
+/// a string compare.
+///
+/// Not cheap enough to call per frame even so: the fallback reads 8 KiB. Call
+/// it when a document is opened and keep the answer (see `BufferTab::kind`).
+pub fn classify_path(path: &Path) -> FileKind {
+    if let Some(k) = classify_ext(path) {
+        return k;
+    }
+    // No extension, or one we have no opinion about. Ask the bytes — which is
+    // the case with no extension to go on, and it is exactly where compiled
+    // binaries live.
+    if crate::app::file_looks_binary(path) {
+        FileKind::Binary
+    } else {
+        FileKind::Text
+    }
+}
+
+/// [`classify_path`] for a caller that has already read the file. Same answer,
+/// without a second trip to the disk — every open reads the bytes anyway, and
+/// re-reading 8 KiB to ask a question the caller can already answer is a cost
+/// with nothing on the other side of it.
+///
+/// `bytes` is `None` when the read itself failed; that is not a binary file,
+/// it is an unreadable one, and the caller reports it as such.
+pub fn classify_bytes(path: &Path, bytes: Option<&[u8]>) -> FileKind {
+    if let Some(k) = classify_ext(path) {
+        return k;
+    }
+    match bytes {
+        Some(b) if crate::app::looks_binary(b) => FileKind::Binary,
+        _ => FileKind::Text,
+    }
+}
+
 // ── Image ───────────────────────────────────────────────────────────────
 
 #[derive(Clone)]

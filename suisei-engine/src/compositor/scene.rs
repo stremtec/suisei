@@ -120,12 +120,20 @@ pub struct PaneScene {
     pub doc_version: u64,
     /// Row budget the snapshot was built with (patch-path reuse key).
     pub band_rows: u32,
-    /// This pane runs a shell of its own.
-    pub is_terminal: bool,
+    /// What the face should put in this pane — a shell, a text editor, or one
+    /// of the viewers. This used to be a `is_terminal: bool`, which is the same
+    /// routing question with two of its answers missing.
+    pub kind: suisei_core::media::FileKind,
     /// Normalised rect within the editor area, straight from the layout tree.
     /// The face places panes by these instead of re-deriving geometry from a
     /// kind and a ratio, which it could only ever get right for two panes.
     pub rect: suisei_core::split::Rect,
+}
+
+impl PaneScene {
+    pub fn is_terminal(&self) -> bool {
+        self.kind == suisei_core::media::FileKind::Terminal
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -335,9 +343,9 @@ pub struct ChromeScene {
     pub tabs: Vec<TabScene>,
     /// Focused-pane (or single) lines for backwards-compatible consumers.
     pub lines: Vec<EditorLineScene>,
-    /// Unsplit, and the single pane runs a shell. The FFI synthesises pane 0
+    /// What the single pane shows when unsplit. The FFI synthesises pane 0
     /// on that path instead of walking the pane array, so it needs telling.
-    pub pane0_is_terminal: bool,
+    pub pane0_kind: suisei_core::media::FileKind,
     /// Actual active buffer title, independent from a unified layout chip.
     pub pane0_title: String,
     pub pane_focus: u8,
@@ -523,11 +531,11 @@ pub fn patch_chrome_editor_scroll(app: &App, frame_gen: u64, chrome: &mut Chrome
     chrome.wrap_lines = u8::from(app.wrap_lines);
     chrome.buffer_version = app.buffer.version();
     chrome.lines = lines;
-    chrome.pane0_is_terminal = app
+    chrome.pane0_kind = app
         .split
         .panes
         .first()
-        .is_some_and(|p| app.is_terminal_tab(p.buffer));
+        .map_or(Default::default(), |p| app.tab_kind(p.buffer));
     chrome.pane0_title = tab_title(app, app.current_buffer());
     chrome.pane_focus = pane_focus;
     chrome.panes = panes;
@@ -650,11 +658,11 @@ pub fn compose(app: &App, frame_gen: u64, outline: &[OutlineItemScene]) -> Frame
             branch: branch_name(app),
             tabs,
             lines,
-            pane0_is_terminal: app
+            pane0_kind: app
                 .split
                 .panes
                 .first()
-                .is_some_and(|p| app.is_terminal_tab(p.buffer)),
+                .map_or(Default::default(), |p| app.tab_kind(p.buffer)),
             pane0_title: tab_title(app, app.current_buffer()),
             pane_focus,
             panes,
@@ -2132,7 +2140,7 @@ fn build_editor_surfaces(
                     && p.hscroll == eff_hscroll
                     && p.doc_version == doc_version
                     && p.band_rows == rows_each as u32
-                    && p.is_terminal == app.is_terminal_tab(pane.buffer)
+                    && p.kind == app.tab_kind(pane.buffer)
                     && p.rect == rect
                     && p.doc_line_count == doc_line_count
             }) {
@@ -2173,7 +2181,7 @@ fn build_editor_surfaces(
             lines,
             doc_version,
             band_rows: rows_each as u32,
-            is_terminal: app.is_terminal_tab(pane.buffer),
+            kind: app.tab_kind(pane.buffer),
             rect,
         });
     }

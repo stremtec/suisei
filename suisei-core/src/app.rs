@@ -730,7 +730,14 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
     // A truncated multi-byte character at the 8 KiB boundary is not binary, so
     // judge the whole file when it is small and only the head when it is not.
     if bytes.len() <= 8 * 1024 {
-        std::str::from_utf8(bytes).is_err()
+        match std::str::from_utf8(bytes) {
+            Ok(_) => false,
+            // `error_len() == None` means the slice ran out mid-character
+            // rather than containing something invalid. That is a cut, not
+            // evidence — and this function must not give a different answer
+            // depending on where its caller happened to cut.
+            Err(e) => e.error_len().is_some(),
+        }
     } else {
         false
     }
@@ -740,14 +747,29 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
 /// — that is a new document, and saving it is the point.
 pub fn file_looks_binary(path: &std::path::Path) -> bool {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
+    let Ok(f) = std::fs::File::open(path) else {
         return false;
     };
-    let mut head = [0u8; 8 * 1024];
-    match f.read(&mut head) {
-        Ok(n) => looks_binary(&head[..n]),
-        Err(_) => false,
+    // One byte PAST the window, deliberately.
+    //
+    // `looks_binary` decides whether it is allowed to judge UTF-8 by asking
+    // whether it holds the whole file — and it can only answer that if a
+    // larger file yields a larger slice. Reading exactly 8 KiB made every
+    // file over 8 KiB look complete, so the UTF-8 test ran on a truncated
+    // head, and any multi-byte character straddling byte 8192 failed it.
+    // The file was then declared binary and ⌘S refused to save it, with no
+    // way for the user to tell which files were affected or why: it depends
+    // on whether a Hangul syllable, an emoji or a curly quote happens to
+    // land on that boundary.
+    //
+    // `read_to_end` over `take` rather than a single `read`, because `read`
+    // may return a short count on a perfectly healthy file — which produces
+    // the same misclassification by a second route.
+    let mut head = Vec::with_capacity(8 * 1024 + 1);
+    if f.take(8 * 1024 + 1).read_to_end(&mut head).is_err() {
+        return false;
     }
+    looks_binary(&head)
 }
 
 impl App {
@@ -851,14 +873,14 @@ impl App {
         // blank editor, and ⌘S then wrote that blank over the PNG. Say so
         // instead, and let `save_file` refuse.
         let raw = fs::read(&abs_path).ok();
-        let unreadable = raw.as_deref().is_some_and(looks_binary);
+        let kind = crate::media::classify_bytes(&abs_path, raw.as_deref());
         let content = match raw {
-            Some(b) if !unreadable => String::from_utf8_lossy(&b).into_owned(),
+            Some(b) if !kind.is_viewer() => String::from_utf8_lossy(&b).into_owned(),
             _ => String::new(),
         };
         let on_disk_hash = text_hash(&content);
-        let message = if unreadable {
-            format!("Binary file — not editable: {}", abs_path.display())
+        let message = if kind.is_viewer() {
+            format!("{}: {}", kind.noun(), abs_path.display())
         } else {
             format!("Opened: {}", abs_path.display())
         };
@@ -890,6 +912,7 @@ impl App {
                 undo_stack: undo,
                 file_mtime: mtime,
                 terminal: None,
+                kind,
             }),
             live_doc: FIRST_TAB_ID,
             ..Self::default()
@@ -3655,14 +3678,15 @@ impl App {
         if let Some(path) = self.filename.clone() {
             // Refuse to write text over something that is not text.
             //
-            // `open_file` cannot hand this decision over as state without
-            // threading a flag through every tab constructor, and re-reading
-            // the head of the file also catches the case where it BECAME
-            // binary while open. Only the first 8 KiB, so the check costs
-            // nothing on a large document.
-            if file_looks_binary(&path) {
+            // Two questions, and they catch different files. The stored kind
+            // is what we decided at open, which is the only thing that knows a
+            // JPEG is a JPEG when its first 8 KiB happen to be NUL-free UTF-8.
+            // The disk re-read catches the opposite case — a text file that
+            // BECAME binary while it was open. Only the first 8 KiB, so it
+            // costs nothing on a large document.
+            if self.live_tab_kind().is_viewer() || file_looks_binary(&path) {
                 self.set_message(&format!(
-                    "Refusing to save: {} is a binary file",
+                    "Refusing to save: {} is not a text file",
                     path.display()
                 ));
                 return;
@@ -4630,6 +4654,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                kind: crate::media::FileKind::Text,
             });
         }
         app.save_state_to_tab(); // tab 0 mirrors the active buffer
@@ -4685,6 +4710,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                kind: crate::media::FileKind::Text,
             });
         }
         app.save_state_to_tab();
@@ -4781,6 +4807,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                kind: crate::media::FileKind::Text,
             });
         }
         app.save_state_to_tab();
@@ -4874,6 +4901,7 @@ mod tests {
             undo_stack: UndoStack::new(),
             file_mtime: None,
             terminal: None,
+            kind: crate::media::FileKind::Text,
         });
         app.save_state_to_tab();
         let (a_id, b_id) = (app.tabs.buffers[0].id, app.tabs.buffers[1].id);
@@ -4922,6 +4950,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                kind: crate::media::FileKind::Text,
             });
         }
         app.save_state_to_tab();
@@ -4964,6 +4993,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                kind: crate::media::FileKind::Text,
             });
         }
         app.save_state_to_tab();
@@ -5144,6 +5174,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                kind: crate::media::FileKind::Text,
             });
         }
         app.save_state_to_tab();
@@ -6444,10 +6475,164 @@ mod binary_guard_tests {
         // to fail UTF-8, and the NUL comes later in any real file.
         let png = tmp("x.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR");
         let app = App::open_file(png.to_str().unwrap());
+        assert_eq!(
+            app.live_tab_kind(),
+            crate::media::FileKind::Image,
+            "a .png is an image, not a wall of mojibake"
+        );
         assert!(
-            app.message.contains("Binary file"),
-            "expected a binary notice, got {:?}",
+            app.message.contains("Image"),
+            "expected the notice to name what it is, got {:?}",
             app.message
+        );
+        assert!(app.buffer.text().is_empty(), "nothing to edit, so nothing shown");
+        let _ = std::fs::remove_file(png);
+    }
+
+    /// The path with no extension to go on. This is the Xcode-tile case: a
+    /// compiled binary, where the bytes are the only evidence.
+    #[test]
+    fn an_extensionless_binary_is_caught_by_its_bytes() {
+        let exe = tmp("a.out", b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01\x00\x00\x00\x00");
+        let app = App::open_file(exe.to_str().unwrap());
+        assert_eq!(app.live_tab_kind(), crate::media::FileKind::Binary);
+        let _ = std::fs::remove_file(exe);
+    }
+
+    /// The opposite direction, and the one that would be felt every day: an
+    /// ordinary source file must stay ordinary. A false Binary here hides a
+    /// file behind a tile the user cannot type into.
+    #[test]
+    fn source_files_stay_text() {
+        for (name, body) in [
+            ("t.rs", "fn main() { println!(\"안녕 🎧\"); }\n".as_bytes()),
+            ("t.md", "# 제목\n\n본문\n".as_bytes()),
+            ("Makefile", b"all:\n\techo hi\n".as_slice()),
+        ] {
+            let p = tmp(name, body);
+            let app = App::open_file(p.to_str().unwrap());
+            assert_eq!(
+                app.live_tab_kind(),
+                crate::media::FileKind::Text,
+                "{name} should be editable text"
+            );
+            assert!(!app.buffer.text().is_empty(), "{name} lost its contents");
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// ⌘S went dead on some files and not others, with no visible pattern.
+    ///
+    /// The pattern was the 8 KiB read window. `file_looks_binary` handed
+    /// `looks_binary` exactly 8192 bytes of a larger file; `looks_binary`
+    /// decides whether it may judge UTF-8 by asking `len <= 8192`, read that
+    /// as "this is the whole file", and validated a slice cut through the
+    /// middle of a character. Any file over 8 KiB with a Hangul syllable,
+    /// emoji or curly quote straddling that boundary was declared binary and
+    /// refused. Which byte a character lands on is invisible, so the failure
+    /// looked random.
+    ///
+    /// The sweep is the test: three of these offsets used to fail.
+    #[test]
+    fn a_multibyte_character_on_the_8kib_boundary_is_still_text() {
+        for pad in 8186..8195 {
+            let mut body: String = std::iter::repeat('a').take(pad).collect();
+            body.push('가');
+            body.push_str(&"b".repeat(500));
+            let p = tmp(&format!("k{pad}.rs"), body.as_bytes());
+            assert!(
+                !file_looks_binary(&p),
+                "a {} byte source file was called binary because a character \
+                 crosses byte 8192 (pad {pad})",
+                body.len()
+            );
+            let mut app = App::open_file(p.to_str().unwrap());
+            app.save_file();
+            assert!(
+                app.message.starts_with('✓'),
+                "⌘S refused an ordinary source file: {:?}",
+                app.message
+            );
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// Edit A, click B's tab, and B's gutter showed A's bars.
+    ///
+    /// `self.git` describes one file, and nothing made it follow the document.
+    /// `goto_tab` — the tab-chip click — was one of the eight restore paths
+    /// that never called `refresh_git`, so the old hunks simply stayed, drawn
+    /// against whatever rows the new document happened to have.
+    ///
+    /// Asserted on `signs` as well as `hunks`: the renderer reads the sign map,
+    /// so clearing only the hunks would leave the bars on screen.
+    #[test]
+    fn switching_tabs_takes_the_previous_file_s_hunks_with_it() {
+        let a = tmp("gutter_a.rs", b"fn a() {}\n");
+        let b = tmp("gutter_b.rs", b"fn b() {}\n");
+        let mut app = App::open_file(a.to_str().unwrap());
+        app.open_new_tab(b.to_str().unwrap());
+
+        // Stand in for "the user edited B and it grew a hunk". Building this
+        // by hand rather than through git keeps the test off the filesystem's
+        // repository state, which is not what is under test.
+        app.git.path = b.display().to_string();
+        app.git.available = true;
+        app.git.hunks = vec![crate::git::GitHunk {
+            start: 0,
+            len: 1,
+            removed: Vec::new(),
+            kind: crate::git::GitSign::Modified,
+            patch: String::new(),
+            staged: false,
+        }];
+        app.git
+            .signs
+            .insert(0, crate::git::GitSign::Modified);
+
+        app.goto_tab(0);
+        assert_eq!(
+            app.filename.as_deref(),
+            Some(a.as_path()),
+            "the switch itself did not happen"
+        );
+        assert!(
+            app.git.hunks.is_empty() && app.git.signs.is_empty(),
+            "the other file's change is still in the gutter: {:?}",
+            app.git.hunks
+        );
+        for p in [a, b] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// The guard still has to work — the fix widens the read window, it does
+    /// not weaken the test. A binary whose NUL sits past 8 KiB is still caught
+    /// by the head, and one with a NUL early is caught immediately.
+    #[test]
+    fn the_widened_window_still_catches_binaries() {
+        let mut blob = vec![b'a'; 9000];
+        blob[4000] = 0;
+        let p = tmp("big.bin", &blob);
+        assert!(file_looks_binary(&p));
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// The explorer's open path — `App::open_file` is only the launch
+    /// constructor, and this is the one a user actually reaches. It had the
+    /// same `read_to_string().unwrap_or_default()` and the same ⌘S after it.
+    #[test]
+    fn opening_a_png_in_a_tab_does_not_offer_to_destroy_it() {
+        let png = tmp("z.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x01\x02\x03");
+        let before = std::fs::read(&png).expect("read back");
+        let mut app = App::new();
+        app.open_new_tab(png.to_str().unwrap());
+        assert_eq!(app.live_tab_kind(), crate::media::FileKind::Image);
+        app.save_file();
+        assert_eq!(
+            std::fs::read(&png).expect("read back"),
+            before,
+            "⌘S on an image pane wrote over the image"
         );
         let _ = std::fs::remove_file(png);
     }

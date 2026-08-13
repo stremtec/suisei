@@ -352,6 +352,11 @@ struct ContentView: View {
         )
     }
     private var accent: Color { theme.color(theme.accent) }
+    /// The theme, handed to the non-text viewers, which live outside this file
+    /// and so cannot reach `theme` themselves.
+    private var viewerPalette: ViewerPalette {
+        ViewerPalette(fg: fg, dim: dim, accent: accent, bg: editorBg)
+    }
     private var gutterFg: Color { isLightTheme ? Color.black.opacity(0.32) : dim.opacity(0.9) }
     /// Xcode-level current-line wash — barely visible, not a gray slab.
     private var cursorLineBg: Color {
@@ -5232,6 +5237,10 @@ struct ContentView: View {
                 } else if let only = engine.editorSplit.panes.first, only.isTerminal {
                     // Unsplit, and the single pane was converted to a terminal.
                     terminalPaneBody(showClose: true, pane: only)
+                } else if let only = engine.editorSplit.panes.first, only.kind.isViewer {
+                    // Unsplit, and the document is not text — an image, a PDF,
+                    // audio, or something with no text in it at all.
+                    PaneViewer(kind: only.kind, path: only.path, palette: viewerPalette)
                 } else {
                     editorSurface(
                         lines: engine.editorLines.isEmpty ? engine.chrome.lines : engine.editorLines,
@@ -5440,6 +5449,12 @@ struct ContentView: View {
                 }
 
                 terminalPaneBody(showClose: false, showHeader: false, pane: pane)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if pane.kind.isViewer {
+                // The path bar stays: a viewer pane is still a document in a
+                // split, and the breadcrumb is how you know which one.
+                panePathBar(pane: pane)
+                PaneViewer(kind: pane.kind, path: pane.path, palette: viewerPalette)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 panePathBar(pane: pane)

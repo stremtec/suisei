@@ -61,6 +61,25 @@ impl App {
             .find(|t| t.id == id)
             .is_some_and(|t| t.terminal.is_some())
     }
+    /// What the face should draw for this tab — the shell axis and the file
+    /// axis composed into the one answer a pane needs.
+    ///
+    /// Kept as a composition rather than a stored field so the two cannot
+    /// drift: `BufferTab::kind` never says `Terminal` and `BufferTab::terminal`
+    /// never says anything about a file.
+    pub fn tab_kind(&self, id: BufferId) -> crate::media::FileKind {
+        match self.tabs.buffers.iter().find(|t| t.id == id) {
+            Some(t) if t.terminal.is_some() => crate::media::FileKind::Terminal,
+            Some(t) => t.kind,
+            // A pane pointing at a closed document renders as an empty editor,
+            // so that is what it should classify as too.
+            None => crate::media::FileKind::Text,
+        }
+    }
+    /// The kind of the document the keyboard is pointed at.
+    pub fn live_tab_kind(&self) -> crate::media::FileKind {
+        self.tab_kind(self.live_doc)
+    }
     /// The title the shell reported (OSC 0/2) for a terminal tab, if any —
     /// the tab strip shows it in place of the generic "Terminal".
     pub fn terminal_title(&self, tid: crate::split::TerminalId) -> Option<&str> {
@@ -126,6 +145,7 @@ impl App {
             undo_stack: UndoStack::new(),
             file_mtime: None,
             terminal: Some(tid),
+            kind: crate::media::FileKind::Text,
         });
         // Point the focused pane at the new terminal tab BEFORE the restore:
         // the active tab is derived from the pane, so this is what makes

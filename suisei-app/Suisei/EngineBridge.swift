@@ -68,6 +68,35 @@ struct EditorLine: Equatable, Identifiable {
     var gitHunkLast: Bool { (gitSign & 0x20) != 0 }
 }
 
+/// What a pane is showing — the one question the face asks before it decides
+/// which view goes inside. Mirrors `suisei_core::media::FileKind`; the raw
+/// values are the ABI (`SUISEI_PANE_*`, pinned by `pane_kind_wire_values`).
+///
+/// `terminal = 1` is not arbitrary: this arrived as a bare `is_terminal` byte
+/// and that is what `true` wrote into it.
+enum PaneKind: UInt8 {
+    case text = 0
+    case terminal = 1
+    case image = 2
+    case pdf = 3
+    case audio = 4
+    case binary = 5
+
+    /// An unknown value can only come from an engine newer than this face.
+    /// Fall back to the editor: showing text for something we cannot name is
+    /// recoverable, and hiding a file behind a viewer we do not have is not.
+    init(raw: UInt8) { self = PaneKind(rawValue: raw) ?? .text }
+
+    /// This pane is not a text editor and not a shell — something else has to
+    /// be put in it, and that something needs the file, not the buffer.
+    var isViewer: Bool {
+        switch self {
+        case .text, .terminal: return false
+        case .image, .pdf, .audio, .binary: return true
+        }
+    }
+}
+
 /// One editor split surface (or the single full editor when unsplit).
 struct EditorPaneSnap: Equatable, Identifiable {
     var id: Int
@@ -86,8 +115,17 @@ struct EditorPaneSnap: Equatable, Identifiable {
     /// can only describe two panes — three asked for 150% of the width and the
     /// first pane got clipped off-screen.
     var rect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+    /// What to draw here. Was `isTerminal: Bool` — the same routing question
+    /// with four of its answers missing.
+    var kind: PaneKind = .text
+    /// Absolute path of this pane's document, and only for a viewer kind: the
+    /// image, PDF, audio and binary surfaces all draw from the file rather
+    /// than from the buffer, and AppKit wants a URL. Empty otherwise, because
+    /// pulling it for every text pane on every frame would be four string
+    /// copies per frame in service of nothing.
+    var path: String = ""
     /// This pane runs its own shell.
-    var isTerminal: Bool = false
+    var isTerminal: Bool { kind == .terminal }
     /// That shell's content generation — bumped when its grid changes, so the
     /// face skips re-pulling a ~300 KiB snapshot it already has.
     var termGen: UInt16 = 0
@@ -115,7 +153,8 @@ extension SplitSnap {
             if x.scroll != y.scroll { return "split.pane.scroll" }
             if x.hscroll != y.hscroll { return "split.pane.hscroll" }
             if x.rect != y.rect { return "split.pane.rect" }
-            if x.isTerminal != y.isTerminal { return "split.pane.isTerminal" }
+            if x.kind != y.kind { return "split.pane.kind" }
+            if x.path != y.path { return "split.pane.path" }
             if x.termGen != y.termGen { return "split.pane.termGen" }
             if x.termCursorRow != y.termCursorRow { return "split.pane.termCursorRow" }
             if x.termCursorCol != y.termCursorCol { return "split.pane.termCursorCol" }
@@ -159,7 +198,8 @@ extension EditorPaneSnap {
             && a.tabIndex == b.tabIndex
             && a.title == b.title
             && a.rect == b.rect
-            && a.isTerminal == b.isTerminal
+            && a.kind == b.kind
+            && a.path == b.path
             && a.termGen == b.termGen
             && a.termCursorRow == b.termCursorRow
             && a.termCursorCol == b.termCursorCol
@@ -4738,15 +4778,15 @@ final class EngineBridge: ObservableObject {
                 docLineCount: snap.line_count, lines: allLines
             )
             // The unsplit pane is synthesised by the FFI rather than walked out
-            // of the pane array, but it can still be a terminal.
-            single.isTerminal = withUnsafeBytes(of: snap.panes) { raw in
-                raw.baseAddress!.load(fromByteOffset: 17, as: UInt8.self) != 0
+            // of the pane array, but it still carries a kind.
+            single.kind = withUnsafeBytes(of: snap.panes) { raw in
+                PaneKind(raw: raw.baseAddress!.load(fromByteOffset: 17, as: UInt8.self))
             }
             // Stamp paneId 0 on all lines.
             return (
                 allLines,
                 SplitSnap(focus: 0,
-                          panes: attachPaneTerminals(engine, [single]))
+                          panes: attachViewerPaths(engine, attachPaneTerminals(engine, [single])))
             )
         }
 
@@ -4763,8 +4803,8 @@ final class EngineBridge: ObservableObject {
                 let lineStart = base.load(fromByteOffset: 8, as: UInt32.self)
                 let lineCount = base.load(fromByteOffset: 12, as: UInt32.self)
                 let focusedFlag = base.load(fromByteOffset: 16, as: UInt8.self)
-                // offset 17: is_terminal (a former pad byte).
-                let isTerm = base.load(fromByteOffset: 17, as: UInt8.self) != 0
+                // offset 17: kind (a former pad byte, then an is_terminal bool).
+                let kind = PaneKind(raw: base.load(fromByteOffset: 17, as: UInt8.self))
                 // offset 18: term_gen (u16) — pane shell content generation.
                 let termGen = base.load(fromByteOffset: 18, as: UInt16.self)
                 // offset 20: doc_line_count, 24: hscroll (after 4 pad bytes at 16..19)
@@ -4793,7 +4833,7 @@ final class EngineBridge: ObservableObject {
                         x: CGFloat(rx), y: CGFloat(ry),
                         width: CGFloat(rw), height: CGFloat(rh)
                     ),
-                    isTerminal: isTerm,
+                    kind: kind,
                     termGen: termGen
                 ))
             }
@@ -4803,7 +4843,7 @@ final class EngineBridge: ObservableObject {
             allLines,
             SplitSnap(
                 focus: focus,
-                panes: attachPaneTerminals(engine, panes)
+                panes: attachViewerPaths(engine, attachPaneTerminals(engine, panes))
             )
         )
     }
@@ -5632,6 +5672,35 @@ final class EngineBridge: ObservableObject {
             out[i].termLines = lines
             out[i].termCursorRow = Int(snap.cursor_row)
             out[i].termCursorCol = Int(snap.cursor_col)
+        }
+        return out
+    }
+
+    /// Fill in `path` for the panes that need one.
+    ///
+    /// Only viewer kinds ask, so an ordinary session — every pane a text
+    /// editor — does no work at all and never touches the 512-byte buffer.
+    /// The kind is what gates it, which is the point of having a kind.
+    private func attachViewerPaths(_ engine: OpaquePointer, _ panes: [EditorPaneSnap])
+        -> [EditorPaneSnap]
+    {
+        guard panes.contains(where: { $0.kind.isViewer }) else { return panes }
+        var out = panes
+        var buf = [CChar](repeating: 0, count: Int(SUISEI_PATH_CAP))
+        // A pane's file does not change without the pane changing, so a path
+        // already in hand is still that pane's path.
+        let prev = editorSplit.panes
+        for i in out.indices where out[i].kind.isViewer {
+            if prev.indices.contains(i), prev[i].kind == out[i].kind,
+               prev[i].tabIndex == out[i].tabIndex, !prev[i].path.isEmpty
+            {
+                out[i].path = prev[i].path
+                continue
+            }
+            let ok = buf.withUnsafeMutableBufferPointer {
+                suisei_engine_pane_path(engine, UInt32(i), $0.baseAddress, UInt32(SUISEI_PATH_CAP))
+            }
+            if ok != 0 { out[i].path = String(cString: buf) }
         }
         return out
     }
