@@ -1337,6 +1337,14 @@ final class EngineBridge: ObservableObject {
         }
     }
 
+    /// A non-published twin of `chrome`, kept only while `SUISEI_PERF=1`.
+    ///
+    /// Its whole job is to be the thing that releases the previous snapshot so
+    /// the cost of doing so can be measured apart from the cost of telling
+    /// SwiftUI. Assigning to it is byte-for-byte the work `chrome = next` does,
+    /// minus the publisher.
+    private var chromeShadow: ChromeSnapshot = .empty
+
     /// Which surface owns the keyboard right now.
     var focus: Focus { Focus(label: chrome.modeLabel) }
 
@@ -4335,14 +4343,23 @@ final class EngineBridge: ObservableObject {
             //     of `EngineBridge`, i.e. ContentView's whole 5,616-line body.
             //     Fix would be to subdivide the body into comparable children.
             //
-            // Assigning the same value to a plain local first isolates the
-            // former: it does the identical retain/release traffic with no
-            // publisher attached. Whatever is left in `chrome publish` is
-            // SwiftUI.
+            // Isolating the former needs a store that actually RELEASES the
+            // old snapshot, and the first attempt did not: `var scratch =
+            // chrome; scratch = next` leaves `chrome` holding the old value, so
+            // nothing is deallocated and the measurement came out at 0.000 ms
+            // no matter what the payload cost. It ruled out retain/release
+            // traffic and nothing else — the conclusion "whatever is left is
+            // SwiftUI" did not follow from it.
+            //
+            // `chromeShadow` holds the PREVIOUS snapshot and no one else does,
+            // so assigning to it does the identical work `chrome = next` does
+            // — copy in, drop the last reference to the old arrays and strings
+            // — with no publisher attached. What is left in `chrome publish`
+            // after subtracting this one really is SwiftUI.
             if PerfProbe.enabled {
-                var scratch = chrome
-                PerfProbe.measure("  chrome value copy (no publish)") { scratch = next }
-                _ = scratch
+                PerfProbe.measure("  chrome copy+free (no publish)") {
+                    chromeShadow = next
+                }
             }
             PerfProbe.measure("  chrome publish") { chrome = next }
         }
