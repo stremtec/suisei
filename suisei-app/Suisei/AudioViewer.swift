@@ -573,10 +573,30 @@ struct AudioViewer: View {
 
     @StateObject private var model = AudioPlayerModel()
 
+    /// How big the hero block is drawn — artwork, title, artist, year and the
+    /// two buttons, all off this one number so they grow as one thing.
+    ///
+    /// Persisted: it is a preference about how the user wants to look at audio
+    /// files, not about this file.
+    @AppStorage("suisei.audio.heroScale") private var heroScale: Double = 1
+    /// The scale when the current drag began. `nil` between drags — the
+    /// gesture reports a cumulative translation, so it needs the value it
+    /// started from rather than the value it last produced.
+    @State private var dragBase: Double?
+    @State private var resizeHovering = false
+
     /// Below this the inspector is dropped rather than squeezed — a two-column
     /// layout in a narrow split pane gives neither column enough room.
     private static let inspectorMinWidth: CGFloat = 620
     private static let inspectorWidth: CGFloat = 230
+    private static let minScale: Double = 0.55
+    private static let maxScale: Double = 1.85
+    /// Points of vertical drag for one unit of scale. Tuned so the whole range
+    /// is a comfortable single gesture rather than a sweep of the screen.
+    private static let dragPerScale: Double = 280
+
+    /// A hero-block measurement at the current scale.
+    private func s(_ v: CGFloat) -> CGFloat { v * heroScale }
 
     var body: some View {
         GeometryReader { geo in
@@ -589,13 +609,37 @@ struct AudioViewer: View {
                         Spacer(minLength: 12)
                         artworkTile(side: artworkSide(in: geo.size, inspector: showInspector))
                         titleBlock
-                            .padding(.top, compact ? 12 : 20)
+                            .padding(.top, s(compact ? 12 : 20))
                         if !compact {
-                            playButtons.padding(.top, 18)
+                            playButtons.padding(.top, s(18))
                         }
                         Spacer(minLength: 12)
                     }
                     .frame(maxWidth: .infinity)
+                    // The whole column is the grip, so the drag can start on
+                    // the artwork or on the empty space beside it — wherever
+                    // the pointer happens to be.
+                    .contentShape(Rectangle())
+                    .gesture(heroResize)
+                    // The cursor is the only thing telling anyone this is
+                    // draggable; nothing else on the pane would suggest it.
+                    //
+                    // Push and pop have to balance exactly. `NSCursor` keeps a
+                    // stack, and one unmatched push leaves the resize cursor
+                    // over the entire app until something else pushes — so the
+                    // flag gates both edges rather than the callback being
+                    // trusted to alternate.
+                    .onHover { inside in
+                        guard inside != resizeHovering else { return }
+                        resizeHovering = inside
+                        if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+                    }
+                    .onDisappear {
+                        if resizeHovering {
+                            resizeHovering = false
+                            NSCursor.pop()
+                        }
+                    }
                     if showInspector {
                         Divider().overlay(palette.fg.opacity(0.10))
                         InfoInspector(sections: model.sections, palette: palette)
@@ -620,13 +664,38 @@ struct AudioViewer: View {
         .onDisappear { model.close() }
     }
 
+    /// Drag anywhere in the hero column to resize it.
+    ///
+    /// Down is bigger, which is the direction the block grows. `minimumDistance`
+    /// is deliberately non-zero: at zero the gesture claims the press before a
+    /// child can, and the play buttons underneath stop working.
+    private var heroResize: some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { g in
+                let base = dragBase ?? heroScale
+                if dragBase == nil { dragBase = base }
+                heroScale = min(
+                    Self.maxScale,
+                    max(Self.minScale, base + Double(g.translation.height) / Self.dragPerScale)
+                )
+            }
+            .onEnded { _ in dragBase = nil }
+    }
+
     /// Never taller than the space left after the text and the card, and never
     /// wider than the column it sits in. Music can assume a window; a pane can
-    /// be any shape, and the inspector takes a bite out of the width.
+    /// be any shape, the inspector takes a bite out of the width, and the user
+    /// can now ask for a size the pane cannot give.
+    ///
+    /// The scale is a request, not an instruction: the clamps still win, so
+    /// dragging past what fits stops growing rather than pushing the transport
+    /// off the bottom.
     private func artworkSide(in size: CGSize, inspector: Bool) -> CGFloat {
         let column = size.width - (inspector ? Self.inspectorWidth + 24 : 0)
-        let byHeight = size.height - 250
-        return max(72, min(260, min(column - 80, byHeight)))
+        // The text and buttons scale with the artwork; the transport card does
+        // not, so only part of the reservation moves.
+        let byHeight = size.height - (s(150) + 110)
+        return max(56, min(s(260), min(column - s(80), byHeight)))
     }
 
     // MARK: Artwork
@@ -680,9 +749,9 @@ struct AudioViewer: View {
     // MARK: Title block
 
     private var titleBlock: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: s(3)) {
             Text(model.title)
-                .font(.system(size: 19, weight: .bold))
+                .font(.system(size: s(19), weight: .bold))
                 .foregroundStyle(palette.fg)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -690,16 +759,16 @@ struct AudioViewer: View {
                 // The accent line. This is the single strongest thing Music's
                 // album page does and it costs nothing to keep.
                 Text(model.artist)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: s(16), weight: .semibold))
                     .foregroundStyle(palette.accent)
                     .lineLimit(1)
             }
             if !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(.system(size: 11))
+                    .font(.system(size: s(11)))
                     .foregroundStyle(palette.dim)
                     .lineLimit(1)
-                    .padding(.top, 2)
+                    .padding(.top, s(2))
             }
         }
         .multilineTextAlignment(.center)
@@ -712,7 +781,7 @@ struct AudioViewer: View {
     // MARK: Buttons
 
     private var playButtons: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: s(10)) {
             capsule(
                 model.playing ? "일시정지" : "재생",
                 symbol: model.playing ? "pause.fill" : "play.fill",
@@ -728,13 +797,13 @@ struct AudioViewer: View {
         _ title: String, symbol: String, filled: Bool, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: symbol).font(.system(size: 11, weight: .bold))
-                Text(title).font(.system(size: 12.5, weight: .semibold))
+            HStack(spacing: s(5)) {
+                Image(systemName: symbol).font(.system(size: s(11), weight: .bold))
+                Text(title).font(.system(size: s(12.5), weight: .semibold))
             }
             .foregroundStyle(palette.accent)
-            .frame(minWidth: 92)
-            .padding(.vertical, 8)
+            .frame(minWidth: s(92))
+            .padding(.vertical, s(8))
             .background(
                 Capsule().fill(palette.accent.opacity(filled ? 0.20 : 0.11))
             )
@@ -789,20 +858,21 @@ struct AudioViewer: View {
                     .lineLimit(1)
             }
         }
-        .padding(.horizontal, 20)
+        // Wider than it looks like it needs: a capsule's end is a half-circle,
+        // so at this height the first 28pt of each side is curve. Content laid
+        // out to 20 sat inside it.
+        .padding(.horizontal, 28)
         .padding(.vertical, 12)
-        .background(
-            // Music's bar is rounded far past a window's corner — closer to a
-            // capsule that stopped short than to a panel. `.continuous` is
-            // what keeps that much curvature from reading as a circle stuck to
-            // a rectangle.
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(palette.fg.opacity(0.07))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(palette.fg.opacity(0.09), lineWidth: 1)
-                )
-        )
+        // The toolbar's material, not an imitation of it.
+        //
+        // The three buttons at the top right look the way they do because
+        // macOS 26 wraps a toolbar item in an `NSGlassEffectView` — see
+        // `editorToolbar`, where the whole point is that the app draws nothing.
+        // `glassEffect` is the same material from the SwiftUI side, so this
+        // card is made of what the toolbar is made of rather than of a fill
+        // and a hairline chosen to resemble it. A capsule is that API's own
+        // default shape, which is also the shape asked for.
+        .glassEffect(.regular, in: Capsule())
     }
 
     private func iconButton(
