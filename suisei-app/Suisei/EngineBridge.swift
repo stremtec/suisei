@@ -99,6 +99,44 @@ struct EditorPaneSnap: Equatable, Identifiable {
     var termCursorCol: Int = 0
 }
 
+extension EditorPaneSnap {
+    /// Structural equality — the pane's shape and content, deliberately NOT
+    /// its line count.
+    ///
+    /// `docLineCount` moves on every Enter. It made `split` differ, which made
+    /// `ChromeSnapshot` differ, which published the whole shell. The perf log
+    /// named it once the probe was reading the right side of the mask:
+    ///
+    ///     chrome differs: split         chrome willChange 30.9 / 31.5 ms
+    ///     chrome differs: tabs          chrome willChange  0.076 ms
+    ///     chrome differs: completions   chrome willChange  0.044 ms
+    ///
+    /// Publishing is not what costs — publishing a changed SPLIT costs, by
+    /// about four hundred times. This is why Enter felt different from every
+    /// other key.
+    ///
+    /// Nothing loses the number. The canvas reads it from `EditorTickStore`
+    /// (`EditorHost` line 120), and `publishEditorTick` fills that from the
+    /// local `split` value on every pass, publishing or not. The isolated
+    /// per-keystroke store already owned this fact; `split` was a second owner
+    /// that only ever charged for it.
+    static func == (a: EditorPaneSnap, b: EditorPaneSnap) -> Bool {
+        a.id == b.id
+            && a.focused == b.focused
+            && a.tabIndex == b.tabIndex
+            && a.title == b.title
+            && a.scroll == b.scroll
+            && a.hscroll == b.hscroll
+            && a.rect == b.rect
+            && a.isTerminal == b.isTerminal
+            && a.termGen == b.termGen
+            && a.termCursorRow == b.termCursorRow
+            && a.termCursorCol == b.termCursorCol
+            && a.termLines == b.termLines
+            && a.lines == b.lines
+    }
+}
+
 /// Split state for the editor island. The shape lives entirely in the
 /// per-pane rects; `isSplit` is just "more than one pane". (The old
 /// `kind`/`ratio` pair could only describe two panes and was retired with
