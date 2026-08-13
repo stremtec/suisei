@@ -4605,14 +4605,13 @@ final class EngineBridge: ObservableObject {
                     chromeShadow = next
                 }
             }
-            // Splits the 75 ms in two. `@Published` sends `objectWillChange`
-            // from `willSet`; sending it by hand first means the assignment
-            // below finds SwiftUI already invalidated. Whichever probe keeps
-            // the time owns the cost — the publisher's subscribers, or the
-            // store-and-release of the snapshot itself.
-            if PerfProbe.enabled {
-                PerfProbe.measure("  chrome willChange") { objectWillChange.send() }
-            }
+            // A `chrome willChange` probe used to sit here, sending
+            // `objectWillChange` by hand so the cost could be split from the
+            // store. It did its job — 44 ms in the send against 6 ms in the
+            // store is what pointed at the menu bar — but it is an EXTRA
+            // publish, so every profiled run invalidated SwiftUI twice and no
+            // measurement taken with it was of the shipping behaviour.
+            // Removed now that the question it answered is closed.
             PerfProbe.measure("  chrome publish") { chrome = next }
             syncMenu()
         }
