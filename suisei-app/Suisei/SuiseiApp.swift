@@ -5,13 +5,19 @@ import AppKit
 struct SuiseiApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     /// Single Core face shared by welcome + editor + Settings.
-    /// `@State`, not `@StateObject`: this holds the engine alive without
-    /// subscribing to it. A scene that observes `EngineBridge` is re-evaluated
-    /// on every keystroke, and re-evaluating a scene means AppKit rebuilds the
-    /// whole main menu — measured at 43–47 ms per character. The menu's own
-    /// state now comes from `engine.menu`, which publishes only when a menu
-    /// fact actually moves.
-    @State private var engine = EngineBridge()
+    /// Deliberately not a property wrapper. `@StateObject` subscribes, and a
+    /// scene that observes `EngineBridge` is re-evaluated on every keystroke —
+    /// which has AppKit rebuild the whole main menu, measured at 43–47 ms per
+    /// character. The menu's own state comes from `engine.menu` now, which
+    /// publishes only when one of its six facts actually moves.
+    ///
+    /// `@State` was the first attempt and crashed on launch: it evaluates its
+    /// initial value when the `App` struct is constructed, and that is before
+    /// `NSApplication` exists, so `EngineBridge.init` met a nil `NSApp` while
+    /// reading the system appearance. A lazy static is created on first
+    /// access, which is the first scene body — the same moment `@StateObject`
+    /// would have picked, minus the subscription.
+    private var engine: EngineBridge { .shared }
 
     init() {
         // Bring up the durable daemon (crash-safe state + LSP/DAP owner) and,

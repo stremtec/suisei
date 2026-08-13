@@ -808,6 +808,11 @@ final class EngineBridge: ObservableObject {
     let editorTick = EditorTickStore()
     /// Editor paint surface — updated on scroll without re-emitting full chrome shell.
     @Published private(set) var editorLines: [EditorLine] = []
+    /// The one engine, shared by Welcome, the editor and Settings. Lazy, so
+    /// it is built on first use rather than at `App` construction — see the
+    /// note on `SuiseiApp.engine`.
+    static let shared = EngineBridge()
+
     /// The six facts the main menu reads, and nothing else.
     ///
     /// The menu used to read them straight off this object, which made the
