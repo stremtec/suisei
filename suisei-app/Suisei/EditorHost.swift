@@ -1928,20 +1928,26 @@ final class EditorCanvasView: NSView {
                 lastRow = row
                 continue
             }
-            var y = visualY(row)
-            // A run that begins where a change is expanded starts at the TOP
-            // of the opened block, not below it: the removed lines are part of
-            // the same change and the bar has to say so.
-            if let e = shownChange, row == e.insertAt {
-                y -= insertedHeight(above: row)
-            }
+            let y = visualY(row)
             let sameRun = runStart != nil
                 && row == lastRow + 1
                 && kind == runKind
                 && line.gitHunkStaged == runStaged
             if !sameRun {
                 flush(bottomCap: false)
-                runStart = y
+                // A run that begins where a change is expanded starts at the
+                // TOP of the opened block: the removed lines are part of the
+                // same change and the bar has to say so.
+                //
+                // Only the START moves. Lifting `y` itself and then taking
+                // `runEnd = y + lineH` from it put the run's bottom a block
+                // above the row it belongs to, so the bar came out one line
+                // tall at the top of the block — "hunk가 한줄밖에 안떠".
+                var top = y
+                if let e = shownChange, row == e.insertAt {
+                    top -= insertedHeight(above: row)
+                }
+                runStart = top
                 runTopCap = line.gitHunkFirst
                 runKind = kind
                 runStaged = line.gitHunkStaged
