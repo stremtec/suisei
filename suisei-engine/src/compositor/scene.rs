@@ -2626,7 +2626,8 @@ fn visual_width_str(s: &str) -> usize {
 /// the bar never filled. One collision, both symptoms.
 ///
 /// ```text
-///   0x03  kind: 0 none, 1 added, 2 modified, 3 deleted
+///   0x03  kind: 0 none, 1 added, 2 modified, 3 deleted (the face's
+///         `gitSignKind` masks with this)
 ///   0x04  (free)
 ///   0x08  the hunk is staged        → bar is filled rather than hollow
 ///   0x10  first row of its hunk     → the bar caps here
@@ -2634,7 +2635,6 @@ fn visual_width_str(s: &str) -> usize {
 ///   0x40  breakpoint on this line   (owned by the DAP path)
 ///   0x80  soft-wrap continuation    (owned by the line builder)
 /// ```
-pub const GIT_KIND_MASK: u8 = 0x03;
 pub const GIT_HUNK_STAGED: u8 = 0x08;
 pub const GIT_HUNK_FIRST: u8 = 0x10;
 pub const GIT_HUNK_LAST: u8 = 0x20;

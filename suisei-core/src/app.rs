@@ -5871,8 +5871,6 @@ mod tests {
         assert_eq!(app.current_buffer_id(), ids[0]);
     }
 
-    /// 이미 그룹 멤버인 문서를 다시 열면 멤버십 불변 (swap 스킵).
-    #[test]
     /// Reported: with a layout grouped or unified, the tab strip's "+" →
     /// "New Untitled Tab" misbehaves.
     ///

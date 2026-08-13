@@ -548,8 +548,18 @@ pub fn signs_from_hunks(hunks: &[GitHunk], signs: &mut HashMap<usize, GitSign>) 
             };
             signs.insert(row, sign);
         }
+        // A hunk that removed more lines than it added is a DELETION as far as
+        // the reader is concerned, whatever else it also did: lines are gone
+        // and the text left behind is the only trace. Its last row carries
+        // that, overriding the Modified it just got.
+        //
+        // This was `or_insert`, which is the same statement with the opposite
+        // effect — the row had already been claimed by the loop above, so the
+        // entry was occupied and the deletion was dropped every single time.
+        // Deleting three lines down to one reported a plain modification, and
+        // the gutter drew it blue: "삭제했는데 파란색이야".
         if h.removed.len() > h.len {
-            signs.entry(h.end()).or_insert(GitSign::Deleted);
+            signs.insert(h.end(), GitSign::Deleted);
         }
     }
 }
@@ -634,6 +644,37 @@ mod tests {
             "staging moves nothing — only the bar's fill changes"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shrinking_a_hunk_reports_a_deletion() {
+        // Three lines collapsed to one. Git calls it a modification; the
+        // person who did it calls it deleting two lines, and the gutter has to
+        // agree with them — nothing else on screen shows the loss.
+        let hunks = parse_diff_hunks_full("@@ -7,3 +7,1 @@\n-a\n-b\n-c\n+a\n");
+        assert_eq!(hunks.len(), 1);
+        assert_eq!((hunks[0].start, hunks[0].len), (6, 1));
+        assert_eq!(hunks[0].removed.len(), 3);
+
+        let mut signs = HashMap::new();
+        signs_from_hunks(&hunks, &mut signs);
+        assert_eq!(
+            signs.get(&6),
+            Some(&GitSign::Deleted),
+            "the surviving row carries the loss"
+        );
+    }
+
+    #[test]
+    fn a_growing_hunk_is_not_a_deletion() {
+        // One line expanded to three: nothing was lost, so nothing is red.
+        let hunks = parse_diff_hunks_full("@@ -7,1 +7,3 @@\n-a\n+a\n+b\n+c\n");
+        let mut signs = HashMap::new();
+        signs_from_hunks(&hunks, &mut signs);
+        assert_eq!(signs.get(&6), Some(&GitSign::Modified));
+        assert_eq!(signs.get(&7), Some(&GitSign::Added));
+        assert_eq!(signs.get(&8), Some(&GitSign::Added));
+        assert!(!signs.values().any(|s| *s == GitSign::Deleted));
     }
 
     #[test]
