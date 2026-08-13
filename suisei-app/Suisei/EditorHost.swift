@@ -104,6 +104,27 @@ struct EditorHost: NSViewRepresentable {
         return v
     }
 
+    /// What the selected completion would add, for the inline grey preview.
+    ///
+    /// The remainder only — the popup's label minus what has already been
+    /// typed — so the preview reads as a continuation of the caret rather than
+    /// a duplicate of the prefix. Matched case-insensitively because the list
+    /// is: typing `def` offers `Definition`, and the ghost has to be `inition`,
+    /// not nothing.
+    ///
+    /// Focused pane only. Under a split every pane draws its own caret, and a
+    /// ghost on the others would be a suggestion for a caret that is not there.
+    static func ghostSuffix(_ engine: EngineBridge, paneIndex: Int) -> String {
+        let split = engine.editorSplit
+        guard !split.isSplit || paneIndex == split.focus else { return "" }
+        let c = engine.chrome.completions
+        guard c.open, c.selected >= 0, c.selected < c.items.count else { return "" }
+        let label = c.items[c.selected].label
+        guard label.count > c.prefix.count,
+              label.lowercased().hasPrefix(c.prefix.lowercased()) else { return "" }
+        return String(label.dropFirst(c.prefix.count))
+    }
+
     func updateNSView(_ view: EditorScrollView, context: Context) {
         view.engine = engine
         view.paneIndex = paneIndex
@@ -112,6 +133,7 @@ struct EditorHost: NSViewRepresentable {
             caretColor: caretColor, gutterFg: gutterFg, cursorLineBg: cursorLineBg,
             theme: theme
         )
+        view.canvas.ghostSuffix = Self.ghostSuffix(engine, paneIndex: paneIndex)
         let tick = editorTick.tick(for: paneIndex)
         view.apply(
             hScroll: tick.hscroll,
@@ -631,6 +653,12 @@ final class EditorCanvasView: NSView {
     var paneIndex: Int = 0
 
     private(set) var wrapLines: Bool = true
+    /// Inline preview of the selected completion, drawn after the caret.
+    /// Empty whenever the popup is closed or this pane is not the focused one.
+    var ghostSuffix: String = "" {
+        didSet { if ghostSuffix != oldValue { needsDisplay = true } }
+    }
+
     private(set) var docLineCount: UInt32 = 1
     private(set) var showFocusRing: Bool = false
     var colors = Colors(
@@ -1658,6 +1686,32 @@ final class EditorCanvasView: NSView {
                 }
                 colors.caret.setFill()
                 caretRect.fill()
+
+                // Xcode-style inline preview: the rest of the selected
+                // suggestion, faint, starting where the caret is. Drawn AFTER
+                // the caret so the bar stays crisp over it, and clipped to the
+                // pane so a long symbol cannot run out past the edge.
+                //
+                // No layout is re-derived for it — `caretX` and `baseline` are
+                // the ones the caret just used, so the preview cannot drift
+                // from the caret the way a separately-measured overlay would.
+                if !ghostSuffix.isEmpty, compositionCaretUTF16 == nil {
+                    let ghost = NSAttributedString(
+                        string: ghostSuffix,
+                        attributes: [
+                            .font: font,
+                            .foregroundColor: colors.fg.withAlphaComponent(0.38),
+                        ]
+                    )
+                    cg.saveGState()
+                    cg.clip(to: CGRect(
+                        x: caretX, y: capTop - 1,
+                        width: max(0, bounds.width - caretX - 4),
+                        height: descBottom - capTop + 2
+                    ))
+                    ghost.draw(at: CGPoint(x: caretX, y: textY))
+                    cg.restoreGState()
+                }
             }
             for sp in line.spans where sp.kind == 254 {
                 // Matching bracket: a visible match flashes once. If CoreText
