@@ -361,6 +361,12 @@ struct ContentView: View {
         ViewerPalette(fg: fg, dim: dim, accent: accent, bg: editorBg)
     }
 
+    /// The File tab is on screen right now — so the ⓘ button is showing
+    /// something, and its next press closes it.
+    private var showingFileInspector: Bool {
+        engine.uiInspectorVisible && inspectorMode == .file
+    }
+
     /// Whether the unsplit island gets a minimap.
     ///
     /// The minimap is a picture of a text document's shape. A pane holding a
@@ -583,40 +589,40 @@ struct ContentView: View {
         // buttons: its zoom controls are in the window's toolbar, not floating
         // over the page. `ToolbarItemGroup` puts the run in one platter, which
         // is the grouping a hand-built bar was imitating.
-        if let kind = viewerControls.kind, kind == .image || kind == .pdf {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    viewerControls.perform?(.zoomOut)
-                } label: {
-                    Image(systemName: "minus.magnifyingglass")
-                }
-                .help("축소")
+        if viewerControls.kind != nil {
+            if viewerControls.canZoom {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        viewerControls.perform?(.zoomOut)
+                    } label: {
+                        Image(systemName: "minus.magnifyingglass")
+                    }
+                    .help("축소")
 
-                // Not a control — the current magnification, which Preview
-                // also states in its toolbar. Already rounded upstream so a
-                // pinch republishes only when the digits move.
-                if !viewerControls.zoomLabel.isEmpty {
-                    Text(viewerControls.zoomLabel)
-                        .font(.system(size: 11, weight: .medium).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(minWidth: 38)
-                }
+                    if !viewerControls.zoomLabel.isEmpty {
+                        Text(viewerControls.zoomLabel)
+                            .font(.system(size: 11, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(minWidth: 38)
+                    }
 
-                Button {
-                    viewerControls.perform?(.zoomIn)
-                } label: {
-                    Image(systemName: "plus.magnifyingglass")
-                }
-                .help("확대")
+                    Button {
+                        viewerControls.perform?(.zoomIn)
+                    } label: {
+                        Image(systemName: "plus.magnifyingglass")
+                    }
+                    .help("확대")
 
-                Button {
-                    viewerControls.perform?(viewerControls.fitted ? .actual : .fit)
-                } label: {
-                    Image(systemName: viewerControls.fitted
-                        ? "1.magnifyingglass"
-                        : "arrow.up.left.and.arrow.down.right")
+                    // What this button MEANS is the viewer's business — fit
+                    // for an image, fit for a PDF, default size for audio —
+                    // so it supplies the glyph too.
+                    Button {
+                        viewerControls.perform?(.reset)
+                    } label: {
+                        Image(systemName: viewerControls.resetSymbol)
+                    }
+                    .help(viewerControls.resetHelp)
                 }
-                .help(viewerControls.fitted ? "실제 크기" : "화면에 맞추기")
             }
 
             if !viewerControls.pageLabel.isEmpty {
@@ -627,13 +633,29 @@ struct ContentView: View {
                 }
             }
 
+            // Reveals the facts in the inspector that already exists rather
+            // than in a column of the viewer's own.
+            //
+            // Three states, not two. Shut → open it on the File tab. Open on
+            // some other tab → switch, and do NOT close: the panel is showing
+            // something else, so the press means "show me the file". Open and
+            // already on File → close, because at that point the press cannot
+            // mean anything else.
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    viewerControls.infoOpen.toggle()
+                    if engine.uiInspectorVisible, inspectorMode == .file {
+                        animatePanels { engine.uiInspectorVisible = false }
+                    } else {
+                        if !engine.uiInspectorVisible {
+                            animatePanels { engine.uiInspectorVisible = true }
+                        }
+                        inspectorMode = .file
+                    }
+                    focused = true
                 } label: {
-                    Image(systemName: "info.circle")
+                    Image(systemName: showingFileInspector ? "info.circle.fill" : "info.circle")
                 }
-                .help("정보")
+                .help(showingFileInspector ? "파일 정보 닫기" : "파일 정보")
             }
         }
 
@@ -4785,7 +4807,23 @@ struct ContentView: View {
     private var fileInspectorContent: some View {
         let path = engine.chrome.filename
         return Group {
-            if path.isEmpty || path == "[No Name]" {
+            // A viewer pane's facts are not the text editor's facts: an image
+            // has no line count and a PNG's "Type" is not what someone opened
+            // this tab to read. The viewer publishes its own, and they are
+            // drawn in this panel's rows so the rail looks like itself.
+            if !viewerControls.sections.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(viewerControls.sections) { section in
+                            inspectorSection(section.title)
+                            ForEach(section.rows) { row in
+                                inspectorRow(row.label, row.value)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 10)
+                }
+            } else if path.isEmpty || path == "[No Name]" {
                 navigatorPlaceholder("doc", "No file", "Open a file to inspect it.")
             } else {
                 ScrollView {

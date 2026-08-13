@@ -573,10 +573,8 @@ struct AudioViewer: View {
     @State private var dragBase: Double?
     @State private var resizeHovering = false
 
-    /// Below this the inspector is dropped rather than squeezed — a two-column
-    /// layout in a narrow split pane gives neither column enough room.
-    private static let inspectorMinWidth = ViewerInspector.minPaneWidth
-    private static let inspectorWidth = ViewerInspector.width
+    @ObservedObject private var controls = EngineBridge.shared.viewerControls
+
     private static let minScale: Double = 0.55
     private static let maxScale: Double = 1.85
     /// Points of vertical drag for one unit of scale. Tuned so the whole range
@@ -586,16 +584,40 @@ struct AudioViewer: View {
     /// A hero-block measurement at the current scale.
     private func s(_ v: CGFloat) -> CGFloat { v * heroScale }
 
+    /// The same size the drag changes, on the toolbar's buttons.
+    ///
+    /// Audio has no magnification, so "zoom" here means the hero block — which
+    /// is the only thing on this pane that has a size at all, and the thing
+    /// the drag already resizes. A pointing device without a comfortable drag
+    /// should not be the reason a pane cannot be adjusted.
+    private func claimToolbar() {
+        controls.claim(.audio, canZoom: true)
+        controls.resetSymbol = "arrow.counterclockwise"
+        controls.resetHelp = "기본 크기"
+        controls.perform = { cmd in
+            switch cmd {
+            case .zoomIn: heroScale = min(Self.maxScale, heroScale * 1.15)
+            case .zoomOut: heroScale = max(Self.minScale, heroScale / 1.15)
+            case .reset: heroScale = 1
+            }
+        }
+        pushScale()
+        controls.setSections(model.sections)
+    }
+
+    private func pushScale() {
+        let label = "\(Int((heroScale * 100).rounded()))%"
+        if controls.zoomLabel != label { controls.zoomLabel = label }
+    }
+
     var body: some View {
         GeometryReader { geo in
             let compact = geo.size.height < 420
-            let showInspector = geo.size.width >= Self.inspectorMinWidth
-                && !model.sections.isEmpty
             VStack(spacing: 0) {
                 HStack(alignment: .top, spacing: 0) {
                     VStack(spacing: 0) {
                         Spacer(minLength: 12)
-                        artworkTile(side: artworkSide(in: geo.size, inspector: showInspector))
+                        artworkTile(side: artworkSide(in: geo.size))
                         titleBlock
                             .padding(.top, s(compact ? 12 : 20))
                         if !compact {
@@ -628,15 +650,12 @@ struct AudioViewer: View {
                             NSCursor.pop()
                         }
                     }
-                    if showInspector {
-                        Divider().overlay(palette.fg.opacity(0.10))
-                        ViewerInspector(sections: model.sections, palette: palette)
-                            .frame(width: Self.inspectorWidth)
-                    }
                 }
                 transportCard(
                     compact: compact,
-                    showFormatLine: !showInspector,
+                    // The facts live in the right rail's File tab now, so the
+                    // card carries the one-line version unconditionally.
+                    showFormatLine: true,
                     // The first thing to go when the card runs out of room:
                     // the waveform is the control that has to survive, and a
                     // squeezed slider is worse than no slider.
@@ -649,7 +668,13 @@ struct AudioViewer: View {
         }
         .background(palette.bg)
         .task(id: path) { model.open(path) }
-        .onDisappear { model.close() }
+        .onAppear { claimToolbar() }
+        .onDisappear {
+            controls.release(.audio)
+            model.close()
+        }
+        .onChange(of: heroScale) { _, _ in pushScale() }
+        .onChange(of: model.sections) { _, next in controls.setSections(next) }
     }
 
     /// Drag anywhere in the hero column to resize it.
@@ -678,12 +703,11 @@ struct AudioViewer: View {
     /// The scale is a request, not an instruction: the clamps still win, so
     /// dragging past what fits stops growing rather than pushing the transport
     /// off the bottom.
-    private func artworkSide(in size: CGSize, inspector: Bool) -> CGFloat {
-        let column = size.width - (inspector ? Self.inspectorWidth + 24 : 0)
+    private func artworkSide(in size: CGSize) -> CGFloat {
         // The text and buttons scale with the artwork; the transport card does
         // not, so only part of the reservation moves.
         let byHeight = size.height - (s(150) + 110)
-        return max(56, min(s(260), min(column - s(80), byHeight)))
+        return max(56, min(s(260), min(size.width - s(80), byHeight)))
     }
 
     // MARK: Artwork

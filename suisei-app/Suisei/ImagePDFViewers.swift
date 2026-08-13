@@ -48,25 +48,14 @@ struct ImagePaneViewer: View {
     /// items. What is left here is what the screenshot actually shows: the
     /// image, centred, with nothing drawn around it.
     var body: some View {
-        GeometryReader { geo in
-            let roomForInspector = geo.size.width >= ViewerInspector.minPaneWidth
-            HStack(spacing: 0) {
-                ZoomableImage(
-                    image: image,
-                    pixelSize: pixelSize,
-                    fitted: $fitted,
-                    liveZoom: $liveZoom,
-                    request: $zoomRequest,
-                    palette: palette
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if roomForInspector, controls.infoOpen, !sections.isEmpty {
-                    Divider().overlay(palette.fg.opacity(0.10))
-                    ViewerInspector(sections: sections, palette: palette)
-                        .frame(width: ViewerInspector.width)
-                }
-            }
-        }
+        ZoomableImage(
+            image: image,
+            pixelSize: pixelSize,
+            fitted: $fitted,
+            liveZoom: $liveZoom,
+            request: $zoomRequest,
+            palette: palette
+        )
         .background(palette.bg)
         .task(id: path) { await load() }
         .onAppear { claimToolbar() }
@@ -79,15 +68,16 @@ struct ImagePaneViewer: View {
     }
 
     private func claimToolbar() {
-        controls.claim(.image)
+        controls.claim(.image, canZoom: true)
         controls.perform = { cmd in
             // Always relative to what is on screen, never to a remembered
             // request — the two drift apart the moment a gesture zooms.
             switch cmd {
             case .zoomOut: zoomRequest = .scale(max(0.05, liveZoom / 1.25))
             case .zoomIn: zoomRequest = .scale(min(32, liveZoom * 1.25))
-            case .fit: zoomRequest = .fit
-            case .actual: zoomRequest = .actual
+            // Fitted already? Then the useful move is 1:1, and the other way
+            // round after that — the same toggle a double-click does.
+            case .reset: zoomRequest = fitted ? .actual : .fit
             }
         }
         pushZoom()
@@ -99,7 +89,11 @@ struct ImagePaneViewer: View {
         // only when a digit moves rather than on every frame of a pinch.
         let label = "\(Int((liveZoom * 100).rounded()))%"
         if controls.zoomLabel != label { controls.zoomLabel = label }
-        if controls.fitted != fitted { controls.fitted = fitted }
+        let symbol = fitted ? "1.magnifyingglass" : "arrow.up.left.and.arrow.down.right"
+        if controls.resetSymbol != symbol {
+            controls.resetSymbol = symbol
+            controls.resetHelp = fitted ? "실제 크기" : "화면에 맞추기"
+        }
     }
 
     private func load() async {
@@ -122,6 +116,7 @@ struct ImagePaneViewer: View {
         image = loaded.0
         pixelSize = loaded.1
         sections = loaded.2
+        controls.setSections(loaded.2)
     }
 
     /// Everything `ImageIO` knows, without decoding the pixels.
@@ -532,23 +527,14 @@ struct PDFPaneViewer: View {
 
     var body: some View {
         GeometryReader { geo in
-            let wide = geo.size.width >= 520
-            let roomForInspector = geo.size.width >= ViewerInspector.minPaneWidth
-            HStack(spacing: 0) {
-                PDFSurface(
-                    document: document,
-                    palette: palette,
-                    showThumbnails: wide,
-                    zoomCommand: $zoomCommand,
-                    page: $page
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if roomForInspector, controls.infoOpen, !sections.isEmpty {
-                    Divider().overlay(palette.fg.opacity(0.10))
-                    ViewerInspector(sections: sections, palette: palette)
-                        .frame(width: ViewerInspector.width)
-                }
-            }
+            PDFSurface(
+                document: document,
+                palette: palette,
+                // Thumbnails need real width to be worth their column.
+                showThumbnails: geo.size.width >= 520,
+                zoomCommand: $zoomCommand,
+                page: $page
+            )
         }
         .background(palette.bg)
         .task(id: path) { await load() }
@@ -559,14 +545,15 @@ struct PDFPaneViewer: View {
     }
 
     private func claimToolbar() {
-        controls.claim(.pdf)
-        controls.fitted = true
+        controls.claim(.pdf, canZoom: true)
         controls.zoomLabel = ""
+        controls.resetSymbol = "arrow.up.left.and.arrow.down.right"
+        controls.resetHelp = "화면에 맞추기"
         controls.perform = { cmd in
             switch cmd {
             case .zoomOut: zoomCommand = .out
             case .zoomIn: zoomCommand = .in
-            case .fit, .actual: zoomCommand = .fit
+            case .reset: zoomCommand = .fit
             }
         }
         pushPage()
@@ -597,6 +584,7 @@ struct PDFPaneViewer: View {
         document = loaded.0
         pageCount = loaded.0?.pageCount ?? 0
         sections = loaded.1
+        controls.setSections(loaded.1)
     }
 
     private nonisolated static func describe(

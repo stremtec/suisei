@@ -75,25 +75,34 @@ struct ViewerPalette: Equatable {
 /// small published objects in a synchronous initialiser, and every write here
 /// comes from a view callback that is already on the main thread.
 final class ViewerControls: ObservableObject {
-    enum Command { case zoomIn, zoomOut, fit, actual }
+    /// What the toolbar can ask for. Deliberately vague about what it MEANS —
+    /// "reset" is fit for an image, fit for a PDF and default size for audio,
+    /// and the toolbar has no business knowing which. The viewer that claimed
+    /// the controls says what the button looks like.
+    enum Command { case zoomIn, zoomOut, reset }
 
     /// Nil when nothing that owns these controls is on screen — the toolbar
     /// items are absent, not disabled.
     @Published var kind: PaneKind?
+    /// Whether this viewer has anything to zoom. A binary tile does not.
+    @Published var canZoom = false
     /// Already rounded, so a pinch only republishes when the number the user
     /// can read actually changes.
     @Published var zoomLabel = ""
     @Published var pageLabel = ""
-    @Published var infoOpen = false
-    @Published var fitted = false
+    @Published var resetSymbol = "arrow.up.left.and.arrow.down.right"
+    @Published var resetHelp = "화면에 맞추기"
+    /// The facts the file inspector shows while this viewer is up.
+    @Published var sections: [ViewerInfoSection] = []
 
     /// Set by the viewer that currently owns the toolbar. Held as a closure
     /// rather than as more `@Published` state so a button press does not have
     /// to round-trip through a value the view then has to notice and clear.
     var perform: ((Command) -> Void)?
 
-    func claim(_ kind: PaneKind) {
+    func claim(_ kind: PaneKind, canZoom: Bool) {
         if self.kind != kind { self.kind = kind }
+        if self.canZoom != canZoom { self.canZoom = canZoom }
     }
 
     /// Give the toolbar back. Guarded on the kind so a pane that is going away
@@ -101,22 +110,40 @@ final class ViewerControls: ObservableObject {
     func release(_ kind: PaneKind) {
         guard self.kind == kind else { return }
         self.kind = nil
+        canZoom = false
         zoomLabel = ""
         pageLabel = ""
-        fitted = false
+        sections = []
         perform = nil
+    }
+
+    func setSections(_ next: [ViewerInfoSection]) {
+        // Cheap identity check — these are rebuilt on load, not per frame, and
+        // the inspector republishing on an unchanged list is pure waste.
+        if sections.count != next.count
+            || zip(sections, next).contains(where: { $0.title != $1.title
+                || $0.rows.count != $1.rows.count })
+        {
+            sections = next
+            return
+        }
+        if zip(sections, next).contains(where: { a, b in
+            zip(a.rows, b.rows).contains { $0.label != $1.label || $0.value != $1.value }
+        }) {
+            sections = next
+        }
     }
 }
 
 // MARK: - Inspector
 
-struct ViewerInfoRow: Identifiable {
+struct ViewerInfoRow: Identifiable, Equatable {
     var id: String { label }
     let label: String
     let value: String
 }
 
-struct ViewerInfoSection: Identifiable {
+struct ViewerInfoSection: Identifiable, Equatable {
     var id: String { title }
     let title: String
     let rows: [ViewerInfoRow]
@@ -129,85 +156,6 @@ struct ViewerInfoSection: Identifiable {
             guard let value, !value.isEmpty else { return nil }
             return ViewerInfoRow(label: label, value: value)
         }
-    }
-}
-
-/// What the file is, listed.
-///
-/// Apple's inspector shape — Preview's Info window, Music's Get Info: a
-/// section title in small dim caps, then rows of a dim left label against a
-/// right-aligned value in the document's ink. No separators, no boxes, no
-/// alternating fill. The alignment does the work a rule would do, and the
-/// panel stays quiet enough to sit beside the content without competing.
-struct ViewerInspector: View {
-    let sections: [ViewerInfoSection]
-    let palette: ViewerPalette
-
-    static let width: CGFloat = 230
-    /// Below this the inspector is dropped rather than squeezed — two columns
-    /// in a narrow split pane give neither one enough room.
-    static let minPaneWidth: CGFloat = 620
-
-    var body: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 18) {
-                ForEach(sections) { section in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(section.title.uppercased())
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .tracking(0.6)
-                            .foregroundStyle(palette.dim.opacity(0.75))
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(section.rows) { row in
-                                if Self.isBlock(row.value) {
-                                    // A credits list or a URL dump does not
-                                    // belong in a right-aligned column — it
-                                    // reads as ragged noise there. Same shape
-                                    // as Get Info's Comments box: the label,
-                                    // then the text under it, full width.
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(row.label)
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(palette.dim)
-                                        Text(row.value)
-                                            .font(.system(size: 10.5))
-                                            .foregroundStyle(palette.fg.opacity(0.9))
-                                            .fixedSize(horizontal: false, vertical: true)
-                                            .textSelection(.enabled)
-                                    }
-                                    .padding(.top, 2)
-                                } else {
-                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                        Text(row.label)
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(palette.dim)
-                                        Spacer(minLength: 6)
-                                        Text(row.value)
-                                            .font(.system(size: 11, weight: .medium))
-                                            .foregroundStyle(palette.fg)
-                                            .multilineTextAlignment(.trailing)
-                                            // Wraps rather than truncates: a
-                                            // long title is exactly what
-                                            // someone opened this panel to read.
-                                            .fixedSize(horizontal: false, vertical: true)
-                                            .textSelection(.enabled)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .scrollIndicators(.never)
-    }
-
-    /// Too long or too many lines to sit in the value column.
-    private static func isBlock(_ v: String) -> Bool {
-        v.contains("\n") || v.count > 42
     }
 }
 
@@ -230,6 +178,7 @@ struct FilePlaceholderView: View {
     @State private var typeName: String = ""
     @State private var sizeText: String = ""
     @State private var isExecutable = false
+    @ObservedObject private var controls = EngineBridge.shared.viewerControls
 
     private var url: URL { URL(fileURLWithPath: path) }
 
@@ -258,6 +207,10 @@ struct FilePlaceholderView: View {
         // id, SwiftUI reuses the view and the second binary you open wears the
         // first one's icon.
         .task(id: path) { load() }
+        // No zoom — a tile has one size — but it has as much to say in the
+        // File tab as anything else does.
+        .onAppear { controls.claim(kind, canZoom: false) }
+        .onDisappear { controls.release(kind) }
     }
 
     private var iconTile: some View {
@@ -326,6 +279,26 @@ struct FilePlaceholderView: View {
         }
         isExecutable = FileManager.default.isExecutableFile(atPath: path)
             && !url.hasDirectoryPath
+
+        let extra = try? url.resourceValues(forKeys: [
+            .creationDateKey, .contentModificationDateKey,
+        ])
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        controls.setSections([
+            ViewerInfoSection("File", [
+                ("Name", url.lastPathComponent),
+                ("Kind", typeName),
+                ("Size", sizeText),
+                ("Executable", isExecutable ? "Yes" : nil),
+                ("Created", extra?.creationDate.map { df.string(from: $0) }),
+                ("Modified", extra?.contentModificationDate.map { df.string(from: $0) }),
+            ]),
+            ViewerInfoSection("Location", [
+                ("Where", url.deletingLastPathComponent().path),
+            ]),
+        ])
     }
 }
 
