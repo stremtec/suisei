@@ -469,33 +469,46 @@ impl Buffer {
         // delimiter and still be "at" it as far as the user is concerned.
         // Prefer the character behind the caret (Xcode's own bias), then the
         // one in front.
-        if let Some(p) = self.match_for_char_before() {
+        if let Some(p) = self.match_for_char_before_at(self.cursor) {
             return Some(p);
         }
         // Caret sits just BEFORE a delimiter: shift one right and retry, so
         // clicking directly onto a bracket lights its partner too.
+        //
+        // The retry used to be `self.clone()` with the column bumped, which
+        // copied every line in the document to move a cursor one character.
+        // The compositor asks this question once per visible row, so a caret
+        // parked in front of a bracket cloned the whole file 240 times per
+        // draw — 17.5 ms at 6k lines, 43.6 ms at 20k, straight onto the main
+        // thread ahead of CoreText. The scanners take the position instead.
         let ahead = self.char_after_cursor()?;
         if !matches!(ahead, '(' | '[' | '{' | ')' | ']' | '}') {
             return None;
         }
-        let mut probe = self.clone();
-        probe.cursor.col += 1;
-        probe.match_for_char_before()
+        self.match_for_char_before_at(Position::new(self.cursor.row, self.cursor.col + 1))
     }
 
-    fn match_for_char_before(&self) -> Option<Position> {
-        match self.char_before_cursor()? {
-            ')' | ']' | '}' => self.scan_back_for_opener(),
-            '(' | '[' | '{' => self.scan_forward_for_closer(),
+    fn char_before(&self, at: Position) -> Option<char> {
+        if at.col > 0 {
+            self.line(at.row).chars().nth(at.col - 1)
+        } else {
+            None
+        }
+    }
+
+    fn match_for_char_before_at(&self, at: Position) -> Option<Position> {
+        match self.char_before(at)? {
+            ')' | ']' | '}' => self.scan_back_for_opener(at),
+            '(' | '[' | '{' => self.scan_forward_for_closer(at),
             _ => None,
         }
     }
 
-    fn scan_forward_for_closer(&self) -> Option<Position> {
+    fn scan_forward_for_closer(&self, at: Position) -> Option<Position> {
         const MAX_ROWS: usize = 400;
         const MAX_CHARS: usize = 20_000;
 
-        let opener = self.char_before_cursor()?;
+        let opener = self.char_before(at)?;
         let closer = match opener {
             '(' => ')',
             '[' => ']',
@@ -505,9 +518,9 @@ impl Buffer {
 
         let mut depth = 0usize;
         let mut scanned = 0usize;
-        let first_row = self.cursor.row;
+        let first_row = at.row;
         let mut row = first_row;
-        let mut col = self.cursor.col;
+        let mut col = at.col;
 
         loop {
             let chars: Vec<char> = self.line(row).chars().collect();
@@ -536,11 +549,11 @@ impl Buffer {
         }
     }
 
-    fn scan_back_for_opener(&self) -> Option<Position> {
+    fn scan_back_for_opener(&self, at: Position) -> Option<Position> {
         const MAX_ROWS: usize = 400;
         const MAX_CHARS: usize = 20_000;
 
-        let closer = self.char_before_cursor()?;
+        let closer = self.char_before(at)?;
         let opener = match closer {
             ')' => '(',
             ']' => '[',
@@ -551,8 +564,8 @@ impl Buffer {
         let mut depth = 0usize;
         let mut scanned = 0usize;
         // Start just before the closer itself.
-        let mut row = self.cursor.row;
-        let mut col = self.cursor.col.saturating_sub(1);
+        let mut row = at.row;
+        let mut col = at.col.saturating_sub(1);
         let first_row = row;
 
         loop {

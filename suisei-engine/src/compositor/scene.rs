@@ -2292,6 +2292,19 @@ fn build_lines_at(
     let diags_active = is_current && !app.lsp.diagnostics.is_empty();
 
     // Visual row origin for first buffer line in this window (approx: 1:1 before scroll).
+    // Xcode-style bracket hint: moving across a closer points out its opener.
+    // Kind 254 is a marker span; the FACE owns the ~1s flash, so the core stays
+    // stateless and the timing lives with the renderer.
+    //
+    // Hoisted: this asks about the CARET, so it gives the same answer for every
+    // row, and it used to be asked once per row of the band. 240 identical
+    // whole-document scans per draw, on the main thread, before CoreText.
+    let bracket_match = if caret_vcol.is_some() && use_live_syntax && is_current {
+        app.buffer.matching_bracket_before_cursor()
+    } else {
+        None
+    };
+
     let mut visual_row = band_start as u32;
     let mut lines = Vec::with_capacity(rows.saturating_mul(if wrap { 2 } else { 1 }));
     let mut buffer_rows_taken = 0usize;
@@ -2314,14 +2327,6 @@ fn build_lines_at(
             text.push('…');
         }
         let is_cursor_row = row == cursor_row;
-        // Xcode-style bracket hint: moving across a closer points out its
-        // opener. Kind 254 is a marker span; the FACE owns the ~1s flash, so
-        // the core stays stateless and the timing lives with the renderer.
-        let bracket_match = if caret_vcol.is_some() && use_live_syntax && is_current {
-            app.buffer.matching_bracket_before_cursor()
-        } else {
-            None
-        };
         let (sel_v0, sel_v1) = if use_live_syntax && is_current {
             selection_on_line(app, row, &text, sel)
         } else {
