@@ -1308,6 +1308,21 @@ final class EngineBridge: ObservableObject {
     }
 
     /// Coalesced catch-up for everything typing deliberately skipped.
+    /// True while a settle is pending, i.e. while the user is mid-burst.
+    ///
+    /// Read by `refreshEditorPaintOnly` to skip the chrome publish. Measured,
+    /// with the isolation fixed so it releases the old snapshot:
+    ///
+    ///     chrome publish                 mean=30.027ms  max=53.342ms
+    ///     chrome copy+free (no publish)  mean= 0.000ms  max= 0.001ms
+    ///
+    /// The value costs nothing to copy and nothing to free. The whole 30ms is
+    /// `objectWillChange` reaching every observer of this object — which is
+    /// ContentView's entire body — and it happens on a keystroke, twice a
+    /// frame's worth of budget, for chrome nobody can read before the burst
+    /// ends anyway.
+    private var chromeSettlePending: Bool { chromeSettleWork?.isCancelled == false }
+
     private func scheduleChromeSettle() {
         chromeSettleWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -1337,12 +1352,17 @@ final class EngineBridge: ObservableObject {
         }
     }
 
-    /// A non-published twin of `chrome`, kept only while `SUISEI_PERF=1`.
+    /// A non-published twin of `chrome`.
     ///
-    /// Its whole job is to be the thing that releases the previous snapshot so
-    /// the cost of doing so can be measured apart from the cost of telling
-    /// SwiftUI. Assigning to it is byte-for-byte the work `chrome = next` does,
-    /// minus the publisher.
+    /// Two jobs, and the second is why it is not behind `SUISEI_PERF`. It was
+    /// added to measure the cost of releasing the previous snapshot apart from
+    /// the cost of telling SwiftUI — assigning to it is byte-for-byte the work
+    /// `chrome = next` does, minus the publisher. That measurement said the
+    /// publisher is the entire cost.
+    ///
+    /// Now it also absorbs the writes a skipped mid-burst publish would have
+    /// made, so the value is not lost: the settle at the end of the burst does
+    /// a full `refreshChrome`, which rebuilds from the engine regardless.
     private var chromeShadow: ChromeSnapshot = .empty
 
     /// Which surface owns the keyboard right now.
@@ -4330,8 +4350,20 @@ final class EngineBridge: ObservableObject {
             if outline != next.outline { next.outline = outline }
         }
 
+        // Mid-burst, DON'T publish. `insertChar` schedules a settle for 0.12s
+        // after the last key, and the pane canvases do not read `chrome` on
+        // this path at all — they get scroll and caret from `editorTick`,
+        // which is a separate store precisely so its publish reaches them and
+        // nothing else. What is left in `chrome` that a keystroke changes is
+        // Ln/Col, the dirty dot and the line count: chrome, in the literal
+        // sense, and 0.12s late is not a thing anyone can see.
+        //
+        // Without this every keystroke paid 30ms to tell the whole view tree
+        // that the cursor column had changed by one.
         let differs = PerfProbe.measure("  chrome deep compare") { next != chrome }
-        if differs {
+        if differs, chromeSettlePending {
+            chromeShadow = next
+        } else if differs {
             // Splitting the publish, because "chrome publish" measured up to
             // 12.7 ms on a tab switch and that number has two very different
             // possible owners with two very different fixes:
