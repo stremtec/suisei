@@ -103,6 +103,21 @@ struct EditorPaneSnap: Equatable, Identifiable {
 /// per-pane rects; `isSplit` is just "more than one pane". (The old
 /// `kind`/`ratio` pair could only describe two panes and was retired with
 /// the layout tree — the ABI bytes survive as pads.)
+/// Menu-bar state, split off `EngineBridge` so the `App` scene is not a
+/// subscriber of the typing path. See `EngineBridge.menu`.
+final class MenuState: ObservableObject {
+    struct Facts: Equatable {
+        var navVisible = true
+        var inspectorVisible = true
+        var debugVisible = false
+        var paneCount = 1
+        var isSplit = false
+        var hasActiveLayout = false
+    }
+
+    @Published var facts = Facts()
+}
+
 struct SplitSnap: Equatable {
     var focus: Int
     var panes: [EditorPaneSnap]
@@ -793,6 +808,21 @@ final class EngineBridge: ObservableObject {
     let editorTick = EditorTickStore()
     /// Editor paint surface — updated on scroll without re-emitting full chrome shell.
     @Published private(set) var editorLines: [EditorLine] = []
+    /// The six facts the main menu reads, and nothing else.
+    ///
+    /// The menu used to read them straight off this object, which made the
+    /// `App` scene a subscriber of a per-keystroke publisher: one character
+    /// typed re-evaluated the scene body and had AppKit rebuild the entire
+    /// main menu. That measured 43–47 ms, and it was stable at 43–47 ms
+    /// whatever the payload — larger than every other cost on the typing path
+    /// put together, and invisible to eight rounds of profiling because the
+    /// probe was on `chrome = next` and the work was in the `willSet` that
+    /// sends `objectWillChange`.
+    ///
+    /// These six change only on explicit commands, so they publish at their
+    /// own rate. The `App` no longer observes the engine at all.
+    let menu = MenuState()
+
     @Published private(set) var editorSplit: SplitSnap = .empty
     /// From Core only (`snap.scroll_frac`). Never a parallel face accumulator.
     @Published private(set) var editorScrollFrac: CGFloat = 0
@@ -824,9 +854,9 @@ final class EngineBridge: ObservableObject {
     /// project grep finishes, and out-of-order replies would otherwise win.
     private var searchGeneration: UInt64 = 0
     /// Shared UI chrome toggles (menus + shell).
-    @Published var uiNavVisible: Bool = true
-    @Published var uiDebugVisible: Bool = false
-    @Published var uiInspectorVisible: Bool = true
+    @Published var uiNavVisible: Bool = true { didSet { syncMenu() } }
+    @Published var uiDebugVisible: Bool = false { didSet { syncMenu() } }
+    @Published var uiInspectorVisible: Bool = true { didSet { syncMenu() } }
     /// True while the tab strip is changing its structure (close/reorder or a
     /// layout presentation step). The strip uses this to suppress its normal
     /// active-tab auto-centering: scrolling the viewport while chips are also
@@ -3197,6 +3227,21 @@ final class EngineBridge: ObservableObject {
     /// Whether a folded layout is currently on screen (desk-active or a
     /// group-member chip is focused). Prefer `isLayoutDeskActive` when the
     /// question is park/collapse behaviour.
+    /// Push the menu's six facts across, if any of them moved. Cheap enough
+    /// to call from the per-keystroke path: the gate is one struct compare,
+    /// and `objectWillChange` only reaches the menu when something flipped.
+    func syncMenu() {
+        let facts = MenuState.Facts(
+            navVisible: uiNavVisible,
+            inspectorVisible: uiInspectorVisible,
+            debugVisible: uiDebugVisible,
+            paneCount: editorSplit.panes.count,
+            isSplit: editorSplit.isSplit,
+            hasActiveLayout: hasActiveLayout
+        )
+        if menu.facts != facts { menu.facts = facts }
+    }
+
     var hasActiveLayout: Bool {
         isLayoutDeskActive || chrome.tabs.contains { $0.group != 0 && $0.active }
     }
@@ -4423,7 +4468,16 @@ final class EngineBridge: ObservableObject {
                     chromeShadow = next
                 }
             }
+            // Splits the 75 ms in two. `@Published` sends `objectWillChange`
+            // from `willSet`; sending it by hand first means the assignment
+            // below finds SwiftUI already invalidated. Whichever probe keeps
+            // the time owns the cost — the publisher's subscribers, or the
+            // store-and-release of the snapshot itself.
+            if PerfProbe.enabled {
+                PerfProbe.measure("  chrome willChange") { objectWillChange.send() }
+            }
             PerfProbe.measure("  chrome publish") { chrome = next }
+            syncMenu()
         }
         // Per-keystroke caret/scroll goes to the isolated tick store LAST, so
         // `chrome` is already current when a pane's `updateNSView` fires from it.
@@ -4734,6 +4788,7 @@ final class EngineBridge: ObservableObject {
         let chromeChanged = PerfProbe.measure("  chrome != compare") { next != chrome }
         if chromeChanged {
             PerfProbe.measure("  publish chrome (SwiftUI)") { chrome = next }
+            syncMenu()
         }
         // Diagnostics use a separate bounded FFI snapshot. Core asks for a
         // full refresh whenever its revision changes; adopt the list in the

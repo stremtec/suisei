@@ -5,7 +5,13 @@ import AppKit
 struct SuiseiApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     /// Single Core face shared by welcome + editor + Settings.
-    @StateObject private var engine = EngineBridge()
+    /// `@State`, not `@StateObject`: this holds the engine alive without
+    /// subscribing to it. A scene that observes `EngineBridge` is re-evaluated
+    /// on every keystroke, and re-evaluating a scene means AppKit rebuilds the
+    /// whole main menu — measured at 43–47 ms per character. The menu's own
+    /// state now comes from `engine.menu`, which publishes only when a menu
+    /// fact actually moves.
+    @State private var engine = EngineBridge()
 
     init() {
         // Bring up the durable daemon (crash-safe state + LSP/DAP owner) and,
@@ -112,34 +118,8 @@ struct SuiseiApp: App {
         standardCommands
 
         CommandGroup(after: .sidebar) {
-            // Every panel toggle goes through `animatingPanels`. These used to
-            // flip the flags raw, so a panel glided when its top-bar button was
-            // clicked and snapped when the same action was keyed.
-            Button(engine.uiNavVisible ? "Hide Navigator" : "Show Navigator") {
-                engine.animatingPanels { engine.uiNavVisible.toggle() }
-            }
-            .keyboardShortcut("0", modifiers: .command)
-
-            Button(engine.uiInspectorVisible ? "Hide Inspector" : "Show Inspector") {
-                engine.animatingPanels { engine.uiInspectorVisible.toggle() }
-            }
-            .keyboardShortcut("0", modifiers: [.command, .option])
-
-            Button(engine.uiDebugVisible ? "Hide Debug Area" : "Show Debug Area") {
-                let next = !engine.uiDebugVisible
-                engine.animatingPanels {
-                    withAnimation(.spring(duration: 0.3, bounce: 0.12)) {
-                        engine.setDebugArea(next)
-                    }
-                }
-            }
-            .keyboardShortcut("y", modifiers: [.command, .shift])
-
-            Toggle("Minimap", isOn: minimapBinding)
+            PanelToggleCommands(engine: engine)
         }
-
-        // Workspace destinations. Keep this distinct from macOS' built-in
-        // View menu so the menu bar never contains two adjacent “View” items.
         CommandMenu("Workspace") {
             Button("File Explorer") {
                 NotificationCenter.default.post(name: .suiseiNavProject, object: nil)
@@ -238,39 +218,7 @@ struct SuiseiApp: App {
 
             Divider()
 
-            Button("Split Editor Right") {
-                engine.splitEditorRight()
-            }
-            .disabled(engine.editorSplit.panes.count >= 4)
-
-            Button("Split Editor Below") {
-                engine.splitEditorBelow()
-            }
-            .disabled(engine.editorSplit.panes.count >= 4)
-
-            Button("Focus Next Pane") {
-                engine.focusNextPane()
-            }
-            .disabled(!engine.editorSplit.isSplit)
-
-            Button("Close Focused Pane") {
-                engine.closeFocusedPane()
-            }
-            .disabled(!engine.editorSplit.isSplit)
-
-            Divider()
-
-            Button("Save Split as Layout Tab") {
-                engine.foldLayout()
-            }
-            .disabled(!engine.editorSplit.isSplit || engine.hasActiveLayout)
-
-            Button("Unfold Active Layout") {
-                engine.unfoldLayout()
-            }
-            .disabled(!engine.hasActiveLayout)
-
-            Divider()
+            SplitCommands(engine: engine)
 
             Button("Larger Text") {
                 engine.zoomFont(delta: 1)
@@ -383,13 +331,6 @@ struct SuiseiApp: App {
         }
     }
 
-    private var minimapBinding: Binding<Bool> {
-        Binding(
-            get: { UserDefaults.standard.object(forKey: "suisei.minimap") as? Bool ?? true },
-            set: { UserDefaults.standard.set($0, forKey: "suisei.minimap") }
-        )
-    }
-
     private func openSettingsWindow() {
         NotificationCenter.default.post(name: .suiseiOpenSettingsWindow, object: nil)
     }
@@ -409,38 +350,38 @@ private struct WelcomeSceneRoot: View {
     var body: some View {
         WelcomeView(
             onCreate: {
-                engine.createNewProject()
-                recents = RecentStore.load()
-                promoteToEditor()
+        engine.createNewProject()
+        recents = RecentStore.load()
+        promoteToEditor()
             },
             onOpen: {
-                engine.openProjectFolder()
-                recents = RecentStore.load()
-                promoteToEditorIfLeftWelcome()
+        engine.openProjectFolder()
+        recents = RecentStore.load()
+        promoteToEditorIfLeftWelcome()
             },
             onClone: {
-                engine.cloneGitRepository()
-                recents = RecentStore.load()
-                promoteToEditorIfLeftWelcome()
+        engine.cloneGitRepository()
+        recents = RecentStore.load()
+        promoteToEditorIfLeftWelcome()
             },
             onOpenRecent: { path in
-                var isDir: ObjCBool = false
-                FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
-                if isDir.boolValue {
-                    engine.setProjectRoot(path)
-                }
-                engine.openPath(path)
-                recents = RecentStore.load()
-                promoteToEditor()
+        var isDir: ObjCBool = false
+        FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+        if isDir.boolValue {
+            engine.setProjectRoot(path)
+        }
+        engine.openPath(path)
+        recents = RecentStore.load()
+        promoteToEditor()
             },
             onClose: {
-                dismissWindow(id: "welcome")
-                // No editor open → quit (launch sheet closed).
-                DispatchQueue.main.async {
-                    if !NSApp.windows.contains(where: { $0.isVisible && $0.title != "Welcome" }) {
-                        NSApp.terminate(nil)
-                    }
-                }
+        dismissWindow(id: "welcome")
+        // No editor open → quit (launch sheet closed).
+        DispatchQueue.main.async {
+            if !NSApp.windows.contains(where: { $0.isVisible && $0.title != "Welcome" }) {
+                NSApp.terminate(nil)
+            }
+        }
             },
             recents: recents,
             // Launch warmup sequence (app-boot tier). Grammar warming is real
@@ -448,9 +389,9 @@ private struct WelcomeSceneRoot: View {
             // at project-open per docs/SUISEI-EDIT-ARCHITECTURE.md §3. Engine
             // calls hop to the main actor so they serialise with the tick.
             bootStages: [
-                BootStage(label: "Preparing editor") { Boot.warmEditorGlyphs() },
-                BootStage(label: "Loading grammars") { await MainActor.run { engine.warmGrammars() } },
-                BootStage(label: "Restoring session") { Boot.primeRecents() },
+        BootStage(label: "Preparing editor") { Boot.warmEditorGlyphs() },
+        BootStage(label: "Loading grammars") { await MainActor.run { engine.warmGrammars() } },
+        BootStage(label: "Restoring session") { Boot.primeRecents() },
             ]
         )
         .frame(
@@ -469,16 +410,16 @@ private struct WelcomeSceneRoot: View {
             engine.activateInput()
             // Re-apply AppKit chrome after the NSWindow exists (async host attach).
             DispatchQueue.main.async {
-                WelcomeChromeApplier.applyToWelcomeWindows()
+        WelcomeChromeApplier.applyToWelcomeWindows()
             }
             // Second pass once SwiftUI finishes laying out the hosting view.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                WelcomeChromeApplier.applyToWelcomeWindows()
+        WelcomeChromeApplier.applyToWelcomeWindows()
             }
         }
         .onChange(of: engine.chrome.welcome) { _, welcome in
             if !welcome {
-                promoteToEditor()
+        promoteToEditor()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .suiseiRecoveryAccepted)) { _ in
@@ -499,8 +440,8 @@ private struct WelcomeSceneRoot: View {
         // unlikely.
         .sheet(
             isPresented: Binding(
-                get: { engine.recoverySheetShown && !engine.recoveryEntries.isEmpty },
-                set: { engine.recoverySheetShown = $0 }
+        get: { engine.recoverySheetShown && !engine.recoveryEntries.isEmpty },
+        set: { engine.recoverySheetShown = $0 }
             )
         ) {
             RecoverySheet(engine: engine)
@@ -537,13 +478,13 @@ private struct EditorSceneRoot: View {
     var body: some View {
         ContentView(engine: engine)
             .onAppear {
-                engine.activateInput()
-                // If Core is still on Welcome (edge case), open launch window instead.
-                if engine.chrome.welcome {
-                    // Keep editor suppressed path — user should use Welcome.
-                } else {
-                    SuiseiWindowLayout.apply(welcome: false, animate: false)
-                }
+        engine.activateInput()
+        // If Core is still on Welcome (edge case), open launch window instead.
+        if engine.chrome.welcome {
+            // Keep editor suppressed path — user should use Welcome.
+        } else {
+            SuiseiWindowLayout.apply(welcome: false, animate: false)
+        }
             }
     }
 }
@@ -634,7 +575,7 @@ struct RecoverySheet: View {
             isPresented: $pendingDiscardAll
         ) {
             Button("Discard All", role: .destructive) {
-                engine.discardAllRecovery()
+        engine.discardAllRecovery()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -734,5 +675,103 @@ struct RecoverySheet: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
+    }
+}
+
+
+/// Show/Hide Navigator · Inspector · Debug Area.
+///
+/// Lives in its own `View` so the observation is on `MenuState`, not on the
+/// engine: these three titles are the only reason the menu needed to know
+/// anything, and they change on command, not on keystroke.
+private var minimapBinding: Binding<Bool> {
+    Binding(
+        get: { UserDefaults.standard.object(forKey: "suisei.minimap") as? Bool ?? true },
+        set: { UserDefaults.standard.set($0, forKey: "suisei.minimap") }
+    )
+}
+
+private struct PanelToggleCommands: View {
+    let engine: EngineBridge
+    @ObservedObject private var menu: MenuState
+
+    init(engine: EngineBridge) {
+        self.engine = engine
+        self.menu = engine.menu
+    }
+
+    var body: some View {
+        // Every panel toggle goes through `animatingPanels`. These used to
+        // flip the flags raw, so a panel glided when its top-bar button was
+        // clicked and snapped when the same action was keyed.
+        Button(menu.facts.navVisible ? "Hide Navigator" : "Show Navigator") {
+            engine.animatingPanels { engine.uiNavVisible.toggle() }
+        }
+        .keyboardShortcut("0", modifiers: .command)
+
+        Button(menu.facts.inspectorVisible ? "Hide Inspector" : "Show Inspector") {
+            engine.animatingPanels { engine.uiInspectorVisible.toggle() }
+        }
+        .keyboardShortcut("0", modifiers: [.command, .option])
+
+        Button(menu.facts.debugVisible ? "Hide Debug Area" : "Show Debug Area") {
+            let next = !engine.uiDebugVisible
+            engine.animatingPanels {
+                withAnimation(.spring(duration: 0.3, bounce: 0.12)) {
+                    engine.setDebugArea(next)
+                }
+            }
+        }
+        .keyboardShortcut("y", modifiers: [.command, .shift])
+
+        Toggle("Minimap", isOn: minimapBinding)
+
+    }
+}
+
+/// Split and layout items, whose enablement follows the pane list.
+private struct SplitCommands: View {
+    let engine: EngineBridge
+    @ObservedObject private var menu: MenuState
+
+    init(engine: EngineBridge) {
+        self.engine = engine
+        self.menu = engine.menu
+    }
+
+    var body: some View {
+        Button("Split Editor Right") {
+            engine.splitEditorRight()
+        }
+        .disabled(menu.facts.paneCount >= 4)
+
+        Button("Split Editor Below") {
+            engine.splitEditorBelow()
+        }
+        .disabled(menu.facts.paneCount >= 4)
+
+        Button("Focus Next Pane") {
+            engine.focusNextPane()
+        }
+        .disabled(!menu.facts.isSplit)
+
+        Button("Close Focused Pane") {
+            engine.closeFocusedPane()
+        }
+        .disabled(!menu.facts.isSplit)
+
+        Divider()
+
+        Button("Save Split as Layout Tab") {
+            engine.foldLayout()
+        }
+        .disabled(!menu.facts.isSplit || menu.facts.hasActiveLayout)
+
+        Button("Unfold Active Layout") {
+            engine.unfoldLayout()
+        }
+        .disabled(!menu.facts.hasActiveLayout)
+
+        Divider()
     }
 }
