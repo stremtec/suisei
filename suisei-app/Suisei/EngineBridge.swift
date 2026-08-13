@@ -1321,11 +1321,16 @@ final class EngineBridge: ObservableObject {
     /// ContentView's entire body — and it happens on a keystroke, twice a
     /// frame's worth of budget, for chrome nobody can read before the burst
     /// ends anyway.
-    private var chromeSettlePending: Bool { chromeSettleWork?.isCancelled == false }
+    private var chromeSettlePending: Bool { chromeSettleWork != nil }
 
     private func scheduleChromeSettle() {
         chromeSettleWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
+            // CLEARED before the refresh, not after and not never: a completed
+            // `DispatchWorkItem` still reports `isCancelled == false`, so a
+            // pending-check that asked it would answer "still typing" forever
+            // and the paint path would stop publishing chrome for good.
+            self?.chromeSettleWork = nil
             self?.refreshChrome()
         }
         chromeSettleWork = work
@@ -1382,8 +1387,8 @@ final class EngineBridge: ObservableObject {
             PerfProbe.measure("  engine_gui_type_char") {
                 suisei_engine_gui_type_char(engine, scalar.value)
             }
-            refreshEditorPaintOnly()
             scheduleChromeSettle()
+            refreshEditorPaintOnly()
         } else {
             dispatchRaw(code: .char_, ch: scalar.value)
         }
@@ -1463,16 +1468,19 @@ final class EngineBridge: ObservableObject {
         if code == .backspace {
             if let engine {
                 suisei_engine_gui_delete_backward(engine)
-                refreshEditorPaintOnly()
+                // Armed BEFORE the paint refresh, which reads it: scheduled
+                // after, the first key of every burst still paid the 30ms
+                // publish and only its successors skipped.
                 scheduleChromeSettle()
+                refreshEditorPaintOnly()
             }
             return true
         }
         if code == .delete {
             if let engine {
                 suisei_engine_gui_delete_forward(engine)
-                refreshEditorPaintOnly()
                 scheduleChromeSettle()
+                refreshEditorPaintOnly()
             }
             return true
         }
@@ -1486,8 +1494,8 @@ final class EngineBridge: ObservableObject {
                     let c = loadCompletions(engine)
                     chrome.completions = c.open ? c : .empty
                 }
-                refreshEditorPaintOnly()
                 scheduleChromeSettle()
+                refreshEditorPaintOnly()
             }
             return true
         }

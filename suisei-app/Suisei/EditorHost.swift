@@ -1131,7 +1131,12 @@ final class EditorCanvasView: NSView {
     /// `colorGen` here is belt-and-braces.
     private func cacheKey(for line: EditorLine) -> UInt64 {
         var h = Hasher()
-        h.combine(line.lineNo)
+        // NOT `line.lineNo`. `attributedLine` reads the text and the spans and
+        // nothing else, so a shaped line does not depend on which row it sits
+        // at — two identical lines render identically. Keying on the row number
+        // meant one Return invalidated every cached line below the caret,
+        // which is precisely the edit that needs the cache most: measured 311
+        // misses against 504 hits while typing.
         h.combine(line.text)
         h.combine(colorGen)
         for s in line.spans {
