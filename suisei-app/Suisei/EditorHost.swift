@@ -82,9 +82,9 @@ struct EditorHost: NSViewRepresentable {
             punctuation: NSColor(theme.color(theme.punctuation)),
             gitChange: .systemBlue,
             gitDelete: .systemRed,
-            removedBg: NSColor.systemBrown.withAlphaComponent(0.20),
-            removedFg: NSColor.secondaryLabelColor,
-            removedEdge: NSColor.systemBrown.withAlphaComponent(0.55),
+            removedBg: NSColor.systemYellow.withAlphaComponent(0.10),
+            removedFg: NSColor(fg).withAlphaComponent(0.82),
+            removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
             breakpoint: .systemYellow,
             breakpointInk: .black
         )
@@ -613,8 +613,9 @@ final class EditorCanvasView: NSView {
         /// text, so it gets its own colour — see `gitColor`.
         var gitDelete: NSColor
         /// The band an expanded change's replaced text is drawn on, its ink,
-        /// and the rule closing it. Warm rather than red: this text is not an
-        /// error, it is history, and it must not read as the live document.
+        /// and the hairline closing it. Warm rather than red: this text is not
+        /// an error, it is history. Faint rather than loud: the live code above
+        /// and below it is still the thing being read.
         var removedBg: NSColor
         var removedFg: NSColor
         var removedEdge: NSColor
@@ -642,9 +643,9 @@ final class EditorCanvasView: NSView {
         property: .systemTeal, constant: .systemOrange, operatorColor: .labelColor,
         punctuation: .secondaryLabelColor, gitChange: .systemBlue,
         gitDelete: .systemRed,
-        removedBg: NSColor.systemBrown.withAlphaComponent(0.20),
-        removedFg: .secondaryLabelColor,
-        removedEdge: NSColor.systemBrown.withAlphaComponent(0.55),
+        removedBg: NSColor.systemYellow.withAlphaComponent(0.10),
+        removedFg: NSColor.labelColor.withAlphaComponent(0.82),
+        removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
         breakpoint: .systemYellow, breakpointInk: .black
     )
 
@@ -2332,9 +2333,12 @@ final class EditorCanvasView: NSView {
 
     /// The lines an expanded change replaced, in the rows made for them.
     ///
-    /// Drawn plainly — no syntax colouring — because this is not the document.
-    /// It is what the document USED to say, and colouring it the same way
-    /// invites reading it as live code.
+    /// Sits on a warm wash and reads as CODE — `fg`, the document's own ink, at
+    /// the document's own x. It was `secondaryLabelColor` with a "−" in the
+    /// gutter and a rule under it, which made a block of dimmed, marked-up text
+    /// that looked like a diff pasted into the editor rather than like the file
+    /// as it used to be. The screenshot has neither: the removed rows simply
+    /// have no line number, and that absence is the marker.
     private func drawShownChange(lineH: CGFloat, font: NSFont, cg: CGContext) {
         guard let e = shownChange else { return }
         let top = CGFloat(e.insertAt) * lineH
@@ -2345,8 +2349,8 @@ final class EditorCanvasView: NSView {
         colors.removedBg.setFill()
         box.fill()
 
-        // A rule where the removed text ends and the surviving text begins, so
-        // the two are not read as one block.
+        // One hairline where the old text ends and the surviving text begins.
+        // Nothing at the top: the code above it is genuinely what precedes it.
         colors.removedEdge.setFill()
         CGRect(x: 0, y: box.maxY - 1, width: bounds.width, height: 1).fill()
 
@@ -2357,19 +2361,11 @@ final class EditorCanvasView: NSView {
         cg.saveGState()
         cg.clip(to: box)
         for (i, text) in e.lines.enumerated() {
-            let y = top + CGFloat(i) * lineH
-            // A "−" in the gutter where the line number would be. These rows
-            // have no number because they have no line.
-            let mark = NSAttributedString(string: "−", attributes: [
-                .font: font, .foregroundColor: colors.removedFg.withAlphaComponent(0.6),
-            ])
-            mark.draw(at: CGPoint(
-                x: EditorMetrics.gutter - EditorMetrics.gutterTextGap - mark.size().width,
-                y: y + (lineH - mark.size().height) / 2
-            ))
-            NSAttributedString(string: text, attributes: attrs).draw(at: CGPoint(
+            let line = NSAttributedString(string: text, attributes: attrs)
+            line.draw(at: CGPoint(
                 x: EditorMetrics.gutter,
-                y: y + (lineH - font.ascender + font.descender) / 2
+                y: top + CGFloat(i) * lineH
+                    + (lineH - font.ascender + font.descender) / 2
             ))
         }
         cg.restoreGState()
