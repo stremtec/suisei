@@ -594,17 +594,34 @@ impl Engine {
         if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::SUPER) {
             return false; // shortcut, not text
         }
+        // Every edit here goes through `editing_with_optimistic_colour`, and
+        // three of them did not.
+        //
+        // The wrapper slides the painted spans to match the edit, so what is on
+        // screen stays coloured until the async parse answers. Without it the
+        // tokens keep the rows and columns they had BEFORE the edit, and the
+        // face draws the ones that no longer match in `colors.fg` — white, in
+        // dark mode. Enter was the loudest, because it renumbers every row
+        // below the caret at once: the reported flash of white on every Return.
         match ev.code {
             KeyCode::Char(c) => {
-                self.app.gui_insert_text(&c.to_string());
+                self.editing_with_optimistic_colour(|e| {
+                    e.app.gui_insert_text(&c.to_string())
+                });
                 self.app.completion_after_typing();
             }
-            KeyCode::Enter => self.app.gui_insert_newline(INDENT),
+            KeyCode::Enter => {
+                self.editing_with_optimistic_colour(|e| {
+                    e.app.gui_insert_newline(INDENT)
+                });
+            }
             KeyCode::Backspace => {
                 self.editing_with_optimistic_colour(|e| e.app.gui_delete_backward());
                 self.app.completion_after_typing();
             }
-            KeyCode::Delete => self.app.gui_delete_forward(),
+            KeyCode::Delete => {
+                self.editing_with_optimistic_colour(|e| e.app.gui_delete_forward());
+            }
             // Tab indents. It used to reach vim's `handle_normal`, where Tab is
             // the jumplist-forward command (`Ctrl+I`) — pressing Tab in the
             // editor jumped somewhere else in the file instead of inserting.

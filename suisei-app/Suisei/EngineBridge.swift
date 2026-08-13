@@ -1308,21 +1308,6 @@ final class EngineBridge: ObservableObject {
     }
 
     /// Coalesced catch-up for everything typing deliberately skipped.
-    /// True while a settle is pending, i.e. while the user is mid-burst.
-    ///
-    /// Read by `refreshEditorPaintOnly` to skip the chrome publish. Measured,
-    /// with the isolation fixed so it releases the old snapshot:
-    ///
-    ///     chrome publish                 mean=30.027ms  max=53.342ms
-    ///     chrome copy+free (no publish)  mean= 0.000ms  max= 0.001ms
-    ///
-    /// The value costs nothing to copy and nothing to free. The whole 30ms is
-    /// `objectWillChange` reaching every observer of this object — which is
-    /// ContentView's entire body — and it happens on a keystroke, twice a
-    /// frame's worth of budget, for chrome nobody can read before the burst
-    /// ends anyway.
-    private var chromeSettlePending: Bool { chromeSettleWork != nil }
-
     private func scheduleChromeSettle() {
         chromeSettleWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -4358,44 +4343,66 @@ final class EngineBridge: ObservableObject {
             if outline != next.outline { next.outline = outline }
         }
 
-        // Mid-burst, DON'T publish. `insertChar` schedules a settle for 0.12s
-        // after the last key, and the pane canvases do not read `chrome` on
-        // this path at all — they get scroll and caret from `editorTick`,
-        // which is a separate store precisely so its publish reaches them and
-        // nothing else. What is left in `chrome` that a keystroke changes is
-        // Ln/Col, the dirty dot and the line count: chrome, in the literal
-        // sense, and 0.12s late is not a thing anyone can see.
+        // Publish only what a keystroke does NOT change.
         //
-        // Without this every keystroke paid 30ms to tell the whole view tree
-        // that the cursor column had changed by one.
+        // Measured: `chrome publish` is 16 ms mean and 57 ms worst, and
+        // `chrome copy+free (no publish)` beside it is 0.001 ms — the entire
+        // cost is `objectWillChange` reaching every observer of this object,
+        // which is ContentView's whole body. Twice a frame's budget to say the
+        // cursor column moved by one.
+        //
+        // The first attempt gated that on "is a settle pending", and the trace
+        // says why that was the wrong shape: a block where every one of
+        // sixteen paint refreshes published anyway. Ten callers reach this
+        // function and most of them schedule no settle, so the guard answered
+        // for the caller rather than for the change.
+        //
+        // Gating on the CHANGE has no such hole. Ln/Col, the caret column, the
+        // line count, the scroll and the buffer version move on every
+        // keystroke and are read by the status line, which the settle
+        // refreshes 0.12s after the last key. Carried over from the current
+        // value, they cannot make `next` differ — so a keystroke that touches
+        // nothing else publishes nothing at all, whoever called.
+        let volatilePerKeystroke = (
+            cursorRow: next.cursorRow, cursorCol: next.cursorCol,
+            caretVCol: next.caretVCol, lineCount: next.lineCount,
+            scroll: next.scroll, pct: next.pct,
+            bufferVersion: next.bufferVersion, dirty: next.dirty
+        )
+        next.cursorRow = chrome.cursorRow
+        next.cursorCol = chrome.cursorCol
+        next.caretVCol = chrome.caretVCol
+        next.lineCount = chrome.lineCount
+        next.scroll = chrome.scroll
+        next.pct = chrome.pct
+        next.bufferVersion = chrome.bufferVersion
+        next.dirty = chrome.dirty
+
         let differs = PerfProbe.measure("  chrome deep compare") { next != chrome }
-        if differs, chromeSettlePending {
-            chromeShadow = next
-        } else if differs {
-            // Splitting the publish, because "chrome publish" measured up to
-            // 12.7 ms on a tab switch and that number has two very different
-            // possible owners with two very different fixes:
+        if differs {
+            // Something real changed, so the volatile fields ride along with
+            // it — they are current and the publish is already being paid for.
+            next.cursorRow = volatilePerKeystroke.cursorRow
+            next.cursorCol = volatilePerKeystroke.cursorCol
+            next.caretVCol = volatilePerKeystroke.caretVCol
+            next.lineCount = volatilePerKeystroke.lineCount
+            next.scroll = volatilePerKeystroke.scroll
+            next.pct = volatilePerKeystroke.pct
+            next.bufferVersion = volatilePerKeystroke.bufferVersion
+            next.dirty = volatilePerKeystroke.dirty
+        }
+        if differs {
+            // Kept from the investigation, because it is what settled which of
+            // two candidates owns the cost. `chromeShadow` holds the previous
+            // snapshot and nothing else does, so assigning to it copies in AND
+            // frees the old one — the identical work, minus the publisher.
             //
-            //   - the VALUE: copying `next` in and releasing the old
-            //     `ChromeSnapshot`'s heap references (every array and String it
-            //     owns). Fix would be to shrink or box the payload.
-            //   - the INVALIDATION: `objectWillChange` reaching every observer
-            //     of `EngineBridge`, i.e. ContentView's whole 5,616-line body.
-            //     Fix would be to subdivide the body into comparable children.
-            //
-            // Isolating the former needs a store that actually RELEASES the
-            // old snapshot, and the first attempt did not: `var scratch =
-            // chrome; scratch = next` leaves `chrome` holding the old value, so
-            // nothing is deallocated and the measurement came out at 0.000 ms
-            // no matter what the payload cost. It ruled out retain/release
-            // traffic and nothing else — the conclusion "whatever is left is
-            // SwiftUI" did not follow from it.
-            //
-            // `chromeShadow` holds the PREVIOUS snapshot and no one else does,
-            // so assigning to it does the identical work `chrome = next` does
-            // — copy in, drop the last reference to the old arrays and strings
-            // — with no publisher attached. What is left in `chrome publish`
-            // after subtracting this one really is SwiftUI.
+            // An earlier version used `var scratch = chrome; scratch = next`,
+            // which leaves `chrome` holding the old value, so nothing is ever
+            // deallocated: it measured 0.000 ms whatever the payload cost, and
+            // "so the rest must be SwiftUI" did not follow from it. With the
+            // release actually happening it still reads 0.001 ms, and the
+            // conclusion finally does.
             if PerfProbe.enabled {
                 PerfProbe.measure("  chrome copy+free (no publish)") {
                     chromeShadow = next
