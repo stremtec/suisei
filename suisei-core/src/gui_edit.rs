@@ -540,20 +540,28 @@ impl App {
             self.completions.deactivate();
             return;
         }
-        let ext = self.file_extension();
-        let symbols = self.symbols_in_scope_at_caret();
+        // Narrow BEFORE walking the scope. `refine` needs no symbol list, and
+        // it is the overwhelmingly common case: once the popup is up, every
+        // further character of the same identifier only narrows it.
+        //
+        // The walk used to run first, unconditionally, and its result was then
+        // thrown away on exactly those keys — an O(file) scan to find the
+        // caret's byte offset plus a full visibility walk, on every identifier
+        // character. Measured at 28.5 ms per key at 20k lines and 181 ms at
+        // 60k, before Swift or paint.
         if self.completions.active {
             self.completions.refine(&prefix);
-            // `refine` only narrows; a fresh activate re-widens when the user
-            // deletes back to a shorter prefix.
-            if !self.completions.active {
-                self.completions
-                    .activate_with(&prefix, ext.as_deref(), &symbols);
+            if self.completions.active {
+                self.request_lsp_completions();
+                return;
             }
-        } else {
-            self.completions
-                .activate_with(&prefix, ext.as_deref(), &symbols);
+            // `refine` only narrows; falling through re-widens, which is what
+            // deleting back to a shorter prefix needs.
         }
+        let ext = self.file_extension();
+        let symbols = self.symbols_in_scope_at_caret();
+        self.completions
+            .activate_with(&prefix, ext.as_deref(), &symbols);
         self.request_lsp_completions();
     }
 

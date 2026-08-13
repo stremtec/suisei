@@ -771,7 +771,11 @@ pub fn visible_at(tree: &Tree, src: &str, byte: usize, lang: ScopeLang) -> Vec<S
     recover_through_error(&mut chain, root, src, byte, lang);
 
     let mut out: Vec<ScopeSymbol> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
+    // A set, not a `Vec` with a linear scan: `out` already carries the order,
+    // so the only thing the list was providing was membership — at O(n) a
+    // lookup, over every symbol in every enclosing scope including the global
+    // one. Quadratic in the count of globals, on the typing path.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let last = chain.len().saturating_sub(1);
     for (depth, scope) in chain.iter().enumerate() {
         let global = depth == last;
@@ -782,7 +786,7 @@ pub fn visible_at(tree: &Tree, src: &str, byte: usize, lang: ScopeLang) -> Vec<S
         // said `method_definition` in their table.
         let methods_here = lang.method_owner_kinds().contains(&scope.kind());
         for (name, kind, ty) in found {
-            if name.is_empty() || seen.iter().any(|s| s == &name) {
+            if name.is_empty() || seen.contains(&name) {
                 continue;
             }
             let kind = if methods_here && kind == SymbolKind::Function {
@@ -790,7 +794,7 @@ pub fn visible_at(tree: &Tree, src: &str, byte: usize, lang: ScopeLang) -> Vec<S
             } else {
                 kind
             };
-            seen.push(name.clone());
+            seen.insert(name.clone());
             out.push(ScopeSymbol {
                 name,
                 kind,
