@@ -33,6 +33,11 @@ pub struct GitHunk {
     /// addition. This is what "Show Change" reveals above the hunk.
     pub removed: Vec<String>,
     pub kind: GitSign,
+    /// This hunk's own slice of the diff, verbatim: the `@@` line and its
+    /// body. Enough to build a one-hunk patch and hand it to `git apply`, so
+    /// staging or discarding one change never has to re-derive what the change
+    /// was — the bytes git produced are the bytes git gets back.
+    pub patch: String,
     /// The change is in the index and not in the working tree's diff against
     /// it — `git add`ed and untouched since.
     ///
@@ -385,6 +390,89 @@ pub fn compute_gutter(path: &str) -> (bool, HashMap<usize, GitSign>, Vec<GitHunk
     (true, signs, hunks)
 }
 
+/// What a gutter action does to one hunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HunkAction {
+    /// Add just this change to the index.
+    Stage,
+    /// Throw this change away, returning those lines to HEAD.
+    Discard,
+}
+
+/// Apply `action` to the hunk covering `row` of `path`.
+///
+/// Built from the hunk's own `patch` — the bytes git produced go straight back
+/// to `git apply`, so neither staging nor discarding has to re-derive what the
+/// change was. Re-deriving it is how a one-hunk stage stages the wrong lines
+/// when an earlier hunk in the same file has shifted them.
+///
+/// Returns the message to show, or an error.
+pub fn apply_hunk(path: &str, row: usize, action: HunkAction) -> Result<String, String> {
+    let abs = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let root = crate::git_ops::find_git_root(Some(&abs))
+        .ok_or_else(|| "Not in a git repository".to_string())?;
+    let rel = abs
+        .strip_prefix(&root)
+        .map_err(|_| "File is outside the repository".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let (_ok, _signs, hunks) = compute_gutter(path);
+    let hunk = hunks
+        .iter()
+        .find(|h| h.contains(row))
+        .ok_or_else(|| "No change on that line".to_string())?;
+
+    if action == HunkAction::Stage && hunk.staged {
+        return Err("Already staged".into());
+    }
+
+    // A minimal patch: the file header git needs to know what it is looking at,
+    // then this hunk alone.
+    let patch = format!(
+        "diff --git a/{rel} b/{rel}\n--- a/{rel}\n+++ b/{rel}\n{}",
+        hunk.patch
+    );
+    let args: &[&str] = match action {
+        // `--cached` touches the index only, leaving the working tree alone —
+        // which is the whole point of staging one hunk out of several.
+        HunkAction::Stage => &["apply", "--cached", "--unidiff-zero", "-"],
+        // `-R` against the working tree puts those lines back as HEAD has them.
+        HunkAction::Discard => &["apply", "-R", "--unidiff-zero", "-"],
+    };
+    run_git_stdin(&root, args, &patch)?;
+    Ok(match action {
+        HunkAction::Stage => "Staged change".into(),
+        HunkAction::Discard => "Discarded change".into(),
+    })
+}
+
+/// `git` with a patch on stdin.
+fn run_git_stdin(root: &Path, args: &[&str], stdin: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "git took no stdin".to_string())?
+        .write_all(stdin.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Err(err.lines().next().unwrap_or("git apply failed").to_string())
+}
+
 /// Do two hunks cover any of the same buffer lines?
 ///
 /// Zero-length hunks (pure deletions) occupy the single line they are marked
@@ -506,20 +594,31 @@ pub fn parse_diff_hunks_full(diff: &str) -> Vec<GitHunk> {
                 len: n,
                 removed: Vec::new(),
                 kind,
+                patch: format!("{line}\n"),
                 // Filled in by `compute_gutter`, which is the only caller with
                 // both diffs to compare.
                 staged: false,
             });
             continue;
         }
-        // Body lines belong to the hunk most recently opened. Only the removed
-        // side is kept: the added side is already in the buffer.
-        if let Some(text) = line.strip_prefix('-') {
-            if line.starts_with("---") {
-                continue;
-            }
+        // Body lines belong to the hunk most recently opened.
+        //
+        // The whole body is kept verbatim for `patch`; `removed` additionally
+        // pulls out the old side, which is what "Show Change" reveals.
+        if line.starts_with("---") || line.starts_with("+++") {
+            continue;
+        }
+        let body = line.starts_with('+')
+            || line.starts_with('-')
+            || line.starts_with(' ')
+            || line.starts_with('\\');
+        if body {
             if let Some(h) = out.last_mut() {
-                h.removed.push(text.to_string());
+                h.patch.push_str(line);
+                h.patch.push('\n');
+                if let Some(text) = line.strip_prefix('-') {
+                    h.removed.push(text.to_string());
+                }
             }
         }
     }
@@ -675,6 +774,66 @@ mod tests {
         assert_eq!(signs.get(&7), Some(&GitSign::Added));
         assert_eq!(signs.get(&8), Some(&GitSign::Added));
         assert!(!signs.values().any(|s| *s == GitSign::Deleted));
+    }
+
+    #[test]
+    fn staging_one_hunk_leaves_the_other_alone() {
+        let Some(dir) = scratch_repo("one-hunk") else { return };
+        let f = dir.join("f.rs");
+        // Two separate changes, far enough apart to be two hunks under -U0.
+        std::fs::write(&f, "A\nb\nc\nd\nE\n").unwrap();
+        let path = f.to_str().unwrap();
+
+        let hunks = compute_gutter(path).2;
+        assert_eq!(hunks.len(), 2, "two hunks: {hunks:?}");
+        assert!(hunks.iter().all(|h| !h.staged));
+
+        // Stage only the first.
+        apply_hunk(path, hunks[0].start, HunkAction::Stage).unwrap();
+
+        let after = compute_gutter(path).2;
+        assert_eq!(after.len(), 2, "still two changes against HEAD");
+        assert!(after[0].staged, "the one asked for is staged");
+        assert!(!after[1].staged, "the other is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discarding_one_hunk_restores_only_its_lines() {
+        let Some(dir) = scratch_repo("discard-hunk") else { return };
+        let f = dir.join("f.rs");
+        std::fs::write(&f, "A\nb\nc\nd\nE\n").unwrap();
+        let path = f.to_str().unwrap();
+
+        let hunks = compute_gutter(path).2;
+        assert_eq!(hunks.len(), 2);
+        // Discard the LAST, so the first's line numbers are unaffected either
+        // way and the test cannot pass by accident.
+        apply_hunk(path, hunks[1].start, HunkAction::Discard).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "A\nb\nc\nd\ne\n",
+            "only the discarded hunk went back to HEAD"
+        );
+        let after = compute_gutter(path).2;
+        assert_eq!(after.len(), 1, "one change left: {after:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staging_an_already_staged_hunk_says_so() {
+        let Some(dir) = scratch_repo("restage") else { return };
+        let f = dir.join("f.rs");
+        std::fs::write(&f, "A\nb\nc\nd\ne\n").unwrap();
+        let path = f.to_str().unwrap();
+        let hunks = compute_gutter(path).2;
+        apply_hunk(path, hunks[0].start, HunkAction::Stage).unwrap();
+        assert!(
+            apply_hunk(path, hunks[0].start, HunkAction::Stage).is_err(),
+            "the menu should not offer to stage it twice"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

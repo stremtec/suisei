@@ -226,6 +226,11 @@ void suisei_engine_split_resize(SuiseiEngine *e, uint32_t pane_a,
                                 uint32_t pane_b, float delta);
 void suisei_engine_toggle_breakpoint_line(SuiseiEngine *ptr, uint32_t line_1based);
 
+/* Stage (stage != 0) or discard the one git change covering a line.
+   Addressed by line, which is what a gutter click has. Returns 0 on success;
+   the message either way is on `chrome`. */
+int32_t suisei_engine_apply_hunk(SuiseiEngine *ptr, uint32_t line_1based, uint8_t stage);
+
 /* ── Minimap overview (downsampled) ────────────────────────────────── */
 #define SUISEI_MINIMAP_MAX 2048
 

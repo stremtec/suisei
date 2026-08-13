@@ -1188,6 +1188,38 @@ impl App {
         self.rebuild_folds();
     }
 
+    /// Stage or discard the change on a line, then re-read the gutter.
+    ///
+    /// The refresh is not left to `poll_git_index`: that watches `.git/index`,
+    /// which a discard never touches, so a discarded hunk would keep its bar
+    /// until something else happened.
+    pub fn apply_gutter_hunk(
+        &mut self,
+        line_1based: u32,
+        action: crate::git::HunkAction,
+    ) -> i32 {
+        let Some(path) = self.filename.clone() else {
+            self.message = "No file".into();
+            return -1;
+        };
+        let row = (line_1based.max(1) - 1) as usize;
+        match crate::git::apply_hunk(&path.display().to_string(), row, action) {
+            Ok(msg) => {
+                self.message = msg;
+                // A discard rewrote the file underneath the buffer.
+                if action == crate::git::HunkAction::Discard {
+                    self.reload_from_disk();
+                }
+                self.refresh_git();
+                0
+            }
+            Err(e) => {
+                self.message = e;
+                -1
+            }
+        }
+    }
+
     /// Notice the index changing underneath us, and re-read the gutter.
     ///
     /// Staging is not something the editor owns. It happens in the SCM panel,

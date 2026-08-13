@@ -2799,6 +2799,22 @@ final class EngineBridge: ObservableObject {
     }
 
     /// Toggle a bookmark/breakpoint on a 1-based line (gutter click).
+    /// Stage or discard the one change covering a line.
+    ///
+    /// Addressed by LINE, not by hunk index — the caller is a gutter click and
+    /// a line is what a click has. An index would be a second name for the
+    /// same change, stale the moment the file is re-diffed.
+    @discardableResult
+    func applyGutterHunk(line1based: UInt32, stage: Bool) -> Bool {
+        guard let engine, line1based > 0 else { return false }
+        let rc = suisei_engine_apply_hunk(engine, line1based, stage ? 1 : 0)
+        // A discard rewrites the file, so the text and not only the gutter has
+        // to come back.
+        refreshChrome()
+        refreshEditorPaintOnly()
+        return rc == 0
+    }
+
     func toggleBreakpointLine(_ line1based: UInt32) {
         guard let engine, line1based > 0 else { return }
         suisei_engine_toggle_breakpoint_line(engine, line1based)

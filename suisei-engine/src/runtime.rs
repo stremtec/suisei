@@ -1829,6 +1829,19 @@ impl Engine {
 
     /// Toggle a breakpoint on a specific 1-based line of the current file
     /// (gutter click — bookmark affordance).
+    /// Stage or discard the change on a line, and repaint.
+    pub fn apply_gutter_hunk(
+        &mut self,
+        line_1based: u32,
+        action: suisei_core::git::HunkAction,
+    ) -> i32 {
+        let rc = self.app.apply_gutter_hunk(line_1based, action);
+        // The bar's fill, the text itself after a discard, and the message all
+        // change here; none of them are on an input path that would repaint.
+        self.shell.dirty = true;
+        rc
+    }
+
     pub fn toggle_breakpoint_line(&mut self, line_1based: u32) {
         if line_1based == 0 {
             return;

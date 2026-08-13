@@ -1986,6 +1986,48 @@ final class EditorCanvasView: NSView {
         return out
     }
 
+    /// The menu a change bar opens.
+    ///
+    /// Built where it is used, through a block-holding target, rather than as a
+    /// bridge with one `@objc` per entry. Held on the view for as long as it
+    /// can be open — a released target silently disables every item.
+    private var hunkMenuTarget: TabStripMenuTarget?
+
+    private func showHunkMenu(
+        _ h: (first: Int, last: Int, staged: Bool, kind: UInt8)
+    ) {
+        guard let engine else { return }
+        let line = UInt32(h.first + 1)
+        let target = TabStripMenuTarget()
+        hunkMenuTarget = target
+
+        // "Show Change" is not here yet. An item that does nothing is worse
+        // than an absent one, and revealing the replaced text needs the
+        // renderer to make room for lines the buffer does not have.
+        var entries: [(String, () -> Void)?] = []
+        if !h.staged {
+            entries.append(("Stage Change", { [weak engine] in
+                engine?.applyGutterHunk(line1based: line, stage: true)
+            }))
+        }
+        entries.append(("Discard Change", { [weak engine] in
+            engine?.applyGutterHunk(line1based: line, stage: false)
+        }))
+
+        let menu = target.menu(entries)
+        // At the bar, under the pointer's row, the way a source-list menu opens
+        // beside the thing it acts on.
+        let lineH = max(1, EditorMetrics.lineHeight)
+        menu.popUp(
+            positioning: nil,
+            at: CGPoint(
+                x: Self.gitBarZone,
+                y: (CGFloat(h.last + 1) * lineH).rounded()
+            ),
+            in: self
+        )
+    }
+
     // MARK: - Breakpoint chip: appearance
 
     /// Rows whose chip is mid-transition, and when it started.
@@ -2347,8 +2389,13 @@ final class EditorCanvasView: NSView {
         // time. The bar's column belongs to the hunk; the line NUMBER belongs
         // to the breakpoint.
         if p.x <= Self.gitBarZone {
-            // Reserved for the hunk menu. Deliberately inert rather than
-            // falling through: falling through is the bug.
+            // The change bar's own column. Deliberately handled here rather
+            // than falling through — falling through is what set a breakpoint
+            // on every press meant for a hunk.
+            let lineH = max(1, EditorMetrics.lineHeight)
+            if let h = hunkExtent(atRow: Int(floor(p.y / lineH))) {
+                showHunkMenu(h)
+            }
             return
         }
         if p.x < EditorMetrics.gutter - EditorMetrics.gutterTextGap * 0.5 {
