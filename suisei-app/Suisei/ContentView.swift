@@ -357,6 +357,26 @@ struct ContentView: View {
     private var viewerPalette: ViewerPalette {
         ViewerPalette(fg: fg, dim: dim, accent: accent, bg: editorBg)
     }
+
+    /// Whether the unsplit island gets a minimap.
+    ///
+    /// The minimap is a picture of a text document's shape. A pane holding a
+    /// shell, an image, a PDF or an audio file has no such shape — and the
+    /// strip was drawn over them regardless, because it lives at the island
+    /// level where it never had to know what the pane was showing. On the
+    /// audio pane it landed straight across the inspector and cut every value
+    /// in half.
+    ///
+    /// The split path never had this: there the minimap hangs off
+    /// `editorSurface`, which only exists in the text branch. This is the same
+    /// condition, said where the island can hear it.
+    private var islandShowsMinimap: Bool {
+        guard minimapEnabled, !engine.editorSplit.isSplit, !engine.preview.open else {
+            return false
+        }
+        // No pane at all is the empty editor, which is still text.
+        return (engine.editorSplit.panes.first?.kind ?? .text) == .text
+    }
     private var gutterFg: Color { isLightTheme ? Color.black.opacity(0.32) : dim.opacity(0.9) }
     /// Xcode-level current-line wash — barely visible, not a gray slab.
     private var cursorLineBg: Color {
@@ -4843,9 +4863,7 @@ struct ContentView: View {
             // Minimap lives at the island level (stable identity — no re-mount
             // with editor pane rebuilds; that was the layer flicker).
             .overlay(alignment: .trailing) {
-                if minimapEnabled, !engine.editorSplit.isSplit,
-                   !engine.preview.open
-                {
+                if islandShowsMinimap {
                     MinimapStrip(
                         engine: engine,
                         accent: accent,
