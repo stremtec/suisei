@@ -1447,6 +1447,17 @@ final class EngineBridge: ObservableObject {
         // able to diverge from IME commits and programmatic insertion. One edit
         // primitive now owns selection replacement, auto-pairs and Unicode.
         suisei_engine_gui_type_char(engine, ch)
+        // Fold the engine's own completion timing into this log. It is the one
+        // cost on the typing path that lives entirely in Rust, so every round
+        // of this investigation has been blind to it — `chrome differs:
+        // completions` reads 0.044 ms and says nothing about the walk that
+        // produced the list.
+        if PerfProbe.enabled {
+            let total = Double(suisei_engine_completion_last_total_us(engine)) / 1000
+            let scope = Double(suisei_engine_completion_last_scope_us(engine)) / 1000
+            if total > 0 { PerfProbe.record("  rust completion", total) }
+            if scope > 0 { PerfProbe.record("    rust scope walk", scope) }
+        }
         // Autocomplete has to keep up WITH typing, not 120ms after it stops.
         // Probe cheaply and pull the popup only while there is one — this is
         // the single piece of chrome the fast path may not defer.

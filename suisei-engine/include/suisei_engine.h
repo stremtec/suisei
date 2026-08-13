@@ -792,6 +792,10 @@ void suisei_engine_save_session(const SuiseiEngine *ptr);
 /* ── Shadow WAL recovery (D0) ──────────────────────────────────────────── */
 
 /* Number of pending crash-recovery entries found on startup. */
+uint32_t suisei_engine_completion_last_total_us(const SuiseiEngine *ptr);
+
+uint32_t suisei_engine_completion_last_scope_us(const SuiseiEngine *ptr);
+
 uint32_t suisei_engine_recovery_count(const SuiseiEngine *ptr);
 /* Get the file path of recovery entry idx. Writes NUL-terminated UTF-8
    into buf (max buf_len bytes). Returns 1 on success, 0 if out of range. */

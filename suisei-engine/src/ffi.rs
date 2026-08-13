@@ -3511,6 +3511,29 @@ pub extern "C" fn suisei_engine_save_session(ptr: *const SuiseiEngine) {
     eng.0.save_session();
 }
 
+/// Microseconds the last completion pass took, and how much of that was the
+/// lexical-visibility walk.
+///
+/// Diagnostic only. The popup was the last thing the user could still feel,
+/// and the Swift side measured its publish at 0.044 ms — so the cost was over
+/// here, unmeasured, and the app's perf log had no way to show a Rust number
+/// beside its own. These two let it.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_completion_last_total_us(ptr: *const SuiseiEngine) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).0.app.completions.last_total_us }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_completion_last_scope_us(ptr: *const SuiseiEngine) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).0.app.completions.last_scope_us }
+}
+
 /// Number of pending crash-recovery entries found on startup.
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_recovery_count(ptr: *const SuiseiEngine) -> u32 {

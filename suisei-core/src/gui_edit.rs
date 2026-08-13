@@ -531,6 +531,12 @@ impl App {
     /// Multi-caret is deliberately excluded: one popup cannot describe several
     /// different prefixes.
     pub fn completion_after_typing(&mut self) {
+        let t0 = std::time::Instant::now();
+        self.completion_after_typing_inner();
+        self.completions.last_total_us = t0.elapsed().as_micros() as u32;
+    }
+
+    fn completion_after_typing_inner(&mut self) {
         if self.sel.len() > 1 {
             self.completions.deactivate();
             return;
@@ -552,6 +558,7 @@ impl App {
         if self.completions.active {
             self.completions.refine(&prefix);
             if self.completions.active {
+                self.completions.last_scope_us = 0;
                 self.request_lsp_completions();
                 return;
             }
@@ -559,7 +566,9 @@ impl App {
             // deleting back to a shorter prefix needs.
         }
         let ext = self.file_extension();
+        let t_scope = std::time::Instant::now();
         let symbols = self.symbols_in_scope_at_caret();
+        self.completions.last_scope_us = t_scope.elapsed().as_micros() as u32;
         self.completions
             .activate_with(&prefix, ext.as_deref(), &symbols);
         self.request_lsp_completions();

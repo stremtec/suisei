@@ -3,6 +3,13 @@ pub struct Completions {
     pub selected: usize,
     pub active: bool,
     pub prefix: String,
+    /// Microseconds the last `completion_after_typing` took, and how much of
+    /// that was the lexical-visibility walk. Read over FFI so the app's perf
+    /// log can show a Rust cost beside its Swift ones — the popup was the one
+    /// remaining thing the user could feel and the Swift side measured it at
+    /// 0.044 ms, which meant the cost was over here and unmeasured.
+    pub last_total_us: u32,
+    pub last_scope_us: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -19,6 +26,8 @@ impl Default for Completions {
             selected: 0,
             active: false,
             prefix: String::new(),
+            last_total_us: 0,
+            last_scope_us: 0,
         }
     }
 }
