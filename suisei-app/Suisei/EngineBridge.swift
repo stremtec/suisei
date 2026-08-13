@@ -667,13 +667,40 @@ enum EditorMetrics {
         return defaultFontSize
     }()
 
+    /// Digits the widest line number in view needs.
+    ///
+    /// The gutter used to be sized for a flat 3.4 digits and then CAPPED at
+    /// 44pt, so a four-digit file had nowhere to put its numbers: the drawing
+    /// clamped them to x=4, on top of the change bar, and the breakpoint chip
+    /// — sized from the same too-small span — cut the third digit off. Both
+    /// reported bugs are that one constant.
+    static var lineNumberDigits: Int = 3 {
+        didSet { lineNumberDigits = max(3, min(9, lineNumberDigits)) }
+    }
+
     static var gutter: CGFloat {
-        // Digits strip stays compact; air gap is gutterTextGap before code (not a wide slab).
-        // At 14pt ≈ 36–40pt total with ~12pt gap.
-        let digitsW = cellWidth * 3.4 + gitStripeWidth + 6
+        // Digits strip stays compact; air gap is gutterTextGap before code (not
+        // a wide slab). The 0.4 is the half-digit of air the numbers sit in.
+        //
+        // NO upper cap. One existed and it is what clipped four-digit files;
+        // the width is derived from what has to fit, so a ceiling on it can
+        // only ever mean "and then do not fit".
+        let digitsW =
+            cellWidth * (CGFloat(lineNumberDigits) + 0.4) + gitStripeWidth + 6
         let total = digitsW + gutterTextGap
         let scaled = (gutterBase + 4) * (fontSize / defaultFontSize)
-        return min(44, max(32, max(total, scaled)))
+        return max(32, max(total, scaled))
+    }
+
+    /// How many digits `count` needs.
+    static func digits(for count: UInt32) -> Int {
+        var n = max(1, count)
+        var d = 0
+        while n > 0 {
+            d += 1
+            n /= 10
+        }
+        return d
     }
 
     /// The editor's monospaced font, cached, and never nil.
@@ -1705,6 +1732,7 @@ final class EngineBridge: ObservableObject {
         next.gen = paint.frameGen
         next.scroll = paint.scroll
         next.lineCount = paint.lineCount
+        EditorMetrics.lineNumberDigits = EditorMetrics.digits(for: paint.lineCount)
         next.lines = paint.lines
         next.split = paint.split
         next.tabs = tabs
@@ -4233,6 +4261,7 @@ final class EngineBridge: ObservableObject {
         next.cursorCol = snap.cursor_col
         next.caretVCol = snap.caret_vcol
         next.lineCount = snap.line_count
+        EditorMetrics.lineNumberDigits = EditorMetrics.digits(for: snap.line_count)
         next.scroll = snap.scroll
         next.pct = snap.pct
         next.bufferVersion = snap.buffer_version
