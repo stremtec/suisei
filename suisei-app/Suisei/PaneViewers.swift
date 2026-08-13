@@ -35,7 +35,11 @@ struct PaneViewer: View {
             Color.clear
         case .audio:
             AudioViewer(path: path, palette: palette)
-        case .image, .pdf, .binary:
+        case .image:
+            ImagePaneViewer(path: path, palette: palette)
+        case .pdf:
+            PDFPaneViewer(path: path, palette: palette)
+        case .binary:
             FilePlaceholderView(path: path, kind: kind, palette: palette)
         }
     }
@@ -48,6 +52,173 @@ struct ViewerPalette: Equatable {
     var dim: Color
     var accent: Color
     var bg: Color
+}
+
+// MARK: - Inspector
+
+struct ViewerInfoRow: Identifiable {
+    var id: String { label }
+    let label: String
+    let value: String
+}
+
+struct ViewerInfoSection: Identifiable {
+    var id: String { title }
+    let title: String
+    let rows: [ViewerInfoRow]
+
+    /// Skips rows with nothing in them, so a caller can list everything it
+    /// might know without guarding each line.
+    init(_ title: String, _ rows: [(String, String?)]) {
+        self.title = title
+        self.rows = rows.compactMap { label, value in
+            guard let value, !value.isEmpty else { return nil }
+            return ViewerInfoRow(label: label, value: value)
+        }
+    }
+}
+
+/// What the file is, listed.
+///
+/// Apple's inspector shape — Preview's Info window, Music's Get Info: a
+/// section title in small dim caps, then rows of a dim left label against a
+/// right-aligned value in the document's ink. No separators, no boxes, no
+/// alternating fill. The alignment does the work a rule would do, and the
+/// panel stays quiet enough to sit beside the content without competing.
+struct ViewerInspector: View {
+    let sections: [ViewerInfoSection]
+    let palette: ViewerPalette
+
+    static let width: CGFloat = 230
+    /// Below this the inspector is dropped rather than squeezed — two columns
+    /// in a narrow split pane give neither one enough room.
+    static let minPaneWidth: CGFloat = 620
+
+    var body: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 18) {
+                ForEach(sections) { section in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(section.title.uppercased())
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .tracking(0.6)
+                            .foregroundStyle(palette.dim.opacity(0.75))
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(section.rows) { row in
+                                if Self.isBlock(row.value) {
+                                    // A credits list or a URL dump does not
+                                    // belong in a right-aligned column — it
+                                    // reads as ragged noise there. Same shape
+                                    // as Get Info's Comments box: the label,
+                                    // then the text under it, full width.
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(row.label)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(palette.dim)
+                                        Text(row.value)
+                                            .font(.system(size: 10.5))
+                                            .foregroundStyle(palette.fg.opacity(0.9))
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .textSelection(.enabled)
+                                    }
+                                    .padding(.top, 2)
+                                } else {
+                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                        Text(row.label)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(palette.dim)
+                                        Spacer(minLength: 6)
+                                        Text(row.value)
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundStyle(palette.fg)
+                                            .multilineTextAlignment(.trailing)
+                                            // Wraps rather than truncates: a
+                                            // long title is exactly what
+                                            // someone opened this panel to read.
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollIndicators(.never)
+    }
+
+    /// Too long or too many lines to sit in the value column.
+    private static func isBlock(_ v: String) -> Bool {
+        v.contains("\n") || v.count > 42
+    }
+}
+
+// MARK: - Shared chrome
+
+/// Preview.app's top strip: what the document is on the left, controls on the
+/// right. One bar for both the image and the PDF surfaces, because in Preview
+/// they are the same bar.
+struct ViewerTopBar<Trailing: View>: View {
+    let title: String
+    let subtitle: String
+    let palette: ViewerPalette
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(palette.fg)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 10))
+                        .foregroundStyle(palette.dim)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 12)
+            trailing
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+    }
+}
+
+/// A plain icon control in the pane's own colours, sized for the top bar.
+struct ViewerIconButton: View {
+    let symbol: String
+    var help: String = ""
+    var active: Bool = false
+    let palette: ViewerPalette
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(active ? palette.accent : palette.fg.opacity(0.85))
+                .frame(width: 24, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(active
+                            ? palette.accent.opacity(0.16)
+                            : palette.fg.opacity(hovering ? 0.10 : 0))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(help)
+    }
 }
 
 // MARK: - The Xcode treatment

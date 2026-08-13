@@ -61,19 +61,7 @@ final class AudioPlayerModel: ObservableObject {
     @Published var format = ""
     /// The inspector's contents. Built once when the file loads; the panel is
     /// a read-only view of a file that is not changing.
-    @Published var sections: [InfoSection] = []
-
-    struct InfoRow: Identifiable {
-        var id: String { label }
-        let label: String
-        let value: String
-    }
-
-    struct InfoSection: Identifiable {
-        var id: String { title }
-        let title: String
-        let rows: [InfoRow]
-    }
+    @Published var sections: [ViewerInfoSection] = []
 
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -344,10 +332,10 @@ final class AudioPlayerModel: ObservableObject {
 
     private static func buildSections(
         _ f: AudioFacts, tags: [String: String], url: URL, duration: Double
-    ) -> [InfoSection] {
-        var out: [InfoSection] = []
+    ) -> [ViewerInfoSection] {
+        var out: [ViewerInfoSection] = []
 
-        var audio: [InfoRow] = []
+        var audio: [ViewerInfoRow] = []
         if !f.codec.isEmpty { audio.append(.init(label: "Codec", value: f.codec)) }
         if duration > 0 {
             audio.append(.init(label: "Duration", value: AudioViewer.clock(duration)))
@@ -366,9 +354,9 @@ final class AudioPlayerModel: ObservableObject {
         if f.bitrate > 0 {
             audio.append(.init(label: "Bit Rate", value: "\(grouped(Int(f.bitrate / 1000))) kbps"))
         }
-        if !audio.isEmpty { out.append(.init(title: "Audio", rows: audio)) }
+        if !audio.isEmpty { out.append(ViewerInfoSection("Audio", audio.map { ($0.label, Optional($0.value)) })) }
 
-        var file: [InfoRow] = []
+        var file: [ViewerInfoRow] = []
         let values = try? url.resourceValues(forKeys: [
             .fileSizeKey, .contentTypeKey, .creationDateKey, .contentModificationDateKey,
         ])
@@ -387,21 +375,21 @@ final class AudioPlayerModel: ObservableObject {
         if let d = values?.contentModificationDate {
             file.append(.init(label: "Modified", value: stamp(d)))
         }
-        if !file.isEmpty { out.append(.init(title: "File", rows: file)) }
+        if !file.isEmpty { out.append(ViewerInfoSection("File", file.map { ($0.label, Optional($0.value)) })) }
 
         // Tags in a fixed order — a dictionary's order is not one, and a panel
         // whose rows move between files is unreadable.
         let order = ["Title", "Artist", "Album", "Album Artist", "Year", "Genre",
                      "Track", "Disc", "Composer", "Encoder", "Comment"]
-        var meta: [InfoRow] = order.compactMap { k in
+        var meta: [ViewerInfoRow] = order.compactMap { k in
             guard let v = tags[k], !v.isEmpty else { return nil }
-            return InfoRow(label: k, value: v)
+            return ViewerInfoRow(label: k, value: v)
         }
         for (k, v) in tags.sorted(by: { $0.key < $1.key })
         where !order.contains(k) && !v.isEmpty {
             meta.append(.init(label: k, value: v))
         }
-        if !meta.isEmpty { out.append(.init(title: "Metadata", rows: meta)) }
+        if !meta.isEmpty { out.append(ViewerInfoSection("Metadata", meta.map { ($0.label, Optional($0.value)) })) }
 
         return out
     }
@@ -587,8 +575,8 @@ struct AudioViewer: View {
 
     /// Below this the inspector is dropped rather than squeezed — a two-column
     /// layout in a narrow split pane gives neither column enough room.
-    private static let inspectorMinWidth: CGFloat = 620
-    private static let inspectorWidth: CGFloat = 230
+    private static let inspectorMinWidth = ViewerInspector.minPaneWidth
+    private static let inspectorWidth = ViewerInspector.width
     private static let minScale: Double = 0.55
     private static let maxScale: Double = 1.85
     /// Points of vertical drag for one unit of scale. Tuned so the whole range
@@ -642,7 +630,7 @@ struct AudioViewer: View {
                     }
                     if showInspector {
                         Divider().overlay(palette.fg.opacity(0.10))
-                        InfoInspector(sections: model.sections, palette: palette)
+                        ViewerInspector(sections: model.sections, palette: palette)
                             .frame(width: Self.inspectorWidth)
                     }
                 }
@@ -969,82 +957,6 @@ private struct VolumeControl: View {
         if volume < 0.34 { return "speaker.wave.1.fill" }
         if volume < 0.67 { return "speaker.wave.2.fill" }
         return "speaker.wave.3.fill"
-    }
-}
-
-// MARK: - Inspector
-
-/// What the file is, listed.
-///
-/// Apple's inspector shape — Preview's Info window, Music's Get Info: a
-/// section title in small dim caps, then rows of a dim left label against a
-/// right-aligned value in the document's ink. No separators, no boxes, no
-/// alternating fill. The alignment does the work a rule would do, and the
-/// panel stays quiet enough to sit beside the artwork without competing.
-private struct InfoInspector: View {
-    let sections: [AudioPlayerModel.InfoSection]
-    let palette: ViewerPalette
-
-    var body: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 18) {
-                ForEach(sections) { section in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(section.title.uppercased())
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .tracking(0.6)
-                            .foregroundStyle(palette.dim.opacity(0.75))
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(section.rows) { row in
-                                if Self.isBlock(row.value) {
-                                    // A credits list or a URL dump does not
-                                    // belong in a right-aligned column — it
-                                    // reads as ragged noise there. Same shape
-                                    // as Get Info's Comments box: the label,
-                                    // then the text under it, full width.
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(row.label)
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(palette.dim)
-                                        Text(row.value)
-                                            .font(.system(size: 10.5))
-                                            .foregroundStyle(palette.fg.opacity(0.9))
-                                            .fixedSize(horizontal: false, vertical: true)
-                                            .textSelection(.enabled)
-                                    }
-                                    .padding(.top, 2)
-                                } else {
-                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                        Text(row.label)
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(palette.dim)
-                                        Spacer(minLength: 6)
-                                        Text(row.value)
-                                            .font(.system(size: 11, weight: .medium))
-                                            .foregroundStyle(palette.fg)
-                                            .multilineTextAlignment(.trailing)
-                                            // Wraps rather than truncates: a
-                                            // long album title is exactly what
-                                            // someone opened this panel to read.
-                                            .fixedSize(horizontal: false, vertical: true)
-                                            .textSelection(.enabled)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .scrollIndicators(.never)
-    }
-
-    /// Too long or too many lines to sit in the value column.
-    private static func isBlock(_ v: String) -> Bool {
-        v.contains("\n") || v.count > 42
     }
 }
 
