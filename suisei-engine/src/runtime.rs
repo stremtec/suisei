@@ -125,6 +125,9 @@ pub struct Engine {
     syntax_applied: u64,
     /// Mirror of the worker's pre-parse cache size (FFI diagnostic).
     syntax_cached: usize,
+    /// The outline is behind the buffer and waiting for a pause to catch up.
+    outline_dirty: bool,
+    outline_built_at: Option<std::time::Instant>,
 }
 
 impl Engine {
@@ -217,6 +220,8 @@ impl Engine {
             syntax_requested: None,
             syntax_applied: 0,
             syntax_cached: 0,
+            outline_dirty: false,
+            outline_built_at: None,
         }
     }
 
@@ -397,14 +402,45 @@ impl Engine {
     fn editing_with_optimistic_colour(&mut self, edit: impl FnOnce(&mut Self)) {
         let before = (self.app.sel.len() == 1).then(|| {
             let at = self.app.sel.primary().head;
-            (at, self.app.buffer.line(at.row).chars().count())
+            (
+                at,
+                self.app.buffer.line(at.row).chars().count(),
+                self.app.buffer.line_count(),
+            )
         });
 
         edit(self);
 
-        let Some((at, before_len)) = before else {
+        let Some((at, before_len, before_lines)) = before else {
             return;
         };
+
+        // A change in LINE COUNT first, because it renumbers every token below
+        // the caret and the column arithmetic underneath assumes those numbers
+        // are still right. Return was not handled at all: the stale colours the
+        // paint path deliberately keeps showing became stale colours on the
+        // wrong rows, which is why highlighting looked like it vanished for a
+        // beat on every Enter.
+        let after_lines = self.app.buffer.line_count();
+        match after_lines.cmp(&before_lines) {
+            std::cmp::Ordering::Greater if after_lines == before_lines + 1 => {
+                self.app.syntax.nudge_for_split(at.row, at.col);
+                return;
+            }
+            std::cmp::Ordering::Less if after_lines + 1 == before_lines => {
+                // Backspace at a line start joins this row onto the one above,
+                // and the caret has already moved there.
+                let head = self.app.sel.primary().head;
+                self.app.syntax.nudge_for_join(head.row, head.col);
+                return;
+            }
+            // A paste or a block delete moves more rows than one nudge can
+            // describe. The worker's next frame is the answer; guessing would
+            // paint confident nonsense until it arrives.
+            std::cmp::Ordering::Greater | std::cmp::Ordering::Less => return,
+            std::cmp::Ordering::Equal => {}
+        }
+
         let after_len = self.app.buffer.line(at.row).chars().count();
         match after_len.cmp(&before_len) {
             std::cmp::Ordering::Greater => {
@@ -773,6 +809,10 @@ impl Engine {
             self.shell.dirty = true;
             need_full = true;
         }
+        if self.poll_outline() {
+            self.shell.dirty = true;
+            need_full = true;
+        }
         // Only recompose when poll actually changes state — not every 50ms while open.
         if self.app.git_wb.open && self.app.git_wb.poll_loading() {
             self.shell.dirty = true;
@@ -1062,17 +1102,66 @@ impl Engine {
             self.git_wb_signature = git_wb_signature;
             self.git_wb_generation = self.git_wb_generation.wrapping_add(1);
         }
-        // Outline: full-buffer scan — skip when only scroll/caret chrome changed.
+        // Outline: a full-buffer scan, and it ran on every version bump — so
+        // every keystroke walked all 5000 lines of a 5000-line file. It is a
+        // PANEL: it has never needed to be correct within one keystroke of the
+        // edit that changed it.
+        //
+        // Marked dirty here and rebuilt on a quiet moment (below, and in the
+        // tick), so a typing burst pays for it once instead of once per key.
+        // A document switch is immediate: that outline is about another file.
         let ver = self.app.buffer.version();
         let path = self.app.filename.clone();
-        if self.outline_cache_ver != ver || self.outline_cache_path != path {
-            self.outline_cache = crate::compositor::build_outline_public(&self.app);
-            self.outline_cache_ver = ver;
+        if self.outline_cache_path != path {
             self.outline_cache_path = path;
+            self.outline_dirty = true;
+            self.rebuild_outline(ver);
+        } else if self.outline_cache_ver != ver {
+            self.outline_dirty = true;
+            self.rebuild_outline_if_settled(ver);
         }
         self.frame_gen = self.frame_gen.saturating_add(1);
         self.last_diff = compose(&self.app, self.frame_gen, &self.outline_cache);
         self.shell.dirty = false;
+    }
+
+    /// How long a typing burst has to pause before the outline is rebuilt.
+    /// Below what anyone notices in a panel; far above one keystroke.
+    const OUTLINE_SETTLE: std::time::Duration = std::time::Duration::from_millis(140);
+
+    fn rebuild_outline(&mut self, ver: u64) {
+        self.outline_cache = crate::compositor::build_outline_public(&self.app);
+        self.outline_cache_ver = ver;
+        self.outline_dirty = false;
+        self.outline_built_at = Some(std::time::Instant::now());
+    }
+
+    fn rebuild_outline_if_settled(&mut self, ver: u64) {
+        let quiet = self
+            .outline_built_at
+            .map(|t| t.elapsed() >= Self::OUTLINE_SETTLE)
+            .unwrap_or(true);
+        if quiet {
+            self.rebuild_outline(ver);
+        }
+    }
+
+    /// Catch up an outline left dirty by a burst that has since stopped.
+    /// Without this the panel would hold the pre-burst scan until the next
+    /// edit happened to arrive after the settle window.
+    fn poll_outline(&mut self) -> bool {
+        if !self.outline_dirty {
+            return false;
+        }
+        let quiet = self
+            .outline_built_at
+            .map(|t| t.elapsed() >= Self::OUTLINE_SETTLE)
+            .unwrap_or(true);
+        if !quiet {
+            return false;
+        }
+        self.rebuild_outline(self.app.buffer.version());
+        true
     }
 
     pub fn running(&self) -> bool {

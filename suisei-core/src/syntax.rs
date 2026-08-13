@@ -412,6 +412,55 @@ impl SyntaxEngine {
         }
     }
 
+    /// A line was SPLIT at `row`/`col`: everything below moves down one row.
+    ///
+    /// The column nudges above cover an edit inside one line, which is every
+    /// keystroke except the one that changes how many lines there are. Return
+    /// was not covered, so after it every token below the caret still named the
+    /// row it used to be on — the stale colours the paint path is designed to
+    /// keep going were suddenly the wrong stale colours, and the file appeared
+    /// to lose its highlighting until the worker's next frame landed.
+    ///
+    /// The split row's own tokens are divided at `col`: what was left of the
+    /// break stays, what was right of it moves to the new row and back to
+    /// column zero.
+    pub fn nudge_for_split(&mut self, row: usize, col: usize) {
+        for t in &mut self.tokens {
+            if t.3 > row {
+                t.3 += 1;
+                continue;
+            }
+            if t.3 != row {
+                continue;
+            }
+            if t.1 >= col {
+                // Wholly after the break: it belongs to the new row.
+                t.1 -= col;
+                t.2 -= col;
+                t.3 += 1;
+            } else if t.2 > col {
+                // Straddles it. Truncate here rather than splitting in two:
+                // this is a one-frame approximation, and the worker's answer
+                // is already on its way.
+                t.2 = col;
+            }
+        }
+    }
+
+    /// Two lines were JOINED — `row + 1` merged onto the end of `row` at `col`.
+    /// The inverse of [`Self::nudge_for_split`], for Backspace at a line start.
+    pub fn nudge_for_join(&mut self, row: usize, col: usize) {
+        for t in &mut self.tokens {
+            if t.3 == row + 1 {
+                t.3 = row;
+                t.1 += col;
+                t.2 += col;
+            } else if t.3 > row + 1 {
+                t.3 -= 1;
+            }
+        }
+    }
+
     /// The same, for a single-line deletion of `chars` ending at `col`.
     ///
     /// Spans that the deletion empties are dropped rather than left as
@@ -768,6 +817,67 @@ fn fingerprint_text(text: &str) -> u64 {
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h
+}
+
+
+#[cfg(test)]
+mod nudge_tests {
+    use super::*;
+    use crate::highlight::TokenKind;
+
+    fn engine_with(tokens: Vec<HlToken>) -> SyntaxEngine {
+        let mut e = SyntaxEngine::new();
+        e.tokens = tokens;
+        e
+    }
+
+    #[test]
+    fn a_split_moves_everything_below_down_one_row() {
+        // (kind, start, end, row)
+        let mut e = engine_with(vec![
+            (TokenKind::Keyword, 0, 3, 5),
+            (TokenKind::Function, 0, 4, 9),
+        ]);
+        e.nudge_for_split(5, 3);
+        assert_eq!(e.tokens[1].3, 10, "the row below followed the new line");
+    }
+
+    #[test]
+    fn a_split_divides_the_row_it_happens_on() {
+        let mut e = engine_with(vec![
+            (TokenKind::Keyword, 0, 3, 5),   // before the break
+            (TokenKind::Function, 6, 9, 5),     // after it
+            (TokenKind::String, 2, 8, 5),    // straddling it
+        ]);
+        e.nudge_for_split(5, 4);
+        assert_eq!(e.tokens[0], (TokenKind::Keyword, 0, 3, 5), "stays put");
+        assert_eq!(
+            e.tokens[1],
+            (TokenKind::Function, 2, 5, 6),
+            "moves to the new row and back to column zero"
+        );
+        assert_eq!(
+            e.tokens[2],
+            (TokenKind::String, 2, 4, 5),
+            "truncated at the break rather than split in two"
+        );
+    }
+
+    #[test]
+    fn a_join_is_the_inverse_of_a_split() {
+        let original = vec![
+            (TokenKind::Keyword, 0, 3, 5),
+            (TokenKind::Function, 6, 9, 5),
+            (TokenKind::Comment, 0, 2, 8),
+        ];
+        let mut e = engine_with(original.clone());
+        e.nudge_for_split(5, 4);
+        e.nudge_for_join(5, 4);
+        assert_eq!(
+            e.tokens, original,
+            "split then join at the same point returns every token"
+        );
+    }
 }
 
 #[cfg(test)]

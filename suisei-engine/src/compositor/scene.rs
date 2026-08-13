@@ -813,6 +813,15 @@ fn build_outline(app: &App) -> Vec<OutlineItemScene> {
     let n = app.buffer.line_count();
     let mut out = Vec::new();
     let max_items = 200usize;
+    // Hoisted. This is a property of the FILE, and it was being recomputed per
+    // line: `Lang::from_ext` is a linear scan of 29 languages, each comparing
+    // against a slice of extensions, so a 5000-line file paid something like a
+    // hundred thousand string comparisons for one answer that never changed.
+    let code_like = suisei_core::lang::Lang::from_ext(&ext)
+        .map(|l| l.scope().is_some())
+        .unwrap_or(false)
+        || matches!(ext.as_str(), "kt" | "kts" | "scala" | "dart" | "zig" | "ex")
+        || ext.is_empty();
     for i in 0..n {
         if out.len() >= max_items {
             break;
@@ -840,17 +849,11 @@ fn build_outline(app: &App) -> Vec<OutlineItemScene> {
         }
         // Code symbols. Gated on the language having lexical declarations at
         // all, rather than on a hand-kept list of sixteen extensions that had
-        // C# , Ruby, PHP, Lua, Scala, Dart, Zig, Haskell and Elixir missing —
+        // C#, Ruby, PHP, Lua, Scala, Dart, Zig, Haskell and Elixir missing —
         // their outline panel was empty while the file highlighted fine. Data
         // and markup languages stay out: `outline_code_line` matches `fn `,
         // `class `, `def ` and friends, which mean nothing in YAML or CSS.
-        let code_like = suisei_core::lang::Lang::from_ext(&ext)
-            .map(|l| l.scope().is_some())
-            .unwrap_or(false);
-        if code_like
-            || matches!(ext.as_str(), "kt" | "kts" | "scala" | "dart" | "zig" | "ex")
-            || ext.is_empty()
-        {
+        if code_like {
             if let Some(item) = outline_code_line(trimmed, i) {
                 out.push(item);
             }
