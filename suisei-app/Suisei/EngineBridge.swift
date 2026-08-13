@@ -2444,7 +2444,15 @@ final class EngineBridge: ObservableObject {
     @discardableResult
     func prewarmFile(_ path: String) -> Bool {
         guard let engine else { return false }
-        return path.withCString { suisei_engine_prewarm_file(engine, $0) != 0 }
+        // Probed because the project indexer calls this on the main actor,
+        // one file every 8 ms, and pauses only for drag-tracking and panel
+        // live-resize — never for typing. Whether that matters depends
+        // entirely on what one prewarm costs, which nothing had measured; if
+        // this row is absent from a trace, the indexer was not running during
+        // it and did not affect the numbers beside it.
+        return PerfProbe.measure("prewarmFile (main thread)") {
+            path.withCString { suisei_engine_prewarm_file(engine, $0) != 0 }
+        }
     }
 
     /// Boot pipeline: warm every language grammar on the syntax worker so the

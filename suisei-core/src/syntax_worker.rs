@@ -54,6 +54,10 @@ pub enum SyntaxFrame {
         window: Range<usize>,
         tokens: Vec<HlToken>,
         active: bool,
+        /// The file's global scope, collected here rather than on the main
+        /// thread. Completion needs it and it costs 8.7 ms at 50k lines; the
+        /// parse that produces it already happened on this thread.
+        globals: Vec<crate::scope::Found>,
         /// The parse itself, handed to the main thread with the tokens.
         ///
         /// Highlighting only ever needed the tokens, so the tree used to stay
@@ -263,9 +267,17 @@ fn worker_loop(
             // The tree is cloned rather than moved: this engine keeps its own
             // for the next incremental reparse.
             let tree = engine.live_tree().map(|(t, _)| t.clone());
+            let globals = match (
+                engine.live_tree(),
+                crate::scope::ScopeLang::from_ext(engine.live_ext()),
+            ) {
+                (Some((t, txt)), Some(lang)) => crate::scope::collect_global_symbols(t, txt, lang),
+                _ => Vec::new(),
+            };
             let _ = out.send(SyntaxFrame::Tokens {
                 tokens: engine.tokens.clone(),
                 active: engine.active,
+                globals,
                 path,
                 version,
                 window,

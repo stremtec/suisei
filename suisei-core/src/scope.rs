@@ -729,6 +729,19 @@ impl ScopeLang {
 ///
 /// Shadowing falls out of the ordering: an inner binding is reached first, and
 /// the outer one with the same name is dropped as a duplicate.
+/// Collect the file's global scope. Runs on the syntax worker, beside the
+/// parse that produced `tree`.
+///
+/// This is the whole cost of completion's scope walk — 8.7 ms on a 50k-line
+/// file, and 8.7 ms whether the caret is nested five deep or sitting at byte
+/// 0. Doing it here means the main thread never does it at all.
+pub fn collect_global_symbols(tree: &Tree, src: &str, lang: ScopeLang) -> Vec<Found> {
+    let mut out = Vec::new();
+    let root = tree.root_node();
+    collect_in_scope(root, src, lang, root, &mut out);
+    out
+}
+
 /// The global scope's symbols, held across calls.
 ///
 /// Measured on a 50k-line, 3,194-symbol Rust file: `visible_at` costs 8.22 ms
@@ -745,8 +758,20 @@ pub struct GlobalScopeCache {
 }
 
 impl GlobalScopeCache {
-    /// Drop the entry, so the next call recollects. For callers that change
-    /// the document without going through a reparse.
+    /// Adopt the list the worker collected alongside a parse.
+    ///
+    /// The first version of this filled itself lazily on the main thread and
+    /// keyed on the tree's identity. That could never hit: completion
+    /// activates on the second character of an identifier, the characters
+    /// before it reparse the file, so every activation lands just after a new
+    /// tree. It measured 34x faster in a test that held the tree still and 0x
+    /// faster in the app. Filling it from the worker removes the question.
+    pub fn adopt(&mut self, symbols: Vec<Found>, tree_gen: u64) {
+        self.tree_gen = tree_gen;
+        self.symbols = Some(symbols);
+    }
+
+    /// Drop the entry, so the next call recollects on the main thread.
     pub fn invalidate(&mut self) {
         self.symbols = None;
     }
@@ -967,7 +992,9 @@ fn prev_char_boundary(src: &str, byte: usize) -> usize {
 }
 
 /// One name a scope declares: identifier, what it is, and its written type.
-type Found = (String, SymbolKind, Option<String>);
+/// One declaration as `collect_in_scope` finds it. Public because the syntax
+/// worker produces these now — see `collect_global_symbols`.
+pub type Found = (String, SymbolKind, Option<String>);
 
 /// Declarations made directly inside `scope`, without entering a nested scope.
 ///

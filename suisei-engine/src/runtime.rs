@@ -1042,6 +1042,7 @@ impl Engine {
                 tree,
                 text,
                 ext,
+                globals,
             } => {
                 let current = self
                     .app
@@ -1054,6 +1055,13 @@ impl Engine {
                         .app
                         .syntax
                         .apply_frame(path, window, tokens, active, tree, text, ext);
+                    // The worker collected the file's global scope beside the
+                    // parse. Adopting it here is the whole point: completion
+                    // now looks the globals up instead of walking for them,
+                    // and the walk was 8.7 ms at 50k lines.
+                    self.app
+                        .scope_cache
+                        .adopt(globals, self.app.syntax.live_tree_gen());
                     self.syntax_applied = version;
                     // Mark the frame dirty only when the tokens actually
                     // changed — an empty answer for an untitled document
