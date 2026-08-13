@@ -1206,10 +1206,22 @@ struct TabStripActions {
 final class TabStripMenuTarget: NSObject {
     private var blocks: [ObjectIdentifier: () -> Void] = [:]
 
-    func item(_ title: String, _ block: @escaping () -> Void) -> NSMenuItem {
+    func item(
+        _ title: String, symbol: String? = nil,
+        key: String = "", modifiers: NSEvent.ModifierFlags = [],
+        _ block: @escaping () -> Void
+    ) -> NSMenuItem {
         let item = NSMenuItem(
-            title: title, action: #selector(fire(_:)), keyEquivalent: ""
+            title: title, action: #selector(fire(_:)), keyEquivalent: key
         )
+        item.keyEquivalentModifierMask = modifiers
+        if let symbol {
+            item.image = NSImage(
+                systemSymbolName: symbol, accessibilityDescription: nil
+            )?.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+            )
+        }
         item.target = self
         blocks[ObjectIdentifier(item)] = block
         return item

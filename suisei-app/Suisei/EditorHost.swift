@@ -1994,36 +1994,44 @@ final class EditorCanvasView: NSView {
     private var hunkMenuTarget: TabStripMenuTarget?
 
     private func showHunkMenu(
-        _ h: (first: Int, last: Int, staged: Bool, kind: UInt8)
+        _ h: (first: Int, last: Int, staged: Bool, kind: UInt8), at p: CGPoint
     ) {
         guard let engine else { return }
         let line = UInt32(h.first + 1)
         let target = TabStripMenuTarget()
         hunkMenuTarget = target
+        let menu = NSMenu()
 
-        // "Show Change" is not here yet. An item that does nothing is worse
-        // than an absent one, and revealing the replaced text needs the
-        // renderer to make room for lines the buffer does not have.
-        var entries: [(String, () -> Void)?] = []
-        if !h.staged {
-            entries.append(("Stage Change", { [weak engine] in
-                engine?.applyGutterHunk(line1based: line, stage: true)
-            }))
+        // Staged and unstaged are opposites, so only one of them is ever an
+        // action: offering both means one of them is always a no-op, and a
+        // menu item that reports "Not staged" is a worse answer than an item
+        // that was not there.
+        if h.staged {
+            menu.addItem(target.item(
+                "Unstage Change", symbol: "minus.circle"
+            ) { [weak engine] in
+                engine?.applyGutterHunk(line1based: line, action: 1)
+            })
+        } else {
+            menu.addItem(target.item(
+                "Stage Change", symbol: "plus.circle"
+            ) { [weak engine] in
+                engine?.applyGutterHunk(line1based: line, action: 0)
+            })
         }
-        entries.append(("Discard Change", { [weak engine] in
-            engine?.applyGutterHunk(line1based: line, stage: false)
-        }))
 
-        let menu = target.menu(entries)
-        // At the bar, under the pointer's row, the way a source-list menu opens
-        // beside the thing it acts on.
-        let lineH = max(1, EditorMetrics.lineHeight)
+        menu.addItem(target.item(
+            "Discard Change", symbol: "arrow.uturn.backward"
+        ) { [weak engine] in
+            engine?.applyGutterHunk(line1based: line, action: 2)
+        })
+
+        // Anchored at the PRESS, the way a source-list menu opens beside the
+        // thing it acts on. It used to open below the hunk's last line, which
+        // for a long change put it a screen away from the pointer.
         menu.popUp(
             positioning: nil,
-            at: CGPoint(
-                x: Self.gitBarZone,
-                y: (CGFloat(h.last + 1) * lineH).rounded()
-            ),
+            at: CGPoint(x: Self.gitBarZone, y: p.y.rounded()),
             in: self
         )
     }
@@ -2394,7 +2402,7 @@ final class EditorCanvasView: NSView {
             // on every press meant for a hunk.
             let lineH = max(1, EditorMetrics.lineHeight)
             if let h = hunkExtent(atRow: Int(floor(p.y / lineH))) {
-                showHunkMenu(h)
+                showHunkMenu(h, at: p)
             }
             return
         }

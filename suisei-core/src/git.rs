@@ -395,6 +395,8 @@ pub fn compute_gutter(path: &str) -> (bool, HashMap<usize, GitSign>, Vec<GitHunk
 pub enum HunkAction {
     /// Add just this change to the index.
     Stage,
+    /// Take just this change back out of the index. The working tree keeps it.
+    Unstage,
     /// Throw this change away, returning those lines to HEAD.
     Discard,
 }
@@ -423,8 +425,10 @@ pub fn apply_hunk(path: &str, row: usize, action: HunkAction) -> Result<String, 
         .find(|h| h.contains(row))
         .ok_or_else(|| "No change on that line".to_string())?;
 
-    if action == HunkAction::Stage && hunk.staged {
-        return Err("Already staged".into());
+    match action {
+        HunkAction::Stage if hunk.staged => return Err("Already staged".into()),
+        HunkAction::Unstage if !hunk.staged => return Err("Not staged".into()),
+        _ => {}
     }
 
     // A minimal patch: the file header git needs to know what it is looking at,
@@ -437,12 +441,16 @@ pub fn apply_hunk(path: &str, row: usize, action: HunkAction) -> Result<String, 
         // `--cached` touches the index only, leaving the working tree alone —
         // which is the whole point of staging one hunk out of several.
         HunkAction::Stage => &["apply", "--cached", "--unidiff-zero", "-"],
+        // The same patch reversed, still index-only: the file keeps the change,
+        // the index forgets it.
+        HunkAction::Unstage => &["apply", "--cached", "-R", "--unidiff-zero", "-"],
         // `-R` against the working tree puts those lines back as HEAD has them.
         HunkAction::Discard => &["apply", "-R", "--unidiff-zero", "-"],
     };
     run_git_stdin(&root, args, &patch)?;
     Ok(match action {
         HunkAction::Stage => "Staged change".into(),
+        HunkAction::Unstage => "Unstaged change".into(),
         HunkAction::Discard => "Discarded change".into(),
     })
 }
@@ -833,6 +841,40 @@ mod tests {
             apply_hunk(path, hunks[0].start, HunkAction::Stage).is_err(),
             "the menu should not offer to stage it twice"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unstaging_a_hunk_keeps_it_in_the_file() {
+        let Some(dir) = scratch_repo("unstage-hunk") else { return };
+        let f = dir.join("f.rs");
+        std::fs::write(&f, "A\nb\nc\nd\ne\n").unwrap();
+        let path = f.to_str().unwrap();
+        let hunks = compute_gutter(path).2;
+        apply_hunk(path, hunks[0].start, HunkAction::Stage).unwrap();
+        assert!(compute_gutter(path).2[0].staged);
+
+        apply_hunk(path, hunks[0].start, HunkAction::Unstage).unwrap();
+
+        let after = compute_gutter(path).2;
+        assert_eq!(after.len(), 1, "the change is still there");
+        assert!(!after[0].staged, "but no longer in the index");
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "A\nb\nc\nd\ne\n",
+            "unstaging does not touch the file — that is what discard is for"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unstaging_something_unstaged_says_so() {
+        let Some(dir) = scratch_repo("unstage-noop") else { return };
+        let f = dir.join("f.rs");
+        std::fs::write(&f, "A\nb\nc\nd\ne\n").unwrap();
+        let path = f.to_str().unwrap();
+        let hunks = compute_gutter(path).2;
+        assert!(apply_hunk(path, hunks[0].start, HunkAction::Unstage).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

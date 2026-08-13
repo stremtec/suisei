@@ -1587,7 +1587,7 @@ pub extern "C" fn suisei_engine_toggle_breakpoint_line(ptr: *mut SuiseiEngine, l
     }
 }
 
-/// Stage or discard the one change covering a line. `stage != 0` stages.
+/// Stage (0), unstage (1) or discard (2) the one change covering a line.
 ///
 /// Addressed by LINE rather than by hunk index: the caller is a click in the
 /// gutter, and a line is what a click has. An index would be a second way to
@@ -1599,15 +1599,16 @@ pub extern "C" fn suisei_engine_toggle_breakpoint_line(ptr: *mut SuiseiEngine, l
 pub extern "C" fn suisei_engine_apply_hunk(
     ptr: *mut SuiseiEngine,
     line_1based: u32,
-    stage: u8,
+    action: u8,
 ) -> i32 {
     if ptr.is_null() {
         return -1;
     }
-    let action = if stage != 0 {
-        suisei_core::git::HunkAction::Stage
-    } else {
-        suisei_core::git::HunkAction::Discard
+    let action = match action {
+        0 => suisei_core::git::HunkAction::Stage,
+        1 => suisei_core::git::HunkAction::Unstage,
+        2 => suisei_core::git::HunkAction::Discard,
+        _ => return -1,
     };
     unsafe { (*ptr).0.apply_gutter_hunk(line_1based, action) }
 }
