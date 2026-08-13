@@ -1072,13 +1072,25 @@ final class EngineBridge: ObservableObject {
     /// out of a config file and stay light on a dark desktop.
     private func pushSystemAppearance() {
         guard let engine else { return }
-        let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+        // `NSApp` is an implicitly-unwrapped `NSApplication!` and stays nil
+        // until AppKit has stood the application up. This object can be built
+        // before that — it crashed on launch, intermittently, when it was —
+        // so retry on the next turn instead of unwrapping into a trap.
+        guard let app = NSApp else {
+            DispatchQueue.main.async { [weak self] in self?.pushSystemAppearance() }
+            return
+        }
+        let match = app.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
         suisei_engine_set_system_appearance(engine, match == .darkAqua ? 1 : 0)
         refreshChrome()
     }
 
     private func observeSystemAppearance() {
-        appearanceObserver = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+        guard let app = NSApp else {
+            DispatchQueue.main.async { [weak self] in self?.observeSystemAppearance() }
+            return
+        }
+        appearanceObserver = app.observe(\.effectiveAppearance) { [weak self] _, _ in
             DispatchQueue.main.async { self?.pushSystemAppearance() }
         }
     }
