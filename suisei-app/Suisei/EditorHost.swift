@@ -1172,6 +1172,7 @@ final class EditorCanvasView: NSView {
         let band = rows(r0, r1)
 
         renderer.beginFrame()
+        syncBreakpointAnimations(band)
         for (r, c) in hunkHoverRects(lineH: lineH) { renderer.addRect(r, c) }
         for (r, c) in gitBars(band, lineH: lineH) { renderer.addRect(r, c) }
         bracketRects.removeAll(keepingCapacity: true)
@@ -1187,16 +1188,18 @@ final class EditorCanvasView: NSView {
             let rowRect = CGRect(x: viewport.minX, y: y, width: viewport.width, height: lineH)
 
             if line.isCursor { renderer.addRect(rowRect, colors.cursorLine) }
-            if line.hasBreakpoint {
+            let bpPhase = breakpointPhase(line)
+            if bpPhase > 0.001 {
                 // Same chip the CoreText path draws, squared off: this
                 // renderer has rects only, and a 4pt radius on a 15pt-wide
                 // chip is the part it can afford to lose.
                 renderer.addRect(
                     Self.breakpointChip(
                         atY: y, lineH: lineH,
-                        numberWidth: gutterNumberWidth(line.lineNo, font: font)
+                        numberWidth: gutterNumberWidth(line.lineNo, font: font),
+                        phase: bpPhase
                     ),
-                    colors.breakpoint
+                    colors.breakpoint.withAlphaComponent(bpPhase)
                 )
             }
 
@@ -1428,6 +1431,7 @@ final class EditorCanvasView: NSView {
             }
         }
 
+        syncBreakpointAnimations(band)
         for (r, c) in hunkHoverRects(lineH: lineH) {
             c.setFill()
             r.fill()
@@ -1453,17 +1457,18 @@ final class EditorCanvasView: NSView {
             PerfProbe.measure("    gutter number") {
                 let ln = gutterLine(
                     line.lineNo, isCursor: line.isCursor, font: font,
-                    onBreakpoint: line.hasBreakpoint
+                    onBreakpoint: breakpointPhase(line) > 0.5
                 )
-                if line.hasBreakpoint {
+                let phase = breakpointPhase(line)
+                if phase > 0.001 {
                     let chip = Self.breakpointChip(
-                        atY: y, lineH: lineH, numberWidth: ln.width
+                        atY: y, lineH: lineH, numberWidth: ln.width, phase: phase
                     )
-                    colors.breakpoint.setFill()
+                    colors.breakpoint.withAlphaComponent(phase).setFill()
                     NSBezierPath(
                         roundedRect: chip,
-                        xRadius: Self.breakpointChipRadius,
-                        yRadius: Self.breakpointChipRadius
+                        xRadius: Self.breakpointChipRadius * phase,
+                        yRadius: Self.breakpointChipRadius * phase
                     ).fill()
                 }
                 cg.saveGState()
@@ -1981,6 +1986,66 @@ final class EditorCanvasView: NSView {
         return out
     }
 
+    // MARK: - Breakpoint chip: appearance
+
+    /// Rows whose chip is mid-transition, and when it started.
+    ///
+    /// Keyed by line number rather than by index, so scrolling does not
+    /// reassign an animation to a different line.
+    private var bpAnim: [UInt32: (start: CFTimeInterval, appearing: Bool)] = [:]
+    /// What the last band said, so a flip can be told from a first sighting.
+    private var bpSeen: [UInt32: Bool] = [:]
+    private var bpAnimTimer: Timer?
+
+    /// Notice chips arriving and leaving in this band.
+    ///
+    /// A row scrolled into view for the first time is NOT an arrival — it was
+    /// already there. Only a row this canvas has seen before and whose state
+    /// flipped gets an animation; otherwise every scroll would replay every
+    /// chip on screen.
+    private func syncBreakpointAnimations<Band: Sequence<EditorLine>>(_ band: Band) {
+        let now = CACurrentMediaTime()
+        var started = false
+        for line in band where !line.isWrapContinuation {
+            let on = line.hasBreakpoint
+            if let was = bpSeen[line.lineNo], was != on {
+                bpAnim[line.lineNo] = (now, on)
+                started = true
+            }
+            bpSeen[line.lineNo] = on
+        }
+        bpAnim = bpAnim.filter { now - $0.value.start < Self.bpAnimDuration }
+        if started { startBreakpointAnimation() }
+    }
+
+    /// 0 = no chip, 1 = fully drawn. Eased, and derived from the clock rather
+    /// than stepped, so a dropped frame costs a frame and not a wrong size.
+    private func breakpointPhase(_ line: EditorLine) -> CGFloat {
+        guard let a = bpAnim[line.lineNo] else {
+            return line.hasBreakpoint ? 1 : 0
+        }
+        let t = min(1, max(0, (CACurrentMediaTime() - a.start) / Self.bpAnimDuration))
+        let eased = CGFloat(1 - pow(1 - t, 3))
+        return a.appearing ? eased : 1 - eased
+    }
+
+    private func startBreakpointAnimation() {
+        guard bpAnimTimer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            self.needsDisplay = true
+            if self.bpAnim.isEmpty {
+                timer.invalidate()
+                self.bpAnimTimer = nil
+                self.needsDisplay = true
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        bpAnimTimer = t
+    }
+
+    static let bpAnimDuration: CFTimeInterval = 0.16
+
     /// The breakpoint chip: a rounded rect wrapping the LINE NUMBER.
     ///
     /// Breakpoints used to be a bookmark glyph at x=4, inside the change bar's
@@ -1989,15 +2054,23 @@ final class EditorCanvasView: NSView {
     /// the bar is pressed for its hunk, the number is pressed for its
     /// breakpoint, and neither can be hit by accident.
     static func breakpointChip(
-        atY y: CGFloat, lineH: CGFloat, numberWidth: CGFloat
+        atY y: CGFloat, lineH: CGFloat, numberWidth: CGFloat,
+        phase: CGFloat = 1
     ) -> CGRect {
         let right = EditorMetrics.gutter - EditorMetrics.gutterTextGap
         let pad = breakpointChipPadding
         let left = max(gitBarZone, right - numberWidth - pad)
         let h = min(lineH - 2, EditorMetrics.lineHeight - 2)
-        return CGRect(
+        let full = CGRect(
             x: left, y: (y + (lineH - h) / 2).rounded(),
             width: max(0, right + pad - left), height: h
+        )
+        guard phase < 1 else { return full }
+        // Grows out of its own centre. A chip that simply appears at full size
+        // reads as a glitch — "너무 뙄 생김".
+        let k = 0.55 + 0.45 * max(0, min(1, phase))
+        return full.insetBy(
+            dx: full.width * (1 - k) / 2, dy: full.height * (1 - k) / 2
         )
     }
 
