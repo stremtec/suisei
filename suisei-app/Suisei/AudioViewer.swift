@@ -33,6 +33,27 @@ final class AudioPlayerModel: ObservableObject {
     @Published var duration: Double = 0
     @Published var elapsed: Double = 0
     @Published var playing = false
+    /// 0…1, this player's own level — not the system's. Persisted, because a
+    /// volume that resets every time a file is opened is not a setting.
+    @Published var volume: Float = AudioPlayerModel.storedVolume {
+        didSet {
+            player?.volume = muted ? 0 : volume
+            UserDefaults.standard.set(Double(volume), forKey: Self.volumeKey)
+        }
+    }
+    @Published var muted = false {
+        didSet { player?.volume = muted ? 0 : volume }
+    }
+
+    private static let volumeKey = "suisei.audio.volume"
+    private static var storedVolume: Float {
+        // `object(forKey:)` first: `float(forKey:)` answers 0 for a key that
+        // was never written, which would open every first session silent.
+        guard let v = UserDefaults.standard.object(forKey: volumeKey) as? Double else {
+            return 1
+        }
+        return Float(min(max(0, v), 1))
+    }
     /// Peak amplitude per horizontal bucket, 0…1. Empty until the scan lands,
     /// and empty forever for a file `AVAudioFile` cannot open — the scrubber
     /// falls back to a plain bar rather than the view failing.
@@ -80,6 +101,7 @@ final class AudioPlayerModel: ObservableObject {
 
         let item = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: item)
+        player.volume = muted ? 0 : volume
         self.player = player
         // 20 Hz. The label only needs a few, but this number also drives the
         // playhead across the waveform, and at 10 Hz that visibly steps.
@@ -580,7 +602,14 @@ struct AudioViewer: View {
                             .frame(width: Self.inspectorWidth)
                     }
                 }
-                transportCard(compact: compact, showFormatLine: !showInspector)
+                transportCard(
+                    compact: compact,
+                    showFormatLine: !showInspector,
+                    // The first thing to go when the card runs out of room:
+                    // the waveform is the control that has to survive, and a
+                    // squeezed slider is worse than no slider.
+                    showVolume: geo.size.width >= 520
+                )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(.horizontal, 24)
@@ -718,7 +747,9 @@ struct AudioViewer: View {
     /// Music docks its transport in a rounded card that floats over the page
     /// rather than a bar welded to the window edge. Same here, and it is also
     /// what makes the waveform read as a control instead of as decoration.
-    private func transportCard(compact: Bool, showFormatLine: Bool) -> some View {
+    private func transportCard(
+        compact: Bool, showFormatLine: Bool, showVolume: Bool
+    ) -> some View {
         VStack(spacing: 8) {
             HStack(spacing: 14) {
                 iconButton("gobackward.10") { model.skip(-10) }
@@ -742,6 +773,14 @@ struct AudioViewer: View {
                     .font(.system(size: 11, weight: .medium).monospacedDigit())
                     .foregroundStyle(palette.dim)
                     .fixedSize()
+                if showVolume {
+                    VolumeControl(
+                        volume: $model.volume,
+                        muted: $model.muted,
+                        palette: palette
+                    )
+                    .fixedSize()
+                }
             }
             if !compact, showFormatLine, !model.format.isEmpty {
                 Text(model.format)
@@ -750,13 +789,17 @@ struct AudioViewer: View {
                     .lineLimit(1)
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            // Music's bar is rounded far past a window's corner — closer to a
+            // capsule that stopped short than to a panel. `.continuous` is
+            // what keeps that much curvature from reading as a circle stuck to
+            // a rectangle.
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(palette.fg.opacity(0.07))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .strokeBorder(palette.fg.opacity(0.09), lineWidth: 1)
                 )
         )
@@ -783,6 +826,79 @@ struct AudioViewer: View {
         guard s.isFinite, s >= 0 else { return "0:00" }
         let t = Int(s.rounded(.down))
         return String(format: "%d:%02d", t / 60, t % 60)
+    }
+}
+
+// MARK: - Volume
+
+/// A speaker that mutes when clicked, and a slim track beside it.
+///
+/// Hand-drawn rather than a SwiftUI `Slider` for the same reason the buttons
+/// are: `Slider` paints itself in the system accent, which is the one colour
+/// on this pane that has nothing to do with the theme the user chose. It also
+/// arrives at a size decided by AppKit, and next to a 3pt waveform that reads
+/// as a piece of a different application.
+///
+/// This is the player's own level, not the system's — turning it down here
+/// does not reach anything else that is making sound.
+private struct VolumeControl: View {
+    @Binding var volume: Float
+    @Binding var muted: Bool
+    let palette: ViewerPalette
+
+    private static let trackWidth: CGFloat = 58
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Button { muted.toggle() } label: {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(muted ? palette.dim : palette.fg)
+                    // A fixed box: the wave glyphs are different widths, and
+                    // without it the track shifts sideways as the level moves.
+                    .frame(width: 15, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(muted ? "음소거 해제" : "음소거")
+
+            GeometryReader { geo in
+                let w = max(1, geo.size.width)
+                let filled = muted ? 0 : CGFloat(volume) * w
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(palette.fg.opacity(0.20))
+                        .frame(height: 3)
+                    Capsule()
+                        .fill(muted ? palette.fg.opacity(0.28) : palette.accent)
+                        .frame(width: filled, height: 3)
+                    Circle()
+                        .fill(muted ? palette.fg.opacity(0.35) : palette.accent)
+                        .frame(width: 8, height: 8)
+                        // Inset by the knob's own radius so it stops at the
+                        // ends of the track instead of hanging off them.
+                        .offset(x: min(max(0, filled - 4), w - 8))
+                }
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0).onChanged { g in
+                        // Dragging is also how you come back from muted —
+                        // otherwise the slider looks live and does nothing.
+                        muted = false
+                        volume = Float(min(max(0, g.location.x / w), 1))
+                    }
+                )
+            }
+            .frame(width: Self.trackWidth, height: 16)
+        }
+    }
+
+    private var symbol: String {
+        if muted || volume <= 0.001 { return "speaker.slash.fill" }
+        if volume < 0.34 { return "speaker.wave.1.fill" }
+        if volume < 0.67 { return "speaker.wave.2.fill" }
+        return "speaker.wave.3.fill"
     }
 }
 
