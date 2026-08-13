@@ -81,7 +81,9 @@ struct EditorHost: NSViewRepresentable {
             operatorColor: NSColor(theme.color(theme.operatorColor)),
             punctuation: NSColor(theme.color(theme.punctuation)),
             gitChange: .systemBlue,
-            gitDelete: .systemRed
+            gitDelete: .systemRed,
+            breakpoint: .systemYellow,
+            breakpointInk: .black
         )
         paletteKey = key
         paletteValue = colors
@@ -594,6 +596,11 @@ final class EditorCanvasView: NSView {
         /// Lines were removed here. The one change with no evidence in the
         /// text, so it gets its own colour — see `gitColor`.
         var gitDelete: NSColor
+        /// The breakpoint chip behind a line number, and the ink that reads on
+        /// it. Yellow because it is a stop, not a change — nothing else in this
+        /// gutter is yellow.
+        var breakpoint: NSColor
+        var breakpointInk: NSColor
     }
 
     weak var engine: EngineBridge?
@@ -612,7 +619,8 @@ final class EditorCanvasView: NSView {
         macroName: .systemPink, namespace: .systemMint, parameter: .labelColor,
         property: .systemTeal, constant: .systemOrange, operatorColor: .labelColor,
         punctuation: .secondaryLabelColor, gitChange: .systemBlue,
-        gitDelete: .systemRed
+        gitDelete: .systemRed,
+        breakpoint: .systemYellow, breakpointInk: .black
     )
 
     var isLiveScrolling = false
@@ -686,7 +694,6 @@ final class EditorCanvasView: NSView {
     /// no data and simply did not draw.
     private var bandEnd: Int = -1
     private var bandRows: [EditorLine] = []
-    private var bookmarkImage: NSImage?
     private lazy var metalRenderer: MetalTextRenderer? = {
         RendererChoice.useMetal ? MetalTextRenderer() : nil
     }()
@@ -931,9 +938,8 @@ final class EditorCanvasView: NSView {
         docLineCount: UInt32
     ) {
         var repaint = false
-        // Per-instance: THIS canvas needs a repaint and a fresh bookmark image.
+        // Per-instance: THIS canvas needs a repaint.
         if !Self.colorsEqual(self.colors, colors) {
-            bookmarkImage = nil
             repaint = true
         }
         // Process-wide: the shared cache turns over once per real theme change,
@@ -1048,19 +1054,28 @@ final class EditorCanvasView: NSView {
     private struct GutterKey: Hashable {
         let number: UInt32
         let isCursor: Bool
+        let onBreakpoint: Bool
         let colorGen: UInt64
     }
     private let gutterCache = LRUCache<GutterKey, (line: CTLine, width: CGFloat)>(capacity: 4000)
 
-    private func gutterLine(_ number: UInt32, isCursor: Bool, font: NSFont)
-        -> (line: CTLine, width: CGFloat)
-    {
-        let key = GutterKey(number: number, isCursor: isCursor, colorGen: colorGen)
+    private func gutterLine(
+        _ number: UInt32, isCursor: Bool, font: NSFont,
+        onBreakpoint: Bool = false
+    ) -> (line: CTLine, width: CGFloat) {
+        let key = GutterKey(
+            number: number, isCursor: isCursor,
+            onBreakpoint: onBreakpoint, colorGen: colorGen
+        )
         if let hit = gutterCache[key] { return hit }
+        // On the chip the number is read against yellow, so it takes the ink
+        // that goes with it rather than the gutter's usual grey.
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: isCursor
-                ? colors.accent.withAlphaComponent(0.92) : colors.gutter,
+            .foregroundColor: onBreakpoint
+                ? colors.breakpointInk
+                : (isCursor
+                    ? colors.accent.withAlphaComponent(0.92) : colors.gutter),
         ]
         let ct = CTLineCreateWithAttributedString(
             NSAttributedString(string: "\(number)", attributes: attrs)
@@ -1069,6 +1084,11 @@ final class EditorCanvasView: NSView {
         let entry = (line: ct, width: width)
         gutterCache[key] = entry
         return entry
+    }
+
+    /// Width of a line number, for placing the breakpoint chip around it.
+    private func gutterNumberWidth(_ number: UInt32, font: NSFont) -> CGFloat {
+        gutterLine(number, isCursor: false, font: font).width
     }
 
     /// Cache identity for one rendered line, as a 64-bit hash.
@@ -1168,9 +1188,15 @@ final class EditorCanvasView: NSView {
 
             if line.isCursor { renderer.addRect(rowRect, colors.cursorLine) }
             if line.hasBreakpoint {
+                // Same chip the CoreText path draws, squared off: this
+                // renderer has rects only, and a 4pt radius on a 15pt-wide
+                // chip is the part it can afford to lose.
                 renderer.addRect(
-                    CGRect(x: 5, y: y + 4, width: 7, height: max(5, lineH - 8)),
-                    colors.accent.withAlphaComponent(0.95)
+                    Self.breakpointChip(
+                        atY: y, lineH: lineH,
+                        numberWidth: gutterNumberWidth(line.lineNo, font: font)
+                    ),
+                    colors.breakpoint
                 )
             }
 
@@ -1423,12 +1449,23 @@ final class EditorCanvasView: NSView {
                 rowRect.fill()
             }
 
-            if line.hasBreakpoint {
-                drawBookmark(at: y, lineH: lineH)
-            }
 
             PerfProbe.measure("    gutter number") {
-                let ln = gutterLine(line.lineNo, isCursor: line.isCursor, font: font)
+                let ln = gutterLine(
+                    line.lineNo, isCursor: line.isCursor, font: font,
+                    onBreakpoint: line.hasBreakpoint
+                )
+                if line.hasBreakpoint {
+                    let chip = Self.breakpointChip(
+                        atY: y, lineH: lineH, numberWidth: ln.width
+                    )
+                    colors.breakpoint.setFill()
+                    NSBezierPath(
+                        roundedRect: chip,
+                        xRadius: Self.breakpointChipRadius,
+                        yRadius: Self.breakpointChipRadius
+                    ).fill()
+                }
                 cg.saveGState()
                 cg.textMatrix = .identity
                 cg.translateBy(
@@ -1691,30 +1728,6 @@ final class EditorCanvasView: NSView {
     }
 
     /// Bookmark-style breakpoint marker in the gutter (SF Symbol, accent tint).
-    private func drawBookmark(at y: CGFloat, lineH: CGFloat) {
-        if bookmarkImage == nil {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
-            bookmarkImage = NSImage(
-                systemSymbolName: "bookmark.fill",
-                accessibilityDescription: "Breakpoint"
-            )?
-            .withSymbolConfiguration(cfg)
-        }
-        guard let img = bookmarkImage else { return }
-        let size = img.size
-        let rect = CGRect(
-            x: 4,
-            y: y + (lineH - size.height) * 0.5,
-            width: size.width,
-            height: size.height
-        )
-        // Tint via template drawing.
-        NSGraphicsContext.current?.saveGraphicsState()
-        colors.accent.set()
-        img.isTemplate = true
-        img.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 0.95)
-        NSGraphicsContext.current?.restoreGraphicsState()
-    }
 
     private func ctLine(for line: EditorLine, font: NSFont) -> CTLine {
         let key = PerfProbe.measure("    cacheKey") { cacheKey(for: line) }
@@ -1967,6 +1980,29 @@ final class EditorCanvasView: NSView {
         }
         return out
     }
+
+    /// The breakpoint chip: a rounded rect wrapping the LINE NUMBER.
+    ///
+    /// Breakpoints used to be a bookmark glyph at x=4, inside the change bar's
+    /// own column — so a click meant for a hunk toggled a breakpoint, and the
+    /// two markers sat on top of each other. They are separate targets now:
+    /// the bar is pressed for its hunk, the number is pressed for its
+    /// breakpoint, and neither can be hit by accident.
+    static func breakpointChip(
+        atY y: CGFloat, lineH: CGFloat, numberWidth: CGFloat
+    ) -> CGRect {
+        let right = EditorMetrics.gutter - EditorMetrics.gutterTextGap
+        let pad = breakpointChipPadding
+        let left = max(gitBarZone, right - numberWidth - pad)
+        let h = min(lineH - 2, EditorMetrics.lineHeight - 2)
+        return CGRect(
+            x: left, y: (y + (lineH - h) / 2).rounded(),
+            width: max(0, right + pad - left), height: h
+        )
+    }
+
+    static let breakpointChipPadding: CGFloat = 4
+    static let breakpointChipRadius: CGFloat = 4
 
     /// Leading inset of the change bar inside the gutter.
     static let gitBarX: CGFloat = 2
@@ -2231,7 +2267,17 @@ final class EditorCanvasView: NSView {
         window?.makeFirstResponder(self)
         guard let engine else { return }
         let p = convert(event.locationInWindow, from: nil)
-        // Gutter click → toggle bookmark/breakpoint on that line.
+        // The gutter has two targets, and they used to be one.
+        //
+        // A press anywhere left of the text toggled a breakpoint, including on
+        // the change bar — so pressing a hunk would have set a breakpoint every
+        // time. The bar's column belongs to the hunk; the line NUMBER belongs
+        // to the breakpoint.
+        if p.x <= Self.gitBarZone {
+            // Reserved for the hunk menu. Deliberately inert rather than
+            // falling through: falling through is the bug.
+            return
+        }
         if p.x < EditorMetrics.gutter - EditorMetrics.gutterTextGap * 0.5 {
             let row = UInt32(max(0, Int(floor(p.y / max(1, EditorMetrics.lineHeight)))))
             engine.toggleBreakpointLine(row + 1)
