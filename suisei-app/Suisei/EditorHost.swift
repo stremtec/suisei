@@ -81,7 +81,8 @@ struct EditorHost: NSViewRepresentable {
             operatorColor: NSColor(theme.color(theme.operatorColor)),
             punctuation: NSColor(theme.color(theme.punctuation)),
             gitChange: .systemBlue,
-            gitDelete: .systemRed
+            gitDelete: .systemRed,
+            gitHoverWash: NSColor.systemBlue.withAlphaComponent(0.13)
         )
         paletteKey = key
         paletteValue = colors
@@ -594,6 +595,10 @@ final class EditorCanvasView: NSView {
         /// Lines were removed here. The one change with no evidence in the
         /// text, so it gets its own colour — see `gitColor`.
         var gitDelete: NSColor
+        /// Wash behind a hovered hunk. Faint: it sits UNDER the text and has to
+        /// say "this whole run is one thing" without competing with a
+        /// selection, which is the other full-width wash on this surface.
+        var gitHoverWash: NSColor
     }
 
     weak var engine: EngineBridge?
@@ -612,7 +617,8 @@ final class EditorCanvasView: NSView {
         macroName: .systemPink, namespace: .systemMint, parameter: .labelColor,
         property: .systemTeal, constant: .systemOrange, operatorColor: .labelColor,
         punctuation: .secondaryLabelColor, gitChange: .systemBlue,
-        gitDelete: .systemRed
+        gitDelete: .systemRed,
+        gitHoverWash: NSColor.systemBlue.withAlphaComponent(0.13)
     )
 
     var isLiveScrolling = false
@@ -1152,6 +1158,9 @@ final class EditorCanvasView: NSView {
         let band = rows(r0, r1)
 
         renderer.beginFrame()
+        if let wash = hunkHoverRect(lineH: lineH) {
+            renderer.addRect(wash, colors.gitHoverWash)
+        }
         for (r, c) in gitBars(band, lineH: lineH) { renderer.addRect(r, c) }
         bracketRects.removeAll(keepingCapacity: true)
         var wrapped: Set<UInt32> = []
@@ -1401,6 +1410,10 @@ final class EditorCanvasView: NSView {
             }
         }
 
+        if let wash = hunkHoverRect(lineH: lineH) {
+            colors.gitHoverWash.setFill()
+            wash.fill()
+        }
         for (r, c) in gitBars(band, lineH: lineH) {
             c.setFill()
             r.fill()
@@ -1829,38 +1842,9 @@ final class EditorCanvasView: NSView {
     /// Rects because that is the only primitive BOTH renderers have. A stroked
     /// path would have to exist twice, once per renderer, and could then
     /// differ; from one rect list they cannot.
-    /// TEMPORARY. The raw `git_sign` byte per changed row.
-    ///
-    /// The core is proven right by test (`staging_flips_the_hunk_without_
-    /// moving_it`) and the draw call is wired, so the question left is what
-    /// this function is actually handed. Logged only when the set changes.
-    nonisolated(unsafe) private static var lastGitDump = ""
-
-    private func dumpGitSigns<Band: Sequence<EditorLine>>(_ band: Band) {
-        var parts: [String] = []
-        for line in band where line.gitSign & 0x3F != 0 {
-            parts.append(String(
-                format: "%d:%02X", Int(line.lineNo), Int(line.gitSign)
-            ))
-        }
-        let now = parts.joined(separator: " ")
-        guard now != Self.lastGitDump else { return }
-        Self.lastGitDump = now
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/suisei-gutter.txt")
-        let line = "signs \(now.isEmpty ? "(none)" : now)\n"
-        guard let d = line.data(using: .utf8) else { return }
-        if let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile(); h.write(d); try? h.close()
-        } else {
-            try? d.write(to: url)
-        }
-    }
-
     private func gitBars<Band: Sequence<EditorLine>>(
         _ band: Band, lineH: CGFloat
     ) -> [(CGRect, NSColor)] {
-        dumpGitSigns(band)
         var out: [(CGRect, NSColor)] = []
         var runStart: CGFloat?
         var runEnd: CGFloat = 0
@@ -2022,6 +2006,110 @@ final class EditorCanvasView: NSView {
         wheelLiveEndWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
         super.scrollWheel(with: event)
+    }
+
+    // MARK: - Gutter change bars: hover
+
+    /// The hunk the pointer is over, in rows, or nil.
+    ///
+    /// Held rather than recomputed at paint time because the wash has to be
+    /// drawn for rows the pointer is NOT on — a hunk is highlighted whole.
+    private var hoveredHunk: (first: Int, last: Int, staged: Bool)?
+
+    /// How far into the gutter a press or a hover belongs to the change bar
+    /// rather than to the breakpoint column behind it.
+    static var gitBarZone: CGFloat {
+        gitBarX + EditorMetrics.gitStripeWidth + 4
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for a in trackingAreas where a.owner === self { removeTrackingArea(a) }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [
+                .activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited,
+                .inVisibleRect,
+            ],
+            owner: self
+        ))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        updateHunkHover(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        setHoveredHunk(nil)
+    }
+
+    private func updateHunkHover(_ p: CGPoint) {
+        guard p.x >= 0, p.x <= Self.gitBarZone else {
+            setHoveredHunk(nil)
+            return
+        }
+        let lineH = max(1, EditorMetrics.lineHeight)
+        setHoveredHunk(hunkExtent(atRow: Int(floor(p.y / lineH))))
+    }
+
+    private func setHoveredHunk(_ next: (first: Int, last: Int, staged: Bool)?) {
+        let same = hoveredHunk?.first == next?.first
+            && hoveredHunk?.last == next?.last
+            && hoveredHunk?.staged == next?.staged
+        guard !same else { return }
+        hoveredHunk = next
+        toolTip = next.map { $0.staged ? "Staged change" : "Unstaged change" }
+        needsDisplay = true
+    }
+
+    /// The rows of the hunk covering `row`, walking outward from it.
+    ///
+    /// Derived from the per-row hunk-boundary bits rather than from a hunk list
+    /// the face keeps its own copy of — the scene already marks each run's
+    /// first and last row, and a second list would be one more thing to hold in
+    /// step with the first.
+    private func hunkExtent(atRow row: Int) -> (first: Int, last: Int, staged: Bool)? {
+        guard row >= 0, row < Int(docLineCount) else { return nil }
+        let here = rows(row, row)
+        guard let line = here.first(where: { Int($0.lineNo) - 1 == row }),
+              line.gitSignKind != 0
+        else { return nil }
+
+        var first = row
+        while first > 0 {
+            let above = rows(first - 1, first - 1)
+            guard let l = above.first(where: { Int($0.lineNo) - 1 == first - 1 }),
+                  l.gitSignKind != 0, !l.gitHunkFirst || first - 1 == row
+            else { break }
+            first -= 1
+            if l.gitHunkFirst { break }
+        }
+        var last = row
+        let maxRow = Int(docLineCount) - 1
+        while last < maxRow {
+            let cur = rows(last, last)
+            if let l = cur.first(where: { Int($0.lineNo) - 1 == last }), l.gitHunkLast {
+                break
+            }
+            let below = rows(last + 1, last + 1)
+            guard let l = below.first(where: { Int($0.lineNo) - 1 == last + 1 }),
+                  l.gitSignKind != 0
+            else { break }
+            last += 1
+        }
+        return (first, last, line.gitHunkStaged)
+    }
+
+    /// The wash behind a hovered hunk: the whole change, not the row under the
+    /// pointer, because the change is what the menu on it will act upon.
+    private func hunkHoverRect(lineH: CGFloat) -> CGRect? {
+        guard let h = hoveredHunk else { return nil }
+        return CGRect(
+            x: 0, y: CGFloat(h.first) * lineH,
+            width: bounds.width, height: CGFloat(h.last - h.first + 1) * lineH
+        )
     }
 
     override func mouseDown(with event: NSEvent) {
