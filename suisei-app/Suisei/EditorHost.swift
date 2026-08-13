@@ -1465,17 +1465,19 @@ final class EditorCanvasView: NSView {
             }
         }
 
-        syncBreakpointAnimations(band)
-        for (r, c) in hunkHoverRects(lineH: lineH) {
-            c.setFill()
-            r.fill()
+        PerfProbe.measure("   draw: gutter decorations") {
+            syncBreakpointAnimations(band)
+            for (r, c) in hunkHoverRects(lineH: lineH) {
+                c.setFill()
+                r.fill()
+            }
+            drawShownChange(lineH: lineH, font: font, cg: cg)
+            for (r, c) in gitBars(band, lineH: lineH) {
+                c.setFill()
+                r.fill()
+            }
         }
-        drawShownChange(lineH: lineH, font: font, cg: cg)
-        for (r, c) in gitBars(band, lineH: lineH) {
-            c.setFill()
-            r.fill()
-        }
-
+        let rowLoopStart = DispatchTime.now().uptimeNanoseconds
         for line in band {
             if line.isWrapContinuation { continue }
             let baseRow = max(0, Int(line.lineNo) - 1)
@@ -1758,6 +1760,10 @@ final class EditorCanvasView: NSView {
             }
             cg.restoreGState()
         }
+        PerfProbe.record(
+            "   draw: row loop",
+            Double(DispatchTime.now().uptimeNanoseconds - rowLoopStart) / 1_000_000
+        )
 
         // Do not draw a full rectangular focus ring around a pane. Split
         // dividers already define its bounds, while the focused pane header

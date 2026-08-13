@@ -4363,12 +4363,24 @@ final class EngineBridge: ObservableObject {
         // refreshes 0.12s after the last key. Carried over from the current
         // value, they cannot make `next` differ — so a keystroke that touches
         // nothing else publishes nothing at all, whoever called.
+        // `gen` is in here because it is a FRAME COUNTER: it differs on every
+        // single pass, so leaving it out defeated the whole comparison — a
+        // trace after the first attempt still showed fifteen of fifteen paint
+        // refreshes publishing.
+        //
+        // `lines` is in here because the canvas does not read it. Lines reach
+        // the pane through `editorLines`, published a few lines above this;
+        // `chrome.lines` is only a fallback for the frame before that store is
+        // populated (`ContentView` line 5237), which the settle fills in.
         let volatilePerKeystroke = (
+            gen: next.gen,
             cursorRow: next.cursorRow, cursorCol: next.cursorCol,
             caretVCol: next.caretVCol, lineCount: next.lineCount,
             scroll: next.scroll, pct: next.pct,
-            bufferVersion: next.bufferVersion, dirty: next.dirty
+            bufferVersion: next.bufferVersion, dirty: next.dirty,
+            lines: next.lines
         )
+        next.gen = chrome.gen
         next.cursorRow = chrome.cursorRow
         next.cursorCol = chrome.cursorCol
         next.caretVCol = chrome.caretVCol
@@ -4377,11 +4389,13 @@ final class EngineBridge: ObservableObject {
         next.pct = chrome.pct
         next.bufferVersion = chrome.bufferVersion
         next.dirty = chrome.dirty
+        next.lines = chrome.lines
 
         let differs = PerfProbe.measure("  chrome deep compare") { next != chrome }
         if differs {
             // Something real changed, so the volatile fields ride along with
             // it — they are current and the publish is already being paid for.
+            next.gen = volatilePerKeystroke.gen
             next.cursorRow = volatilePerKeystroke.cursorRow
             next.cursorCol = volatilePerKeystroke.cursorCol
             next.caretVCol = volatilePerKeystroke.caretVCol
@@ -4390,6 +4404,7 @@ final class EngineBridge: ObservableObject {
             next.pct = volatilePerKeystroke.pct
             next.bufferVersion = volatilePerKeystroke.bufferVersion
             next.dirty = volatilePerKeystroke.dirty
+            next.lines = volatilePerKeystroke.lines
         }
         if differs {
             // Kept from the investigation, because it is what settled which of
