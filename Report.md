@@ -6,19 +6,7 @@ st(selection:)` 대신 페이지 ID를 직접 전달하는 명시적 Button 목�
 | SUI-007 | LSP diagnostic revision을 추가해 같은 개수의 내용 변경과 clear도 Issues snapshot을 갱신 | 실제 rust-analyzer publish |
 | SUI-008 | SCM 행 single-click 선택, double-click 열기, Stage/Unstage context menu 연결 | 실제 행 hit test |
 | SUI-009 | 네이티브 TextField의 cut/copy/paste/select-all/undo/redo를 AppKit responder chain으로 분기 | Project Filter·검색 필드 실사용 |
-| SUI-010 | 검색 Clear가 hit list를 즉시 비우고, generation을 올려 이미 진행 중인 비동기 검색 결과도 폐기하도록 수정 | 검색 중/검색 완료 후 Clear |
-| SUI-011 | pane title을 visible tab-strip index로 역조회하지 않고 Core가 실제 buffer별 title을 별도 snapshot으로 전달하도록 수정 | grouped/unified 왕복에서 각 pane 제목 |
-| SUI-012 | Editor 메뉴에 `Save Split as Layout Tab`과 `Unfold Active Layout`을 추가하고 현재 split/layout 상태에 따라 활성화 | 메뉴·스크롤 제스처 양쪽 왕복 |
-| SUI-013 | Debug Area 최초/추가 session과 editor-pane terminal이 모두 열린 Project root를 cwd로 사용하는 공통 정책으로 통합 | 셸 3개에서 `pwd` |
-| SUI-015 | 디렉터리 열기를 workspace 교체 API로 분리해 clean tab은 새 프로젝트로 교체하고, dirty tab이 있으면 전환을 거부해 데이터 손실을 막음; 개별 파일 열기는 기존 workspace의 새 탭 유지 | clean/dirty 프로젝트 전환 UI |
-| SUI-016 | 최근 하위 파일을 열 때 부모를 즉시 root로 쓰지 않고 `.git`/manifest marker까지 위로 탐색해 workspace root를 복원 | Welcome recent child-file |
-| SUI-017 | Go to File의 walk root를 활성 파일의 parent가 아니라 열린 Project root/manifest root로 통일하고 확장자 필터 없이 README·manifest·JSON을 포함하는 회귀 테스트 추가 | 실제 팔레트 목록·400개 cap |
-| SUI-018 | Settings의 `xei` 표기를 Suisei 이름과 `~/.suisei.toml`로 교체 | Settings 실제 화면 |
-| SUI-019 | Full Workbench 동안 Navigator를 임시 숨기고, 진입 시 compact SCM snapshot을 새 Workbench repository snapshot으로 교체 | SCM→Workbench→SCM 왕복 |
-| SUI-020 | SCM/Workbench가 동일한 `-uall` file 단위 count 정의와 진입 시 동일 snapshot을 사용하며 Workbench badge는 selectable row만 계산 | 실제 50개 이상·staged+unstaged 중복 파일 |
-| SUI-021 | New File/New Folder 생성 직후 Project tree의 동일 row를 inline rename 상태로 전환하고 text field에 focus | toolbar/context menu 양쪽 |
-| SUI-022 | Recovery 성공 시 project root를 복원하고 Welcome scene에 editor 전환 notification을 명시적으로 전달 | 실제 WAL Recover |
-| SUI-023 | 커스텀 두 번째 `View` 메뉴를 `Workspace`로 변경 | 메뉴 바 확인 |
+| SUI-010 orkspace`로 변경 | 메뉴 바 확인 |
 | SUI-024 | Filter Clear 전에 marked-text field의 focus를 해제하고 다음 runloop에 복귀시켜 ghost composition을 제거 | 실제 한글 조합 중 Clear |
 | SUI-025 | Preview immediate-close 시 stale status message를 함께 제거 | Preview 열기/닫기 |
 | SUI-026 | 4-pane에서 pane header와 Editor 메뉴의 Split 명령을 미리 disabled, 단일 pane에서 Focus/Close Pane 비활성화 | 1/4-pane 메뉴 확인 |

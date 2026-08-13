@@ -977,6 +977,7 @@ final class EditorCanvasView: NSView {
         bandRows.removeAll(keepingCapacity: true)
         bandEnd = -1
         overdrawPredatesChange = true
+        closeRevealIfItsChangeIsGone()
         if let sv = scrollView {
             let pad = EditorMetrics.lineHeight * 4
             setNeedsDisplay(sv.documentVisibleRect.insetBy(dx: 0, dy: -pad))
@@ -2409,6 +2410,42 @@ final class EditorCanvasView: NSView {
     /// Rows on screen that no buffer line owns. Read by the scroll view when it
     /// sizes the document, which is the other place row count means height.
     var extraVisualRows: Int { shownChange?.lines.count ?? 0 }
+
+    /// Drop the reveal when the change it describes has stopped existing.
+    ///
+    /// `shownChange` is a claim about the buffer: N rows that HEAD has here and
+    /// this document does not. Discarding that change makes the claim false in
+    /// the worst possible way — HEAD's lines become the buffer's lines, so the
+    /// reveal goes on inserting a phantom copy of text that is now really
+    /// there. The leftover rows are the visible half of it; the other half is
+    /// that `visualY` and `bufferRow(atY:)` stay shifted by N, so every row
+    /// below the discarded change is drawn and clicked N rows out of place.
+    ///
+    /// Closing it from the Discard menu item would have fixed the reported
+    /// case and left the rest: a discard on a hunk ABOVE this one, an edit that
+    /// merges it away, an undo, or a tab switch — after which the reveal would
+    /// show one file's deleted lines inside another. So the check is on the
+    /// claim, not on the actions that can break it.
+    ///
+    /// Verified rather than closed outright, because content advances on every
+    /// keystroke and caret move and nearly all of those leave the change where
+    /// it was. `hunk_at` is a scan of the gutter's own small Vec — no `git`
+    /// process — and this runs only while something is revealed.
+    private func closeRevealIfItsChangeIsGone() {
+        guard let e = shownChange, !revealClosing else { return }
+        let live = engine?.removedTextForHunk(atLine: UInt32(e.insertAt + 1))
+        if live == e.lines.joined(separator: "\n") { return }
+        // No closing animation: the rows it was showing are, in the discard
+        // case, now real rows in the buffer at the same place. Shrinking a
+        // phantom copy of them over the top reads as a glitch, where dropping
+        // it is almost seamless.
+        revealTimer?.invalidate()
+        revealTimer = nil
+        shownChange = nil
+        revealClosing = false
+        scrollView?.refitCanvas()
+        needsDisplay = true
+    }
 
     private func toggleShownChange(
         _ h: (first: Int, last: Int, staged: Bool, kind: UInt8)

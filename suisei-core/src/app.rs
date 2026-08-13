@@ -1287,6 +1287,19 @@ impl App {
                 // A discard rewrote the file underneath the buffer.
                 if action == crate::git::HunkAction::Discard {
                     self.reload_from_disk();
+                    // And it is gone NOW. `refresh_git` is asynchronous, so
+                    // leaving this to it kept the discarded change in the
+                    // gutter for a whole `git diff` — its bar still drawn, and
+                    // "Show Change" still holding the rows it revealed open
+                    // over text that had just become real. Long enough to see
+                    // on any repository big enough to have a slow diff.
+                    //
+                    // Only the discarded hunk: clearing the gutter outright
+                    // would blink every other bar in the file for the same
+                    // interval, to fix a flicker.
+                    self.git.hunks.retain(|h| !h.contains(row));
+                    self.git.signs.clear();
+                    crate::git::signs_from_hunks(&self.git.hunks, &mut self.git.signs);
                 }
                 self.refresh_git();
                 0
