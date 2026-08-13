@@ -607,6 +607,47 @@ struct ThemeSnap: Equatable {
     }
 }
 
+extension ChromeSnapshot {
+    /// Names the first field that moved, for the perf log. The carry-over in
+    /// `refreshEditorPaintOnly` is supposed to leave nothing differing on a
+    /// plain keystroke; when a publish happens anyway this says which field
+    /// let it through. `gen` was the last one caught this way.
+    static func firstDifference(_ a: ChromeSnapshot, _ b: ChromeSnapshot) -> String {
+        if a.gen != b.gen { return "gen" }
+        if a.modeLabel != b.modeLabel { return "modeLabel" }
+        if a.message != b.message { return "message" }
+        if a.filename != b.filename { return "filename" }
+        if a.breadcrumbs != b.breadcrumbs { return "breadcrumbs" }
+        if a.dirty != b.dirty { return "dirty" }
+        if a.welcome != b.welcome { return "welcome" }
+        if a.explorerOpen != b.explorerOpen { return "explorerOpen" }
+        if a.cursorRow != b.cursorRow { return "cursorRow" }
+        if a.cursorCol != b.cursorCol { return "cursorCol" }
+        if a.caretVCol != b.caretVCol { return "caretVCol" }
+        if a.scrollIntent != b.scrollIntent { return "scrollIntent" }
+        if a.lineCount != b.lineCount { return "lineCount" }
+        if a.scroll != b.scroll { return "scroll" }
+        if a.pct != b.pct { return "pct" }
+        if a.bufferVersion != b.bufferVersion { return "bufferVersion" }
+        if a.branch != b.branch { return "branch" }
+        if a.tabs != b.tabs { return "tabs" }
+        if a.tabsOverflow != b.tabsOverflow { return "tabsOverflow" }
+        if a.lines != b.lines { return "lines" }
+        if a.split != b.split { return "split" }
+        if a.explorer != b.explorer { return "explorer" }
+        if a.palette != b.palette { return "palette" }
+        if a.search != b.search { return "search" }
+        if a.completions != b.completions { return "completions" }
+        if a.terminal != b.terminal { return "terminal" }
+        if a.settings != b.settings { return "settings" }
+        if a.theme != b.theme { return "theme" }
+        if a.scm != b.scm { return "scm" }
+        if a.gitWb != b.gitWb { return "gitWb" }
+        if a.outline != b.outline { return "outline" }
+        return "none"
+    }
+}
+
 struct ChromeSnapshot: Equatable {
     var gen: UInt64
     var modeLabel: String
@@ -4492,6 +4533,9 @@ final class EngineBridge: ObservableObject {
             // store-and-release of the snapshot itself.
             if PerfProbe.enabled {
                 PerfProbe.measure("  chrome willChange") { objectWillChange.send() }
+            }
+            if PerfProbe.enabled {
+                PerfProbe.record("  chrome differs: " + ChromeSnapshot.firstDifference(next, chrome), 0)
             }
             PerfProbe.measure("  chrome publish") { chrome = next }
             syncMenu()
