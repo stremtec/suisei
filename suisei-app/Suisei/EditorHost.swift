@@ -80,7 +80,8 @@ struct EditorHost: NSViewRepresentable {
             constant: NSColor(theme.color(theme.constant)),
             operatorColor: NSColor(theme.color(theme.operatorColor)),
             punctuation: NSColor(theme.color(theme.punctuation)),
-            gitChange: .systemBlue
+            gitChange: .systemBlue,
+            gitDelete: .systemRed
         )
         paletteKey = key
         paletteValue = colors
@@ -590,6 +591,9 @@ final class EditorCanvasView: NSView {
         /// this needs to stay the one colour that means "uncommitted", the way
         /// Xcode's does.
         var gitChange: NSColor
+        /// Lines were removed here. The one change with no evidence in the
+        /// text, so it gets its own colour — see `gitColor`.
+        var gitDelete: NSColor
     }
 
     weak var engine: EngineBridge?
@@ -607,7 +611,8 @@ final class EditorCanvasView: NSView {
         number: .systemOrange, typeName: .systemTeal, function: .systemYellow,
         macroName: .systemPink, namespace: .systemMint, parameter: .labelColor,
         property: .systemTeal, constant: .systemOrange, operatorColor: .labelColor,
-        punctuation: .secondaryLabelColor, gitChange: .systemBlue
+        punctuation: .secondaryLabelColor, gitChange: .systemBlue,
+        gitDelete: .systemRed
     )
 
     var isLiveScrolling = false
@@ -1977,14 +1982,21 @@ final class EditorCanvasView: NSView {
     /// Vertical resolution of the rounded ends.
     static let gitBarCapStep: CGFloat = 0.5
 
-    /// Xcode paints ONE colour for "changed since HEAD" rather than sorting
-    /// additions from modifications — the distinction is visible in the text
-    /// itself, and two colours down the gutter read as two kinds of warning.
-    /// Deletions share it: a deletion is a change, not an error, and in red at
-    /// the bar's width it read as a breakpoint.
+    /// Additions and modifications share one colour, as Xcode's do: which of
+    /// the two it is can be read off the text, and two colours down the gutter
+    /// read as two kinds of warning.
+    ///
+    /// A deletion does not share it. Xcode distinguishes that one by SHAPE — a
+    /// small triangle rather than a bar — and this gutter cannot, because a
+    /// deletion is drawn as an ordinary one-line pill here. With the shape
+    /// carrying nothing, colour is the only axis left, and a deletion is the
+    /// one change with no evidence in the text at all: the pill IS the whole
+    /// report. Blue made it indistinguishable from the line above it having
+    /// been added.
     private func gitColor(_ kind: UInt8) -> NSColor {
         switch kind {
-        case 1, 2, 3: return colors.gitChange
+        case 1, 2: return colors.gitChange
+        case 3: return colors.gitDelete
         default: return .clear
         }
     }

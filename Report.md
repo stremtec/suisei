@@ -1,43 +1,7 @@
 # Suisei 대화형 사용성·기능 감사 보고서
 
-- 감사 일자: 2026-07-30
-- 최신 재검증: 2026-08-01
-- 대상: Suisei 0.1.0, 로컬 작업 트리 빌드
-- 기준 커밋: `7e01a47` + 현재 작업 트리 변경분
-- 시험 환경: macOS, 한국어/영어 입력 소스, Rust 프로젝트
-- 시험 방식: 실제 Suisei UI를 Computer Use로 조작하고, 필요한 경우 디스크 내용·`cargo check`·실행 중인 언어 서버 상태를 읽기 전용으로 교차 검증
-- 시험 프로젝트: `/private/tmp/suisei-ui-audit.0FOBuW`
-- 재검증 프로젝트: `/Users/asill/suisei` (별도 임시 fixture는 검증 후 삭제)
-- UI 위치·간격 상세: [`docs/SUISEI-SWISS-GRID-AUDIT.md`](docs/SUISEI-SWISS-GRID-AUDIT.md)
-
-## 1. 결론
-
-Suisei에는 문서에 잘 드러나지 않는 기능이 예상보다 많다. 분할 편집기, 분할 구성을 한 개의 레이아웃 탭으로 접는 기능, 프로젝트 검색·치환, Markdown Pretty Preview, 다중 터미널, Git Workbench, 중단점 패널 등은 이미 실제 UI에 연결되어 있다.
-
 반면 현재 빌드는 일상 편집에 투입하기 전에 반드시 해결해야 할 문제가 있다.
-
-1. 한국어 IME 조합 중 저장하면 화면에 보이는 마지막 조합 음절이 파일에서 누락되는 데이터 손실이 재현된다.
-2. 감사 시작 빌드에서는 메인 창의 트래픽 라이트가 약 20pt 간격으로
-   위아래를 반복 이동했다. 현재 작업 트리에서는 주기적 frame 경쟁을
-   제거하고 48pt 상단 band의 중심선으로 복구했다.
-3. 찾기, 설정, 진단, 소스 제어처럼 핵심 보조 UI 중 일부가 화면에는 존재하지만 정상적으로 조작되지 않는다.
-4. 커스텀 편집기와 네이티브 텍스트 필드 사이의 포커스·단축키 라우팅이 일관되지 않다.
-5. 레이아웃 저장 기능은 동작하지만 거의 발견할 수 없고, 표시 모드를 바꾸면 패널 제목이 깨진다.
-
-현재 기준 우선순위는 `IME 저장 손실 → 트래픽 라이트/창 크롬 → 포커스·찾기 → 진단·설정·SCM → 레이아웃/터미널 사용성` 순서가 적절하다.
-
-### 1.1 수정 진행 상태 — 2026-07-30
-
-아래 항목은 소스 수정과 자동 테스트/패키지 빌드까지 끝난 상태다. 실제
-앱 검증 전에는 “해결 확정”으로 닫지 않는다.
-
-| 이슈 | 코드 상태 | 남은 검증 |
-| --- | --- | --- |
-| SUI-001 | Save/Save As 직전에 marked text를 한 번만 Core에 commit하도록 수정, 한글·일본어·ZWJ 문자열 atomic-save 회귀 테스트 추가 | 실제 한국어 조합 중 `⌘S` |
-| SUI-002 | 20Hz tick, accessory, 표준 버튼/private-container frame 쓰기를 모두 제거. 실제 버튼은 숨기고 native standard-button cell을 쓰는 고정 Auto Layout overlay가 48pt band에서 창 동작을 전달 | 10초 무변화·zoom/restore 왕복 통과 |
-| SUI-003 | Find 표시용 `Text`를 네이티브 `TextField`로 교체하고 조합된 전체 문자열을 Core live-search로 전달 | 실제 한글·일본어 입력 |
-| SUI-004 | Find가 열린 동안 버튼·화살표·`⌘G`가 live query를 cycle하도록 통합하고, Return accept가 선택 중인 match를 유지하도록 수정 | 버튼·키보드 왕복 |
-| SUI-005 | Settings sidebar를 간접 `List(selection:)` 대신 페이지 ID를 직접 전달하는 명시적 Button 목록으로 교체 | 네 페이지 클릭·VoiceOver |
+st(selection:)` 대신 페이지 ID를 직접 전달하는 명시적 Button 목록으로 교체 | 네 페이지 클릭·VoiceOver |
 | SUI-006 | editor/settings window에 고유 AppKit identifier를 부여하고 편집기 traffic-light 보정을 editor identifier에만 한정 | Settings 열기·테마 전환·traffic lights |
 | SUI-007 | LSP diagnostic revision을 추가해 같은 개수의 내용 변경과 clear도 Issues snapshot을 갱신 | 실제 rust-analyzer publish |
 | SUI-008 | SCM 행 single-click 선택, double-click 열기, Stage/Unstage context menu 연결 | 실제 행 hit test |
