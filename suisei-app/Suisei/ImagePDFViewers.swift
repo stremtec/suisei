@@ -39,17 +39,17 @@ struct ImagePaneViewer: View {
         GeometryReader { geo in
             let roomForInspector = geo.size.width >= ViewerInspector.minPaneWidth
             VStack(spacing: 0) {
-                ViewerTopBar(
-                    title: url.lastPathComponent,
-                    subtitle: dimensionLine,
-                    palette: palette
-                ) {
-                    zoomControls
-                    if roomForInspector {
-                        ViewerIconButton(
-                            symbol: "sidebar.right", help: "정보", active: showInspector,
-                            palette: palette
-                        ) { showInspector.toggle() }
+                ViewerTopBar(label: dimensionLine, palette: palette) {
+                    ViewerToolBarGroups {
+                        zoomControls
+                        if roomForInspector {
+                            ViewerToolGroup {
+                                ViewerIconButton(
+                                    symbol: "sidebar.right", help: "정보",
+                                    active: showInspector, palette: palette
+                                ) { showInspector.toggle() }
+                            }
+                        }
                     }
                 }
                 Divider().overlay(palette.fg.opacity(0.10))
@@ -79,8 +79,8 @@ struct ImagePaneViewer: View {
         return "\(Int(pixelSize.width)) × \(Int(pixelSize.height))"
     }
 
-    private var zoomControls: some View {
-        HStack(spacing: 2) {
+    @ViewBuilder private var zoomControls: some View {
+        ViewerToolGroup {
             ViewerIconButton(symbol: "minus.magnifyingglass", help: "축소", palette: palette) {
                 zoom = max(0.05, (zoom ?? liveZoom) / 1.25)
             }
@@ -88,11 +88,13 @@ struct ImagePaneViewer: View {
             // has to say what is actually on screen.
             Text("\(Int((liveZoom * 100).rounded()))%")
                 .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                .foregroundStyle(palette.dim)
-                .frame(width: 42)
+                .foregroundStyle(palette.fg.opacity(0.7))
+                .frame(width: 40)
             ViewerIconButton(symbol: "plus.magnifyingglass", help: "확대", palette: palette) {
                 zoom = min(32, (zoom ?? liveZoom) * 1.25)
             }
+        }
+        ViewerToolGroup {
             ViewerIconButton(
                 symbol: "arrow.up.left.and.arrow.down.right",
                 help: "화면에 맞추기", active: zoom == nil, palette: palette
@@ -210,6 +212,9 @@ private struct ZoomableImage: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = CenteringScrollView()
+        // Before `documentView`: swapping the clip view afterwards re-parents
+        // the document and loses the scroll position.
+        scroll.contentView = CenteringClipView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
@@ -313,9 +318,6 @@ private struct ZoomableImage: NSViewRepresentable {
     }
 }
 
-/// Keeps the document centred when it is smaller than the pane, which is the
-/// normal state for an icon or a thumbnail. A plain `NSScrollView` pins its
-/// document to a corner instead.
 private final class CenteringScrollView: NSScrollView {
     var onMagnify: (() -> Void)?
 
@@ -323,16 +325,31 @@ private final class CenteringScrollView: NSScrollView {
         super.magnify(with: event)
         onMagnify?()
     }
+}
 
-    override func layout() {
-        super.layout()
-        guard let doc = documentView else { return }
-        let visible = contentView.bounds.size
-        let content = doc.frame.size
-        var origin = doc.frame.origin
-        if content.width < visible.width { origin.x = (visible.width - content.width) / 2 }
-        if content.height < visible.height { origin.y = (visible.height - content.height) / 2 }
-        if origin != doc.frame.origin { doc.setFrameOrigin(origin) }
+/// Keeps the document centred when it is smaller than the clip view, which is
+/// the normal state for anything not zoomed past the pane.
+///
+/// The centring has to happen HERE and not by moving the document view's
+/// frame. A scroll view positions its document by the clip view's bounds
+/// origin, and `constrainBoundsRect` is asked for that origin on every scroll,
+/// every magnification and every resize — so a frame nudged into place in
+/// `layout()` is immediately overruled, and the document ends up wherever the
+/// default clamp puts it. In unflipped coordinates that is the bottom, which
+/// is exactly where the image was.
+private final class CenteringClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        guard let doc = documentView else { return rect }
+        // `rect` is already in magnified coordinates; `doc.frame` is not
+        // scaled, and comparing them is what decides "is there slack".
+        if rect.width > doc.frame.width {
+            rect.origin.x = (doc.frame.width - rect.width) / 2
+        }
+        if rect.height > doc.frame.height {
+            rect.origin.y = (doc.frame.height - rect.height) / 2
+        }
+        return rect
     }
 }
 
@@ -380,31 +397,40 @@ struct PDFPaneViewer: View {
             let roomForInspector = geo.size.width >= ViewerInspector.minPaneWidth
             VStack(spacing: 0) {
                 ViewerTopBar(
-                    title: url.lastPathComponent,
-                    subtitle: pageCount > 0 ? "\(page) / \(pageCount) 페이지" : "",
+                    label: pageCount > 0 ? "\(page) / \(pageCount) 페이지" : "",
                     palette: palette
                 ) {
-                    if wide {
-                        ViewerIconButton(
-                            symbol: "sidebar.leading", help: "축소판", active: showThumbnails,
-                            palette: palette
-                        ) { showThumbnails.toggle() }
-                    }
-                    ViewerIconButton(symbol: "minus.magnifyingglass", help: "축소", palette: palette) {
-                        zoomCommand = .out
-                    }
-                    ViewerIconButton(symbol: "plus.magnifyingglass", help: "확대", palette: palette) {
-                        zoomCommand = .in
-                    }
-                    ViewerIconButton(
-                        symbol: "arrow.up.left.and.arrow.down.right", help: "화면에 맞추기",
-                        palette: palette
-                    ) { zoomCommand = .fit }
-                    if roomForInspector {
-                        ViewerIconButton(
-                            symbol: "sidebar.right", help: "정보", active: showInspector,
-                            palette: palette
-                        ) { showInspector.toggle() }
+                    ViewerToolBarGroups {
+                        ViewerToolGroup {
+                            ViewerIconButton(
+                                symbol: "minus.magnifyingglass", help: "축소", palette: palette
+                            ) { zoomCommand = .out }
+                            ViewerIconButton(
+                                symbol: "plus.magnifyingglass", help: "확대", palette: palette
+                            ) { zoomCommand = .in }
+                            ViewerIconButton(
+                                symbol: "arrow.up.left.and.arrow.down.right",
+                                help: "화면에 맞추기", palette: palette
+                            ) { zoomCommand = .fit }
+                        }
+                        // The two panel toggles together, one on each side of
+                        // the document, the way the window's own are.
+                        if wide || roomForInspector {
+                            ViewerToolGroup {
+                                if wide {
+                                    ViewerIconButton(
+                                        symbol: "sidebar.leading", help: "축소판",
+                                        active: showThumbnails, palette: palette
+                                    ) { showThumbnails.toggle() }
+                                }
+                                if roomForInspector {
+                                    ViewerIconButton(
+                                        symbol: "sidebar.right", help: "정보",
+                                        active: showInspector, palette: palette
+                                    ) { showInspector.toggle() }
+                                }
+                            }
+                        }
                     }
                 }
                 Divider().overlay(palette.fg.opacity(0.10))

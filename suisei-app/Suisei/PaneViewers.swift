@@ -163,35 +163,67 @@ struct ViewerInspector: View {
 /// right. One bar for both the image and the PDF surfaces, because in Preview
 /// they are the same bar.
 struct ViewerTopBar<Trailing: View>: View {
-    let title: String
-    let subtitle: String
+    /// What the document IS — `2048 × 1195`, `3 / 7 페이지`. Not its name: the
+    /// breadcrumb directly above already says that, and repeating it made this
+    /// read as a second title bar rather than as a toolbar.
+    let label: String
     let palette: ViewerPalette
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
         HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(palette.fg)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.system(size: 10))
-                        .foregroundStyle(palette.dim)
-                        .lineLimit(1)
-                }
-            }
+            Text(label)
+                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                .foregroundStyle(palette.dim)
+                .lineLimit(1)
             Spacer(minLength: 12)
             trailing
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 }
 
-/// A plain icon control in the pane's own colours, sized for the top bar.
+/// One glass platter holding a run of related controls.
+///
+/// This is the shape the window's own toolbar has, and it is not a style the
+/// app draws — macOS 26 puts a toolbar item inside an `NSGlassEffectView` and
+/// groups a run of them into a single capsule (see `editorToolbar`, measured
+/// at 112×36 for three items). A pane is not a titlebar and cannot have real
+/// toolbar items, so `GlassEffectContainer` plus one `glassEffect` per run is
+/// how the same material and the same grouping get here.
+///
+/// Grouped by what the controls do, the way Preview's toolbar is: zoom in one
+/// platter, the panel toggles in another. A single platter holding everything
+/// would be one long pill that says nothing about which button does what.
+struct ViewerToolGroup<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack(spacing: 1) { content }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 3)
+            .glassEffect(.regular, in: Capsule())
+    }
+}
+
+/// Wraps a bar's worth of platters so the glass blends between them instead of
+/// each one being its own unrelated sheet.
+struct ViewerToolBarGroups<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        GlassEffectContainer(spacing: 10) {
+            HStack(spacing: 8) { content }
+        }
+    }
+}
+
+/// An icon control sized to sit inside a platter.
+///
+/// It draws no background of its own: the platter is the background, and a
+/// second rounded fill inside it is the thing that makes a hand-built bar look
+/// hand-built. Hover is a change in ink, which is what a toolbar item does.
 struct ViewerIconButton: View {
     let symbol: String
     var help: String = ""
@@ -205,19 +237,18 @@ struct ViewerIconButton: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(active ? palette.accent : palette.fg.opacity(0.85))
-                .frame(width: 24, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(active
-                            ? palette.accent.opacity(0.16)
-                            : palette.fg.opacity(hovering ? 0.10 : 0))
-                )
+                .foregroundStyle(ink)
+                .frame(width: 26, height: 21)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(help)
+    }
+
+    private var ink: Color {
+        if active { return palette.accent }
+        return palette.fg.opacity(hovering ? 1 : 0.7)
     }
 }
 
