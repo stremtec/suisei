@@ -978,6 +978,11 @@ final class EngineBridge: ObservableObject {
     /// own rate. The `App` no longer observes the engine at all.
     let menu = MenuState()
 
+    /// The focused viewer pane's toolbar controls. Same reasoning as `menu`:
+    /// a small object with its own publish rate, so the window chrome can
+    /// observe it without observing the typing path.
+    let viewerControls = ViewerControls()
+
     @Published private(set) var editorSplit: SplitSnap = .empty
     /// From Core only (`snap.scroll_frac`). Never a parallel face accumulator.
     @Published private(set) var editorScrollFrac: CGFloat = 0

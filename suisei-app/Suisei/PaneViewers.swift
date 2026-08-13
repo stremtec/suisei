@@ -17,11 +17,10 @@ import UniformTypeIdentifiers
 
 /// Routes a non-text pane to its viewer.
 ///
-/// Every kind currently lands on `FilePlaceholderView`. That is not a stub: it
-/// is the Xcode treatment — the file's real icon, what it is, how big, and the
-/// things you can actually do with it — and it is the correct final answer for
-/// `.binary`. Image, PDF and audio each replace their own branch here as their
-/// surfaces land, and the app is usable at every step in between.
+/// `.binary` lands on `FilePlaceholderView`, which is not a fallback: it is
+/// the Xcode treatment — the file's real icon, what it is, how big, and the
+/// things you can actually do with it — and it is the whole correct answer for
+/// a file with nothing to display.
 struct PaneViewer: View {
     let kind: PaneKind
     let path: String
@@ -52,6 +51,61 @@ struct ViewerPalette: Equatable {
     var dim: Color
     var accent: Color
     var bg: Color
+}
+
+// MARK: - Controls, hoisted to the window's toolbar
+
+/// The focused viewer pane's controls, published where the WINDOW toolbar can
+/// reach them.
+///
+/// A pane cannot have a toolbar. The look the user is after comes from macOS
+/// wrapping a real `NSToolbarItem` in an `NSGlassEffectView` and grouping a
+/// run of them into one platter, and nothing short of being a toolbar item
+/// gets it — `editorToolbar` says exactly that, and it was measured.
+///
+/// So the controls go where they can be toolbar items. This is also where
+/// Preview keeps them: its zoom buttons are in the window's toolbar, not
+/// floating over the page. A hand-drawn bar inside the pane was reproducing
+/// the wrong part of the screenshot.
+///
+/// Only the focused pane fills this in. Two viewer panes in a split have one
+/// toolbar between them, which is the same answer every document app gives.
+///
+/// Not `@MainActor`-annotated, matching `MenuState`: `EngineBridge` builds its
+/// small published objects in a synchronous initialiser, and every write here
+/// comes from a view callback that is already on the main thread.
+final class ViewerControls: ObservableObject {
+    enum Command { case zoomIn, zoomOut, fit, actual }
+
+    /// Nil when nothing that owns these controls is on screen — the toolbar
+    /// items are absent, not disabled.
+    @Published var kind: PaneKind?
+    /// Already rounded, so a pinch only republishes when the number the user
+    /// can read actually changes.
+    @Published var zoomLabel = ""
+    @Published var pageLabel = ""
+    @Published var infoOpen = false
+    @Published var fitted = false
+
+    /// Set by the viewer that currently owns the toolbar. Held as a closure
+    /// rather than as more `@Published` state so a button press does not have
+    /// to round-trip through a value the view then has to notice and clear.
+    var perform: ((Command) -> Void)?
+
+    func claim(_ kind: PaneKind) {
+        if self.kind != kind { self.kind = kind }
+    }
+
+    /// Give the toolbar back. Guarded on the kind so a pane that is going away
+    /// cannot clear the controls of one that has just taken over.
+    func release(_ kind: PaneKind) {
+        guard self.kind == kind else { return }
+        self.kind = nil
+        zoomLabel = ""
+        pageLabel = ""
+        fitted = false
+        perform = nil
+    }
 }
 
 // MARK: - Inspector
@@ -154,101 +208,6 @@ struct ViewerInspector: View {
     /// Too long or too many lines to sit in the value column.
     private static func isBlock(_ v: String) -> Bool {
         v.contains("\n") || v.count > 42
-    }
-}
-
-// MARK: - Shared chrome
-
-/// Preview.app's top strip: what the document is on the left, controls on the
-/// right. One bar for both the image and the PDF surfaces, because in Preview
-/// they are the same bar.
-struct ViewerTopBar<Trailing: View>: View {
-    /// What the document IS — `2048 × 1195`, `3 / 7 페이지`. Not its name: the
-    /// breadcrumb directly above already says that, and repeating it made this
-    /// read as a second title bar rather than as a toolbar.
-    let label: String
-    let palette: ViewerPalette
-    @ViewBuilder var trailing: Trailing
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(label)
-                .font(.system(size: 11, weight: .medium).monospacedDigit())
-                .foregroundStyle(palette.dim)
-                .lineLimit(1)
-            Spacer(minLength: 12)
-            trailing
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-    }
-}
-
-/// One glass platter holding a run of related controls.
-///
-/// This is the shape the window's own toolbar has, and it is not a style the
-/// app draws — macOS 26 puts a toolbar item inside an `NSGlassEffectView` and
-/// groups a run of them into a single capsule (see `editorToolbar`, measured
-/// at 112×36 for three items). A pane is not a titlebar and cannot have real
-/// toolbar items, so `GlassEffectContainer` plus one `glassEffect` per run is
-/// how the same material and the same grouping get here.
-///
-/// Grouped by what the controls do, the way Preview's toolbar is: zoom in one
-/// platter, the panel toggles in another. A single platter holding everything
-/// would be one long pill that says nothing about which button does what.
-struct ViewerToolGroup<Content: View>: View {
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        HStack(spacing: 1) { content }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 3)
-            .glassEffect(.regular, in: Capsule())
-    }
-}
-
-/// Wraps a bar's worth of platters so the glass blends between them instead of
-/// each one being its own unrelated sheet.
-struct ViewerToolBarGroups<Content: View>: View {
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        GlassEffectContainer(spacing: 10) {
-            HStack(spacing: 8) { content }
-        }
-    }
-}
-
-/// An icon control sized to sit inside a platter.
-///
-/// It draws no background of its own: the platter is the background, and a
-/// second rounded fill inside it is the thing that makes a hand-built bar look
-/// hand-built. Hover is a change in ink, which is what a toolbar item does.
-struct ViewerIconButton: View {
-    let symbol: String
-    var help: String = ""
-    var active: Bool = false
-    let palette: ViewerPalette
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(ink)
-                .frame(width: 26, height: 21)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(help)
-    }
-
-    private var ink: Color {
-        if active { return palette.accent }
-        return palette.fg.opacity(hovering ? 1 : 0.7)
     }
 }
 

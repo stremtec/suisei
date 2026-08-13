@@ -46,6 +46,9 @@ private struct GitBranchRow: Identifiable {
 /// Production-oriented xei face: FrameDiff paint only; pointer lifecycle is editor-wide.
 struct ContentView: View {
     @ObservedObject var engine: EngineBridge
+    /// Observed separately from `engine` so the toolbar sees viewer state
+    /// without the viewer state riding on the chrome's publish rate.
+    @ObservedObject var viewerControls = EngineBridge.shared.viewerControls
     @FocusState private var focused: Bool
     @FocusState private var overlayTextInput: OverlayTextInput?
     @Environment(\.openWindow) private var openWindow
@@ -570,6 +573,69 @@ struct ContentView: View {
     /// has: it must be blurable and coverable, which a toolbar item is not.
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
+
+        // The focused viewer pane's controls, when there is one.
+        //
+        // These are here rather than drawn inside the pane because this is the
+        // only place they can be real toolbar items, and being one is the
+        // whole of the look — see the paragraph above about
+        // `NSToolbarPlatterView`. It is also where Preview keeps the same
+        // buttons: its zoom controls are in the window's toolbar, not floating
+        // over the page. `ToolbarItemGroup` puts the run in one platter, which
+        // is the grouping a hand-built bar was imitating.
+        if let kind = viewerControls.kind, kind == .image || kind == .pdf {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    viewerControls.perform?(.zoomOut)
+                } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .help("축소")
+
+                // Not a control — the current magnification, which Preview
+                // also states in its toolbar. Already rounded upstream so a
+                // pinch republishes only when the digits move.
+                if !viewerControls.zoomLabel.isEmpty {
+                    Text(viewerControls.zoomLabel)
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 38)
+                }
+
+                Button {
+                    viewerControls.perform?(.zoomIn)
+                } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .help("확대")
+
+                Button {
+                    viewerControls.perform?(viewerControls.fitted ? .actual : .fit)
+                } label: {
+                    Image(systemName: viewerControls.fitted
+                        ? "1.magnifyingglass"
+                        : "arrow.up.left.and.arrow.down.right")
+                }
+                .help(viewerControls.fitted ? "실제 크기" : "화면에 맞추기")
+            }
+
+            if !viewerControls.pageLabel.isEmpty {
+                ToolbarItem(placement: .primaryAction) {
+                    Text(viewerControls.pageLabel)
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    viewerControls.infoOpen.toggle()
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .help("정보")
+            }
+        }
 
         // Nothing here places these at the trailing edge, and nothing needs to.
         // `.navigationTitle("")` on the split view does it, by keeping the

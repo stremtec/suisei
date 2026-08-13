@@ -1,10 +1,10 @@
 //  ImagePDFViewers.swift
 //  Images and PDFs in a pane, shaped like Preview.app.
 //
-//  From Preview: the document on a neutral backdrop rather than on the app's
-//  own background, a top strip naming what it is with the controls at the far
-//  right, page thumbnails down the left of a PDF, and zoom that lands on
-//  round numbers.
+//  From Preview: the document alone on the pane, page thumbnails down the left
+//  of a PDF, transparency as a checkerboard, and the zoom controls in the
+//  WINDOW's toolbar rather than in a bar of our own — that last one being the
+//  part a hand-drawn bar kept getting wrong. See `ViewerControls`.
 //
 //  Neither surface is drawn by hand. A PDF is `PDFView` and `PDFThumbnailView`,
 //  which is what Preview itself uses; an image is `NSImageView` inside a
@@ -31,78 +31,67 @@ struct ImagePaneViewer: View {
     /// picking it as the pane resizes. A number means the user chose.
     @State private var zoom: CGFloat?
     @State private var liveZoom: CGFloat = 1
-    @State private var showInspector = true
+
+    @ObservedObject private var controls = EngineBridge.shared.viewerControls
 
     private var url: URL { URL(fileURLWithPath: path) }
 
+    /// Nothing but the picture, on the editor's own background.
+    ///
+    /// The controls are in the window's toolbar (`ViewerControls`), which is
+    /// where Preview keeps them and the only place they can be real toolbar
+    /// items. What is left here is what the screenshot actually shows: the
+    /// image, centred, with nothing drawn around it.
     var body: some View {
         GeometryReader { geo in
             let roomForInspector = geo.size.width >= ViewerInspector.minPaneWidth
-            VStack(spacing: 0) {
-                ViewerTopBar(label: dimensionLine, palette: palette) {
-                    ViewerToolBarGroups {
-                        zoomControls
-                        if roomForInspector {
-                            ViewerToolGroup {
-                                ViewerIconButton(
-                                    symbol: "sidebar.right", help: "정보",
-                                    active: showInspector, palette: palette
-                                ) { showInspector.toggle() }
-                            }
-                        }
-                    }
-                }
-                Divider().overlay(palette.fg.opacity(0.10))
-                HStack(spacing: 0) {
-                    ZoomableImage(
-                        image: image,
-                        pixelSize: pixelSize,
-                        zoom: $zoom,
-                        liveZoom: $liveZoom,
-                        palette: palette
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if roomForInspector, showInspector, !sections.isEmpty {
-                        Divider().overlay(palette.fg.opacity(0.10))
-                        ViewerInspector(sections: sections, palette: palette)
-                            .frame(width: ViewerInspector.width)
-                    }
+            HStack(spacing: 0) {
+                ZoomableImage(
+                    image: image,
+                    pixelSize: pixelSize,
+                    zoom: $zoom,
+                    liveZoom: $liveZoom,
+                    palette: palette
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if roomForInspector, controls.infoOpen, !sections.isEmpty {
+                    Divider().overlay(palette.fg.opacity(0.10))
+                    ViewerInspector(sections: sections, palette: palette)
+                        .frame(width: ViewerInspector.width)
                 }
             }
         }
         .background(palette.bg)
         .task(id: path) { await load() }
+        .onAppear { claimToolbar() }
+        .onDisappear { controls.release(.image) }
+        // Written from `.onChange`, never from `body`: publishing into an
+        // object the toolbar observes while that toolbar is being evaluated is
+        // how "Modifying state during view update" gets earned.
+        .onChange(of: liveZoom) { _, _ in pushZoom() }
+        .onChange(of: zoom) { _, _ in pushZoom() }
     }
 
-    private var dimensionLine: String {
-        guard pixelSize != .zero else { return "" }
-        return "\(Int(pixelSize.width)) × \(Int(pixelSize.height))"
+    private func claimToolbar() {
+        controls.claim(.image)
+        controls.perform = { cmd in
+            switch cmd {
+            case .zoomOut: zoom = max(0.05, (zoom ?? liveZoom) / 1.25)
+            case .zoomIn: zoom = min(32, (zoom ?? liveZoom) * 1.25)
+            case .fit: zoom = nil
+            case .actual: zoom = 1
+            }
+        }
+        pushZoom()
     }
 
-    @ViewBuilder private var zoomControls: some View {
-        ViewerToolGroup {
-            ViewerIconButton(symbol: "minus.magnifyingglass", help: "축소", palette: palette) {
-                zoom = max(0.05, (zoom ?? liveZoom) / 1.25)
-            }
-            // The live value, not the requested one: while fitting, the number
-            // has to say what is actually on screen.
-            Text("\(Int((liveZoom * 100).rounded()))%")
-                .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                .foregroundStyle(palette.fg.opacity(0.7))
-                .frame(width: 40)
-            ViewerIconButton(symbol: "plus.magnifyingglass", help: "확대", palette: palette) {
-                zoom = min(32, (zoom ?? liveZoom) * 1.25)
-            }
-        }
-        ViewerToolGroup {
-            ViewerIconButton(
-                symbol: "arrow.up.left.and.arrow.down.right",
-                help: "화면에 맞추기", active: zoom == nil, palette: palette
-            ) { zoom = nil }
-            ViewerIconButton(symbol: "1.magnifyingglass", help: "실제 크기", palette: palette) {
-                zoom = 1
-            }
-        }
+    private func pushZoom() {
+        // The live value, not the requested one: while fitting, the number has
+        // to say what is on screen. Rounded here so the toolbar republishes
+        // only when a digit moves rather than on every frame of a pinch.
+        let label = "\(Int((liveZoom * 100).rounded()))%"
+        if controls.zoomLabel != label { controls.zoomLabel = label }
+        if controls.fitted != (zoom == nil) { controls.fitted = zoom == nil }
     }
 
     private func load() async {
@@ -232,9 +221,16 @@ private struct ZoomableImage: NSViewRepresentable {
         // white one on a light theme or a black one on a dark theme.
         iv.wantsLayer = true
         scroll.documentView = iv
+        // A wheel or pinch zoom is the user choosing a magnification, so it has
+        // to leave fit mode — otherwise the next layout pass refits and undoes
+        // the gesture as it happens.
         scroll.onMagnify = { [weak scroll] in
             guard let scroll else { return }
-            context.coordinator.report(scroll.magnification)
+            context.coordinator.adopt(scroll.magnification)
+        }
+        scroll.onDoubleClick = { [weak scroll] in
+            guard let scroll else { return }
+            context.coordinator.toggleFit(currently: scroll.magnification)
         }
         context.coordinator.scroll = scroll
         return scroll
@@ -243,8 +239,10 @@ private struct ZoomableImage: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let iv = scroll.documentView as? NSImageView else { return }
         let checker = NSColor(patternImage: Checkerboard.image(dark: palette.isDark))
-        scroll.backgroundColor = NSColor(palette.bg).blended(withFraction: 0.5, of: .gray)
-            ?? NSColor(palette.bg)
+        // The editor's own background, not a neutral grey field. Preview can
+        // afford its own backdrop because it owns the window; a pane sits
+        // inside an editor and a second background is just a grey box in it.
+        scroll.backgroundColor = NSColor(palette.bg)
 
         if iv.image !== image || iv.frame.size != documentSize {
             iv.image = image
@@ -294,7 +292,7 @@ private struct ZoomableImage: NSViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(liveZoom: $liveZoom) }
+    func makeCoordinator() -> Coordinator { Coordinator(zoom: $zoom, liveZoom: $liveZoom) }
 
     /// Holds the binding, not the `ZoomableImage` that produced it.
     ///
@@ -306,24 +304,114 @@ private struct ZoomableImage: NSViewRepresentable {
     final class Coordinator {
         weak var scroll: NSScrollView?
         var lastRequested: CGFloat?
+        private let zoom: Binding<CGFloat?>
         private let liveZoom: Binding<CGFloat>
 
-        init(liveZoom: Binding<CGFloat>) { self.liveZoom = liveZoom }
+        init(zoom: Binding<CGFloat?>, liveZoom: Binding<CGFloat>) {
+            self.zoom = zoom
+            self.liveZoom = liveZoom
+        }
+
+        /// Report a magnification the view produced itself, without asking for
+        /// it back — `lastRequested` is set so `updateNSView` does not then
+        /// re-apply the same number and fight the gesture.
+        func adopt(_ m: CGFloat) {
+            lastRequested = m
+            Task { @MainActor [zoom, liveZoom] in
+                if abs(liveZoom.wrappedValue - m) > 0.001 { liveZoom.wrappedValue = m }
+                if zoom.wrappedValue != m { zoom.wrappedValue = m }
+            }
+        }
 
         func report(_ m: CGFloat) {
             Task { @MainActor [liveZoom] in
                 if abs(liveZoom.wrappedValue - m) > 0.001 { liveZoom.wrappedValue = m }
             }
         }
+
+        /// Preview's double-click: fitted → actual size, anything else → fit.
+        func toggleFit(currently: CGFloat) {
+            Task { @MainActor [zoom] in
+                zoom.wrappedValue = zoom.wrappedValue == nil ? 1 : nil
+            }
+        }
     }
 }
 
+/// Preview's interaction set, which a bare `NSScrollView` does not have.
+///
+/// A scroll view scrolls, and that is all it does with a mouse: the wheel
+/// moved the picture and dragging did nothing at all, which is the "이동시키는건
+/// 더 이상함" — there was no panning to be odd about, only its absence. What
+/// Preview does, and what this does now:
+///
+/// * **drag** pans, with the closed hand that says so
+/// * **⌘ + wheel** zooms about the pointer, so the thing under the cursor
+///   stays under it
+/// * **wheel** alone scrolls, unchanged
+/// * **double-click** toggles fit and actual size
+///
+/// Zooming about the pointer rather than about the centre is the part that
+/// makes wheel-zoom feel right; centred zoom is what made it feel wrong.
 private final class CenteringScrollView: NSScrollView {
     var onMagnify: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
+
+    private var panning = false
 
     override func magnify(with event: NSEvent) {
         super.magnify(with: event)
         onMagnify?()
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard event.modifierFlags.contains(.command) else {
+            super.scrollWheel(with: event)
+            return
+        }
+        let step = event.hasPreciseScrollingDeltas
+            ? event.scrollingDeltaY / 180
+            : event.scrollingDeltaY / 20
+        let next = min(maxMagnification, max(minMagnification, magnification * (1 + step)))
+        guard abs(next - magnification) > 0.0001 else { return }
+        let at = contentView.convert(event.locationInWindow, from: nil)
+        setMagnification(next, centeredAt: at)
+        onMagnify?()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            onDoubleClick?()
+            return
+        }
+        // Only pan when there is somewhere to pan to. Dragging an image that
+        // already fits should do nothing, not jitter against the clamp.
+        let doc = documentView?.frame.size ?? .zero
+        let visible = contentView.documentVisibleRect.size
+        panning = doc.width > visible.width + 1 || doc.height > visible.height + 1
+        if panning { NSCursor.closedHand.push() } else { super.mouseDown(with: event) }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard panning else { return super.mouseDragged(with: event) }
+        var origin = contentView.bounds.origin
+        origin.x -= event.deltaX / magnification
+        // The clip view is unflipped, so dragging the picture down means
+        // moving the viewport up.
+        origin.y += (isFlipped ? -event.deltaY : event.deltaY) / magnification
+        contentView.setBoundsOrigin(contentView.constrainBoundsRect(
+            NSRect(origin: origin, size: contentView.bounds.size)
+        ).origin)
+        reflectScrolledClipView(contentView)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if panning {
+            panning = false
+            NSCursor.pop()
+        } else {
+            super.mouseUp(with: event)
+        }
     }
 }
 
@@ -385,9 +473,9 @@ struct PDFPaneViewer: View {
     @State private var sections: [ViewerInfoSection] = []
     @State private var page = 1
     @State private var pageCount = 0
-    @State private var showThumbnails = true
-    @State private var showInspector = false
     @State private var zoomCommand: PDFZoomCommand?
+
+    @ObservedObject private var controls = EngineBridge.shared.viewerControls
 
     private var url: URL { URL(fileURLWithPath: path) }
 
@@ -395,64 +483,47 @@ struct PDFPaneViewer: View {
         GeometryReader { geo in
             let wide = geo.size.width >= 520
             let roomForInspector = geo.size.width >= ViewerInspector.minPaneWidth
-            VStack(spacing: 0) {
-                ViewerTopBar(
-                    label: pageCount > 0 ? "\(page) / \(pageCount) 페이지" : "",
-                    palette: palette
-                ) {
-                    ViewerToolBarGroups {
-                        ViewerToolGroup {
-                            ViewerIconButton(
-                                symbol: "minus.magnifyingglass", help: "축소", palette: palette
-                            ) { zoomCommand = .out }
-                            ViewerIconButton(
-                                symbol: "plus.magnifyingglass", help: "확대", palette: palette
-                            ) { zoomCommand = .in }
-                            ViewerIconButton(
-                                symbol: "arrow.up.left.and.arrow.down.right",
-                                help: "화면에 맞추기", palette: palette
-                            ) { zoomCommand = .fit }
-                        }
-                        // The two panel toggles together, one on each side of
-                        // the document, the way the window's own are.
-                        if wide || roomForInspector {
-                            ViewerToolGroup {
-                                if wide {
-                                    ViewerIconButton(
-                                        symbol: "sidebar.leading", help: "축소판",
-                                        active: showThumbnails, palette: palette
-                                    ) { showThumbnails.toggle() }
-                                }
-                                if roomForInspector {
-                                    ViewerIconButton(
-                                        symbol: "sidebar.right", help: "정보",
-                                        active: showInspector, palette: palette
-                                    ) { showInspector.toggle() }
-                                }
-                            }
-                        }
-                    }
-                }
-                Divider().overlay(palette.fg.opacity(0.10))
-                HStack(spacing: 0) {
-                    PDFSurface(
-                        document: document,
-                        palette: palette,
-                        showThumbnails: wide && showThumbnails,
-                        zoomCommand: $zoomCommand,
-                        page: $page
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if roomForInspector, showInspector, !sections.isEmpty {
-                        Divider().overlay(palette.fg.opacity(0.10))
-                        ViewerInspector(sections: sections, palette: palette)
-                            .frame(width: ViewerInspector.width)
-                    }
+            HStack(spacing: 0) {
+                PDFSurface(
+                    document: document,
+                    palette: palette,
+                    showThumbnails: wide,
+                    zoomCommand: $zoomCommand,
+                    page: $page
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if roomForInspector, controls.infoOpen, !sections.isEmpty {
+                    Divider().overlay(palette.fg.opacity(0.10))
+                    ViewerInspector(sections: sections, palette: palette)
+                        .frame(width: ViewerInspector.width)
                 }
             }
         }
         .background(palette.bg)
         .task(id: path) { await load() }
+        .onAppear { claimToolbar() }
+        .onDisappear { controls.release(.pdf) }
+        .onChange(of: page) { _, _ in pushPage() }
+        .onChange(of: pageCount) { _, _ in pushPage() }
+    }
+
+    private func claimToolbar() {
+        controls.claim(.pdf)
+        controls.fitted = true
+        controls.zoomLabel = ""
+        controls.perform = { cmd in
+            switch cmd {
+            case .zoomOut: zoomCommand = .out
+            case .zoomIn: zoomCommand = .in
+            case .fit, .actual: zoomCommand = .fit
+            }
+        }
+        pushPage()
+    }
+
+    private func pushPage() {
+        let label = pageCount > 0 ? "\(page) / \(pageCount)" : ""
+        if controls.pageLabel != label { controls.pageLabel = label }
     }
 
     private func load() async {
@@ -569,11 +640,7 @@ private struct PDFSurface: NSViewRepresentable {
     func updateNSView(_ split: NSSplitView, context: Context) {
         guard let pdf = context.coordinator.pdf,
               let thumbs = context.coordinator.thumbs else { return }
-        // Preview puts the page on a neutral field, a shade off the app's own
-        // background, so the white of the paper reads as paper.
-        let backdrop = NSColor(palette.bg).blended(withFraction: 0.5, of: .gray)
-            ?? NSColor(palette.bg)
-        pdf.backgroundColor = backdrop
+        pdf.backgroundColor = NSColor(palette.bg)
         // `thumbs` IS `arrangedSubviews[0]`; hiding it is what collapses the
         // column, and `NSSplitView` redistributes on the next layout pass.
         if thumbs.isHidden == showThumbnails {
