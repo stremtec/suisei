@@ -575,6 +575,67 @@ fn parse_hunk_spec(spec: &str) -> (i64, i64) {
 mod tests {
     use super::*;
 
+    /// End to end against a real repository, because the staged/unstaged
+    /// split is a claim about what two `git diff` invocations return and
+    /// nothing but git can settle it.
+    fn scratch_repo(name: &str) -> Option<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("suisei-gutter-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+        };
+        git(&["init", "-q", "."])?;
+        git(&["config", "user.email", "t@example.invalid"])?;
+        git(&["config", "user.name", "t"])?;
+        std::fs::write(dir.join("f.rs"), "a\nb\nc\nd\ne\n").ok()?;
+        git(&["add", "f.rs"])?;
+        git(&["commit", "-qm", "init"])?;
+        Some(dir)
+    }
+
+    #[test]
+    fn an_unstaged_change_is_not_marked_staged() {
+        let Some(dir) = scratch_repo("unstaged") else { return };
+        std::fs::write(dir.join("f.rs"), "a\nb\nX\nY\nc\nd\ne\n").unwrap();
+        let (ok, _signs, hunks) = compute_gutter(dir.join("f.rs").to_str().unwrap());
+        assert!(ok, "git answered");
+        assert_eq!(hunks.len(), 1, "one hunk: {hunks:?}");
+        assert!(!hunks[0].staged, "not added to the index");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staging_flips_the_hunk_without_moving_it() {
+        let Some(dir) = scratch_repo("staged") else { return };
+        std::fs::write(dir.join("f.rs"), "a\nb\nX\nY\nc\nd\ne\n").unwrap();
+        let before = compute_gutter(dir.join("f.rs").to_str().unwrap()).2;
+
+        assert!(
+            Command::new("git")
+                .args(["add", "f.rs"])
+                .current_dir(&dir)
+                .output()
+                .is_ok_and(|o| o.status.success()),
+            "staged it"
+        );
+        let after = compute_gutter(dir.join("f.rs").to_str().unwrap()).2;
+
+        assert_eq!(after.len(), 1, "still one hunk: {after:?}");
+        assert!(after[0].staged, "now staged");
+        assert_eq!(
+            (before[0].start, before[0].len),
+            (after[0].start, after[0].len),
+            "staging moves nothing — only the bar's fill changes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn hunks_carry_what_they_replaced() {
         // `-U0`: no context, so each `@@` block is exactly one change and the

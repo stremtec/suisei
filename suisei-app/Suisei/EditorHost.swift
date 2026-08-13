@@ -1824,9 +1824,38 @@ final class EditorCanvasView: NSView {
     /// Rects because that is the only primitive BOTH renderers have. A stroked
     /// path would have to exist twice, once per renderer, and could then
     /// differ; from one rect list they cannot.
+    /// TEMPORARY. The raw `git_sign` byte per changed row.
+    ///
+    /// The core is proven right by test (`staging_flips_the_hunk_without_
+    /// moving_it`) and the draw call is wired, so the question left is what
+    /// this function is actually handed. Logged only when the set changes.
+    nonisolated(unsafe) private static var lastGitDump = ""
+
+    private func dumpGitSigns<Band: Sequence<EditorLine>>(_ band: Band) {
+        var parts: [String] = []
+        for line in band where line.gitSign & 0x3F != 0 {
+            parts.append(String(
+                format: "%d:%02X", Int(line.lineNo), Int(line.gitSign)
+            ))
+        }
+        let now = parts.joined(separator: " ")
+        guard now != Self.lastGitDump else { return }
+        Self.lastGitDump = now
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/suisei-gutter.txt")
+        let line = "signs \(now.isEmpty ? "(none)" : now)\n"
+        guard let d = line.data(using: .utf8) else { return }
+        if let h = try? FileHandle(forWritingTo: url) {
+            h.seekToEndOfFile(); h.write(d); try? h.close()
+        } else {
+            try? d.write(to: url)
+        }
+    }
+
     private func gitBars<Band: Sequence<EditorLine>>(
         _ band: Band, lineH: CGFloat
     ) -> [(CGRect, NSColor)] {
+        dumpGitSigns(band)
         var out: [(CGRect, NSColor)] = []
         var runStart: CGFloat?
         var runEnd: CGFloat = 0
@@ -1838,16 +1867,17 @@ final class EditorCanvasView: NSView {
         func flush(bottomCap: Bool) {
             guard let start = runStart else { return }
             let color = gitColor(runKind)
-            // A deletion has no lines of its own — it is a boundary, and a bar
-            // is the wrong object for it. Drawn as one it was a 6pt rounded
-            // pill in the gutter, which is a breakpoint.
-            let rects = runKind == 3
-                ? Self.deletionRects(atY: start)
-                : Self.barRects(
-                    top: start, bottom: runEnd,
-                    topCap: runTopCap, bottomCap: bottomCap, staged: runStaged
-                )
-            for r in rects { out.append((r, color)) }
+            // A deletion is a pill like any other, one line tall — the row the
+            // removed text used to sit above. It was briefly a small wedge, on
+            // the reasoning that a deletion occupies no line of its own; but a
+            // wedge answers nothing about staging and reads as neither an
+            // addition nor a change. One shape, one rule.
+            for r in Self.barRects(
+                top: start, bottom: runEnd,
+                topCap: runTopCap, bottomCap: bottomCap, staged: runStaged
+            ) {
+                out.append((r, color))
+            }
             runStart = nil
         }
 
@@ -1881,6 +1911,26 @@ final class EditorCanvasView: NSView {
         return out
     }
 
+    /// A horizontal slice of a bar, `hw` wide either side of the centre.
+    ///
+    /// The ONE place hollow-vs-filled is decided, so every shape the gutter
+    /// draws answers staging the same way. A slice thinner than the stroke has
+    /// no inside to leave open and is drawn solid whatever the state.
+    private static func barSlice(
+        y: CGFloat, height: CGFloat, halfWidth hw: CGFloat, staged: Bool
+    ) -> [CGRect] {
+        guard height > 0, hw > 0 else { return [] }
+        let cx = EditorCanvasView.gitBarX + EditorMetrics.gitStripeWidth / 2
+        let t = EditorCanvasView.gitBarStroke
+        if staged || hw <= t {
+            return [CGRect(x: cx - hw, y: y, width: hw * 2, height: height)]
+        }
+        return [
+            CGRect(x: cx - hw, y: y, width: t, height: height),
+            CGRect(x: cx + hw - t, y: y, width: t, height: height),
+        ]
+    }
+
     /// One bar: a capsule, hollow while the hunk is unstaged and solid once it
     /// is staged.
     ///
@@ -1891,27 +1941,14 @@ final class EditorCanvasView: NSView {
         top: CGFloat, bottom: CGFloat,
         topCap: Bool, bottomCap: Bool, staged: Bool
     ) -> [CGRect] {
-        let w = EditorMetrics.gitStripeWidth
-        let x = EditorCanvasView.gitBarX
-        let r = w / 2                       // a true capsule
-        let t = EditorCanvasView.gitBarStroke
-        let cx = x + r
+        let r = EditorMetrics.gitStripeWidth / 2   // a true capsule
         var out: [CGRect] = []
 
-        func span(_ y: CGFloat, _ h: CGFloat, halfWidth hw: CGFloat) {
-            guard h > 0, hw > 0 else { return }
-            if staged || hw <= t {
-                out.append(CGRect(x: cx - hw, y: y, width: hw * 2, height: h))
-                return
-            }
-            out.append(CGRect(x: cx - hw, y: y, width: t, height: h))
-            out.append(CGRect(x: cx + hw - t, y: y, width: t, height: h))
-        }
-
-        // Straight middle.
         let bodyTop = top + (topCap ? r : 0)
         let bodyBottom = bottom - (bottomCap ? r : 0)
-        span(bodyTop, bodyBottom - bodyTop, halfWidth: r)
+        out += barSlice(
+            y: bodyTop, height: bodyBottom - bodyTop, halfWidth: r, staged: staged
+        )
 
         // Rounded ends, stepped at half a point — one pixel at 2x.
         let step = EditorCanvasView.gitBarCapStep
@@ -1919,40 +1956,18 @@ final class EditorCanvasView: NSView {
         while d < r {
             let mid = d + step / 2
             let hw = (r * r - (r - mid) * (r - mid)).squareRoot()
-            if topCap { span(top + d, step, halfWidth: hw) }
-            if bottomCap { span(bottom - d - step, step, halfWidth: hw) }
-            d += step
-        }
-        return out
-    }
-
-    /// Lines were removed at this boundary.
-    ///
-    /// A small wedge pointing down at the seam, not a bar: the removed text is
-    /// not on any line, so there is no run to draw. It shares the change
-    /// colour because a deletion is a change and not an error — in red, at the
-    /// bar's width and with the bar's rounded ends, it read as a breakpoint.
-    private static func deletionRects(atY y: CGFloat) -> [CGRect] {
-        let w = EditorMetrics.gitStripeWidth
-        let x = EditorCanvasView.gitBarX
-        let step = EditorCanvasView.gitBarCapStep
-        let h = EditorCanvasView.gitDeletionHeight
-        var out: [CGRect] = []
-        var d: CGFloat = 0
-        while d < h {
-            // Widest at the seam, tapering to a point below it.
-            let half = (w / 2) * (1 - d / h)
-            if half > 0 {
-                out.append(CGRect(
-                    x: x + w / 2 - half, y: y + d, width: half * 2, height: step
-                ))
+            if topCap {
+                out += barSlice(y: top + d, height: step, halfWidth: hw, staged: staged)
+            }
+            if bottomCap {
+                out += barSlice(
+                    y: bottom - d - step, height: step, halfWidth: hw, staged: staged
+                )
             }
             d += step
         }
         return out
     }
-
-    static let gitDeletionHeight: CGFloat = 5
 
     /// Leading inset of the change bar inside the gutter.
     static let gitBarX: CGFloat = 2
