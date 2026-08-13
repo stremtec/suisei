@@ -67,6 +67,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/EditorHost.swift"
   "$ROOT/suisei-app/Suisei/EditorDiagnostics.swift"
   "$ROOT/suisei-app/Suisei/PaneViewers.swift"
+  "$ROOT/suisei-app/Suisei/AudioViewer.swift"
   "$ROOT/suisei-app/Suisei/MetalTextRenderer.swift"
   "$ROOT/suisei-app/Suisei/TabStripLayout.swift"
   "$ROOT/suisei-app/Suisei/TabStripModel.swift"

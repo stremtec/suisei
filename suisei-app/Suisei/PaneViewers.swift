@@ -33,7 +33,9 @@ struct PaneViewer: View {
             // Not ours. The caller routes these; this is here so the switch is
             // total and a new kind is a compile error rather than a blank pane.
             Color.clear
-        case .image, .pdf, .audio, .binary:
+        case .audio:
+            AudioViewer(path: path, palette: palette)
+        case .image, .pdf, .binary:
             FilePlaceholderView(path: path, kind: kind, palette: palette)
         }
     }
