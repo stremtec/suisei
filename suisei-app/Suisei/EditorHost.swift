@@ -2026,6 +2026,21 @@ final class EditorCanvasView: NSView {
             engine?.applyGutterHunk(line1based: line, action: 2)
         })
 
+        // What the change replaced, on the clipboard. Those lines are in no
+        // buffer and cannot be selected, so without this there is no way to
+        // get them back out of the gutter.
+        if let removed = engine.removedTextForHunk(atLine: line),
+           !removed.isEmpty
+        {
+            menu.addItem(.separator())
+            menu.addItem(target.item(
+                "Copy Original", symbol: "doc.on.doc"
+            ) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(removed, forType: .string)
+            })
+        }
+
         // To the LEFT of the bar, at the pressed row.
         //
         // `popUp(positioning:at:in:)` puts the menu's LEADING edge at the

@@ -2692,6 +2692,48 @@ pub extern "C" fn suisei_engine_git_wb_diff_byte_count(ptr: *const SuiseiEngine)
     })
 }
 
+/// The text the change on `line_1based` replaced, as one UTF-8 string with
+/// embedded newlines, NUL-terminated.
+///
+/// Returns the byte length written, or the length REQUIRED when `capacity` is
+/// too small — so a caller can size a buffer with `capacity = 0` and call
+/// again. Zero means the line carries no change, or the change removed
+/// nothing (a pure addition replaced no text).
+///
+/// The removed lines exist nowhere else the face can reach: they are not in
+/// the buffer, by definition. This is the only way across.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_hunk_removed_text(
+    ptr: *const SuiseiEngine,
+    line_1based: u32,
+    out: *mut c_char,
+    capacity: u64,
+) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let row = (line_1based.max(1) - 1) as usize;
+    let app = unsafe { &(*ptr).0.app };
+    let Some(hunk) = app.git.hunk_at(row) else {
+        return 0;
+    };
+    if hunk.removed.is_empty() {
+        return 0;
+    }
+    let text = hunk.removed.join("\n");
+    let required = text.len() + 1;
+    let Ok(capacity) = usize::try_from(capacity) else {
+        return 0;
+    };
+    if out.is_null() || capacity < required {
+        return required as u64;
+    }
+    let dst = unsafe { std::slice::from_raw_parts_mut(out.cast::<u8>(), capacity) };
+    dst[..text.len()].copy_from_slice(text.as_bytes());
+    dst[text.len()] = 0;
+    required as u64
+}
+
 /// Copy the complete diff into `out` as consecutive NUL-terminated UTF-8
 /// strings. Returns zero when the supplied buffer is too small, so callers
 /// never observe a partial final line.

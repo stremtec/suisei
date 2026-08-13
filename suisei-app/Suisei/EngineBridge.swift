@@ -2845,6 +2845,25 @@ final class EngineBridge: ObservableObject {
         return rc == 0
     }
 
+    /// What the change on this line replaced, or nil when it replaced nothing.
+    ///
+    /// Sized by asking first: the engine answers the required length for a
+    /// zero capacity, so the buffer is never a guess that truncates someone's
+    /// deleted code.
+    func removedTextForHunk(atLine line1based: UInt32) -> String? {
+        guard let engine, line1based > 0 else { return nil }
+        let needed = suisei_engine_hunk_removed_text(engine, line1based, nil, 0)
+        guard needed > 1 else { return nil }
+        var buf = [CChar](repeating: 0, count: Int(needed))
+        let wrote = buf.withUnsafeMutableBufferPointer {
+            suisei_engine_hunk_removed_text(
+                engine, line1based, $0.baseAddress, UInt64($0.count)
+            )
+        }
+        guard wrote == needed else { return nil }
+        return String(cString: buf)
+    }
+
     func toggleBreakpointLine(_ line1based: UInt32) {
         guard let engine, line1based > 0 else { return }
         suisei_engine_toggle_breakpoint_line(engine, line1based)

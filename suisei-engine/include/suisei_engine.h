@@ -231,6 +231,13 @@ void suisei_engine_toggle_breakpoint_line(SuiseiEngine *ptr, uint32_t line_1base
    the message either way is on `chrome`. */
 int32_t suisei_engine_apply_hunk(SuiseiEngine *ptr, uint32_t line_1based, uint8_t action);
 
+/* The text the change on this line REPLACED, newline-joined and NUL-terminated.
+   Returns the bytes required (including the NUL); pass capacity 0 to ask for
+   the size. Zero means no change there, or a change that removed nothing.
+   These lines are in no buffer, so this is the only way to reach them. */
+uint64_t suisei_engine_hunk_removed_text(const SuiseiEngine *ptr, uint32_t line_1based,
+                                         char *out, uint64_t capacity);
+
 /* ── Minimap overview (downsampled) ────────────────────────────────── */
 #define SUISEI_MINIMAP_MAX 2048
 
