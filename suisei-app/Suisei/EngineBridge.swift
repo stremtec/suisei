@@ -99,6 +99,33 @@ struct EditorPaneSnap: Equatable, Identifiable {
     var termCursorCol: Int = 0
 }
 
+extension SplitSnap {
+    /// Names what inside the split moved, for the perf log. Taking the line
+    /// count out of pane equality was not enough — `chrome differs: split`
+    /// still fires, so a second field in here moves without the shape
+    /// changing.
+    static func firstDifference(_ a: SplitSnap, _ b: SplitSnap) -> String {
+        if a.focus != b.focus { return "split.focus" }
+        if a.panes.count != b.panes.count { return "split.paneCount" }
+        for (x, y) in zip(a.panes, b.panes) {
+            if x.id != y.id { return "split.pane.id" }
+            if x.focused != y.focused { return "split.pane.focused" }
+            if x.tabIndex != y.tabIndex { return "split.pane.tabIndex" }
+            if x.title != y.title { return "split.pane.title" }
+            if x.scroll != y.scroll { return "split.pane.scroll" }
+            if x.hscroll != y.hscroll { return "split.pane.hscroll" }
+            if x.rect != y.rect { return "split.pane.rect" }
+            if x.isTerminal != y.isTerminal { return "split.pane.isTerminal" }
+            if x.termGen != y.termGen { return "split.pane.termGen" }
+            if x.termCursorRow != y.termCursorRow { return "split.pane.termCursorRow" }
+            if x.termCursorCol != y.termCursorCol { return "split.pane.termCursorCol" }
+            if x.termLines != y.termLines { return "split.pane.termLines" }
+            if x.lines != y.lines { return "split.pane.lines" }
+        }
+        return "split.none"
+    }
+}
+
 extension EditorPaneSnap {
     /// Structural equality — the pane's shape and content, deliberately NOT
     /// its line count.
@@ -4539,7 +4566,9 @@ final class EngineBridge: ObservableObject {
             // named `gen` every single time — the one field that is certain to
             // have moved. Masked, this names the field that actually forced
             // the publish.
-            PerfProbe.record("  chrome differs: " + ChromeSnapshot.firstDifference(next, chrome), 0)
+            var field = ChromeSnapshot.firstDifference(next, chrome)
+            if field == "split" { field = SplitSnap.firstDifference(next.split, chrome.split) }
+            PerfProbe.record("  chrome differs: " + field, 0)
         }
         if differs {
             // Something real changed, so the volatile fields ride along with
