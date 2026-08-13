@@ -531,6 +531,12 @@ impl App {
     /// Multi-caret is deliberately excluded: one popup cannot describe several
     /// different prefixes.
     pub fn completion_after_typing(&mut self) {
+        // Zero FIRST. These are read once per keystroke over FFI, and a key
+        // that returns early — multi-caret, a prefix under two characters —
+        // used to leave the previous walk's number sitting in the field to be
+        // reported again. The log showed four samples agreeing to three
+        // decimals, which is not a measurement, it is one measurement echoing.
+        self.completions.last_scope_us = 0;
         let t0 = std::time::Instant::now();
         self.completion_after_typing_inner();
         self.completions.last_total_us = t0.elapsed().as_micros() as u32;
@@ -558,7 +564,6 @@ impl App {
         if self.completions.active {
             self.completions.refine(&prefix);
             if self.completions.active {
-                self.completions.last_scope_us = 0;
                 self.request_lsp_completions();
                 return;
             }
