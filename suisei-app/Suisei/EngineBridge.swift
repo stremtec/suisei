@@ -4495,6 +4495,14 @@ final class EngineBridge: ObservableObject {
         next.lines = chrome.lines
 
         let differs = PerfProbe.measure("  chrome deep compare") { next != chrome }
+        if differs && PerfProbe.enabled {
+            // HERE, not after the restore below. The first placement read the
+            // field name once the volatile values had been put back, so it
+            // named `gen` every single time — the one field that is certain to
+            // have moved. Masked, this names the field that actually forced
+            // the publish.
+            PerfProbe.record("  chrome differs: " + ChromeSnapshot.firstDifference(next, chrome), 0)
+        }
         if differs {
             // Something real changed, so the volatile fields ride along with
             // it — they are current and the publish is already being paid for.
@@ -4533,9 +4541,6 @@ final class EngineBridge: ObservableObject {
             // store-and-release of the snapshot itself.
             if PerfProbe.enabled {
                 PerfProbe.measure("  chrome willChange") { objectWillChange.send() }
-            }
-            if PerfProbe.enabled {
-                PerfProbe.record("  chrome differs: " + ChromeSnapshot.firstDifference(next, chrome), 0)
             }
             PerfProbe.measure("  chrome publish") { chrome = next }
             syncMenu()
