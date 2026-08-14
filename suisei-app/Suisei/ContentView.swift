@@ -528,6 +528,22 @@ struct ContentView: View {
         // plus this modifier is two animators for one value, and that is what
         // used to make the navigator stutter where the inspector never did.
         .animation(.snappy(duration: 0.25), value: engine.uiNavVisible)
+        // The strip learns where the sidebar is GOING, at the moment it is
+        // told to go there.
+        //
+        // Waiting for `SplitColumnWidthReporter` to settle means waiting for
+        // the animation to finish and then some, so the strip started moving
+        // only once the sidebar had stopped — two runs in sequence, and the
+        // second one arriving as a jump. The destination is known at the
+        // toggle: shut, or the navigator's own width. Committing it here lets
+        // the two move together, and it is still ONE change to the input
+        // rather than one per frame.
+        .onChange(of: engine.uiNavVisible) { _, visible in
+            navSettleTask?.cancel()
+            navSettledOnce = true
+            let target: CGFloat = visible ? max(240, CGFloat(navW)) : 0
+            if abs(navSettledWidth - target) > 0.5 { navSettledWidth = target }
+        }
         // An EMPTY title, not a removed one. This is the whole reason the
         // toolbar items sit at the trailing edge — see `editorToolbar`.
         //

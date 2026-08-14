@@ -61,8 +61,42 @@ final class TabStripHostView: NSView {
     /// and a fallback for the document toolbar on the right. The toolbar's real
     /// leading edge is measured below; these values are boundaries only and do
     /// not participate in any chip/close/drag arithmetic.
-    var leadingInset: CGFloat = 150 { didSet { needsDisplay = true } }
-    var trailingInset: CGFloat = 150 { didSet { needsDisplay = true } }
+    /// Set through `setBoundaries` — see there for why they are not assigned
+    /// one at a time.
+    private(set) var leadingInset: CGFloat = 150 { didSet { needsDisplay = true } }
+    private(set) var trailingInset: CGFloat = 150 { didSet { needsDisplay = true } }
+
+    /// Move the corridor, and let the run TRAVEL to wherever that puts it.
+    ///
+    /// The corridor's leading edge steps once per sidebar toggle rather than
+    /// sweeping (`ContentView.navSettledWidth` — rule H1). That is what a run
+    /// which FITS needs, because it is anchored to the window and does not
+    /// move at all. An overflowing run has no such anchor: it fills the
+    /// corridor, so widening the corridor moves its leading edge by the whole
+    /// difference, and a stepped input meant that difference arrived as a jump
+    /// after the sidebar had already finished.
+    ///
+    /// So the step stays and the OUTPUT eases. 0.25s matches
+    /// `.snappy(duration: 0.25)` on `uiNavVisible`, and `ContentView` commits
+    /// the target when the toggle happens rather than when the measurement
+    /// settles, so the two runs move together instead of one after the other.
+    ///
+    /// This does not reintroduce the tremble: the input still changes once.
+    /// It is also H2-safe — `animatedOrigin` is what `currentFrame()` returns,
+    /// so the hit test reads the same interpolated origin the paint used.
+    func setBoundaries(leading: CGFloat, trailing: CGFloat) {
+        guard leadingInset != leading || trailingInset != trailing else { return }
+        let before = currentFrame()?.originX
+        leadingInset = leading
+        trailingInset = trailing
+        guard let before, let after = currentFrame()?.layout.originX else {
+            originAnimation = nil
+            needsDisplay = true
+            return
+        }
+        animateOrigin(from: before, to: after, duration: 0.25)
+        needsDisplay = true
+    }
 
     /// Leading edge of the real native toolbar run in window coordinates.
     /// `NSToolbar` owns this layout, so reading its item views is the only answer
@@ -1411,8 +1445,7 @@ struct TabStripHost: NSViewRepresentable {
         // already want the new ones.
         v.actions = actions
         v.palette = palette
-        v.leadingInset = leadingInset
-        v.trailingInset = trailingInset
+        v.setBoundaries(leading: leadingInset, trailing: trailingInset)
         v.rowDrop = rowDrop
         v.overflowCount = overflowCount
         v.tabs = tabs
