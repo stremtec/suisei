@@ -58,6 +58,12 @@ struct EditorHost: NSViewRepresentable {
             theme: theme
         )
         if key == paletteKey, let cached = paletteValue { return cached }
+        // The bracket flash is one colour in both themes; only how much of it
+        // survives the background it sits on differs.
+        let bgSRGB = NSColor(editorBg).usingColorSpace(.sRGB) ?? .black
+        var br: CGFloat = 0, bgc: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        bgSRGB.getRed(&br, green: &bgc, blue: &bb, alpha: &ba)
+        let lightBg = (0.299 * br + 0.587 * bgc + 0.114 * bb) > 0.55
         let colors = EditorCanvasView.Colors(
             bg: NSColor(editorBg),
             fg: NSColor(fg),
@@ -86,7 +92,10 @@ struct EditorHost: NSViewRepresentable {
             removedFg: NSColor(fg).withAlphaComponent(0.82),
             removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
             breakpoint: .systemYellow,
-            breakpointInk: .black
+            breakpointInk: .black,
+            bracketFill: EditorCanvasView.bracketYellow
+                .withAlphaComponent(lightBg ? 0.70 : 0.52),
+            bracketInk: .black
         )
         paletteKey = key
         paletteValue = colors
@@ -612,7 +621,7 @@ enum FindSquiggle {
     /// Points per full wave. Short enough to read as a squiggle on a
     /// three-character match, long enough not to alias into a blur.
     static let period: CGFloat = 4.5
-    static let amplitude: CGFloat = 1.05
+    static let amplitude: CGFloat = 0.9
 
     static func offset(at x: CGFloat) -> CGFloat {
         sin(x / period * 2 * .pi) * amplitude
@@ -620,15 +629,28 @@ enum FindSquiggle {
 
     /// Distance from the line box's TOP to the wave's centreline. The view
     /// is flipped, so this grows downward.
+    ///
+    /// Sits at the very bottom of the line box and overhangs it slightly. Any
+    /// higher and the crests reach into the descenders — the wave was clipping
+    /// the tails of g, j, p, q and y, which is the one thing an underline is
+    /// supposed not to do. The overhang lands in the leading above the next
+    /// row, where there are no glyphs.
     static func centreY(lineTop y: CGFloat, lineHeight: CGFloat) -> CGFloat {
-        y + lineHeight - amplitude - 1.5
+        y + lineHeight - 1.2
     }
 
     static func thickness(current: Bool) -> CGFloat { current ? 1.8 : 1.3 }
 
     /// The current match is the one ⌘G is on; the rest are context.
+    ///
+    /// Fixed sRGB rather than `systemYellow` for the reason the bracket flash
+    /// is — that one is dynamic and AppKit resolves it to a different hue per
+    /// appearance, so a mark that means the same thing in both themes would
+    /// not have been the same colour in both.
+    static let ink = NSColor(srgbRed: 1.0, green: 0.80, blue: 0.20, alpha: 1)
+
     static func color(current: Bool) -> NSColor {
-        NSColor.systemYellow.withAlphaComponent(current ? 1.0 : 0.6)
+        ink.withAlphaComponent(current ? 1.0 : 0.6)
     }
 }
 
@@ -680,6 +702,17 @@ final class EditorCanvasView: NSView {
         /// gutter is yellow.
         var breakpoint: NSColor
         var breakpointInk: NSColor
+        /// The flash behind a matching delimiter, and the ink redrawn on it.
+        ///
+        /// A fixed sRGB value, NOT `systemYellow`. That is a dynamic colour:
+        /// AppKit resolves it to a different yellow per appearance, so the
+        /// bracket flash was one hue in the light theme and another in the
+        /// dark one without anything here asking for that. The flash means the
+        /// same thing in both, so it is the same colour in both, and the alpha
+        /// differs per theme only because 55% over white and 55% over near
+        /// black do not land in the same place.
+        var bracketFill: NSColor
+        var bracketInk: NSColor
     }
 
     weak var engine: EngineBridge?
@@ -708,7 +741,14 @@ final class EditorCanvasView: NSView {
         removedBg: NSColor.systemYellow.withAlphaComponent(0.10),
         removedFg: NSColor.labelColor.withAlphaComponent(0.82),
         removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
-        breakpoint: .systemYellow, breakpointInk: .black
+        breakpoint: .systemYellow, breakpointInk: .black,
+        bracketFill: bracketYellow.withAlphaComponent(0.52),
+        bracketInk: .black
+    )
+
+    /// One yellow for the bracket flash, in both themes.
+    static let bracketYellow = NSColor(
+        srgbRed: 1.0, green: 0.80, blue: 0.20, alpha: 1
     )
 
     var isLiveScrolling = false
@@ -1390,7 +1430,9 @@ final class EditorCanvasView: NSView {
                 let fade = raw * raw * (3 - 2 * raw)
                 renderer.addRect(
                     CGRect(x: x0 - 1, y: y + 1, width: max(cell, x1 - x0) + 2, height: lineH - 2),
-                    NSColor.systemYellow.withAlphaComponent(0.55 * fade)
+                    colors.bracketFill.withAlphaComponent(
+                        colors.bracketFill.alphaComponent * fade
+                    )
                 )
                 bracketRects.append(rowRect)
             }
@@ -1810,7 +1852,9 @@ final class EditorCanvasView: NSView {
                     dx: -base.width * (scale - 1) / 2,
                     dy: -base.height * (scale - 1) / 2
                 )
-                NSColor.systemYellow.withAlphaComponent(0.55 * fade).setFill()
+                colors.bracketFill
+                    .withAlphaComponent(colors.bracketFill.alphaComponent * fade)
+                    .setFill()
                 NSBezierPath(roundedRect: box, xRadius: 4, yRadius: 4).fill()
 
                 // Redraw the delimiter itself bold and dark on top: the fill
@@ -1823,7 +1867,8 @@ final class EditorCanvasView: NSView {
                         at: CGPoint(x: x0, y: textY),
                         withAttributes: [
                             .font: EditorMetrics.monospaced(fontSize, weight: .bold),
-                            .foregroundColor: NSColor.black.withAlphaComponent(fade),
+                            .foregroundColor: colors.bracketInk
+                                .withAlphaComponent(fade),
                         ]
                     )
                 }
