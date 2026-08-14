@@ -89,6 +89,15 @@ struct ContentView: View {
     /// step at its end instead of twenty during it.
     @State private var navSettledWidth: CGFloat = 280
     @State private var navSettleTask: Task<Void, Never>?
+    /// The last width the navigator actually settled at while open.
+    ///
+    /// The predictor for a reopen, and it has to be the number the reporter
+    /// will publish when the animation ends — not `navW`, which is a saved
+    /// preference and floored at 240. Predicting a value a point or two off
+    /// meant the settle pass committed a second, slightly different width
+    /// after the first travel had finished: opening animated twice, closing
+    /// did not, because closing's target is exactly zero.
+    @State private var navOpenWidth: CGFloat = 280
     /// The first report is committed without waiting: a restored split has to
     /// be respected before the first frame, or the opening tabs sit under a
     /// navigator wider than the bootstrap value.
@@ -541,7 +550,10 @@ struct ContentView: View {
         .onChange(of: engine.uiNavVisible) { _, visible in
             navSettleTask?.cancel()
             navSettledOnce = true
-            let target: CGFloat = visible ? max(240, CGFloat(navW)) : 0
+            // The measured width, not the saved preference — see `navOpenWidth`.
+            let target: CGFloat = visible
+                ? (navOpenWidth > 1 ? navOpenWidth : CGFloat(navW))
+                : 0
             if abs(navSettledWidth - target) > 0.5 { navSettledWidth = target }
         }
         // An EMPTY title, not a removed one. This is the whole reason the
@@ -1169,15 +1181,26 @@ struct ContentView: View {
         navSettleTask?.cancel()
         guard navSettledOnce else {
             navSettledOnce = true
-            navSettledWidth = live
+            commitNavWidth(live)
             return
         }
-        guard abs(navSettledWidth - live) > 0.5 else { return }
+        guard abs(navSettledWidth - live) > 0.5 else {
+            // Already where the strip thinks it is — nothing to move. Still
+            // worth remembering, so the next reopen predicts this exact
+            // number and needs no correcting step after it arrives.
+            if live > 1 { navOpenWidth = live }
+            return
+        }
         navSettleTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 120_000_000)
             guard !Task.isCancelled else { return }
-            if abs(navSettledWidth - live) > 0.5 { navSettledWidth = live }
+            if abs(navSettledWidth - live) > 0.5 { commitNavWidth(live) }
         }
+    }
+
+    private func commitNavWidth(_ live: CGFloat) {
+        navSettledWidth = live
+        if live > 1 { navOpenWidth = live }
     }
 
     private func syncNavFromCore() {

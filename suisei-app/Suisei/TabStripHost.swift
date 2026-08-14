@@ -248,7 +248,18 @@ final class TabStripHostView: NSView {
         guard let next = frames.map(\.minX).min() else { return }
         if next != toolbarLeadingX {
             toolbarLeadingX = next
-            originAnimation = nil
+            // Deliberately does NOT clear `originAnimation`.
+            //
+            // This runs two run-loop turns after `apply`, which lands it in
+            // the middle of the travel a sidebar toggle just started, and
+            // AppKit nudges toolbar item frames by a point or two when the
+            // split view re-lays out. Clearing the animation there snapped the
+            // run to its settled origin — the second jump after the first
+            // animation.
+            //
+            // Letting it run is safe because `animatedOrigin` returns the LIVE
+            // `layout.originX` once the curve is over, so the last stretch is
+            // aimed a point or two short and then lands exactly right.
             needsDisplay = true
         }
     }
