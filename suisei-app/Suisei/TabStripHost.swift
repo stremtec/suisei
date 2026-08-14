@@ -68,36 +68,74 @@ final class TabStripHostView: NSView {
     private(set) var leadingInset: CGFloat = 150 { didSet { needsDisplay = true } }
     private(set) var trailingInset: CGFloat = 150 { didSet { needsDisplay = true } }
 
-    /// Move the corridor, and let the run TRAVEL to wherever that puts it.
+    /// Move the corridor — over time, not at once.
     ///
-    /// The corridor's leading edge steps once per sidebar toggle rather than
-    /// sweeping (`ContentView.navSettledWidth` — rule H1). That is what a run
-    /// which FITS needs, because it is anchored to the window and does not
-    /// move at all. An overflowing run has no such anchor: it fills the
-    /// corridor, so widening the corridor moves its leading edge by the whole
-    /// difference, and a stepped input meant that difference arrived as a jump
-    /// after the sidebar had already finished.
+    /// The corridor's leading edge STEPS once per sidebar toggle rather than
+    /// sweeping with the measurement (`ContentView.navSettledWidth`, rule H1).
+    /// One step is right for the input and wrong for the picture, so the step
+    /// is what arrives here and this is where it becomes a motion.
     ///
-    /// So the step stays and the OUTPUT eases. 0.25s matches
-    /// `.snappy(duration: 0.25)` on `uiNavVisible`, and `ContentView` commits
-    /// the target when the toggle happens rather than when the measurement
-    /// settles, so the two runs move together instead of one after the other.
+    /// Animating the corridor rather than just the run is the point. An
+    /// earlier attempt eased `originX` alone, which left the corridor — and so
+    /// the CLIP, the `+`, and the width the layout is solved against — jumping
+    /// to its new value in one frame. Chips that had been cut off appeared all
+    /// at once while the run was still gliding: "탭이 늘어나거나 … 즉각반응".
     ///
-    /// This does not reintroduce the tremble: the input still changes once.
-    /// It is also H2-safe — `animatedOrigin` is what `currentFrame()` returns,
-    /// so the hit test reads the same interpolated origin the paint used.
+    /// With the boundary itself interpolated, everything downstream is a
+    /// function of it and moves together:
+    ///
+    /// * a run that FITS does not move at all — it is anchored to the window,
+    ///   so `viewportX + originX` cancels the corridor out entirely, and only
+    ///   the clip travels;
+    /// * a run that OVERFLOWS is pinned to the corridor's edge and glides with
+    ///   it, revealing chips at the rate the sidebar uncovers the space.
+    ///
+    /// 0.25s, matching `.snappy(duration: 0.25)` on `uiNavVisible`, and
+    /// `ContentView` commits the target at the toggle rather than when the
+    /// measurement settles, so the two move as one.
+    ///
+    /// Not the tremble H1 forbids: that was sampling a foreign, noisy
+    /// measurement per frame. This is a deterministic ease between two settled
+    /// values that this view owns. It is H2-safe for the reason everything
+    /// here is — `currentFrame()` reads the same interpolation the paint does,
+    /// so the hit test never sees a different corridor than the eye.
     func setBoundaries(leading: CGFloat, trailing: CGFloat) {
         guard leadingInset != leading || trailingInset != trailing else { return }
-        let before = currentFrame()?.originX
+        let live = liveInsets()
         leadingInset = leading
         trailingInset = trailing
-        guard let before, let after = currentFrame()?.layout.originX else {
-            originAnimation = nil
-            needsDisplay = true
-            return
-        }
-        animateOrigin(from: before, to: after, duration: 0.25)
+        insetAnimation = InsetAnimation(
+            fromLeading: live.leading, toLeading: leading,
+            fromTrailing: live.trailing, toTrailing: trailing,
+            start: CACurrentMediaTime(), duration: 0.25
+        )
+        startDisplayLink()
         needsDisplay = true
+    }
+
+    private struct InsetAnimation {
+        let fromLeading: CGFloat
+        let toLeading: CGFloat
+        let fromTrailing: CGFloat
+        let toTrailing: CGFloat
+        let start: TimeInterval
+        let duration: TimeInterval
+    }
+
+    private var insetAnimation: InsetAnimation?
+
+    /// The corridor's edges RIGHT NOW — derived from the clock, like every
+    /// other motion here, so a dropped frame costs a frame and never a
+    /// position.
+    private func liveInsets() -> (leading: CGFloat, trailing: CGFloat) {
+        guard let a = insetAnimation else { return (leadingInset, trailingInset) }
+        let t = min(1, (CACurrentMediaTime() - a.start) / a.duration)
+        guard t < 1 else { return (leadingInset, trailingInset) }
+        let e = CGFloat(1 - pow(1 - t, 3))
+        return (
+            leading: a.fromLeading + (a.toLeading - a.fromLeading) * e,
+            trailing: a.fromTrailing + (a.toTrailing - a.fromTrailing) * e
+        )
     }
 
     /// Leading edge of the real native toolbar run in window coordinates.
@@ -346,11 +384,14 @@ final class TabStripHostView: NSView {
         guard let window else { return nil }
         let content = window.contentLayoutRect
         guard content.width > 0 else { return nil }
+        // The INTERPOLATED edges, so the clip and the layout width travel with
+        // the sidebar instead of arriving in one frame — see `setBoundaries`.
+        let inset = liveInsets()
         guard let viewport = TabStripViewportGeometry.resolve(
             contentMinX: content.minX,
             contentMaxX: content.maxX,
-            leadingInset: leadingInset,
-            trailingInset: trailingInset,
+            leadingInset: inset.leading,
+            trailingInset: inset.trailing,
             toolbarLeadingX: toolbarLeadingX,
             // The + is drawn just beyond the chip clip. Keep its 22pt box and
             // two normal gaps wholly before the native toolbar.
@@ -851,6 +892,9 @@ final class TabStripHostView: NSView {
         if let a = originAnimation, now - a.start >= a.duration {
             originAnimation = nil
         }
+        if let a = insetAnimation, now - a.start >= a.duration {
+            insetAnimation = nil
+        }
         ghosts.removeAll { now - $0.start >= Self.vanishDuration }
         appearing = appearing.filter { now - $0.value < Self.appearDuration }
         if let start = pillStart, now - start >= Self.pillDuration {
@@ -859,8 +903,8 @@ final class TabStripHostView: NSView {
         }
 
         needsDisplay = true
-        if originAnimation == nil, ghosts.isEmpty, appearing.isEmpty,
-           pillStart == nil
+        if originAnimation == nil, insetAnimation == nil, ghosts.isEmpty,
+           appearing.isEmpty, pillStart == nil
         {
             stopDisplayLink()
         }
