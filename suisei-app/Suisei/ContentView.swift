@@ -434,6 +434,27 @@ struct ContentView: View {
         // No pane at all is the empty editor, which is still text.
         return (engine.editorSplit.panes.first?.kind ?? .text) == .text
     }
+    /// Whether every pane meeting one edge of the island is painted in the
+    /// editor's own background.
+    ///
+    /// The island's 12pt edge fades soften document text sliding under its
+    /// top and bottom — they are `editorBg` ramped to transparent, which only
+    /// disappears over `editorBg`. A terminal pane is the one surface in the
+    /// editor that wears something else: its grid is dark in both themes, so
+    /// the fade laid a pale band across the shell's last row. (Image, PDF,
+    /// audio and binary panes all take the editor background, so they need no
+    /// exception here.)
+    ///
+    /// Asked of the panes at that edge rather than of the focused one: the
+    /// fade spans the island's full width, so in a side-by-side split it
+    /// crosses the terminal whether or not the terminal has focus.
+    private func islandEdgeIsEditorBackground(bottom: Bool) -> Bool {
+        !engine.editorSplit.panes.contains { pane in
+            guard pane.isTerminal else { return false }
+            // Normalised rects, so the island's edges are 0 and 1.
+            return bottom ? pane.rect.maxY > 0.999 : pane.rect.minY < 0.001
+        }
+    }
     private var gutterFg: Color { isLightTheme ? Color.black.opacity(0.32) : dim.opacity(0.9) }
     /// Xcode-level current-line wash — barely visible, not a gray slab.
     private var cursorLineBg: Color {
@@ -5092,14 +5113,16 @@ struct ContentView: View {
             // Top fade only once content actually slides under (the always-on
             // material veil looked like a blur glued to the jump bar).
             .overlay(alignment: .top) {
-                if engine.chrome.scroll > 0 {
+                if engine.chrome.scroll > 0, islandEdgeIsEditorBackground(bottom: false) {
                     EdgeFade(color: editorBg, top: true)
                         .frame(height: 12)
                         .transition(.opacity)
                 }
             }
             .overlay(alignment: .bottom) {
-                EdgeFade(color: editorBg, top: false).frame(height: 12)
+                if islandEdgeIsEditorBackground(bottom: true) {
+                    EdgeFade(color: editorBg, top: false).frame(height: 12)
+                }
             }
             .animation(.easeOut(duration: 0.15), value: engine.chrome.scroll > 0)
             .overlay(alignment: .topTrailing) {
