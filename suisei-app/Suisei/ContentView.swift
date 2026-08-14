@@ -5630,6 +5630,7 @@ struct ContentView: View {
                     Text(pane.focused && engine.terminalOwnsKeys ? "keys → shell" : "click to type · ⌃⇧T")
                         .font(.system(size: 10))
                         .foregroundStyle(pane.focused && engine.terminalOwnsKeys ? accent : Color.secondary)
+                    paneSplitMenu(pane: pane)
                     Button {
                         // Close THIS pane's shell — ⌃⇧T acts on the focused
                         // pane, so without this the button killed (or created)
@@ -5641,6 +5642,10 @@ struct ContentView: View {
                         Image(systemName: "xmark")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(.secondary)
+                            // Same 24pt target as the split menu beside it —
+                            // a bare glyph next to a framed one reads as two
+                            // unrelated controls, and is harder to hit.
+                            .frame(width: 24, height: 24)
                     }
                     .buttonStyle(.plain)
                     .help("Close terminal")
@@ -5730,51 +5735,7 @@ struct ContentView: View {
                 .menuStyle(.borderlessButton)
             }
             Spacer(minLength: 4)
-            Menu {
-                Button("Split Left") {
-                    engine.focusPane(pane.id)
-                    engine.splitEditorLeft()
-                    focused = true
-                }
-                .disabled(engine.editorSplit.panes.count >= 4)
-
-                Button("Split Right") {
-                    engine.focusPane(pane.id)
-                    engine.splitEditorRight()
-                    focused = true
-                }
-                .disabled(engine.editorSplit.panes.count >= 4)
-
-                Divider()
-
-                Button("Split Above") {
-                    engine.focusPane(pane.id)
-                    engine.splitEditorAbove()
-                    focused = true
-                }
-                .disabled(engine.editorSplit.panes.count >= 4)
-
-                Button("Split Below") {
-                    engine.focusPane(pane.id)
-                    engine.splitEditorBelow()
-                    focused = true
-                }
-                .disabled(engine.editorSplit.panes.count >= 4)
-
-                if engine.editorSplit.panes.count >= 4 {
-                    Divider()
-                    Text("Maximum 4 panes")
-                }
-            } label: {
-                Image(systemName: "rectangle.split.1x2")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Split editor")
+            paneSplitMenu(pane: pane)
 
             Button {
                 engine.focusPane(pane.id)
@@ -5797,6 +5758,65 @@ struct ContentView: View {
                 .fill(pane.focused ? accent.opacity(0.35) : fg.opacity(0.08))
                 .frame(height: pane.focused ? 1.5 : 1)
         }
+    }
+
+    /// Split-this-pane menu, for whatever kind of pane is asking.
+    ///
+    /// Shared rather than copied into each header: splitting is a property of
+    /// being a pane, not of showing a document. A terminal pane had no way to
+    /// split from its own header at all — the four commands were only ever in
+    /// the path bar, which a shell does not have.
+    ///
+    /// Every item focuses the pane first. ⌃W-family commands act on the focused
+    /// pane, so without it the menu split whichever pane happened to have the
+    /// keyboard rather than the one whose header was clicked.
+    private func paneSplitMenu(pane: EditorPaneSnap) -> some View {
+        let full = engine.editorSplit.panes.count >= 4
+        return Menu {
+            Button("Split Left") {
+                engine.focusPane(pane.id)
+                engine.splitEditorLeft()
+                focused = true
+            }
+            .disabled(full)
+
+            Button("Split Right") {
+                engine.focusPane(pane.id)
+                engine.splitEditorRight()
+                focused = true
+            }
+            .disabled(full)
+
+            Divider()
+
+            Button("Split Above") {
+                engine.focusPane(pane.id)
+                engine.splitEditorAbove()
+                focused = true
+            }
+            .disabled(full)
+
+            Button("Split Below") {
+                engine.focusPane(pane.id)
+                engine.splitEditorBelow()
+                focused = true
+            }
+            .disabled(full)
+
+            if full {
+                Divider()
+                Text("Maximum 4 panes")
+            }
+        } label: {
+            Image(systemName: "rectangle.split.1x2")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 24)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Split editor")
     }
 
     private func splitDivider(vertical: Bool) -> some View {
