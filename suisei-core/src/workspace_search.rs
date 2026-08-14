@@ -1,7 +1,6 @@
 //! Project-wide text search (ripgrep preferred, walk fallback).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct SearchHit {
@@ -139,7 +138,7 @@ pub fn search_project(root: &Path, pattern: &str, max: usize) -> Vec<SearchHit> 
 }
 
 fn search_with_rg(root: &Path, pattern: &str, max: usize) -> Option<Vec<SearchHit>> {
-    let output = Command::new("rg")
+    let output = crate::exec::tool("rg")
         .args([
             "--json",
             "--max-count",

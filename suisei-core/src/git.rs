@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitSign {
@@ -255,7 +254,7 @@ pub fn compute_blame(path: &str) -> (bool, HashMap<usize, BlameLine>) {
     let Some(parent) = abs.parent() else {
         return (false, lines);
     };
-    let output = Command::new("git")
+    let output = crate::exec::tool("git")
         .args([
             "blame",
             "--line-porcelain",
@@ -459,7 +458,7 @@ pub fn apply_hunk(path: &str, row: usize, action: HunkAction) -> Result<String, 
 fn run_git_stdin(root: &Path, args: &[&str], stdin: &str) -> Result<(), String> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = Command::new("git")
+    let mut child = crate::exec::tool("git")
         .args(args)
         .current_dir(root)
         .stdin(Stdio::piped())
@@ -493,7 +492,7 @@ fn overlaps(a: &GitHunk, b: &GitHunk) -> bool {
 
 /// One `git diff -U0` against the index (`unstaged`) or against HEAD.
 fn run_diff(parent: &Path, abs: &Path, path: &str, unstaged: bool) -> Option<String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::exec::tool("git");
     cmd.arg("diff");
     if !unstaged {
         cmd.arg("HEAD");
@@ -700,7 +699,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok()?;
         let git = |args: &[&str]| {
-            Command::new("git")
+            crate::exec::tool("git")
                 .args(args)
                 .current_dir(&dir)
                 .output()
@@ -734,7 +733,7 @@ mod tests {
         let before = compute_gutter(dir.join("f.rs").to_str().unwrap()).2;
 
         assert!(
-            Command::new("git")
+            crate::exec::tool("git")
                 .args(["add", "f.rs"])
                 .current_dir(&dir)
                 .output()

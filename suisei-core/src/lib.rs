@@ -7,6 +7,7 @@ pub mod config;
 pub mod dap;
 pub mod dap_cmds;
 pub mod edit;
+pub mod exec;
 pub mod explorer;
 pub mod fold;
 pub mod fs_atomic;

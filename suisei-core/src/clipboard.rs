@@ -134,13 +134,7 @@ pub fn available() -> bool {
 }
 
 fn which(bin: &str) -> bool {
-    Command::new("which")
-        .arg(bin)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::exec::is_available(bin)
 }
 
 fn pipe_to(cmd: &[&str], text: &str) -> bool {

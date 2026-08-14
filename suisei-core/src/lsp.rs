@@ -2701,17 +2701,10 @@ fn find_project_root(hint: &str, file: &str) -> String {
 }
 
 fn command_exists(bin: &str) -> bool {
-    // absolute path
-    if bin.contains('/') && Path::new(bin).exists() {
-        return true;
-    }
-    Command::new("which")
-        .arg(bin)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // Asked of the same search list `exec::tool` will spawn from, so
+    // "installed" and "spawnable" cannot disagree — and without forking
+    // `which` to answer a question we can answer from a directory listing.
+    crate::exec::is_available(bin)
 }
 
 /// Whether a language server is known for this file's extension (defaults only).
@@ -2898,7 +2891,7 @@ mod tests {
         // dropping the client leaves no orphan (the leak this fixes).
         let marker = "319274.5";
         let running = || {
-            let out = std::process::Command::new("pgrep")
+            let out = crate::exec::tool("pgrep")
                 .args(["-f", &format!("sleep {marker}")])
                 .output()
                 .expect("pgrep");
@@ -3352,7 +3345,7 @@ mod tests {
         use std::io::{Read, Write};
         use std::process::{Command, Stdio};
         use std::time::Duration;
-        let mut child = Command::new("rust-analyzer")
+        let mut child = crate::exec::tool("rust-analyzer")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

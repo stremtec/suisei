@@ -1276,7 +1276,7 @@ impl DapClient {
         let lang_c = lang.clone();
         let args_c = args.clone();
         thread::spawn(move || {
-            let out = Command::new("cargo")
+            let out = crate::exec::tool("cargo")
                 .args(["build"])
                 .current_dir(&cwd_b)
                 .stdout(Stdio::piped())

@@ -1,7 +1,6 @@
 //! Shared git CLI helpers for SCM + Git workbench.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct BranchInfo {
@@ -78,7 +77,7 @@ pub fn find_git_root(hint: Option<&Path>) -> Option<PathBuf> {
 }
 
 pub fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::exec::tool("git")
         .args(args)
         .current_dir(root)
         .output()
@@ -382,7 +381,7 @@ pub fn push(root: &Path) -> Result<String, String> {
                     .map(|_| "Pushed (set upstream)".into())
             } else {
                 // git push writes progress to stderr; re-run capturing both
-                let output = Command::new("git")
+                let output = crate::exec::tool("git")
                     .args(["push"])
                     .current_dir(root)
                     .output()

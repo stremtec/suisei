@@ -629,33 +629,33 @@ impl AudioPlayer {
                 .spawn()
         } else if cfg!(target_os = "windows") {
             // powershell SoundPlayer is async-awkward; try ffplay/mpv
-            Command::new("ffplay")
+            crate::exec::tool("ffplay")
                 .args(["-nodisp", "-autoexit", "-loglevel", "quiet", &path])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .or_else(|_| {
-                    Command::new("mpv")
+                    crate::exec::tool("mpv")
                         .args(["--no-video", "--really-quiet", &path])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .spawn()
                 })
         } else {
-            Command::new("ffplay")
+            crate::exec::tool("ffplay")
                 .args(["-nodisp", "-autoexit", "-loglevel", "quiet", &path])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
                 .or_else(|_| {
-                    Command::new("mpv")
+                    crate::exec::tool("mpv")
                         .args(["--no-video", "--really-quiet", &path])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .spawn()
                 })
                 .or_else(|_| {
-                    Command::new("aplay")
+                    crate::exec::tool("aplay")
                         .arg(&path)
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())

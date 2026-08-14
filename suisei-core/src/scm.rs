@@ -6,7 +6,6 @@
 //! - pretty commit graph via [`crate::git_graph`]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::git_graph::{self, GraphRow};
 
@@ -535,7 +534,7 @@ fn find_git_root(hint: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = crate::exec::tool("git")
         .args(args)
         .current_dir(root)
         .output()

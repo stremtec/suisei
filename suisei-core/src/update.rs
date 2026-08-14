@@ -233,7 +233,7 @@ struct LatestRelease {
 
 /// Latest GitHub release for Suisei (tag + first paragraph of notes).
 fn fetch_latest() -> Option<LatestRelease> {
-    let out = Command::new("curl")
+    let out = crate::exec::tool("curl")
         .args([
             "-fsSL",
             "--max-time",

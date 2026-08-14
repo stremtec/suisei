@@ -109,7 +109,7 @@ pub fn fetch_contributions(year: Option<u32>) -> Option<GhContributions> {
         let from = format!("{year}-01-01T00:00:00Z");
         let to = format!("{year}-12-31T23:59:59Z");
         const QUERY: &str = "query($from: DateTime!, $to: DateTime!) { viewer { contributionsCollection(from: $from, to: $to) { contributionCalendar { totalContributions weeks { contributionDays { date contributionLevel } } } } } }";
-        Command::new("gh")
+        crate::exec::tool("gh")
             .args([
                 "api",
                 "graphql",
@@ -128,7 +128,7 @@ pub fn fetch_contributions(year: Option<u32>) -> Option<GhContributions> {
             .ok()?
     } else {
         const QUERY: &str = "query { viewer { contributionsCollection { contributionCalendar { totalContributions weeks { contributionDays { date contributionLevel } } } } } }";
-        Command::new("gh")
+        crate::exec::tool("gh")
             .args([
                 "api",
                 "graphql",
@@ -188,7 +188,7 @@ pub fn fetch_profile() -> Option<GhProfile> {
     if !gh_installed() {
         return None;
     }
-    let out = Command::new("gh")
+    let out = crate::exec::tool("gh")
         .args(["api", "user"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -211,7 +211,7 @@ pub fn fetch_profile() -> Option<GhProfile> {
 }
 
 fn fetch_primary_email() -> Option<String> {
-    let out = Command::new("gh")
+    let out = crate::exec::tool("gh")
         .args(["api", "user/emails", "-q", ".[] | select(.primary==true) | .email"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -320,13 +320,7 @@ pub struct PrSummary {
 }
 
 pub fn gh_installed() -> bool {
-    Command::new("which")
-        .arg("gh")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::exec::is_available("gh")
 }
 
 /// Probe auth state. Prefers JSON hosts, then plain status, then `gh api user`.
@@ -340,7 +334,7 @@ pub fn auth_status() -> GhAuthInfo {
     }
 
     // 1) JSON (gh ≥ 2.x) — always exit 0 with --json unless fatal
-    if let Ok(out) = Command::new("gh")
+    if let Ok(out) = crate::exec::tool("gh")
         .args(["auth", "status", "--json", "hosts", "-h", "github.com"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -372,7 +366,7 @@ pub fn auth_status() -> GhAuthInfo {
     }
 
     // 2) Plain text fallback
-    if let Ok(out) = Command::new("gh")
+    if let Ok(out) = crate::exec::tool("gh")
         .args(["auth", "status", "-h", "github.com"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -412,7 +406,7 @@ pub fn auth_status() -> GhAuthInfo {
 
 /// Active login via API (most reliable).
 fn api_login() -> Option<String> {
-    let out = Command::new("gh")
+    let out = crate::exec::tool("gh")
         .args(["api", "user", "-q", ".login"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -558,7 +552,7 @@ pub fn auth_login_web_start() -> Result<AuthLoginSession, String> {
     thread::spawn(move || {
         let _ = tx.send(AuthLoginEvent::Log("Starting gh auth login --web …".into()));
 
-        let mut child = match Command::new("gh")
+        let mut child = match crate::exec::tool("gh")
             .args([
                 "auth",
                 "login",
@@ -758,7 +752,7 @@ pub fn auth_logout() -> Result<String, String> {
     if !gh_installed() {
         return Err("gh not installed".into());
     }
-    let out = Command::new("gh")
+    let out = crate::exec::tool("gh")
         .args(["auth", "logout", "--hostname", "github.com"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -768,7 +762,7 @@ pub fn auth_logout() -> Result<String, String> {
     if out.status.success() {
         return Ok("Signed out of github.com".into());
     }
-    let out2 = Command::new("gh")
+    let out2 = crate::exec::tool("gh")
         .args(["auth", "logout"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -791,7 +785,7 @@ pub fn auth_setup_git() -> Result<String, String> {
     if !gh_installed() {
         return Err("gh not installed".into());
     }
-    let out = Command::new("gh")
+    let out = crate::exec::tool("gh")
         .args(["auth", "setup-git"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -889,7 +883,7 @@ pub fn list_prs(root: &Path, limit: usize, state: PrListState) -> Result<Vec<PrS
         return Err("gh not installed".into());
     }
     let lim = limit.clamp(5, 80).to_string();
-    let out = Command::new("gh")
+    let out = crate::exec::tool("gh")
         .args([
             "pr",
             "list",
@@ -987,7 +981,7 @@ pub fn list_issues(
         return Err("gh not installed".into());
     }
     let lim = limit.clamp(5, 80).to_string();
-    let out = Command::new("gh")
+    let out = crate::exec::tool("gh")
         .args([
             "issue",
             "list",
@@ -1094,7 +1088,7 @@ pub fn filter_issues(items: &[IssueSummary], query: &str) -> Vec<usize> {
 pub fn pr_merge(root: &Path, number: u64, method: &str) -> Result<String, String> {
     // method: merge | squash | rebase
     let n = number.to_string();
-    let out = Command::new("gh")
+    let out = crate::exec::tool("gh")
         .args([
             "pr",
             "merge",
@@ -1151,7 +1145,7 @@ fn parse_pr_list_json(text: &str) -> Vec<PrSummary> {
 
 pub fn pr_checkout(root: &Path, number: u64) -> Result<String, String> {
     let n = number.to_string();
-    let out = Command::new("gh")
+    let out = crate::exec::tool("gh")
         .args(["pr", "checkout", &n])
         .current_dir(root)
         .output()
@@ -1169,7 +1163,7 @@ pub fn pr_checkout(root: &Path, number: u64) -> Result<String, String> {
 }
 
 pub fn pr_create(root: &Path, title: &str, body: &str) -> Result<String, String> {
-    let mut cmd = Command::new("gh");
+    let mut cmd = crate::exec::tool("gh");
     cmd.args(["pr", "create", "--title", title, "--body", body])
         .current_dir(root);
     let out = cmd.output().map_err(|e| e.to_string())?;
@@ -1191,7 +1185,7 @@ pub fn browse(root: &Path, target: Option<&str>) -> Result<String, String> {
     if let Some(t) = target {
         args.push(t.to_string());
     }
-    let status = Command::new("gh")
+    let status = crate::exec::tool("gh")
         .args(&args)
         .current_dir(root)
         .status()
