@@ -2042,6 +2042,12 @@ final class EditorCanvasView: NSView {
     /// Rects because that is the only primitive BOTH renderers have. A stroked
     /// path would have to exist twice, once per renderer, and could then
     /// differ; from one rect list they cannot.
+    /// One device pixel in points. The change bars' rounded ends are built
+    /// column by column and have to land on the pixel grid — see `capRects`.
+    private var devicePixel: CGFloat {
+        1 / (window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
+    }
+
     private func gitBars<Band: Sequence<EditorLine>>(
         _ band: Band, lineH: CGFloat
     ) -> [(CGRect, NSColor)] {
@@ -2073,7 +2079,8 @@ final class EditorCanvasView: NSView {
             for r in Self.barRects(
                 top: start, bottom: runEnd,
                 topCap: runTopCap, bottomCap: bottomCap,
-                staged: runStaged, grown: inHovered ? hoverEase : 0
+                staged: runStaged, grown: inHovered ? hoverEase : 0,
+                pixel: devicePixel
             ) {
                 out.append((r, color))
             }
@@ -2152,7 +2159,8 @@ final class EditorCanvasView: NSView {
     /// continuing rather than as stopping at the viewport.
     private static func barRects(
         top: CGFloat, bottom: CGFloat,
-        topCap: Bool, bottomCap: Bool, staged: Bool, grown: CGFloat = 0
+        topCap: Bool, bottomCap: Bool, staged: Bool, grown: CGFloat = 0,
+        pixel: CGFloat = 0.5
     ) -> [CGRect] {
         // A hovered hunk thickens. Xcode does this, and it is the affordance
         // that says the bar is a control and not a decoration — the pointer is
@@ -2190,9 +2198,13 @@ final class EditorCanvasView: NSView {
             y: bodyTop, height: bodyBottom - bodyTop, halfWidth: r, staged: staged
         )
 
-        if topCap { out += capRects(centreY: top + r, r: r, up: true, staged: staged) }
+        if topCap {
+            out += capRects(centreY: top + r, r: r, up: true, staged: staged, pixel: pixel)
+        }
         if bottomCap {
-            out += capRects(centreY: bottom - r, r: r, up: false, staged: staged)
+            out += capRects(
+                centreY: bottom - r, r: r, up: false, staged: staged, pixel: pixel
+            )
         }
         return out
     }
@@ -2211,16 +2223,40 @@ final class EditorCanvasView: NSView {
     ///
     /// Rects rather than a path because the Metal renderer takes nothing else,
     /// and both renderers have to agree about the shape.
+    /// One rounded end, sliced into COLUMNS on the pixel grid.
+    ///
+    /// It was sliced into rows, and that is why a hovered bar looked squared
+    /// off: the topmost row of a dome spans the chord at that depth, so the
+    /// apex came out as one flat horizontal run — the two side strokes meeting
+    /// in a straight line — and the run got longer as the bar thickened.
+    ///
+    /// A dome is steep in x at the apex and shallow at the shoulders, so
+    /// columns put the unavoidable flat parts on the shoulders, where the
+    /// curve is nearly flat anyway, and let the apex taper.
+    ///
+    /// Rects rather than a path because the Metal renderer takes nothing else,
+    /// and both renderers have to agree about the shape.
     private static func capRects(
-        centreY cy: CGFloat, r: CGFloat, up: Bool, staged: Bool
+        centreY cy: CGFloat, r: CGFloat, up: Bool, staged: Bool, pixel: CGFloat
     ) -> [CGRect] {
         let cx = gitBarCentreX
         let t = EditorCanvasView.gitBarStroke
-        let step = EditorCanvasView.gitBarCapStep
+        // One column per DEVICE PIXEL, on the pixel grid.
+        //
+        // The columns were a fixed 0.25pt, which at 2x is half a pixel: every
+        // pixel in the cap was shared by two of them, and two partial
+        // coverages of an opaque colour do not composite to full — so the caps
+        // came out uniformly paler than the body, and the bar looked like it
+        // changed colour at each end. Landing every boundary on a pixel edge
+        // means no horizontal coverage is ever split. The curve is carried by
+        // the column HEIGHTS, which stay fractional and antialias as they
+        // should.
+        let px = max(0.1, pixel)
+        var x = ((cx - r) / px).rounded() * px
+        let end = cx + r
         var out: [CGRect] = []
-        var x = cx - r
-        while x < cx + r - 0.0001 {
-            let w = min(step, cx + r - x)
+        while x < end - 0.0001 {
+            let w = min(px, end - x)
             let dx = x + w / 2 - cx
             let outer = (max(0, r * r - dx * dx)).squareRoot()
             // The hollow's inner edge is the same arc, one stroke smaller. Past
