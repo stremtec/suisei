@@ -19,6 +19,10 @@ struct ProjectTreeView: View {
 
     @State private var expanded: Set<String> = []
     @State private var selectedPath: String = ""
+    /// Files a live reload just touched. Observed separately for the same
+    /// reason everywhere else does it: a reload must not republish the shell
+    /// to reach the tree.
+    @ObservedObject private var live = EngineBridge.shared.live
     @State private var filter: String = ""
     @State private var nodes: [TreeNode] = []
     @State private var gitMarks: [String: String] = [:] // rel path → M/?/A/D
@@ -290,6 +294,25 @@ struct ProjectTreeView: View {
                                 : (isSelected ? Color.primary.opacity(0.12) : Color.clear)
                         )
                 )
+                // Something rewrote this file while you were elsewhere.
+                //
+                // Under the selection rather than over it, and fading: this is
+                // a notice, not a state, and it must not look like the row is
+                // selected. `TimelineView` only while something is lit — one
+                // left standing would drive the whole tree at frame rate.
+                .background {
+                    if live.files[path] != nil {
+                        TimelineView(.animation) { _ in
+                            let f = live.fileIntensity(path)
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(accent.opacity(0.22 * f))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                        .strokeBorder(accent.opacity(0.55 * f), lineWidth: 1)
+                                )
+                        }
+                    }
+                }
                 .overlay(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .strokeBorder(

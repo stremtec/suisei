@@ -213,9 +213,18 @@ pub struct App {
     /// not on screen, and background tabs are announced on their chips instead.
     pub live_rows: std::collections::HashMap<usize, crate::LiveKind>,
     pub live_marked_at: Option<std::time::Instant>,
-    /// Bumped whenever `live_rows` changes, so the face can pull the list only
-    /// when there is a new one rather than every frame.
+    /// Bumped whenever `live_rows` or `live_files` changes, so the face can
+    /// pull only when there is something new rather than every frame.
     pub live_gen: u64,
+    /// Files a live reload touched recently, and when.
+    ///
+    /// Separate from `live_rows` because it answers a different question and
+    /// for a wider set. Rows describe the LIVE document, and only that one:
+    /// a row number means nothing for a buffer that is not on screen. This is
+    /// per PATH, and it includes background tabs — which is the whole point,
+    /// since the project tree is where a file you are not looking at can say
+    /// that it moved.
+    pub live_files: std::collections::HashMap<std::path::PathBuf, std::time::Instant>,
     /// The tab strip — documents in strip order + the id source (A3-2).
     pub tabs: TabStrip,
     pub syntax: SyntaxEngine,
@@ -579,6 +588,7 @@ impl Default for App {
             live_rows: std::collections::HashMap::new(),
             live_marked_at: None,
             live_gen: 0,
+            live_files: std::collections::HashMap::new(),
             tabs: TabStrip::new(),
             live_doc: FIRST_TAB_ID,
             syntax: SyntaxEngine::new(),
@@ -4189,12 +4199,31 @@ impl App {
     /// to run the fade, so a row does not stay marked for the rest of the
     /// session — and so the sign byte stops carrying a bit nothing is using.
     pub fn expire_live_marks(&mut self) {
-        let Some(at) = self.live_marked_at else { return };
-        if at.elapsed() >= std::time::Duration::from_millis(1_600) {
-            self.live_rows.clear();
-            self.live_marked_at = None;
+        let mut changed = false;
+        if let Some(at) = self.live_marked_at {
+            if at.elapsed() >= std::time::Duration::from_millis(1_600) {
+                self.live_rows.clear();
+                self.live_marked_at = None;
+                changed = true;
+            }
+        }
+        // The tree's mark outlives the editor's: a file you are not looking at
+        // is worth pointing out for longer than a row already on screen.
+        let before = self.live_files.len();
+        self.live_files
+            .retain(|_, at| at.elapsed() < std::time::Duration::from_millis(3_000));
+        if self.live_files.len() != before {
+            changed = true;
+        }
+        if changed {
             self.live_gen = self.live_gen.wrapping_add(1);
         }
+    }
+
+    /// True while anything is still marked — the tick uses this to know
+    /// whether expiry has any work to do at all.
+    pub fn has_live_marks(&self) -> bool {
+        self.live_marked_at.is_some() || !self.live_files.is_empty()
     }
 
     /// The same live refresh, for every OTHER open document.
@@ -4261,9 +4290,11 @@ impl App {
             // text that is not what anyone wrote is worse than having no undo.
             tab.undo_stack = UndoStack::new();
             tab.undo_stack.push(tab.buffer.snapshot());
+            self.live_files.insert(path.clone(), std::time::Instant::now());
             reloaded += 1;
         }
         if reloaded > 0 {
+            self.live_gen = self.live_gen.wrapping_add(1);
             // Only the count. Naming one of six is arbitrary, and the tabs
             // themselves are where the change is visible.
             self.set_message(&if reloaded == 1 {
@@ -4339,6 +4370,7 @@ impl App {
         // Which rows this actually changes, worked out BEFORE the old text is
         // dropped — afterwards there is nothing left to compare against.
         self.mark_live_rows(&content);
+        self.live_files.insert(path.clone(), std::time::Instant::now());
 
         self.buffer = Buffer::from_string(&content);
         // Restore cursor within new bounds

@@ -798,10 +798,10 @@ impl Engine {
         self.tick_count = self.tick_count.wrapping_add(1);
         // Not inside the poll below: the flash lasts what it lasts, and tying
         // its end to a 20-tick boundary would quantise it to the poll.
-        if self.app.live_marked_at.is_some() {
-            let before = self.app.live_rows.len();
+        if self.app.has_live_marks() {
+            let before = self.app.live_gen;
             self.app.expire_live_marks();
-            if self.app.live_rows.len() != before {
+            if self.app.live_gen != before {
                 self.shell.dirty = true;
             }
         }
@@ -4571,6 +4571,42 @@ mod tests {
         );
         app.expire_live_marks();
         assert!(app.live_rows.is_empty(), "marks outlived their flash");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The project tree needs a per-FILE signal, and it has to cover the tabs
+    /// the row marks cannot speak for.
+    #[test]
+    fn a_background_reload_is_announced_by_path() {
+        let dir = std::env::temp_dir().join(format!("suisei_live_path_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, "a1\n").unwrap();
+        std::fs::write(&b, "b1\n").unwrap();
+
+        let mut eng = Engine::new();
+        eng.app = App::open_file(a.to_str().unwrap());
+        eng.app.open_new_tab(b.to_str().unwrap());
+        eng.recompose();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&a, "a2\n").unwrap();
+        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
+            eng.tick(8);
+        }
+
+        assert!(
+            eng.app.live_files.keys().any(|p| p.ends_with("a.txt")),
+            "a background reload said nothing the tree could show: {:?}",
+            eng.app.live_files
+        );
+        // And `live_rows` stays quiet for it — those describe the live
+        // document, and a row number means nothing for a buffer off screen.
+        assert!(
+            eng.app.live_rows.is_empty(),
+            "a background reload marked rows of the wrong document"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -863,6 +863,11 @@ typedef struct SuiseiLiveMarkC {
 uint64_t suisei_engine_live_gen(const SuiseiEngine *ptr);
 uint32_t suisei_engine_live_marks(const SuiseiEngine *ptr, SuiseiLiveMarkC *out,
                                   uint32_t cap);
+/* Paths touched recently, as consecutive NUL-terminated strings. Includes
+   background tabs — the tree is where a file nobody is looking at says it
+   moved. */
+#define SUISEI_LIVE_FILES_CAP 8192
+uint32_t suisei_engine_live_files(const SuiseiEngine *ptr, char *out, uint32_t cap);
 
 /* Absolute path of the document in a pane; 0 when it has none (untitled, or a
    shell). The non-text viewers draw from the file, not from the buffer, so

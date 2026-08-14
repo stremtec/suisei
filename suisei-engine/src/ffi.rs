@@ -3475,6 +3475,41 @@ pub extern "C" fn suisei_engine_live_marks(
     n as u32
 }
 
+/// Paths a live reload touched recently, as consecutive NUL-terminated UTF-8
+/// strings. Returns the count written, or 0 if `out` cannot hold them all.
+///
+/// Per PATH, and including background tabs — which is the point. The row
+/// marks describe the live document only, and the project tree is where a
+/// file nobody is looking at can say that it moved.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_live_files(
+    ptr: *const SuiseiEngine,
+    out: *mut c_char,
+    cap: u32,
+) -> u32 {
+    if ptr.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let app = unsafe { &*ptr }.0.app();
+    if app.live_files.is_empty() {
+        return 0;
+    }
+    let dst = unsafe { std::slice::from_raw_parts_mut(out.cast::<u8>(), cap as usize) };
+    let mut at = 0usize;
+    let mut n = 0u32;
+    for path in app.live_files.keys() {
+        let bytes = path.as_os_str().as_encoded_bytes();
+        if at + bytes.len() + 1 > dst.len() {
+            break;
+        }
+        dst[at..at + bytes.len()].copy_from_slice(bytes);
+        dst[at + bytes.len()] = 0;
+        at += bytes.len() + 1;
+        n += 1;
+    }
+    n
+}
+
 /// Absolute path of the document in pane `idx`. Returns 0 when that pane has
 /// no file — an untitled document, or a shell.
 ///

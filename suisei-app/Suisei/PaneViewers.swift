@@ -371,6 +371,12 @@ enum LiveKind: UInt8 {
 final class LiveMarks: ObservableObject {
     /// Row → what happened. Empty almost always.
     @Published private(set) var rows: [UInt32: LiveKind] = [:]
+    /// Absolute path → when this process first saw it reload.
+    ///
+    /// Per file rather than per row, and it covers background tabs, which the
+    /// row marks cannot: a row number means nothing for a buffer that is not
+    /// on screen. This is what the project tree reads.
+    @Published private(set) var files: [String: CFTimeInterval] = [:]
     /// When THIS process first saw each row marked.
     ///
     /// Kept here rather than taken from core for the same reason the
@@ -384,6 +390,9 @@ final class LiveMarks: ObservableObject {
     /// 0 when the row is not flashing. Eased out — it leaves quickly and the
     /// tail is a whisper rather than a step to nothing.
     static let flashDuration: CFTimeInterval = 1.1
+    /// Longer than a row's. A file nobody is looking at is worth pointing out
+    /// for longer than one already on screen.
+    static let fileFlashDuration: CFTimeInterval = 2.4
 
     func intensity(_ row: UInt32, now: CFTimeInterval = CACurrentMediaTime()) -> CGFloat {
         guard let start = seenAt[row] else { return 0 }
@@ -393,35 +402,58 @@ final class LiveMarks: ObservableObject {
 
     var isFlashing: Bool { !seenAt.isEmpty }
 
+    /// 0 when this file is not flashing.
+    func fileIntensity(_ path: String, now: CFTimeInterval = CACurrentMediaTime()) -> CGFloat {
+        guard let start = files[path] else { return 0 }
+        let t = min(1, max(0, (now - start) / Self.fileFlashDuration))
+        return CGFloat(pow(1 - t, 2))
+    }
+
     /// Pull only when core says the list moved. One `u64` read per tick
     /// otherwise, which is what makes this affordable at 120Hz.
     func poll(_ engine: OpaquePointer) {
         let gen = suisei_engine_live_gen(engine)
         if gen != lastGen {
             lastGen = gen
-            var buf = [SuiseiLiveMarkC](repeating: SuiseiLiveMarkC(), count: 4096)
-            let n = buf.withUnsafeMutableBufferPointer {
+            let now = CACurrentMediaTime()
+
+            var marks = [SuiseiLiveMarkC](repeating: SuiseiLiveMarkC(), count: 4096)
+            let n = marks.withUnsafeMutableBufferPointer {
                 suisei_engine_live_marks(engine, $0.baseAddress, UInt32($0.count))
             }
-            var next: [UInt32: LiveKind] = [:]
-            next.reserveCapacity(Int(n))
-            let now = CACurrentMediaTime()
+            var nextRows: [UInt32: LiveKind] = [:]
+            nextRows.reserveCapacity(Int(n))
             for i in 0..<Int(n) {
-                let m = buf[i]
-                next[m.row] = LiveKind(raw: m.kind)
+                let m = marks[i]
+                nextRows[m.row] = LiveKind(raw: m.kind)
                 if seenAt[m.row] == nil { seenAt[m.row] = now }
             }
-            rows = next
+            rows = nextRows
+
+            var buf = [CChar](repeating: 0, count: Int(SUISEI_LIVE_FILES_CAP))
+            let count = buf.withUnsafeMutableBufferPointer {
+                suisei_engine_live_files(engine, $0.baseAddress, UInt32($0.count))
+            }
+            var seenPaths: Set<String> = []
+            if count > 0 {
+                buf.withUnsafeBufferPointer { raw in
+                    guard var p = raw.baseAddress else { return }
+                    for _ in 0..<Int(count) {
+                        let path = String(cString: p)
+                        seenPaths.insert(path)
+                        if files[path] == nil { files[path] = now }
+                        p = p.advanced(by: strlen(p) + 1)
+                    }
+                }
+            }
+            // Core has forgotten the rest; so should we, or a path stays lit
+            // until it happens to reload again.
+            files = files.filter { seenPaths.contains($0.key) }
         }
-        // Retire finished fades even when the list has not moved: core drops
-        // its marks at 1.6s and the fade is 1.1s, so the view is the one that
-        // decides when a flash is over.
-        let now = CACurrentMediaTime()
-        let before = seenAt.count
-        seenAt = seenAt.filter { now - $0.value < Self.flashDuration }
-        if seenAt.count != before, seenAt.isEmpty, rows.isEmpty == false, lastGen != 0 {
-            // Nothing to publish: `rows` is unchanged and the fade is read
-            // through `intensity`, which the canvas polls while animating.
-        }
+
+        // Retire finished fades even when the list has not moved: the view
+        // decides when a flash is over, and its length is not core's.
+        let cutoff = CACurrentMediaTime()
+        seenAt = seenAt.filter { cutoff - $0.value < Self.flashDuration }
     }
 }
