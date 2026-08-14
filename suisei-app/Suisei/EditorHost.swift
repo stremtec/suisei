@@ -360,7 +360,25 @@ final class EditorScrollView: NSScrollView {
         let docChanged = docLineCount != lastDocLineCount || wrapLines != lastWrap
         lastDocLineCount = docLineCount
         lastWrap = wrapLines
-        lastContentCols = Int(engine?.contentCols() ?? 0)
+        // Only the focused pane may ask, because `contentCols()` can only
+        // answer for one document: it measures `App::buffer` — the LIVE one —
+        // over `App::scroll`, and `restore_state_from_tab` resets its
+        // high-water mark on every tab switch precisely because a different
+        // document has a different extent.
+        //
+        // Every pane was asking, so every pane sized ITS canvas to the FOCUSED
+        // pane's document. Moving focus between a wide file and a narrow one
+        // resized both canvases, and resizing a canvas clamps its clip origin:
+        // the horizontal position of both panes stepped sideways on every
+        // focus change, and a narrow file grew a horizontal scrollbar it had no
+        // use for. An unfocused pane keeps the extent it measured for its own
+        // document, which is the only extent it was ever entitled to.
+        //
+        // Same guard as `revealCaret`, `syncCorePosition` and
+        // `postLiveMinimapLine` below, for the same reason.
+        if engine?.editorSplit.isSplit != true || paneIndex == engine?.editorSplit.focus {
+            lastContentCols = Int(engine?.contentCols() ?? 0)
+        }
         fitCanvasToBounds()
 
         canvas.setChrome(
