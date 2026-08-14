@@ -66,9 +66,6 @@ struct EditorLine: Equatable, Identifiable {
     /// This row is the first / last of its hunk, so the bar caps here.
     var gitHunkFirst: Bool { (gitSign & 0x10) != 0 }
     var gitHunkLast: Bool { (gitSign & 0x20) != 0 }
-    /// A live reload just replaced this row. A flash, not a state — core drops
-    /// the bit after ~1.6s, so the face only has to notice it arrive.
-    var liveReloaded: Bool { (gitSign & 0x04) != 0 }
 }
 
 /// What a pane is showing — the one question the face asks before it decides
@@ -992,6 +989,18 @@ final class EngineBridge: ObservableObject {
     /// a small object with its own publish rate, so the window chrome can
     /// observe it without observing the typing path.
     let viewerControls = ViewerControls()
+
+    /// Rows a live reload just replaced, and what it did to them.
+    ///
+    /// Pulled rather than carried per line, because the MINIMAP has to show
+    /// changes that are off screen and the line array only holds the visible
+    /// band. One list serves the canvas and the minimap; a bit for one and a
+    /// list for the other would be the same fact with two owners, disagreeing
+    /// exactly when the marks expire.
+    ///
+    /// Published on its own object so a flash arriving does not republish the
+    /// shell — the same reasoning as `menu` and `viewerControls`.
+    let live = LiveMarks()
     let softwareUpdate = SoftwareUpdateStore()
 
     @Published private(set) var editorSplit: SplitSnap = .empty
@@ -1390,6 +1399,8 @@ final class EngineBridge: ObservableObject {
             let dt = Self.clampedMs((now - lastTickAt) * 1000)
             lastTickAt = now
             let gen = suisei_engine_tick(engine, dt)
+            // One u64 read; pulls the list only when it has actually moved.
+            self.live.poll(engine)
             // Pick up an async references reply (one publish, then it stops).
             self.pollReferencesIfNeeded()
             // Source Control has its own generation and ObservableObject. This

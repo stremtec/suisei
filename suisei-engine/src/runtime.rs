@@ -4536,10 +4536,19 @@ mod tests {
         }
 
         let marked = &eng.app.live_rows;
-        assert!(marked.contains(&1) && marked.contains(&2), "changed rows: {marked:?}");
         assert!(
-            !marked.contains(&0) && !marked.contains(&3),
+            marked.contains_key(&1) && marked.contains_key(&2),
+            "changed rows: {marked:?}"
+        );
+        assert!(
+            !marked.contains_key(&0) && !marked.contains_key(&3),
             "the common prefix and suffix are not the change: {marked:?}"
+        );
+        // Same count in, same count out: the lines were replaced, not added.
+        assert_eq!(
+            marked.get(&1).copied(),
+            Some(suisei_core::LiveKind::Changed),
+            "a same-length replacement is not an addition"
         );
     }
 

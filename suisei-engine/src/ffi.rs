@@ -3421,6 +3421,60 @@ pub extern "C" fn suisei_engine_hover_text(
     1
 }
 
+/// One row a live reload touched. 8 bytes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SuiseiLiveMarkC {
+    pub row: u32,
+    /// `suisei_core::LiveKind` — 0 changed, 1 added, 2 removed.
+    pub kind: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Bumped whenever the live-reload marks change, including when they expire.
+/// The face polls this — one `u64` read — and pulls the list only when it has
+/// actually moved.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_live_gen(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { &*ptr }.0.app().live_gen
+}
+
+/// The rows a live reload just replaced, with what it did to them.
+///
+/// A pull rather than per-row bits in the line array, because the MINIMAP has
+/// to show changes that are off screen and the line array only carries the
+/// visible band. One list serving both surfaces beats a bit for the canvas and
+/// a list for the minimap — that is the same fact with two owners, and they
+/// would disagree at exactly the moment the marks expire.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_live_marks(
+    ptr: *const SuiseiEngine,
+    out: *mut SuiseiLiveMarkC,
+    cap: u32,
+) -> u32 {
+    if ptr.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let app = unsafe { &*ptr }.0.app();
+    let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    let mut n = 0usize;
+    for (&row, &kind) in app.live_rows.iter() {
+        if n >= dst.len() {
+            break;
+        }
+        dst[n] = SuiseiLiveMarkC {
+            row: row as u32,
+            kind: kind as u8,
+            _pad: [0; 3],
+        };
+        n += 1;
+    }
+    n as u32
+}
+
 /// Absolute path of the document in pane `idx`. Returns 0 when that pane has
 /// no file — an untitled document, or a shell.
 ///

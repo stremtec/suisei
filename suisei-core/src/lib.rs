@@ -85,3 +85,16 @@ pub use settings::{
 pub use split::{Axis, Layout, Pane, PaneId, SplitState, TerminalId};
 pub use update::UpdateState;
 pub use workspace_search::{SearchHit, WorkspaceSearch};
+
+/// What a live reload did to a band of rows.
+///
+/// Blue arrived, red left, and "changed" is the same lines saying something
+/// else — three states because that is what a reader asks of a change they did
+/// not make: did it grow, shrink, or move?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LiveKind {
+    Changed = 0,
+    Added = 1,
+    Removed = 2,
+}

@@ -845,6 +845,25 @@ uint8_t suisei_engine_references(const SuiseiEngine *ptr,
 void suisei_engine_request_hover(SuiseiEngine *ptr);
 uint8_t suisei_engine_hover_text(const SuiseiEngine *ptr, char *out, uint32_t cap);
 
+/* One row a live reload touched. */
+#define SUISEI_LIVE_CHANGED 0
+#define SUISEI_LIVE_ADDED 1
+#define SUISEI_LIVE_REMOVED 2
+#define SUISEI_MAX_LIVE_MARKS 4096
+
+typedef struct SuiseiLiveMarkC {
+  uint32_t row;
+  uint8_t kind;
+  uint8_t _pad[3];
+} SuiseiLiveMarkC;
+
+/* Bumped whenever the marks change, including expiry — poll this, pull only
+   when it moves. The minimap needs marks for rows outside the visible band,
+   which is why these are a list and not per-line bits. */
+uint64_t suisei_engine_live_gen(const SuiseiEngine *ptr);
+uint32_t suisei_engine_live_marks(const SuiseiEngine *ptr, SuiseiLiveMarkC *out,
+                                  uint32_t cap);
+
 /* Absolute path of the document in a pane; 0 when it has none (untitled, or a
    shell). The non-text viewers draw from the file, not from the buffer, so
    this is how they find it. Pulled on demand — see the Rust doc comment. */

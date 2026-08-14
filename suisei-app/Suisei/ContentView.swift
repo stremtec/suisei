@@ -6661,6 +6661,9 @@ private struct SplitDivider: View {
 /// the glyph geometry SwiftUI-exact; see tabPlusMenu).
 struct MinimapStrip: View {
     @ObservedObject var engine: EngineBridge
+    /// Observed separately, like everywhere else these small objects are used:
+    /// a reload landing must not republish the shell to reach the minimap.
+    @ObservedObject private var live = EngineBridge.shared.live
     var accent: Color
     var fg: Color
     var bg: Color
@@ -6710,6 +6713,39 @@ struct MinimapStrip: View {
                         )
                         .frame(width: geo.size.width - 2, height: h)
                         .offset(x: 1, y: y0)
+
+                    // Where a live reload landed — the whole point of putting
+                    // it here is the part that is OFF SCREEN. The editor's
+                    // flash can only speak for rows in the band; this speaks
+                    // for the file.
+                    //
+                    // Shaped like the viewport indicator on purpose: the two
+                    // say the same kind of thing ("this region, right now")
+                    // and a second visual language for that would be noise.
+                    if !live.rows.isEmpty {
+                        // The fade is read from a clock, so this has to be
+                        // re-evaluated per frame while it runs. Present only
+                        // while there is something to fade — a `TimelineView`
+                        // left standing would drive the minimap at frame rate
+                        // for the whole session.
+                        TimelineView(.animation) { _ in
+                            ForEach(liveBoxes(mapH: mapH, total: total), id: \.id) { box in
+                                RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                                    .fill(box.color.opacity(0.20 * box.fade))
+                                    .overlay(
+                                        RoundedRectangle(
+                                            cornerRadius: Radius.row, style: .continuous
+                                        )
+                                        .strokeBorder(
+                                            box.color.opacity(0.75 * box.fade), lineWidth: 1
+                                        )
+                                    )
+                                    .frame(width: geo.size.width - 2, height: box.height)
+                                    .offset(x: 1, y: box.y)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    }
                 }
             }
             .contentShape(Rectangle())
@@ -6734,6 +6770,53 @@ struct MinimapStrip: View {
         .overlay(alignment: .leading) {
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1)
         }
+    }
+
+    private struct LiveBox: Identifiable {
+        let id: Int
+        let y: CGFloat
+        let height: CGFloat
+        let color: Color
+        let fade: CGFloat
+    }
+
+    /// Contiguous runs of marked rows, as boxes over the map.
+    ///
+    /// Runs rather than one box per row: a reload usually replaces a band, and
+    /// twenty separate 1pt boxes read as noise where one box reads as a place.
+    /// A box is never thinner than 3pt — a single changed line in a 4,000 line
+    /// file would otherwise be invisible, which is exactly the case this
+    /// exists for.
+    private func liveBoxes(mapH: CGFloat, total: CGFloat) -> [LiveBox] {
+        let marks = engine.live.rows
+        guard !marks.isEmpty, total > 0 else { return [] }
+        let rows = marks.keys.sorted()
+        var out: [LiveBox] = []
+        var runStart = rows[0]
+        var prev = rows[0]
+
+        func flush(_ last: UInt32) {
+            let kind = marks[runStart] ?? .changed
+            let top = CGFloat(runStart) / total * mapH
+            let bottom = CGFloat(last + 1) / total * mapH
+            out.append(LiveBox(
+                id: Int(runStart),
+                y: max(0, min(top, mapH - 3)),
+                height: max(3, bottom - top),
+                color: kind == .removed ? Color(nsColor: .systemRed) : accent,
+                fade: engine.live.intensity(runStart)
+            ))
+        }
+
+        for row in rows.dropFirst() {
+            if row != prev + 1 {
+                flush(prev)
+                runStart = row
+            }
+            prev = row
+        }
+        flush(prev)
+        return out.filter { $0.fade > 0.01 }
     }
 
     /// Document bars only — Equatable so scroll-driven body updates skip the

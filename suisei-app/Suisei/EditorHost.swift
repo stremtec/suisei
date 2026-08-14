@@ -1316,7 +1316,7 @@ final class EditorCanvasView: NSView {
 
         renderer.beginFrame()
         syncBreakpointAnimations(band)
-        syncLiveFlashes(band)
+        syncLiveFlashes()
         for (r, c) in hunkHoverRects(lineH: lineH) { renderer.addRect(r, c) }
         for (r, c) in gitBars(band, lineH: lineH) { renderer.addRect(r, c) }
         bracketRects.removeAll(keepingCapacity: true)
@@ -1334,9 +1334,10 @@ final class EditorCanvasView: NSView {
             if line.isCursor { renderer.addRect(rowRect, colors.cursorLine) }
             let flash = liveFlash(line.lineNo)
             if flash > 0.01 {
-                renderer.addRect(rowRect, colors.liveFlash.withAlphaComponent(
-                    colors.liveFlash.alphaComponent * flash
-                ))
+                let ink = liveFlashColor(line.lineNo)
+                renderer.addRect(
+                    rowRect, ink.withAlphaComponent(ink.alphaComponent * flash)
+                )
             }
             let bpPhase = breakpointPhase(line)
             if bpPhase > 0.001 {
@@ -1597,7 +1598,7 @@ final class EditorCanvasView: NSView {
 
         PerfProbe.measure("   draw: gutter decorations") {
             syncBreakpointAnimations(band)
-            syncLiveFlashes(band)
+            syncLiveFlashes()
             for (r, c) in hunkHoverRects(lineH: lineH) {
                 c.setFill()
                 r.fill()
@@ -1624,9 +1625,8 @@ final class EditorCanvasView: NSView {
             // else: it has to be legible under the glyphs, and it fades out.
             let flash = liveFlash(line.lineNo)
             if flash > 0.01 {
-                colors.liveFlash
-                    .withAlphaComponent(colors.liveFlash.alphaComponent * flash)
-                    .setFill()
+                let ink = liveFlashColor(line.lineNo)
+                ink.withAlphaComponent(ink.alphaComponent * flash).setFill()
                 rowRect.fill()
             }
 
@@ -2418,16 +2418,6 @@ final class EditorCanvasView: NSView {
     ///
     /// Keyed by line number rather than by index, so scrolling does not
     /// reassign an animation to a different line.
-    /// Rows a live reload replaced, and when this view first saw each one.
-    ///
-    /// The time is kept HERE rather than sent from core, for the same reason
-    /// the breakpoint chips keep theirs: a row scrolled into view for the
-    /// first time is not an arrival. Core says which rows; the view says when
-    /// it started showing them, so the fade is the same length wherever the
-    /// row was when the reload happened.
-    private var liveSeen: [UInt32: CFTimeInterval] = [:]
-    static let liveFlashDuration: CFTimeInterval = 1.1
-
     private var bpAnim: [UInt32: (start: CFTimeInterval, appearing: Bool)] = [:]
     /// What the last band said, so a flip can be told from a first sighting.
     private var bpSeen: [UInt32: Bool] = [:]
@@ -2440,35 +2430,39 @@ final class EditorCanvasView: NSView {
     /// already there. Only a row this canvas has seen before and whose state
     /// flipped gets an animation; otherwise every scroll would replay every
     /// chip on screen.
-    /// Start a flash for any row that has just arrived carrying the live bit,
-    /// and retire the ones whose fade is over.
-    private func syncLiveFlashes<Band: Sequence<EditorLine>>(_ band: Band) {
-        let now = CACurrentMediaTime()
-        var wanted = false
-        for line in band where line.liveReloaded {
-            if liveSeen[line.lineNo] == nil { liveSeen[line.lineNo] = now }
-            wanted = true
-        }
-        liveSeen = liveSeen.filter { now - $0.value < Self.liveFlashDuration }
-        if wanted || !liveSeen.isEmpty { startLiveFlashTimer() }
+    /// Keep repainting while any row is flashing.
+    ///
+    /// Which rows, and when each was first seen, belong to `LiveMarks` — the
+    /// same list the minimap reads, because the minimap has to show changes
+    /// that are off screen and a per-row flag can only describe the band. This
+    /// view only has to keep drawing while the fade runs.
+    private func syncLiveFlashes() {
+        guard engine?.live.isFlashing == true else { return }
+        startLiveFlashTimer()
     }
 
-    /// 0 once the flash is over. Eased out, so it leaves quickly and the last
-    /// of it is a whisper rather than a step to nothing.
+    /// 0 once the flash is over.
     private func liveFlash(_ lineNo: UInt32) -> CGFloat {
-        guard let start = liveSeen[lineNo] else { return 0 }
-        let t = min(1, max(0, (CACurrentMediaTime() - start) / Self.liveFlashDuration))
-        return CGFloat(pow(1 - t, 2))
+        engine?.live.intensity(lineNo) ?? 0
+    }
+
+    /// Blue arrived, red left. The same two colours the gutter already uses
+    /// for the same two facts, so a reader does not have to learn a second
+    /// vocabulary for changes they did not make.
+    private func liveFlashColor(_ lineNo: UInt32) -> NSColor {
+        switch engine?.live.rows[lineNo] {
+        case .added: return colors.gitChange.withAlphaComponent(0.26)
+        case .removed: return colors.gitDelete.withAlphaComponent(0.26)
+        default: return colors.liveFlash
+        }
     }
 
     private func startLiveFlashTimer() {
         guard liveFlashTimer == nil else { return }
         let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
-            let now = CACurrentMediaTime()
-            self.liveSeen = self.liveSeen.filter { now - $0.value < Self.liveFlashDuration }
             self.needsDisplay = true
-            if self.liveSeen.isEmpty {
+            if self.engine?.live.isFlashing != true {
                 timer.invalidate()
                 self.liveFlashTimer = nil
             }

@@ -211,8 +211,11 @@ pub struct App {
     /// Cleared by `expire_live_marks` once the face has had time to show them.
     /// Only the live document: a row number means nothing for a buffer that is
     /// not on screen, and background tabs are announced on their chips instead.
-    pub live_rows: std::collections::HashSet<usize>,
+    pub live_rows: std::collections::HashMap<usize, crate::LiveKind>,
     pub live_marked_at: Option<std::time::Instant>,
+    /// Bumped whenever `live_rows` changes, so the face can pull the list only
+    /// when there is a new one rather than every frame.
+    pub live_gen: u64,
     /// The tab strip — documents in strip order + the id source (A3-2).
     pub tabs: TabStrip,
     pub syntax: SyntaxEngine,
@@ -573,8 +576,9 @@ impl Default for App {
             xlc_separator_y: 0,
             file_mtime: None,
             file_deleted: false,
-            live_rows: std::collections::HashSet::new(),
+            live_rows: std::collections::HashMap::new(),
             live_marked_at: None,
+            live_gen: 0,
             tabs: TabStrip::new(),
             live_doc: FIRST_TAB_ID,
             syntax: SyntaxEngine::new(),
@@ -4135,25 +4139,45 @@ impl App {
             head += 1;
         }
         let mut tail = 0usize;
-        while tail < old.len() - head.min(old.len())
-            && tail < new.len() - head.min(new.len())
+        while head + tail < old.len()
+            && head + tail < new.len()
             && old[old.len() - 1 - tail] == new[new.len() - 1 - tail]
         {
             tail += 1;
         }
 
         self.live_rows.clear();
-        // A pure deletion leaves no new row to mark; the line that closed over
-        // the gap is where the reader should look, so mark that one.
-        let first = head.min(new.len().saturating_sub(1));
-        let last = new.len().saturating_sub(tail);
-        if new.is_empty() {
-            self.live_marked_at = None;
-            return;
+        let old_mid = old.len() - tail - head;
+        let new_mid = new.len() - tail - head;
+
+        // What the band DID, by what it did to the line count. With the prefix
+        // and suffix trimmed the middle is one contiguous replacement, so its
+        // net effect is the honest description: longer means lines arrived,
+        // shorter means lines left, equal means the same lines say something
+        // else now.
+        let kind = if new_mid > old_mid {
+            crate::LiveKind::Added
+        } else if new_mid < old_mid {
+            crate::LiveKind::Removed
+        } else {
+            crate::LiveKind::Changed
+        };
+
+        if new_mid == 0 {
+            // Nothing arrived to mark. The row that closed over the gap is
+            // where the reader should look, and it is the only place a
+            // removal can be pointed at.
+            let row = head.min(new.len().saturating_sub(1));
+            if !new.is_empty() {
+                self.live_rows.insert(row, crate::LiveKind::Removed);
+            }
+        } else {
+            for row in head..head + new_mid {
+                self.live_rows.insert(row, kind);
+            }
         }
-        for row in first..last.max(first + 1).min(new.len()) {
-            self.live_rows.insert(row);
-        }
+
+        self.live_gen = self.live_gen.wrapping_add(1);
         self.live_marked_at = if self.live_rows.is_empty() {
             None
         } else {
@@ -4169,6 +4193,7 @@ impl App {
         if at.elapsed() >= std::time::Duration::from_millis(1_600) {
             self.live_rows.clear();
             self.live_marked_at = None;
+            self.live_gen = self.live_gen.wrapping_add(1);
         }
     }
 

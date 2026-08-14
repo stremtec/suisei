@@ -351,3 +351,77 @@ extension PaneKind {
         }
     }
 }
+
+// MARK: - Live reload marks
+
+/// What a live reload did to a row.
+enum LiveKind: UInt8 {
+    case changed = 0
+    case added = 1
+    case removed = 2
+
+    init(raw: UInt8) { self = LiveKind(rawValue: raw) ?? .changed }
+}
+
+/// The rows a live reload just replaced.
+///
+/// Its own `ObservableObject` for the reason `MenuState` is: this changes a
+/// couple of times a minute at most, and putting it on the chrome would make
+/// every reload republish the shell.
+final class LiveMarks: ObservableObject {
+    /// Row → what happened. Empty almost always.
+    @Published private(set) var rows: [UInt32: LiveKind] = [:]
+    /// When THIS process first saw each row marked.
+    ///
+    /// Kept here rather than taken from core for the same reason the
+    /// breakpoint chips keep theirs: a row scrolled into view is not an
+    /// arrival, and the fade should be the same length wherever the row was
+    /// when the reload happened.
+    private(set) var seenAt: [UInt32: CFTimeInterval] = [:]
+
+    private var lastGen: UInt64 = 0
+
+    /// 0 when the row is not flashing. Eased out — it leaves quickly and the
+    /// tail is a whisper rather than a step to nothing.
+    static let flashDuration: CFTimeInterval = 1.1
+
+    func intensity(_ row: UInt32, now: CFTimeInterval = CACurrentMediaTime()) -> CGFloat {
+        guard let start = seenAt[row] else { return 0 }
+        let t = min(1, max(0, (now - start) / Self.flashDuration))
+        return CGFloat(pow(1 - t, 2))
+    }
+
+    var isFlashing: Bool { !seenAt.isEmpty }
+
+    /// Pull only when core says the list moved. One `u64` read per tick
+    /// otherwise, which is what makes this affordable at 120Hz.
+    func poll(_ engine: OpaquePointer) {
+        let gen = suisei_engine_live_gen(engine)
+        if gen != lastGen {
+            lastGen = gen
+            var buf = [SuiseiLiveMarkC](repeating: SuiseiLiveMarkC(), count: 4096)
+            let n = buf.withUnsafeMutableBufferPointer {
+                suisei_engine_live_marks(engine, $0.baseAddress, UInt32($0.count))
+            }
+            var next: [UInt32: LiveKind] = [:]
+            next.reserveCapacity(Int(n))
+            let now = CACurrentMediaTime()
+            for i in 0..<Int(n) {
+                let m = buf[i]
+                next[m.row] = LiveKind(raw: m.kind)
+                if seenAt[m.row] == nil { seenAt[m.row] = now }
+            }
+            rows = next
+        }
+        // Retire finished fades even when the list has not moved: core drops
+        // its marks at 1.6s and the fade is 1.1s, so the view is the one that
+        // decides when a flash is over.
+        let now = CACurrentMediaTime()
+        let before = seenAt.count
+        seenAt = seenAt.filter { now - $0.value < Self.flashDuration }
+        if seenAt.count != before, seenAt.isEmpty, rows.isEmpty == false, lastGen != 0 {
+            // Nothing to publish: `rows` is unchanged and the fade is read
+            // through `intensity`, which the canvas polls while animating.
+        }
+    }
+}
