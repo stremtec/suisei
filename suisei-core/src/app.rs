@@ -952,6 +952,7 @@ impl App {
                 file_mtime: mtime,
                 terminal: None,
                 kind,
+                terminal_cwd: None,
             }),
             live_doc: FIRST_TAB_ID,
             ..Self::default()
@@ -973,31 +974,47 @@ impl App {
     /// Restore tabs/cursors from `~/.suisei/session` (used when started with no file args).
     pub fn restore_session(&mut self) {
         let session = session::load();
-        if session.files.is_empty() {
+        if session.items.is_empty() {
             return;
         }
-        for (i, f) in session.files.iter().enumerate() {
-            if i == 0 {
-                // Replace the empty first tab
-                let content = fs::read_to_string(&f.path).unwrap_or_default();
-                self.buffer = Buffer::from_string(&content);
-                self.filename = Some(PathBuf::from(&f.path));
-                self.buffer.cursor.row = f.row.min(self.buffer.line_count().saturating_sub(1));
-                let line_len = self.buffer.line(self.buffer.cursor.row).chars().count();
-                self.buffer.cursor.col = f.col.min(line_len);
-                self.mark_clean();
-                if !self.tabs.buffers.is_empty() {
-                    self.tabs.buffers[0].buffer = self.buffer.clone();
-                    self.tabs.buffers[0].filename = self.filename.clone();
-                    self.tabs.buffers[0].modified = false;
-                    self.tabs.buffers[0].saved_hash = self.saved_hash;
+        let mut first = true;
+        for item in session.items.iter() {
+            match item {
+                session::SessionItem::File(f) => {
+                    if first {
+                        // Replace the empty first tab
+                        let content = fs::read_to_string(&f.path).unwrap_or_default();
+                        self.buffer = Buffer::from_string(&content);
+                        self.filename = Some(PathBuf::from(&f.path));
+                        self.buffer.cursor.row =
+                            f.row.min(self.buffer.line_count().saturating_sub(1));
+                        let line_len =
+                            self.buffer.line(self.buffer.cursor.row).chars().count();
+                        self.buffer.cursor.col = f.col.min(line_len);
+                        self.mark_clean();
+                        if !self.tabs.buffers.is_empty() {
+                            self.tabs.buffers[0].buffer = self.buffer.clone();
+                            self.tabs.buffers[0].filename = self.filename.clone();
+                            self.tabs.buffers[0].modified = false;
+                            self.tabs.buffers[0].saved_hash = self.saved_hash;
+                        }
+                    } else {
+                        self.open_new_tab(&f.path);
+                        self.buffer.cursor.row =
+                            f.row.min(self.buffer.line_count().saturating_sub(1));
+                        let line_len =
+                            self.buffer.line(self.buffer.cursor.row).chars().count();
+                        self.buffer.cursor.col = f.col.min(line_len);
+                    }
                 }
-            } else {
-                self.open_new_tab(&f.path);
-                self.buffer.cursor.row = f.row.min(self.buffer.line_count().saturating_sub(1));
-                let line_len = self.buffer.line(self.buffer.cursor.row).chars().count();
-                self.buffer.cursor.col = f.col.min(line_len);
+                session::SessionItem::Terminal { cwd } => {
+                    // A tab, at a directory. The shell itself is spawned by
+                    // whoever shows the tab — the process is not part of what
+                    // a session can carry across a restart.
+                    self.open_terminal_tab_at(&PathBuf::from(cwd));
+                }
             }
+            first = false;
         }
         let active = session
             .active
@@ -1020,13 +1037,37 @@ impl App {
         }
         self.refresh_git();
         self.dap.load_persisted_breakpoints();
-        self.message = format!("Restored session ({} file(s))", session.files.len());
+        let files = session
+            .items
+            .iter()
+            .filter(|i| i.file().is_some())
+            .count();
+        let shells = session.items.len() - files;
+        self.message = if shells == 0 {
+            format!("Restored session ({files} file(s))")
+        } else {
+            format!("Restored session ({files} file(s), {shells} shell(s))")
+        };
     }
 
     pub fn save_session(&self) {
         let current = self.current_buffer();
-        let mut files = Vec::new();
+        let mut items = Vec::new();
         for (i, tab) in self.tabs.buffers.iter().enumerate() {
+            if tab.terminal.is_some() {
+                // A shell keeps its slot in the list even though it has no
+                // file, because `pane.tab` indexes this and a gap would point
+                // every pane after it at the wrong tab.
+                items.push(session::SessionItem::Terminal {
+                    cwd: tab
+                        .terminal_cwd
+                        .clone()
+                        .unwrap_or_else(|| self.terminal_working_directory())
+                        .display()
+                        .to_string(),
+                });
+                continue;
+            }
             let Some(ref path) = tab.filename else {
                 continue;
             };
@@ -1035,13 +1076,13 @@ impl App {
             } else {
                 (tab.buffer.cursor.row, tab.buffer.cursor.col)
             };
-            files.push(SessionFile {
+            items.push(session::SessionItem::File(SessionFile {
                 path: path.display().to_string(),
                 row,
                 col,
-            });
+            }));
         }
-        if files.is_empty() {
+        if items.is_empty() {
             return;
         }
         let active = self
@@ -1049,12 +1090,12 @@ impl App {
             .buffers
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.filename.is_some())
+            .filter(|(_, t)| t.filename.is_some() || t.terminal.is_some())
             .position(|(i, _)| i == current)
             .unwrap_or(0);
         let split = self.session_split();
         session::save(&Session {
-            files,
+            items,
             active,
             split,
         });
@@ -1068,13 +1109,14 @@ impl App {
         if !self.split.is_split() {
             return None;
         }
-        // Index within the saved files, in save order (buffers order minus
-        // the unnamed tabs).
+        // Index within the saved ITEMS, in save order. Shells count: they are
+        // saved now, so a split holding one can be saved too — it used to be
+        // dropped entirely, because every pane had to resolve to a file.
         let saved: Vec<BufferId> = self
             .tabs
             .buffers
             .iter()
-            .filter(|t| t.filename.is_some())
+            .filter(|t| t.filename.is_some() || t.terminal.is_some())
             .map(|t| t.id)
             .collect();
         let file_idx_of = |pid: crate::split::PaneId| -> Option<usize> {
@@ -4900,6 +4942,7 @@ mod tests {
                 file_mtime: None,
                 terminal: None,
                 kind: crate::media::FileKind::Text,
+                terminal_cwd: None,
             });
         }
         app.save_state_to_tab(); // tab 0 mirrors the active buffer
@@ -4956,6 +4999,7 @@ mod tests {
                 file_mtime: None,
                 terminal: None,
                 kind: crate::media::FileKind::Text,
+                terminal_cwd: None,
             });
         }
         app.save_state_to_tab();
@@ -5053,6 +5097,7 @@ mod tests {
                 file_mtime: None,
                 terminal: None,
                 kind: crate::media::FileKind::Text,
+                terminal_cwd: None,
             });
         }
         app.save_state_to_tab();
@@ -5147,6 +5192,7 @@ mod tests {
             file_mtime: None,
             terminal: None,
             kind: crate::media::FileKind::Text,
+            terminal_cwd: None,
         });
         app.save_state_to_tab();
         let (a_id, b_id) = (app.tabs.buffers[0].id, app.tabs.buffers[1].id);
@@ -5196,6 +5242,7 @@ mod tests {
                 file_mtime: None,
                 terminal: None,
                 kind: crate::media::FileKind::Text,
+                terminal_cwd: None,
             });
         }
         app.save_state_to_tab();
@@ -5239,6 +5286,7 @@ mod tests {
                 file_mtime: None,
                 terminal: None,
                 kind: crate::media::FileKind::Text,
+                terminal_cwd: None,
             });
         }
         app.save_state_to_tab();
@@ -5420,6 +5468,7 @@ mod tests {
                 file_mtime: None,
                 terminal: None,
                 kind: crate::media::FileKind::Text,
+                terminal_cwd: None,
             });
         }
         app.save_state_to_tab();

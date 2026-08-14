@@ -114,7 +114,8 @@ impl App {
             self.grid_cols().max(40)
         };
         let rows = self.grid_rows().max(24);
-        let anchor = self.terminal_working_directory().join(".suisei-terminal");
+        let cwd = self.terminal_working_directory();
+        let anchor = cwd.join(".suisei-terminal");
         let mut term = Terminal::new();
         term.open = true;
         term.close_confirm = false;
@@ -146,6 +147,7 @@ impl App {
             file_mtime: None,
             terminal: Some(tid),
             kind: crate::media::FileKind::Text,
+            terminal_cwd: Some(cwd),
         });
         // Point the focused pane at the new terminal tab BEFORE the restore:
         // the active tab is derived from the pane, so this is what makes
@@ -169,6 +171,51 @@ impl App {
         }
         self.message = "Terminal tab · keys → shell · ⌃⇧T close · ^W w other pane".into();
     }
+    /// A terminal tab at a given directory, without the toggle.
+    ///
+    /// Session restore's entry point. `toggle_terminal_full` is the user
+    /// gesture — it parks the pane, remembers what it displaced so closing
+    /// restores it, and closes an already-focused shell on a second press.
+    /// None of that applies when a window is being rebuilt from disk: there is
+    /// no displaced document, nothing to toggle, and the tab has to land in
+    /// strip order beside the files it was saved with.
+    pub fn open_terminal_tab_at(&mut self, cwd: &std::path::Path) {
+        let cols = self.grid_cols().max(40);
+        let rows = self.grid_rows().max(24);
+        let mut term = Terminal::new();
+        term.open = true;
+        term.close_confirm = false;
+        term.resize(cols, rows);
+        term.start(Some(&cwd.join(".suisei-terminal")));
+        if !term.started {
+            // A shell that will not spawn is not worth a tab that cannot do
+            // anything: the restore continues with the documents.
+            self.message = "Terminal: failed to spawn shell (PTY)".into();
+            return;
+        }
+        let tid = crate::split::TerminalId(self.next_terminal_id);
+        self.next_terminal_id = self
+            .next_terminal_id
+            .checked_add(1)
+            .expect("terminal id space exhausted");
+        self.pane_terminals.insert(tid, term);
+
+        let tab_id = self.take_tab_id();
+        self.tabs.buffers.push(BufferTab {
+            id: tab_id,
+            buffer: Buffer::new(),
+            filename: None,
+            scroll: 0,
+            modified: false,
+            saved_hash: EMPTY_TEXT_HASH,
+            undo_stack: UndoStack::new(),
+            file_mtime: None,
+            terminal: Some(tid),
+            kind: crate::media::FileKind::Text,
+            terminal_cwd: Some(cwd.to_path_buf()),
+        });
+    }
+
     /// The focused pane's shell id, when it shows a terminal tab.
     fn focused_pane_terminal_id(&self) -> Option<crate::split::TerminalId> {
         let buf_id = self.split.panes.get(self.split.focus_index())?.buffer;

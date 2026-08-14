@@ -47,6 +47,13 @@ pub struct BufferTab {
     /// owners is a fact that will disagree with itself. `App::tab_kind`
     /// composes the two.
     pub kind: crate::media::FileKind,
+    /// Where a terminal tab's shell was started.
+    ///
+    /// The one thing about a shell worth carrying across a restart. The
+    /// process cannot come back — it died with the machine's process table —
+    /// but the directory it was working in is the whole of what makes the
+    /// restored tab useful rather than merely present.
+    pub terminal_cwd: Option<PathBuf>,
 }
 
 /// The tab strip's own state — the documents in strip order and the source
@@ -72,6 +79,7 @@ impl TabStrip {
             file_mtime: None,
             terminal: None,
             kind: crate::media::FileKind::Text,
+            terminal_cwd: None,
         })
     }
 
@@ -148,6 +156,7 @@ impl App {
             file_mtime: None,
             terminal: None,
             kind: crate::media::FileKind::Text,
+            terminal_cwd: None,
         });
         self.split.focused_pane_mut().buffer = tab_id;
         self.restore_state_from_tab();
@@ -503,6 +512,7 @@ impl App {
             file_mtime: mtime,
             terminal: None,
             kind,
+            terminal_cwd: None,
         });
         self.split.focused_pane_mut().buffer = tab_id;
         self.restore_state_from_tab();
@@ -710,6 +720,7 @@ impl App {
                 file_mtime: None,
                 terminal: None,
                 kind: crate::media::FileKind::Text,
+                terminal_cwd: None,
             };
             // The slot survives but the document in it does not, so the id
             // changed and any pane still naming the old one has to follow.
