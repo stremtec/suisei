@@ -4283,14 +4283,17 @@ struct ContentView: View {
             .keyboardShortcut(.return, modifiers: [])
             .help("Done · Return")
         }
-        .padding(8)
+        // Wider than the vertical padding on purpose: a capsule's ends are
+        // half-circles, so content laid out to 8 sat inside the curve.
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
         .frame(minWidth: 420, idealWidth: 480, maxWidth: 540)
         .glassEffect(
             SuiseiGlass.chrome(light: isLightTheme, style: engine.glassStyle),
-            in: RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+            in: Capsule(style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
+            Capsule(style: .continuous)
                 .strokeBorder(fg.opacity(0.08), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(isLightTheme ? 0.08 : 0.28), radius: 8, y: 3)

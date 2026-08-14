@@ -598,6 +598,40 @@ final class LRUCache<Key: Hashable, Value> {
     }
 }
 
+/// The squiggle drawn under a find match, in place of a box behind it.
+///
+/// A wash behind the glyphs competes with the syntax colours it covers and
+/// hides the selection when the two overlap. An underline marks the same
+/// span while leaving the text exactly as it was — which is what a spell
+/// checker has always done, and for the same reason.
+///
+/// Defined once as a function of x so the two renderers cannot disagree:
+/// CoreText strokes it as a path, Metal — which has only quads — samples
+/// the same curve into 1pt columns.
+enum FindSquiggle {
+    /// Points per full wave. Short enough to read as a squiggle on a
+    /// three-character match, long enough not to alias into a blur.
+    static let period: CGFloat = 4.5
+    static let amplitude: CGFloat = 1.05
+
+    static func offset(at x: CGFloat) -> CGFloat {
+        sin(x / period * 2 * .pi) * amplitude
+    }
+
+    /// Distance from the line box's TOP to the wave's centreline. The view
+    /// is flipped, so this grows downward.
+    static func centreY(lineTop y: CGFloat, lineHeight: CGFloat) -> CGFloat {
+        y + lineHeight - amplitude - 1.5
+    }
+
+    static func thickness(current: Bool) -> CGFloat { current ? 1.8 : 1.3 }
+
+    /// The current match is the one ⌘G is on; the rest are context.
+    static func color(current: Bool) -> NSColor {
+        NSColor.systemYellow.withAlphaComponent(current ? 1.0 : 0.6)
+    }
+}
+
 final class EditorCanvasView: NSView {
     /// Equatable so a theme change to ANY token invalidates the CTLine cache.
     /// The hand-written comparison this replaced stopped at `function`, so
@@ -1311,10 +1345,24 @@ final class EditorCanvasView: NSView {
                 let x0 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(u0), nil)
                 let x1 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(u1), nil)
                 let current = span.kind == 249
-                renderer.addRect(
-                    CGRect(x: x0, y: y + 1, width: max(1, x1 - x0), height: lineH - 2),
-                    NSColor.systemYellow.withAlphaComponent(current ? 0.52 : 0.24)
-                )
+                // Metal draws quads only, so the squiggle is sampled into 1pt
+                // columns off the same curve the CoreText path strokes.
+                let cy = FindSquiggle.centreY(lineTop: y, lineHeight: lineH)
+                let thick = FindSquiggle.thickness(current: current)
+                let ink = FindSquiggle.color(current: current)
+                var px = x0
+                while px < x1 {
+                    let w = min(1, x1 - px)
+                    renderer.addRect(
+                        CGRect(
+                            x: px,
+                            y: cy + FindSquiggle.offset(at: px - x0) - thick / 2,
+                            width: w, height: thick
+                        ),
+                        ink
+                    )
+                    px += 1
+                }
             }
 
             if line.hasSelection {
@@ -1582,10 +1630,10 @@ final class EditorCanvasView: NSView {
                 compositionCaretUTF16 = at + markedText.utf16.count
             }
 
-            // Find results: a quiet yellow wash for every match and a stronger
-            // wash + hairline for the current one. These spans are display
-            // columns, so resolve through the same visual→UTF-16 map used by
-            // syntax before asking CoreText for real glyph positions.
+            // Find results: a yellow squiggle under every match, brighter and
+            // thicker under the current one. These spans are display columns,
+            // so resolve through the same visual→UTF-16 map used by syntax
+            // before asking CoreText for real glyph positions.
             let visualMap = visualToUTF16Map(line.text)
             for sp in line.spans where sp.kind == 248 || sp.kind == 249 {
                 let v0 = Int(sp.start)
@@ -1596,16 +1644,22 @@ final class EditorCanvasView: NSView {
                 guard u1 > u0 else { continue }
                 let x0 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(u0), nil)
                 let x1 = gutter + CTLineGetOffsetForStringIndex(ct, CFIndex(u1), nil)
-                let box = CGRect(x: x0, y: y + 1, width: max(1, x1 - x0), height: lineH - 2)
                 let current = sp.kind == 249
-                NSColor.systemYellow.withAlphaComponent(current ? 0.52 : 0.24).setFill()
-                NSBezierPath(roundedRect: box, xRadius: 2, yRadius: 2).fill()
-                if current {
-                    NSColor.systemOrange.withAlphaComponent(0.75).setStroke()
-                    let outline = NSBezierPath(roundedRect: box.insetBy(dx: 0.5, dy: 0.5), xRadius: 2, yRadius: 2)
-                    outline.lineWidth = 1
-                    outline.stroke()
+                let cy = FindSquiggle.centreY(lineTop: y, lineHeight: lineH)
+                let wave = NSBezierPath()
+                // Half-point steps: smooth enough to read as a curve at any
+                // scale, and simpler than fitting béziers to a sine.
+                var px = x0
+                wave.move(to: CGPoint(x: px, y: cy + FindSquiggle.offset(at: 0)))
+                while px < x1 {
+                    px = min(px + 0.5, x1)
+                    wave.line(to: CGPoint(x: px, y: cy + FindSquiggle.offset(at: px - x0)))
                 }
+                wave.lineWidth = FindSquiggle.thickness(current: current)
+                wave.lineCapStyle = .round
+                wave.lineJoinStyle = .round
+                FindSquiggle.color(current: current).setStroke()
+                wave.stroke()
             }
 
             if line.hasSelection {
