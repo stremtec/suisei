@@ -2758,7 +2758,24 @@ final class EditorCanvasView: NSView {
 
     /// Rows on screen that no buffer line owns. Read by the scroll view when it
     /// sizes the document, which is the other place row count means height.
-    var extraVisualRows: Int { shownChange?.lines.count ?? 0 }
+    /// Rows on screen that no buffer line owns.
+    ///
+    /// The reveal's phantom rows, plus — while a REMOVAL is closing — the rows
+    /// that are gone. The document has already shrunk by then, but the rows
+    /// below are still being drawn that far down as they rise into the space,
+    /// and a canvas sized to the new content clips them away. That is why a
+    /// deletion had no animation and simply vanished: the motion was drawn
+    /// outside the view.
+    ///
+    /// Insertions need nothing here — the document grew first, so the room is
+    /// already there.
+    var extraVisualRows: Int {
+        var n = shownChange?.lines.count ?? 0
+        if let o = liveOpening, o.rows < 0, liveOpenProgress < 1 {
+            n += -o.rows
+        }
+        return n
+    }
 
     /// Drop the reveal when the change it describes has stopped existing.
     ///
