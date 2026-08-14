@@ -796,6 +796,15 @@ impl Engine {
         // Idle outline refresh: typing keeps the light path (never rebuilds the
         // outline); catch up ~600ms after the buffer settles.
         self.tick_count = self.tick_count.wrapping_add(1);
+        // Not inside the poll below: the flash lasts what it lasts, and tying
+        // its end to a 20-tick boundary would quantise it to the poll.
+        if self.app.live_marked_at.is_some() {
+            let before = self.app.live_rows.len();
+            self.app.expire_live_marks();
+            if self.app.live_rows.len() != before {
+                self.shell.dirty = true;
+            }
+        }
         if self.tick_count % 12 == 0 && self.outline_cache_ver != self.app.buffer.version() {
             self.shell.dirty = true;
             need_full = true;
@@ -4501,6 +4510,58 @@ mod tests {
             "the pane did not pick up a write it did not make"
         );
         assert!(!eng.app.modified, "a reloaded file is not a dirty one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reload says WHERE it happened, not just that it happened.
+    ///
+    /// The face cannot work this out afterwards — by the time it draws, the
+    /// old text is gone — so the marks are recorded on the way through and
+    /// carried in the sign byte's spare bit.
+    #[test]
+    fn a_live_reload_marks_the_rows_it_replaced() {
+        let dir = std::env::temp_dir().join(format!("suisei_live_marks_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("m.txt");
+        std::fs::write(&f, "one\ntwo\nthree\nfour\n").unwrap();
+        let mut eng = Engine::new();
+        eng.app = App::open_file(f.to_str().unwrap());
+        eng.recompose();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Only the middle moves; the first and last lines are untouched.
+        std::fs::write(&f, "one\nTWO\nTHREE\nfour\n").unwrap();
+        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
+            eng.tick(8);
+        }
+
+        let marked = &eng.app.live_rows;
+        assert!(marked.contains(&1) && marked.contains(&2), "changed rows: {marked:?}");
+        assert!(
+            !marked.contains(&0) && !marked.contains(&3),
+            "the common prefix and suffix are not the change: {marked:?}"
+        );
+    }
+
+    /// The marks are a flash. They expire on their own, or a row stays lit for
+    /// the rest of the session and the sign byte keeps a bit nothing uses.
+    #[test]
+    fn live_marks_expire() {
+        let dir = std::env::temp_dir().join(format!("suisei_live_exp_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("e.txt");
+        std::fs::write(&f, "a\n").unwrap();
+        let mut app = App::open_file(f.to_str().unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&f, "b\n").unwrap();
+        app.check_external_change();
+        assert!(!app.live_rows.is_empty(), "the reload marked nothing");
+
+        app.live_marked_at = Some(
+            std::time::Instant::now() - std::time::Duration::from_secs(5)
+        );
+        app.expire_live_marks();
+        assert!(app.live_rows.is_empty(), "marks outlived their flash");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

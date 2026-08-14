@@ -197,6 +197,22 @@ pub struct App {
     /// `check_active_file_external`, cleared when the path reappears. Drives the
     /// tab's "deleted on disk" state so editing a vanished file is not silent.
     pub file_deleted: bool,
+    /// Rows of the LIVE document that a live reload just replaced, and when.
+    ///
+    /// A reload used to be invisible: the text changed under the reader with
+    /// nothing to say where. The face needs to know WHICH rows to mark, and it
+    /// cannot work that out afterwards — the old text is gone by then. So the
+    /// reload records it on the way through.
+    ///
+    /// Rows only, no kinds. "This line is not what you were looking at" is the
+    /// whole of what a reader needs; splitting it into added and changed would
+    /// be a diff view, and this is a notice.
+    ///
+    /// Cleared by `expire_live_marks` once the face has had time to show them.
+    /// Only the live document: a row number means nothing for a buffer that is
+    /// not on screen, and background tabs are announced on their chips instead.
+    pub live_rows: std::collections::HashSet<usize>,
+    pub live_marked_at: Option<std::time::Instant>,
     /// The tab strip — documents in strip order + the id source (A3-2).
     pub tabs: TabStrip,
     pub syntax: SyntaxEngine,
@@ -557,6 +573,8 @@ impl Default for App {
             xlc_separator_y: 0,
             file_mtime: None,
             file_deleted: false,
+            live_rows: std::collections::HashSet::new(),
+            live_marked_at: None,
             tabs: TabStrip::new(),
             live_doc: FIRST_TAB_ID,
             syntax: SyntaxEngine::new(),
@@ -4093,6 +4111,67 @@ impl App {
         }
     }
 
+    /// Note the rows a reload is about to replace.
+    ///
+    /// Common prefix and common suffix, and everything between them is the
+    /// change. Not an LCS: a real diff would find the smallest edit script,
+    /// and this is not a diff view — it is a notice, and the band between the
+    /// first and last line that moved is exactly the region a reader needs to
+    /// look at. It also cannot degrade: the worst case is a whole-file rewrite
+    /// marking the whole file, which is the truth.
+    ///
+    /// Rows are in the NEW buffer's numbering, because that is what will be on
+    /// screen when they are drawn.
+    fn mark_live_rows(&mut self, next: &str) {
+        let old = self.buffer.lines();
+        // `split('\n')`, not `lines()`. The buffer keeps the empty line a
+        // trailing newline creates and `str::lines()` drops it, so the two
+        // sides were different lengths and the common SUFFIX never lined up —
+        // every reload marked one row too many, right down to the last line.
+        let new: Vec<&str> = next.split('\n').collect();
+
+        let mut head = 0usize;
+        while head < old.len() && head < new.len() && old[head] == new[head] {
+            head += 1;
+        }
+        let mut tail = 0usize;
+        while tail < old.len() - head.min(old.len())
+            && tail < new.len() - head.min(new.len())
+            && old[old.len() - 1 - tail] == new[new.len() - 1 - tail]
+        {
+            tail += 1;
+        }
+
+        self.live_rows.clear();
+        // A pure deletion leaves no new row to mark; the line that closed over
+        // the gap is where the reader should look, so mark that one.
+        let first = head.min(new.len().saturating_sub(1));
+        let last = new.len().saturating_sub(tail);
+        if new.is_empty() {
+            self.live_marked_at = None;
+            return;
+        }
+        for row in first..last.max(first + 1).min(new.len()) {
+            self.live_rows.insert(row);
+        }
+        self.live_marked_at = if self.live_rows.is_empty() {
+            None
+        } else {
+            Some(std::time::Instant::now())
+        };
+    }
+
+    /// Live marks are a flash, not a state. Dropped once the face has had time
+    /// to run the fade, so a row does not stay marked for the rest of the
+    /// session — and so the sign byte stops carrying a bit nothing is using.
+    pub fn expire_live_marks(&mut self) {
+        let Some(at) = self.live_marked_at else { return };
+        if at.elapsed() >= std::time::Duration::from_millis(1_600) {
+            self.live_rows.clear();
+            self.live_marked_at = None;
+        }
+    }
+
     /// The same live refresh, for every OTHER open document.
     ///
     /// `check_active_file_external` watches one file: the focused pane's. That
@@ -4231,6 +4310,10 @@ impl App {
         let had_local_edits = self.modified;
         let cursor = self.buffer.cursor();
         let scroll = self.scroll;
+
+        // Which rows this actually changes, worked out BEFORE the old text is
+        // dropped — afterwards there is nothing left to compare against.
+        self.mark_live_rows(&content);
 
         self.buffer = Buffer::from_string(&content);
         // Restore cursor within new bounds

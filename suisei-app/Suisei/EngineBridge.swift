@@ -66,6 +66,9 @@ struct EditorLine: Equatable, Identifiable {
     /// This row is the first / last of its hunk, so the bar caps here.
     var gitHunkFirst: Bool { (gitSign & 0x10) != 0 }
     var gitHunkLast: Bool { (gitSign & 0x20) != 0 }
+    /// A live reload just replaced this row. A flash, not a state — core drops
+    /// the bit after ~1.6s, so the face only has to notice it arrive.
+    var liveReloaded: Bool { (gitSign & 0x04) != 0 }
 }
 
 /// What a pane is showing — the one question the face asks before it decides

@@ -2646,31 +2646,40 @@ fn visual_width_str(s: &str) -> usize {
 /// ```text
 ///   0x03  kind: 0 none, 1 added, 2 modified, 3 deleted (the face's
 ///         `gitSignKind` masks with this)
-///   0x04  (free)
+///   0x04  replaced by a live reload  (a flash, expires; see App::live_rows)
 ///   0x08  the hunk is staged        → bar is filled rather than hollow
 ///   0x10  first row of its hunk     → the bar caps here
 ///   0x20  last row of its hunk      → the bar caps here
 ///   0x40  breakpoint on this line   (owned by the DAP path)
 ///   0x80  soft-wrap continuation    (owned by the line builder)
 /// ```
+pub const GIT_LIVE_RELOADED: u8 = 0x04;
 pub const GIT_HUNK_STAGED: u8 = 0x08;
 pub const GIT_HUNK_FIRST: u8 = 0x10;
 pub const GIT_HUNK_LAST: u8 = 0x20;
 
 fn git_sign_for_row(app: &App, row: usize) -> u8 {
     use suisei_core::git::GitSign;
+    // Independent of git: a live reload marks rows whether or not the file is
+    // tracked, and returning early on "no git sign" would have dropped every
+    // mark in an untracked file.
+    let live = if app.live_rows.contains(&row) {
+        GIT_LIVE_RELOADED
+    } else {
+        0
+    };
     let kind = match app.git.sign_at(row) {
         Some(GitSign::Added) => 1,
         Some(GitSign::Modified) => 2,
         Some(GitSign::Deleted) => 3,
-        None => return 0,
+        None => return live,
     };
     let Some(h) = app.git.hunk_at(row) else {
         // A sign with no hunk should not happen — signs are derived from them
         // — but a lone slice is a better failure than a missing one.
-        return kind | GIT_HUNK_FIRST | GIT_HUNK_LAST;
+        return kind | live | GIT_HUNK_FIRST | GIT_HUNK_LAST;
     };
-    let mut out = kind;
+    let mut out = kind | live;
     if row == h.start {
         out |= GIT_HUNK_FIRST;
     }

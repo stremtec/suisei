@@ -87,6 +87,7 @@ struct EditorHost: NSViewRepresentable {
             removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
             breakpoint: .systemYellow,
             breakpointInk: .black,
+            liveFlash: NSColor(accent).withAlphaComponent(0.22),
             bracketFill: EditorCanvasView.bracketYellow,
             bracketInk: .black
         )
@@ -695,6 +696,11 @@ final class EditorCanvasView: NSView {
         /// gutter is yellow.
         var breakpoint: NSColor
         var breakpointInk: NSColor
+        /// The wash over a row a live reload just replaced. The accent, faint
+        /// — this is a notice that something arrived, not an error and not a
+        /// change the reader made. It fades to nothing within about a second,
+        /// so it is the only colour here whose job is to leave.
+        var liveFlash: NSColor
         /// The flash behind a matching delimiter, and the ink redrawn on it.
         ///
         /// A fixed sRGB value and OPAQUE, in both themes.
@@ -740,6 +746,7 @@ final class EditorCanvasView: NSView {
         removedFg: NSColor.labelColor.withAlphaComponent(0.82),
         removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
         breakpoint: .systemYellow, breakpointInk: .black,
+        liveFlash: NSColor.systemBlue.withAlphaComponent(0.22),
         bracketFill: bracketYellow,
         bracketInk: .black
     )
@@ -1309,6 +1316,7 @@ final class EditorCanvasView: NSView {
 
         renderer.beginFrame()
         syncBreakpointAnimations(band)
+        syncLiveFlashes(band)
         for (r, c) in hunkHoverRects(lineH: lineH) { renderer.addRect(r, c) }
         for (r, c) in gitBars(band, lineH: lineH) { renderer.addRect(r, c) }
         bracketRects.removeAll(keepingCapacity: true)
@@ -1324,6 +1332,12 @@ final class EditorCanvasView: NSView {
             let rowRect = CGRect(x: viewport.minX, y: y, width: viewport.width, height: lineH)
 
             if line.isCursor { renderer.addRect(rowRect, colors.cursorLine) }
+            let flash = liveFlash(line.lineNo)
+            if flash > 0.01 {
+                renderer.addRect(rowRect, colors.liveFlash.withAlphaComponent(
+                    colors.liveFlash.alphaComponent * flash
+                ))
+            }
             let bpPhase = breakpointPhase(line)
             if bpPhase > 0.001 {
                 // Same chip the CoreText path draws, squared off: this
@@ -1583,6 +1597,7 @@ final class EditorCanvasView: NSView {
 
         PerfProbe.measure("   draw: gutter decorations") {
             syncBreakpointAnimations(band)
+            syncLiveFlashes(band)
             for (r, c) in hunkHoverRects(lineH: lineH) {
                 c.setFill()
                 r.fill()
@@ -1603,6 +1618,15 @@ final class EditorCanvasView: NSView {
             let rowRect = CGRect(x: 0, y: y, width: bounds.width, height: lineH)
             if line.isCursor {
                 colors.cursorLine.setFill()
+                rowRect.fill()
+            }
+            // A row someone else just wrote. Behind the text, ahead of nothing
+            // else: it has to be legible under the glyphs, and it fades out.
+            let flash = liveFlash(line.lineNo)
+            if flash > 0.01 {
+                colors.liveFlash
+                    .withAlphaComponent(colors.liveFlash.alphaComponent * flash)
+                    .setFill()
                 rowRect.fill()
             }
 
@@ -2394,10 +2418,21 @@ final class EditorCanvasView: NSView {
     ///
     /// Keyed by line number rather than by index, so scrolling does not
     /// reassign an animation to a different line.
+    /// Rows a live reload replaced, and when this view first saw each one.
+    ///
+    /// The time is kept HERE rather than sent from core, for the same reason
+    /// the breakpoint chips keep theirs: a row scrolled into view for the
+    /// first time is not an arrival. Core says which rows; the view says when
+    /// it started showing them, so the fade is the same length wherever the
+    /// row was when the reload happened.
+    private var liveSeen: [UInt32: CFTimeInterval] = [:]
+    static let liveFlashDuration: CFTimeInterval = 1.1
+
     private var bpAnim: [UInt32: (start: CFTimeInterval, appearing: Bool)] = [:]
     /// What the last band said, so a flip can be told from a first sighting.
     private var bpSeen: [UInt32: Bool] = [:]
     private var bpAnimTimer: Timer?
+    private var liveFlashTimer: Timer?
 
     /// Notice chips arriving and leaving in this band.
     ///
@@ -2405,6 +2440,43 @@ final class EditorCanvasView: NSView {
     /// already there. Only a row this canvas has seen before and whose state
     /// flipped gets an animation; otherwise every scroll would replay every
     /// chip on screen.
+    /// Start a flash for any row that has just arrived carrying the live bit,
+    /// and retire the ones whose fade is over.
+    private func syncLiveFlashes<Band: Sequence<EditorLine>>(_ band: Band) {
+        let now = CACurrentMediaTime()
+        var wanted = false
+        for line in band where line.liveReloaded {
+            if liveSeen[line.lineNo] == nil { liveSeen[line.lineNo] = now }
+            wanted = true
+        }
+        liveSeen = liveSeen.filter { now - $0.value < Self.liveFlashDuration }
+        if wanted || !liveSeen.isEmpty { startLiveFlashTimer() }
+    }
+
+    /// 0 once the flash is over. Eased out, so it leaves quickly and the last
+    /// of it is a whisper rather than a step to nothing.
+    private func liveFlash(_ lineNo: UInt32) -> CGFloat {
+        guard let start = liveSeen[lineNo] else { return 0 }
+        let t = min(1, max(0, (CACurrentMediaTime() - start) / Self.liveFlashDuration))
+        return CGFloat(pow(1 - t, 2))
+    }
+
+    private func startLiveFlashTimer() {
+        guard liveFlashTimer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let now = CACurrentMediaTime()
+            self.liveSeen = self.liveSeen.filter { now - $0.value < Self.liveFlashDuration }
+            self.needsDisplay = true
+            if self.liveSeen.isEmpty {
+                timer.invalidate()
+                self.liveFlashTimer = nil
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        liveFlashTimer = t
+    }
+
     private func syncBreakpointAnimations<Band: Sequence<EditorLine>>(_ band: Band) {
         let now = CACurrentMediaTime()
         var started = false
