@@ -2096,9 +2096,21 @@ final class EditorCanvasView: NSView {
                 continue
             }
             let y = visualY(row)
+            // A run is a HUNK, not a colour.
+            //
+            // It used to break wherever the sign kind changed, and one hunk
+            // can carry two: `signs_from_hunks` overrides the last row of a
+            // hunk that removed more lines than it added to Deleted, so a
+            // six-lines-into-two edit comes out `Modified, Deleted`. That
+            // split one change into two bars with a flat butt-joint between
+            // them — one capsule's round end, a seam, then another's — which
+            // reads as the bar being cut in half.
+            //
+            // Only a new hunk starts a new run now. Core already marks that
+            // row, and it is the only boundary that means anything to a reader.
             let sameRun = runStart != nil
                 && row == lastRow + 1
-                && kind == runKind
+                && !line.gitHunkFirst
                 && line.gitHunkStaged == runStaged
             if !sameRun {
                 flush(bottomCap: false)
@@ -2118,6 +2130,14 @@ final class EditorCanvasView: NSView {
                 runTopCap = line.gitHunkFirst
                 runKind = kind
                 runStaged = line.gitHunkStaged
+            } else {
+                // The strongest kind in the run wins, and the kinds are
+                // numbered in that order: added, modified, deleted. Core's own
+                // rule, said once more here — "a hunk that removed more lines
+                // than it added is a DELETION as far as the reader is
+                // concerned, whatever else it also did". One change, one
+                // colour.
+                runKind = max(runKind, kind)
             }
             runEnd = y + lineH
             lastRow = row
