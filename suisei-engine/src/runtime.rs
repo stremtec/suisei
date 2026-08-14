@@ -4468,6 +4468,125 @@ mod tests {
         );
     }
 
+    /// An external write reaches the screen without anyone asking.
+    ///
+    /// The claim under "live appear": edit the open file from outside — an
+    /// agent, a formatter, another editor — and the pane shows it. Driven
+    /// through `tick`, not by calling the check directly, because the tick is
+    /// what the app actually runs and the interval is part of the promise.
+    #[test]
+    fn an_external_write_appears_without_being_asked() {
+        let dir = std::env::temp_dir().join(format!("suisei_live_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("live.txt");
+        std::fs::write(&f, "before\n").unwrap();
+        let mut eng = Engine::new();
+        eng.app = App::open_file(f.to_str().unwrap());
+        eng.recompose();
+        assert_eq!(eng.app.buffer.text(), "before\n");
+
+        // Something else writes the file. `mtime` has to actually differ, and
+        // a filesystem with coarse timestamps would otherwise make this pass
+        // or fail on timing rather than on behaviour.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&f, "after\n").unwrap();
+
+        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
+            eng.tick(8);
+        }
+
+        assert_eq!(
+            eng.app.buffer.text(),
+            "after\n",
+            "the pane did not pick up a write it did not make"
+        );
+        assert!(!eng.app.modified, "a reloaded file is not a dirty one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file open in another tab catches up too.
+    ///
+    /// The half that did not exist: an agent rewrites several files, and only
+    /// the focused one used to notice. A split pane beside it kept showing
+    /// text that was no longer on disk.
+    #[test]
+    fn an_unfocused_tab_picks_up_an_external_write() {
+        let dir = std::env::temp_dir().join(format!("suisei_live_bg_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, "a-before\n").unwrap();
+        std::fs::write(&b, "b-before\n").unwrap();
+
+        let mut eng = Engine::new();
+        eng.app = App::open_file(a.to_str().unwrap());
+        eng.app.open_new_tab(b.to_str().unwrap());
+        // Focus is on b; a is the background tab.
+        eng.recompose();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&a, "a-after\n").unwrap();
+
+        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
+            eng.tick(8);
+        }
+
+        let tab_a = eng
+            .app
+            .tabs
+            .buffers
+            .iter()
+            .find(|t| t.filename.as_deref() == Some(a.as_path()))
+            .expect("a is still open");
+        assert_eq!(
+            tab_a.buffer.text(),
+            "a-after\n",
+            "an unfocused tab is still an open document and must follow the disk"
+        );
+        assert!(!tab_a.modified, "a reloaded tab is not a dirty one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unsaved text in a tab nobody is looking at is the easiest thing in the
+    /// editor to destroy silently, so the disk does NOT win there.
+    #[test]
+    fn an_unfocused_dirty_tab_keeps_its_edits() {
+        let dir = std::env::temp_dir().join(format!("suisei_live_dirty_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, "a-before\n").unwrap();
+        std::fs::write(&b, "b-before\n").unwrap();
+
+        let mut eng = Engine::new();
+        eng.app = App::open_file(a.to_str().unwrap());
+        eng.app.gui_insert_text("!");
+        assert!(eng.app.modified);
+        eng.app.open_new_tab(b.to_str().unwrap());
+        eng.recompose();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&a, "a-after\n").unwrap();
+
+        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
+            eng.tick(8);
+        }
+
+        let tab_a = eng
+            .app
+            .tabs
+            .buffers
+            .iter()
+            .find(|t| t.filename.as_deref() == Some(a.as_path()))
+            .expect("a is still open");
+        assert!(
+            tab_a.buffer.text().contains('!'),
+            "unsaved text in a background tab was overwritten by the disk"
+        );
+        assert!(tab_a.modified, "and it is still dirty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A clean file deleted on disk closes after a confirming second poll:
     /// there are no private edits to preserve, but an atomic-save swap can
     /// cause one transient metadata miss.

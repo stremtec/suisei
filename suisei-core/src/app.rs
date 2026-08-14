@@ -4081,6 +4081,7 @@ impl App {
     /// Preserves cursor/scroll as much as possible; rebuilds folds / git / LSP.
     pub fn check_external_change(&mut self) {
         self.check_active_file_external();
+        self.check_background_tabs_external();
         if self.debug && !self.lsp.diagnostics.is_empty() {
             let rows: Vec<String> = self
                 .lsp
@@ -4089,6 +4090,83 @@ impl App {
                 .map(|d| d.row.to_string())
                 .collect();
             self.set_message(&format!("diag rows: {}", rows.join(",")));
+        }
+    }
+
+    /// The same live refresh, for every OTHER open document.
+    ///
+    /// `check_active_file_external` watches one file: the focused pane's. That
+    /// was the whole of "live reload", and it is not enough now — an agent
+    /// rewrites six files and only the one being stared at catches up, while a
+    /// split pane beside it keeps showing text that is no longer on disk. A
+    /// document that is open is a document being watched.
+    ///
+    /// Deliberately narrower than the active path in what it will overwrite. A
+    /// background tab reloads only when it is CLEAN. Unsaved text nobody is
+    /// looking at is the easiest thing in the editor to destroy silently, and
+    /// the active path's "disk won" rule at least happens in front of someone.
+    /// A dirty tab keeps its copy and finds out when it is focused.
+    ///
+    /// One `stat` per open document per poll. At 64 tabs and a poll every
+    /// ~167ms that is under 400 a second, which is the cheapest thing this
+    /// tick does.
+    fn check_background_tabs_external(&mut self) {
+        let live = self.live_doc;
+        let mut reloaded = 0usize;
+        for i in 0..self.tabs.buffers.len() {
+            let tab = &self.tabs.buffers[i];
+            // The focused document is the active path's job, terminals have no
+            // file, and a viewer draws from the path rather than the buffer.
+            if tab.id == live || tab.terminal.is_some() || tab.kind.is_viewer() {
+                continue;
+            }
+            let Some(path) = tab.filename.clone() else { continue };
+            let Some(prev) = tab.file_mtime else { continue };
+            let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+                // Missing or unreadable. The active path owns the deletion
+                // policy, including its two-poll confirmation; guessing at it
+                // for a tab nobody is looking at would only race that.
+                continue;
+            };
+            if mtime == prev {
+                continue;
+            }
+            if tab.modified {
+                // Record the new time anyway, or this fires on every poll for
+                // as long as the tab stays dirty.
+                self.tabs.buffers[i].file_mtime = Some(mtime);
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                self.tabs.buffers[i].file_mtime = Some(mtime);
+                continue;
+            };
+            let tab = &mut self.tabs.buffers[i];
+            let cursor = tab.buffer.cursor();
+            tab.buffer = Buffer::from_string(&content);
+            tab.buffer.cursor.row = cursor
+                .row
+                .min(tab.buffer.line_count().saturating_sub(1));
+            tab.buffer.cursor.col = cursor.col;
+            tab.buffer.clamp_col();
+            tab.scroll = tab.scroll.min(tab.buffer.line_count().saturating_sub(1));
+            tab.saved_hash = text_hash(&content);
+            tab.modified = false;
+            tab.file_mtime = Some(mtime);
+            // A reloaded document has no history worth keeping: undoing into
+            // text that is not what anyone wrote is worse than having no undo.
+            tab.undo_stack = UndoStack::new();
+            tab.undo_stack.push(tab.buffer.snapshot());
+            reloaded += 1;
+        }
+        if reloaded > 0 {
+            // Only the count. Naming one of six is arbitrary, and the tabs
+            // themselves are where the change is visible.
+            self.set_message(&if reloaded == 1 {
+                "↻ Reloaded 1 file changed on disk".to_string()
+            } else {
+                format!("↻ Reloaded {reloaded} files changed on disk")
+            });
         }
     }
 
