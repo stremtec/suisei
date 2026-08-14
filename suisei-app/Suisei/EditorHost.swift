@@ -1617,6 +1617,22 @@ final class EditorCanvasView: NSView {
             if y + lineH < dirtyRect.minY || y > dirtyRect.maxY { continue }
 
             let rowRect = CGRect(x: 0, y: y, width: bounds.width, height: lineH)
+            // A row still arriving is drawn only as far as the gap has opened.
+            //
+            // Without this the rows below — which are mid-slide and therefore
+            // still overlapping it — draw their text through this one, and the
+            // two are legible at once. The clip is what makes the new line
+            // look revealed rather than superimposed.
+            var clipped = false
+            if let o = liveOpening, baseRow >= o.below - o.rows, baseRow < o.below {
+                let top = visualY(o.below - o.rows)
+                let open = CGFloat(o.rows) * lineH * liveOpenProgress
+                cg.saveGState()
+                cg.clip(to: CGRect(x: 0, y: top, width: bounds.width, height: open))
+                clipped = true
+            }
+            defer { if clipped { cg.restoreGState() } }
+
             if line.isCursor {
                 colors.cursorLine.setFill()
                 rowRect.fill()
@@ -2437,6 +2453,12 @@ final class EditorCanvasView: NSView {
     /// that are off screen and a per-row flag can only describe the band. This
     /// view only has to keep drawing while the fade runs.
     private func syncLiveFlashes() {
+        // Claim the slide before anything is measured this pass, so the first
+        // frame drawn is already the compressed one rather than the settled
+        // one — starting a frame late is a visible jump followed by a slide.
+        if let open = engine?.live.takePendingOpen() {
+            noteLiveInsertion(below: open.below, rows: open.rows)
+        }
         guard engine?.live.isFlashing == true else { return }
         startLiveFlashTimer()
     }
@@ -2629,8 +2651,65 @@ final class EditorCanvasView: NSView {
 
     /// Points of inserted space above a buffer row.
     private func insertedHeight(above bufferRow: Int) -> CGFloat {
-        guard let e = shownChange, bufferRow >= e.insertAt else { return 0 }
-        return CGFloat(e.lines.count) * EditorMetrics.lineHeight * revealProgress
+        var h: CGFloat = 0
+        if let e = shownChange, bufferRow >= e.insertAt {
+            h += CGFloat(e.lines.count) * EditorMetrics.lineHeight * revealProgress
+        }
+        // A live insertion still opening. NEGATIVE: the rows below are drawn
+        // above their final places and settle down into them, so the document
+        // appears to make room rather than to have always had it.
+        //
+        // Composed here rather than as a second offset elsewhere, because
+        // `visualY` and `bufferRow(atY:)` both go through this one function
+        // and that is the entire reason the reveal has never disagreed with a
+        // hit test. A second place that shifts rows would be a second place to
+        // keep in step.
+        if let o = liveOpening, bufferRow >= o.below {
+            h -= CGFloat(o.rows) * EditorMetrics.lineHeight * (1 - liveOpenProgress)
+        }
+        return h
+    }
+
+    /// A live reload's inserted rows, still opening.
+    ///
+    /// `below` is the first row that has to move down; `rows` is how far. Only
+    /// insertions: a removal's text is gone by the time the face hears about
+    /// it, so there is nothing left to draw in a closing gap, and the row that
+    /// closed over it gets the red flash instead.
+    private var liveOpening: (below: Int, rows: Int, start: CFTimeInterval)?
+    private var liveOpenTimer: Timer?
+    static let liveOpenDuration: CFTimeInterval = 0.24
+
+    private var liveOpenProgress: CGFloat {
+        guard let o = liveOpening else { return 1 }
+        let t = min(1, max(0, (CACurrentMediaTime() - o.start) / Self.liveOpenDuration))
+        return CGFloat(1 - pow(1 - t, 3))
+    }
+
+    /// Begin the slide, if this reload actually made the document longer.
+    ///
+    /// Driven by the row marks rather than by a line-count delta on its own:
+    /// the marks say WHERE, and a slide anchored anywhere else would move the
+    /// wrong half of the file.
+    func noteLiveInsertion(below: Int, rows: Int) {
+        guard rows > 0, rows < 400 else { return }
+        liveOpening = (below: below, rows: rows, start: CACurrentMediaTime())
+        scrollView?.refitCanvas()
+        needsDisplay = true
+        guard liveOpenTimer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            self.scrollView?.refitCanvas()
+            self.needsDisplay = true
+            if self.liveOpenProgress >= 1 {
+                self.liveOpening = nil
+                timer.invalidate()
+                self.liveOpenTimer = nil
+                self.needsDisplay = true
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        liveOpenTimer = t
     }
 
     /// Where a buffer row is drawn.

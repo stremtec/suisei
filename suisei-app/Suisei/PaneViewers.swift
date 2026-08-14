@@ -386,6 +386,15 @@ final class LiveMarks: ObservableObject {
     private(set) var seenAt: [UInt32: CFTimeInterval] = [:]
 
     private var lastGen: UInt64 = 0
+    /// Handed to whichever canvas is showing the live document, once. The
+    /// slide belongs to a view, not to this list — but only this list knows
+    /// where it should start.
+    private(set) var pendingOpen: (below: Int, rows: Int)?
+
+    func takePendingOpen() -> (below: Int, rows: Int)? {
+        defer { pendingOpen = nil }
+        return pendingOpen
+    }
 
     /// 0 when the row is not flashing. Eased out — it leaves quickly and the
     /// tail is a whisper rather than a step to nothing.
@@ -427,6 +436,16 @@ final class LiveMarks: ObservableObject {
                 let m = marks[i]
                 nextRows[m.row] = LiveKind(raw: m.kind)
                 if seenAt[m.row] == nil { seenAt[m.row] = now }
+            }
+            // The contiguous run of ADDED rows, if this reload made the
+            // document longer. The canvas slides everything below it down.
+            let added = nextRows.filter { $0.value == .added }.keys.sorted()
+            if let first = added.first, let last = added.last,
+               added.count == Int(last - first) + 1
+            {
+                pendingOpen = (below: Int(last) + 1, rows: added.count)
+            } else {
+                pendingOpen = nil
             }
             rows = nextRows
 
