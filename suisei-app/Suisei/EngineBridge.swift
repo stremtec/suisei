@@ -1630,10 +1630,19 @@ final class EngineBridge: ObservableObject {
     ///
     /// So opening one has to reclaim the responder. `nil` hands it to the
     /// window, which is enough for `editorOwnsKeyEvents` to say yes.
+    ///
+    /// **A terminal is not a stray text field**, even though it is an
+    /// `NSTextInputClient` — and `focusTerminalPane` calls this on its way in.
+    /// So a shell taking the keyboard reported that it had, which reclaimed the
+    /// responder from it, one frame after it got it: the pane painted, said
+    /// "keys → shell", and swallowed every keystroke. Excluded here for the
+    /// same reason `EditorCanvasView` is: the surfaces we own are the ones this
+    /// is meant to be handing focus *to*.
     func reclaimKeyboardFromTextFields() {
         guard let win = NSApp.keyWindow ?? NSApp.mainWindow,
               let responder = win.firstResponder,
               !(responder is EditorCanvasView),
+              !(responder is TerminalKeySurface),
               responder is NSTextView || responder is NSTextField
                   || responder is NSTextInputClient
         else { return }

@@ -85,6 +85,25 @@ final class PaneTerminalView: LocalProcessTerminalView {
             if newValue { onFocus?() }
         }
     }
+
+    /// Take the keyboard on a click.
+    ///
+    /// AppKit does not do this for you — a window does not move the first
+    /// responder just because a view was clicked; the view asks. `NSTextView`
+    /// asks, the old `TermCanvas` asked, and SwiftTerm does not: upstream's
+    /// sample apps put the terminal in a window where it is the initial first
+    /// responder and never needs to. Here it is one surface among several, so
+    /// without this a click selected text in a shell that could not be typed
+    /// into.
+    ///
+    /// Before `super`, so the selection this click starts belongs to a view
+    /// that already has the keyboard.
+    override func mouseDown(with event: NSEvent) {
+        if let window, window.firstResponder !== self {
+            window.makeFirstResponder(self)
+        }
+        super.mouseDown(with: event)
+    }
 }
 
 /// Which shell this is.
