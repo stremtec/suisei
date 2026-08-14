@@ -24,6 +24,26 @@ Nothing in `Sources/SwiftTerm`. Only the manifest is ours:
   the commit above baked in;
 * `Documentation.docc` removed.
 
+## What Suisei uses
+
+`suisei-app/Suisei/TerminalSurface.swift` is the whole of it. Terminal *panes*
+run on `LocalProcessTerminalView`; the docked shell (⌃T) still runs on core's
+own emulator in `suisei-core/src/term.rs`, so the two can be compared side by
+side before the old one goes.
+
+Two upstream declarations the port leans on, worth checking on an update
+because a change to either is a compile error here and not obviously about us:
+
+* `TerminalView.hasFocus` is `open`, which is the only hook for "the terminal
+  took the keyboard" — `becomeFirstResponder` next to it is `public override`
+  and cannot be overridden outside the module. See `PaneTerminalView`.
+* `LocalProcessTerminalView.startProcess(executable:args:environment:execName:
+  currentDirectory:)` — `execName` is what makes the shell a *login* shell,
+  without which an app launched from Finder hands its child no real `PATH`.
+
+Also relevant: SwiftTerm exports a type named `Color` (a 16-bit-per-channel
+terminal colour). Any file importing both SwiftTerm and SwiftUI must qualify.
+
 ## Updating
 
 Re-clone upstream at the new commit, copy `Sources/SwiftTerm` and `LICENSE` over,

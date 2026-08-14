@@ -6117,6 +6117,40 @@ mod tests {
         assert!(app.tabs.buffers.iter().any(|t| t.id == ids[1]));
     }
 
+    /// A pane shell's title now arrives from the face — SwiftTerm reads the
+    /// escapes, not us — and lands on the tab it names.
+    ///
+    /// The return value is the whole reason this is not a plain setter: `zsh`
+    /// re-sends its title on every prompt, so a caller that recomposed on each
+    /// report would put a full chrome republish behind every command the user
+    /// runs. Reporting "unchanged" is what makes that free.
+    #[test]
+    fn a_reported_terminal_title_lands_on_its_own_tab() {
+        let mut app = app_with("a");
+        let ids = tabs_named(&mut app, &["a", "b", "c"]);
+        panes_on(&mut app, &ids[..2]);
+        let tids = terminal_tabs_on(&mut app, &ids[..2]);
+
+        assert!(app.set_terminal_title(ids[0], Some("vim README.md")));
+        assert_eq!(app.terminal_title(tids[0]), Some("vim README.md"));
+        // The other shell is untouched: two terminals in one window are two
+        // processes, and one naming itself must not name the other.
+        assert_eq!(app.terminal_title(tids[1]), None);
+
+        // The same string again is not news.
+        assert!(!app.set_terminal_title(ids[0], Some("vim README.md")));
+
+        // A shell that clears its title, or reports only whitespace, goes back
+        // to the generic name rather than showing an empty chip.
+        assert!(app.set_terminal_title(ids[0], Some("   ")));
+        assert_eq!(app.terminal_title(tids[0]), None);
+
+        // A document tab has no shell to name, and saying so must not panic or
+        // silently land the title on some other tab.
+        assert!(!app.set_terminal_title(ids[2], Some("nope")));
+        assert_eq!(app.terminal_title(tids[1]), None);
+    }
+
     /// Split layout tokens round-trip through the session format, nesting
     /// included — the serialization the split's persistence lives and dies by.
     #[test]

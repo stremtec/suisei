@@ -536,6 +536,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // The pane shells are ours, not core's — core's `Terminal` kills its
+        // child on drop, and there is no equivalent moment on this side.
+        // Closing the PTY master usually SIGHUPs the session anyway, but
+        // "usually" is how a shell that ignores HUP ends up outliving the app
+        // in Activity Monitor.
+        TerminalSessions.shared.closeAll()
+    }
 }
 
 // MARK: - Shadow WAL recovery sheet

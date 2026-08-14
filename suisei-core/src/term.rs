@@ -213,6 +213,26 @@ impl Terminal {
         Self::default()
     }
 
+    /// A terminal tab whose shell is **not ours**.
+    ///
+    /// Pane terminals are SwiftTerm's now — it owns the PTY, the emulator and
+    /// the view, and the process it forks is not visible from here. What is
+    /// still ours is the tab: an id for a `BufferTab` to point at, the title
+    /// the shell reports (pushed back over the ABI, since we cannot read it),
+    /// the close confirmation, and the working directory a session restores
+    /// from.
+    ///
+    /// So this is the same object with no process behind it. Nothing polls it
+    /// and nothing draws from its rows; `started` stays false because no shell
+    /// was started *here*, which is exactly what it has always meant. The
+    /// docked terminal (⌃T) still runs on this emulator — that is the
+    /// comparison the port is being judged against.
+    pub fn placeholder() -> Self {
+        let mut t = Self::default();
+        t.open = true;
+        t
+    }
+
     pub fn cols(&self) -> u16 {
         self.cols
     }

@@ -128,16 +128,13 @@ struct EditorPaneSnap: Equatable, Identifiable {
     /// copies per frame in service of nothing.
     var path: String = ""
     /// This pane runs its own shell.
+    ///
+    /// Its rows are not here, and there is nothing to put here: SwiftTerm owns
+    /// the PTY, the emulator and the view. The pane used to carry the shell's
+    /// grid, its caret and a content generation to avoid re-decoding ~300 KiB
+    /// of it per frame — a cache for a copy of something that was already in
+    /// this process, which is what the port deleted.
     var isTerminal: Bool { kind == .terminal }
-    /// That shell's content generation — bumped when its grid changes, so the
-    /// face skips re-pulling a ~300 KiB snapshot it already has.
-    var termGen: UInt16 = 0
-    /// That shell's rows and caret. Pulled per pane: terminal panes are
-    /// separate processes, and one shared snapshot made them all show the same
-    /// session.
-    var termLines: [String] = []
-    var termCursorRow: Int = 0
-    var termCursorCol: Int = 0
 }
 
 extension SplitSnap {
@@ -159,10 +156,6 @@ extension SplitSnap {
             if x.rect != y.rect { return "split.pane.rect" }
             if x.kind != y.kind { return "split.pane.kind" }
             if x.path != y.path { return "split.pane.path" }
-            if x.termGen != y.termGen { return "split.pane.termGen" }
-            if x.termCursorRow != y.termCursorRow { return "split.pane.termCursorRow" }
-            if x.termCursorCol != y.termCursorCol { return "split.pane.termCursorCol" }
-            if x.termLines != y.termLines { return "split.pane.termLines" }
             if x.lines != y.lines { return "split.pane.lines" }
         }
         return "split.none"
@@ -200,14 +193,17 @@ extension EditorPaneSnap {
         a.id == b.id
             && a.focused == b.focused
             && a.tabIndex == b.tabIndex
+            // Which document, not which slot. `firstDifference` has always
+            // named this one; equality did not test it, so the two disagreed
+            // about what a changed pane is. It matters now that a terminal
+            // pane's shell is looked up by exactly this id: two shells with
+            // the same generic title in the same rect are otherwise identical
+            // panes, and the surface would keep drawing the first one.
+            && a.tabStableId == b.tabStableId
             && a.title == b.title
             && a.rect == b.rect
             && a.kind == b.kind
             && a.path == b.path
-            && a.termGen == b.termGen
-            && a.termCursorRow == b.termCursorRow
-            && a.termCursorCol == b.termCursorCol
-            && a.termLines == b.termLines
             && a.lines == b.lines
     }
 }
@@ -431,11 +427,11 @@ struct CompletionsSnap: Equatable {
     static let empty = CompletionsSnap(open: false, prefix: "", selected: 0, items: [])
 }
 
-/// The DOCKED terminal (⌃T). Pane terminals are separate processes pulled
-/// per pane by `attachPaneTerminals` — the old `fullPanel`/`paneBound` flags
-/// were the single-shared-terminal model and never carried truth for panes
-/// (the dock snapshot hardcodes them off), so every branch reading them was
-/// dead. Removed 2026-07-29.
+/// The DOCKED terminal (⌃T) — the only shell core still runs. A terminal PANE
+/// is SwiftTerm's, and none of it crosses the ABI. (The old `fullPanel` /
+/// `paneBound` flags were the single-shared-terminal model and never carried
+/// truth for panes, so every branch reading them was dead. Removed
+/// 2026-07-29.)
 struct TerminalSnap: Equatable {
     var open: Bool
     var lines: [String]
@@ -3670,6 +3666,39 @@ final class EngineBridge: ObservableObject {
         return suisei_engine_tab_id_is_open(engine, stableId) != 0
     }
 
+    /// Where the shell in this pane should start. `nil` when the pane is not a
+    /// terminal, or when core has no directory for it.
+    ///
+    /// Asked once per shell, by `TerminalPaneSurface` just before it forks —
+    /// see the note there on why this is not carried in the pane snapshot.
+    func paneTerminalCwd(_ index: Int) -> String? {
+        guard let engine, index >= 0 else { return nil }
+        var buf = [CChar](repeating: 0, count: Int(SUISEI_PATH_CAP))
+        let ok = buf.withUnsafeMutableBufferPointer {
+            suisei_engine_pane_terminal_cwd(
+                engine, UInt32(index), $0.baseAddress, UInt32(SUISEI_PATH_CAP)
+            )
+        }
+        guard ok != 0 else { return nil }
+        let path = String(cString: buf)
+        return path.isEmpty ? nil : path
+    }
+
+    /// A pane shell announcing its title (OSC 0/2), on its way to the tab chip.
+    ///
+    /// No `refreshChrome()` here: core recomposes only when the string actually
+    /// moved, and a shell that re-sends the same title on every prompt would
+    /// otherwise put a full republish behind every command the user runs. The
+    /// next tick picks up the ones that did change.
+    func setTerminalTitle(tabId: UInt64, title: String?) {
+        guard let engine, tabId != 0 else { return }
+        if let title {
+            title.withCString { suisei_engine_set_terminal_title(engine, tabId, $0) }
+        } else {
+            suisei_engine_set_terminal_title(engine, tabId, nil)
+        }
+    }
+
     func moveTabIds(from: UInt64, to: UInt64) -> Bool {
         guard let engine, from != to else { return false }
         let moved = suisei_engine_move_tab_ids(engine, from, to) != 0
@@ -4153,10 +4182,10 @@ final class EngineBridge: ObservableObject {
            // "editor-owned" so the ⌘-chords below still reach the engine.
            // Plain typing is handed back to it at the tail of the monitor.
            !(responder is EditorCanvasView),
-           // The terminal grid is likewise an NSTextInputClient: keep it
-           // editor-owned so ⌘W/⌘S still work, and plain keys are handed to its
-           // keyDown at the monitor tail (terminalCanvasHasFocus).
-           !(responder is TermCanvas),
+           // A terminal is likewise an NSTextInputClient: keep it editor-owned
+           // so ⌘W/⌘S still work, and plain keys are handed to its keyDown at
+           // the monitor tail (terminalCanvasHasFocus).
+           !(responder is TerminalKeySurface),
            responder is NSTextView || responder is NSTextField
                || responder is NSTextInputClient
         {
@@ -4181,11 +4210,15 @@ final class EngineBridge: ObservableObject {
         NSApp.keyWindow?.firstResponder is EditorCanvasView
     }
 
-    /// The terminal grid holds the keyboard. Like the editor canvas it is now an
+    /// A terminal holds the keyboard. Like the editor canvas it is an
     /// `NSTextInputClient`, so the monitor hands plain keys back to its `keyDown`
     /// (which runs the input method for Hangul/CJK) instead of routing them raw.
+    ///
+    /// Two classes answer to this now — the docked shell's canvas, and
+    /// SwiftTerm's view in a terminal pane — so it asks what they have in
+    /// common. See `TerminalKeySurface`.
     var terminalCanvasHasFocus: Bool {
-        NSApp.keyWindow?.firstResponder is TermCanvas
+        NSApp.keyWindow?.firstResponder is TerminalKeySurface
     }
 
     private func installKeyMonitor() {
@@ -4666,7 +4699,7 @@ final class EngineBridge: ObservableObject {
         // is actually open. The light path is only entered when the shell
         // surface did NOT change, and opening/closing the dock IS a shell
         // change (full path), so last frame's flag is accurate here. Pane
-        // terminals are pulled separately by `attachPaneTerminals`.
+        // terminals cost nothing at all: they never cross this boundary.
         if chrome.terminal.open {
             PerfProbe.measure("  loadTerminal (300KiB)") {
                 let terminal = loadTerminal(engine)
@@ -4893,7 +4926,7 @@ final class EngineBridge: ObservableObject {
             return (
                 allLines,
                 SplitSnap(focus: 0,
-                          panes: attachViewerPaths(engine, attachPaneTerminals(engine, [single])))
+                          panes: attachViewerPaths(engine, [single]))
             )
         }
 
@@ -4912,8 +4945,9 @@ final class EngineBridge: ObservableObject {
                 let focusedFlag = base.load(fromByteOffset: 16, as: UInt8.self)
                 // offset 17: kind (a former pad byte, then an is_terminal bool).
                 let kind = PaneKind(raw: base.load(fromByteOffset: 17, as: UInt8.self))
-                // offset 18: term_gen (u16) — pane shell content generation.
-                let termGen = base.load(fromByteOffset: 18, as: UInt16.self)
+                // offset 18: term_gen (u16) — the docked emulator's content
+                // generation for this pane. Nothing reads it now that pane
+                // shells are SwiftTerm's; the ABI bytes stay as they are.
                 // offset 20: doc_line_count, 24: hscroll (after 4 pad bytes at 16..19)
                 let docLineCount = base.load(fromByteOffset: 20, as: UInt32.self)
                 let hscroll = base.load(fromByteOffset: 24, as: UInt32.self)
@@ -4941,8 +4975,7 @@ final class EngineBridge: ObservableObject {
                         x: CGFloat(rx), y: CGFloat(ry),
                         width: CGFloat(rw), height: CGFloat(rh)
                     ),
-                    kind: kind,
-                    termGen: termGen
+                    kind: kind
                 ))
             }
         }
@@ -4951,7 +4984,7 @@ final class EngineBridge: ObservableObject {
             allLines,
             SplitSnap(
                 focus: focus,
-                panes: attachViewerPaths(engine, attachPaneTerminals(engine, panes))
+                panes: attachViewerPaths(engine, panes)
             )
         )
     }
@@ -5802,49 +5835,6 @@ final class EngineBridge: ObservableObject {
             selected: Int(snap.selected),
             items: items
         )
-    }
-
-    /// Fill in each terminal pane's own rows.
-    ///
-    /// Only terminal panes are pulled, so this is usually zero work and at most
-    /// four. It cannot come from the chrome's single terminal snapshot: these
-    /// are separate processes, and sharing one snapshot is precisely what made
-    /// two terminal panes mirror each other.
-    private func attachPaneTerminals(_ engine: OpaquePointer, _ panes: [EditorPaneSnap])
-        -> [EditorPaneSnap]
-    {
-        guard panes.contains(where: \.isTerminal) else { return panes }
-        // The grid in hand (last publish) is reused when the shell's content
-        // generation is unchanged — each pull decodes ~300 KiB, which used to
-        // run per keystroke per idle terminal. A tabIndex mismatch forces a
-        // pull, so a reshuffled split can never inherit another shell's grid.
-        let prev = editorSplit.panes
-        var out = panes
-        for i in out.indices where out[i].isTerminal {
-            if prev.indices.contains(i), !prev[i].termLines.isEmpty,
-               prev[i].tabIndex == out[i].tabIndex, prev[i].termGen == out[i].termGen
-            {
-                out[i].termLines = prev[i].termLines
-                out[i].termCursorRow = prev[i].termCursorRow
-                out[i].termCursorCol = prev[i].termCursorCol
-                continue
-            }
-            var snap = SuiseiTerminalSnapshot()
-            guard suisei_engine_terminal_for_pane(engine, UInt32(i), &snap) != 0 else { continue }
-            var lines: [String] = []
-            let n = Int(snap.count)
-            withUnsafeBytes(of: snap.lines) { raw in
-                let cap = Int(SUISEI_TERM_LINE)
-                for j in 0..<min(n, Int(SUISEI_MAX_TERM_LINES)) {
-                    let b = raw.baseAddress!.advanced(by: j * cap)
-                    lines.append(String(cString: b.assumingMemoryBound(to: CChar.self)))
-                }
-            }
-            out[i].termLines = lines
-            out[i].termCursorRow = Int(snap.cursor_row)
-            out[i].termCursorCol = Int(snap.cursor_col)
-        }
-        return out
     }
 
     /// Fill in `path` for the panes that need one.

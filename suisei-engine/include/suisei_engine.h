@@ -881,6 +881,17 @@ uint64_t suisei_engine_pane_tab_id(const SuiseiEngine *ptr, uint32_t idx);
 /* True while this stable BufferTab::id still owns an open document. */
 uint8_t suisei_engine_tab_id_is_open(const SuiseiEngine *ptr, uint64_t id);
 
+/* Where a pane's shell should be working; 0 when that pane is not a terminal.
+   The face forks the pane shells (SwiftTerm), so it needs this once per shell
+   — including for every terminal tab a restored window brings back. */
+uint8_t suisei_engine_pane_terminal_cwd(const SuiseiEngine *ptr, uint32_t idx,
+                                        char *out, uint32_t cap);
+/* The face reporting the OSC 0/2 title of a pane shell, keyed by BufferTab::id.
+   NULL or empty clears it back to the generic "Terminal". Recomposes only when
+   the string actually changed. */
+void suisei_engine_set_terminal_title(SuiseiEngine *ptr, uint64_t tab_id,
+                                      const char *title);
+
 /* LSP face surfaces — same App methods the TUI dispatches (gd / format / rename / code actions). */
 void suisei_engine_format_document(SuiseiEngine *ptr);
 void suisei_engine_goto_definition(SuiseiEngine *ptr);

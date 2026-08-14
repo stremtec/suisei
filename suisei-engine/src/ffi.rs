@@ -3592,6 +3592,87 @@ pub extern "C" fn suisei_engine_tab_id_is_open(ptr: *const SuiseiEngine, id: u64
     )
 }
 
+/// Where the shell in pane `idx` should be working. Returns 0 when that pane
+/// is not a terminal.
+///
+/// The face forks the pane shells now, so it is the one that needs this — at
+/// the moment it makes the session, and again for every terminal tab a window
+/// restores. The directory is the whole of what survives a restart (see
+/// `BufferTab::terminal_cwd`), so a restored tab that lands in the right place
+/// is the difference between useful and merely present.
+///
+/// A pull beside `suisei_engine_pane_path` rather than a snapshot field, for
+/// the same reason: it is asked once per shell, and a 512-byte array per pane
+/// in a struct rebuilt every frame would be paid for by every frame that has
+/// no terminal in it.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_pane_terminal_cwd(
+    ptr: *const SuiseiEngine,
+    idx: u32,
+    out: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if ptr.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let app = unsafe { &*ptr }.0.app();
+    let Some(pane) = app.split.panes.get(idx as usize) else {
+        return 0;
+    };
+    let Some(cwd) = app
+        .tabs
+        .buffers
+        .iter()
+        .find(|t| t.id == pane.buffer)
+        .filter(|t| t.terminal.is_some())
+        .and_then(|t| t.terminal_cwd.as_ref())
+    else {
+        return 0;
+    };
+    let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(dst, &cwd.display().to_string());
+    1
+}
+
+/// The face reporting the title its pane shell announced (OSC 0/2). A null or
+/// empty `title` clears it back to the generic "Terminal".
+///
+/// Push rather than pull because it is rare and unpredictable: a shell sends a
+/// title when it feels like it, and polling every terminal tab every frame to
+/// find out would cost more than the fact is worth. Addressed by
+/// `BufferTab::id` — the face keys its shells by tab and has no name for our
+/// terminal ids.
+///
+/// Recomposes only on a real change. `zsh` re-sends its title on every prompt,
+/// and rebuilding the chrome for a string that did not move would put a
+/// full republish behind every command the user runs.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_set_terminal_title(
+    ptr: *mut SuiseiEngine,
+    tab_id: u64,
+    title: *const c_char,
+) {
+    if ptr.is_null() || tab_id == 0 {
+        return;
+    }
+    let owned;
+    let title = if title.is_null() {
+        None
+    } else {
+        owned = unsafe { CStr::from_ptr(title) }.to_string_lossy().into_owned();
+        Some(owned.as_str())
+    };
+    unsafe {
+        if (*ptr)
+            .0
+            .app_mut()
+            .set_terminal_title(suisei_core::BufferId(tab_id), title)
+        {
+            (*ptr).0.recompose_paint_only();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // LSP face surfaces — thin wrappers over existing App methods.
 // ---------------------------------------------------------------------------

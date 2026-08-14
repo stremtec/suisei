@@ -87,6 +87,39 @@ impl App {
             .get(&tid)
             .and_then(|t| t.title.as_deref())
     }
+    /// The face reporting a title its shell announced (OSC 0/2).
+    ///
+    /// The docked terminal parses its own escapes and fills this in as it
+    /// reads them. A pane's shell is SwiftTerm's, so its escapes are never
+    /// seen here — this is the one way that fact gets back, and without it
+    /// every terminal tab would read "Terminal" forever.
+    ///
+    /// Addressed by the **tab**, not by `TerminalId`: the face knows tabs (it
+    /// keys its own sessions by `BufferTab::id`) and has no name for the
+    /// terminal ids, which are ours.
+    ///
+    /// Returns whether anything changed, so the caller can skip republishing
+    /// the chrome for a title the shell re-sends on every prompt.
+    pub fn set_terminal_title(&mut self, tab: BufferId, title: Option<&str>) -> bool {
+        let Some(tid) = self
+            .tabs
+            .buffers
+            .iter()
+            .find(|t| t.id == tab)
+            .and_then(|t| t.terminal)
+        else {
+            return false;
+        };
+        let Some(term) = self.pane_terminals.get_mut(&tid) else {
+            return false;
+        };
+        let next = title.map(str::to_string).filter(|s| !s.trim().is_empty());
+        if term.title == next {
+            return false;
+        }
+        term.title = next;
+        true
+    }
     /// Ctrl+Shift+T — open a terminal as a **tab** in the focused pane.
     ///
     /// A terminal is just a [`BufferTab`] whose `terminal` field is set; the
@@ -107,25 +140,13 @@ impl App {
         // stale copy once the terminal tab is switched away from.
         self.save_state_to_tab();
 
-        // Spawn a shell of its own.
-        let cols = if self.split.is_split() {
-            (self.grid_cols() / 2).max(40)
-        } else {
-            self.grid_cols().max(40)
-        };
-        let rows = self.grid_rows().max(24);
+        // The shell itself belongs to the face — see `Terminal::placeholder`.
+        // Nothing can fail here any more, which is why there is no longer a
+        // "failed to spawn" path leaving the pane as it was: the tab is made
+        // unconditionally and SwiftTerm reports its own trouble in the pane
+        // where the user can read it.
         let cwd = self.terminal_working_directory();
-        let anchor = cwd.join(".suisei-terminal");
-        let mut term = Terminal::new();
-        term.open = true;
-        term.close_confirm = false;
-        term.resize(cols, rows);
-        term.start(Some(&anchor));
-        if !term.started {
-            // No half-state: report the failure and leave the pane as it was.
-            self.message = "Terminal: failed to spawn shell (PTY)".into();
-            return;
-        }
+        let term = Terminal::placeholder();
 
         let tid = crate::split::TerminalId(self.next_terminal_id);
         self.next_terminal_id = self
@@ -180,19 +201,7 @@ impl App {
     /// no displaced document, nothing to toggle, and the tab has to land in
     /// strip order beside the files it was saved with.
     pub fn open_terminal_tab_at(&mut self, cwd: &std::path::Path) {
-        let cols = self.grid_cols().max(40);
-        let rows = self.grid_rows().max(24);
-        let mut term = Terminal::new();
-        term.open = true;
-        term.close_confirm = false;
-        term.resize(cols, rows);
-        term.start(Some(&cwd.join(".suisei-terminal")));
-        if !term.started {
-            // A shell that will not spawn is not worth a tab that cannot do
-            // anything: the restore continues with the documents.
-            self.message = "Terminal: failed to spawn shell (PTY)".into();
-            return;
-        }
+        let term = Terminal::placeholder();
         let tid = crate::split::TerminalId(self.next_terminal_id);
         self.next_terminal_id = self
             .next_terminal_id

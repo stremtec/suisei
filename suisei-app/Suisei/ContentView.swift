@@ -1007,6 +1007,7 @@ struct ContentView: View {
             }
         }
         .modifier(AudioTabLifetimeModifier(engine: engine, player: audioPlayer))
+        .modifier(TerminalTabLifetimeModifier(engine: engine))
         // Increase Contrast / Reduce Transparency change which appearance the
         // windows should carry, and this app pins that appearance rather than
         // inheriting it — so nothing else would notice. Same deferral as the
@@ -2872,11 +2873,15 @@ struct ContentView: View {
         }
     }
 
-    /// Keep the PTY grid in sync with the visible panel (fixes mis-wrapped
-    /// output). `pane` nil means the docked shell; a pane index routes to that
-    /// pane's own PTY — they are separate processes, and every pane used to
-    /// report into the dock's resize, leaving pane shells at their spawn guess.
-    private func reportTerminalCells(_ size: CGSize, pane: Int? = nil) {
+    /// Keep the docked PTY's grid in sync with the visible panel (fixes
+    /// mis-wrapped output).
+    ///
+    /// Only the dock now. A terminal PANE measures itself — SwiftTerm sizes its
+    /// own PTY from its own frame, in the same view that draws the cells, so
+    /// there is no second measurement to keep in agreement with the first.
+    /// That agreement is what the `pane` argument used to be for, and what the
+    /// comment below about matching the painted pitch is still about.
+    private func reportTerminalCells(_ size: CGSize) {
         let cell = max(6, ("M" as NSString).size(withAttributes: [
             .font: EditorMetrics.monospaced(12, weight: .regular)
         ]).width)
@@ -2887,11 +2892,7 @@ struct ContentView: View {
         let lineH: CGFloat = 12 + 5
         let cols = Int((size.width - 20) / cell)
         let rows = Int((size.height - 16) / lineH)
-        if let pane {
-            engine.terminalResizePane(pane, cols: cols, rows: rows)
-        } else {
-            engine.terminalResize(cols: cols, rows: rows)
-        }
+        engine.terminalResize(cols: cols, rows: rows)
     }
 
     /// Push theme appearance into AppKit windows so titlebar / materials follow
@@ -5374,45 +5375,20 @@ struct ContentView: View {
     private func terminalPaneBody(
         showClose: Bool,
         showHeader: Bool = true,
-        pane: EditorPaneSnap? = nil
+        pane: EditorPaneSnap
     ) -> some View {
-        let termLines = pane?.termLines ?? engine.chrome.terminal.lines
-        let termRow = pane?.termCursorRow ?? engine.chrome.terminal.cursorRow
-        let termCol = pane?.termCursorCol ?? engine.chrome.terminal.cursorCol
-        return terminalPaneBodyInner(
-            showClose: showClose, showHeader: showHeader,
-            lines: termLines, cursorRow: termRow, cursorCol: termCol,
-            paneIndex: pane?.id
-        )
-    }
-
-    private func terminalPaneBodyInner(
-        showClose: Bool,
-        showHeader: Bool,
-        lines termLines: [String],
-        cursorRow termRow: Int,
-        cursorCol termCol: Int,
-        paneIndex: Int?
-    ) -> some View {
-        // Who has the keyboard: a pane body asks about its own pane, the dock
-        // (no pane index) about its mode.
-        let ownsKeys = paneIndex.map { idx in
-            engine.editorSplit.focus == idx && engine.terminalOwnsKeys
-        } ?? (engine.focus == .terminal)
+        let idx = pane.id
+        let ownsKeys = engine.editorSplit.focus == idx && engine.terminalOwnsKeys
         return VStack(spacing: 0) {
             if showHeader {
                 HStack(spacing: 8) {
                     Image(systemName: "terminal.fill")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(accent)
-                    Text("Terminal")
+                    Text(pane.title.isEmpty ? "Terminal" : pane.title)
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
-                    if termLines.isEmpty {
-                        Text("starting…")
-                            .font(.system(size: 10, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
+                        .lineLimit(1)
                     Spacer()
                     Text(ownsKeys ? "keys → shell" : "click to type · ⌃⇧T")
                         .font(.system(size: 10, design: .rounded))
@@ -5421,7 +5397,7 @@ struct ContentView: View {
                         HoverIconButton(systemImage: "xmark", help: "Close terminal", fg: Color.primary, dim: Color.secondary) {
                             // Close THIS pane's shell — ⌃⇧T acts on the focused
                             // pane, so focus must follow the click first.
-                            if let idx = paneIndex { engine.focusPane(idx) }
+                            engine.focusPane(idx)
                             engine.toggleTerminalTab()
                             focused = true
                         }
@@ -5434,49 +5410,29 @@ struct ContentView: View {
                 }
             }
 
-            GeometryReader { geo in
-                TerminalGridView(
-                    lines: termLines,
-                    cursorRow: termRow,
-                    cursorCol: termCol,
-                    fontSize: 12,
-                    bg: NSColor(terminalGridBg),
-                    fg: NSColor(terminalGridFg),
-                    onScrollback: { delta in
-                        if let idx = paneIndex {
-                            engine.terminalScrollPane(idx, delta)
-                        } else {
-                            engine.terminalScroll(delta)
-                        }
-                    },
-                    onFocus: {
-                        if let idx = paneIndex {
-                            engine.focusTerminalPane(idx)
-                        } else {
-                            engine.focusTerminal(true)
-                        }
-                    },
-                    paneIndex: Int32(paneIndex ?? -1),
-                    engine: engine
-                )
-                .frame(width: geo.size.width, height: geo.size.height)
-                .onAppear { reportTerminalCells(geo.size, pane: paneIndex) }
-                .onChange(of: geo.size) { _, s in reportTerminalCells(s, pane: paneIndex) }
-            }
+            // SwiftTerm owns the shell, the emulator, the scrollback and its
+            // own scroller. There is no grid to size, nothing to report back,
+            // and no wheel to forward: everything the old `TerminalGridView`
+            // did across the ABI happens inside this view.
+            TerminalPaneSurface(
+                tabId: pane.tabStableId,
+                palette: TerminalPalette(
+                    background: terminalGridBg,
+                    foreground: terminalGridFg,
+                    fontSize: 12
+                ),
+                paneIndex: idx,
+                engine: engine
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(editorBg)
+        .background(terminalGridBg)
         .contentShape(Rectangle())
         // NOTE: no `focused = true` here. That drives the root container's
         // `@FocusState`, which takes the window's first responder straight back
-        // off the terminal canvas — undoing the click that just gave it the
-        // keyboard. The canvas claims the responder itself in `mouseDown`.
-        .onTapGesture {
-            if let idx = paneIndex {
-                engine.focusTerminalPane(idx)
-            } else {
-                engine.focusTerminal(true)
-            }
-        }
+        // off the terminal — undoing the click that just gave it the keyboard.
+        // The terminal claims the responder itself in `mouseDown`.
+        .onTapGesture { engine.focusTerminalPane(idx) }
     }
 
     private var mainEditor: some View {
@@ -5666,14 +5622,10 @@ struct ContentView: View {
                     Image(systemName: "terminal.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(pane.focused ? accent : dim)
-                    Text("Terminal")
+                    Text(pane.title.isEmpty ? "Terminal" : pane.title)
                         .font(.system(size: 11, weight: pane.focused ? .semibold : .regular))
                         .foregroundStyle(pane.focused ? fg : dim)
-                    if pane.termLines.isEmpty {
-                        Text("starting…")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                    }
+                        .lineLimit(1)
                     Spacer(minLength: 4)
                     Text(pane.focused && engine.terminalOwnsKeys ? "keys → shell" : "click to type · ⌃⇧T")
                         .font(.system(size: 10))
