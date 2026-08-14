@@ -172,8 +172,9 @@ uint8_t suisei_engine_editor_accepts_text(const SuiseiEngine *ptr);
 /* Cheap probe: completion popup open? (typing fast path) */
 uint8_t suisei_engine_completions_open(const SuiseiEngine *ptr);
 /* Which chrome panels are open, as a bitmask of SUISEI_PANEL_*.
-   Every panel snapshot below is a fixed-size struct — the terminal's is 300
-   KiB — so the face asks this FIRST and skips the copy for anything closed. */
+   Every panel snapshot below is a fixed-size struct, so the face asks this
+   FIRST and skips the copy for anything closed. (The terminal's was 300 KiB
+   and the reason this probe exists; it is gone, but the others still pay.) */
 #define SUISEI_PANEL_EXPLORER (1u << 0)
 #define SUISEI_PANEL_PALETTE (1u << 1)
 #define SUISEI_PANEL_SEARCH (1u << 2)
@@ -195,7 +196,6 @@ void suisei_engine_clear_scroll_intent(SuiseiEngine *ptr);
 uint8_t suisei_engine_prewarm_file(SuiseiEngine *ptr, const char *path);
 uint32_t suisei_engine_cached_parses(const SuiseiEngine *ptr);
 void suisei_engine_warm_grammars(SuiseiEngine *ptr);
-void suisei_engine_terminal_input(SuiseiEngine *ptr, const char *text);
 
 uint64_t suisei_engine_tick(SuiseiEngine *ptr, uint32_t dt_ms);
 uint64_t suisei_engine_frame_gen(const SuiseiEngine *ptr);
@@ -310,9 +310,6 @@ void suisei_engine_find_accept(SuiseiEngine *ptr);
 void suisei_engine_find_cancel(SuiseiEngine *ptr);
 void suisei_engine_palette_set_query(SuiseiEngine *ptr, const char *query);
 void suisei_engine_paste_text(SuiseiEngine *ptr, const char *text);
-void suisei_engine_terminal_resize(SuiseiEngine *ptr, uint32_t cols, uint32_t rows);
-void suisei_engine_terminal_resize_pane(SuiseiEngine *ptr, uint32_t pane, uint32_t cols,
-                                        uint32_t rows);
 uint8_t suisei_engine_fold_layout(SuiseiEngine *e);
 uint8_t suisei_engine_unfold_layout(SuiseiEngine *e);
 uint8_t suisei_engine_activate_layout(SuiseiEngine *e, uint64_t id, uint64_t focus_doc);
@@ -325,12 +322,9 @@ void suisei_engine_toggle_preview(SuiseiEngine *e);
 /* Full terminal TAB (second call closes it). Direct, for the same reason. */
 void suisei_engine_toggle_terminal_tab(SuiseiEngine *e);
 void suisei_engine_focus_terminal(SuiseiEngine *ptr, uint8_t on);
-/* Multi-session shells (active session lives in Core; parked ones keep running). */
-uint32_t suisei_engine_terminal_sessions(const SuiseiEngine *ptr);
-uint32_t suisei_engine_terminal_active_session(const SuiseiEngine *ptr);
-void suisei_engine_terminal_new_session(SuiseiEngine *ptr);
-void suisei_engine_terminal_select_session(SuiseiEngine *ptr, uint32_t idx);
-void suisei_engine_terminal_close_session(SuiseiEngine *ptr, uint32_t idx);
+/* Where a shell with no pane of its own should start — the docked strip's.
+   The face runs those shells, and asks for this each time it opens one. */
+uint8_t suisei_engine_terminal_cwd(const SuiseiEngine *ptr, char *out, uint32_t cap);
 
 #define SUISEI_MAX_EXPLORER 128
 #define SUISEI_EXPLORER_NAME 160
@@ -420,10 +414,6 @@ void suisei_engine_palette_select(SuiseiEngine *ptr, uint32_t index);
 #define SUISEI_HINT_DESC 48
 #define SUISEI_MAX_COMP 20
 #define SUISEI_COMP_LABEL 64
-#define SUISEI_MAX_TERM_LINES 200
-/* BYTES per row, not columns: rows carry truecolor SGR escapes. */
-#define SUISEI_TERM_LINE 1536
-
 
 typedef struct SuiseiCompletionsSnapshot {
   uint8_t open;
@@ -433,17 +423,6 @@ typedef struct SuiseiCompletionsSnapshot {
   char labels[SUISEI_MAX_COMP][SUISEI_COMP_LABEL];
   char details[SUISEI_MAX_COMP][SUISEI_COMP_LABEL];
 } SuiseiCompletionsSnapshot;
-
-typedef struct SuiseiTerminalSnapshot {
-  uint8_t open;
-  uint8_t full_panel;
-  /* Split pane index for pane-bound full terminal; 0xFFFFFFFF = none / whole main. */
-  uint32_t pane_bound;
-  uint32_t count;
-  uint32_t cursor_row; /* shell cursor within the emitted grid */
-  uint32_t cursor_col;
-  char lines[SUISEI_MAX_TERM_LINES][SUISEI_TERM_LINE];
-} SuiseiTerminalSnapshot;
 
 typedef struct SuiseiStatusExtra {
   char branch[64];
@@ -511,12 +490,6 @@ typedef struct SuiseiThemeSnapshot {
 } SuiseiThemeSnapshot;
 
 uint8_t suisei_engine_completions(const SuiseiEngine *ptr, SuiseiCompletionsSnapshot *out);
-uint8_t suisei_engine_terminal(const SuiseiEngine *ptr, SuiseiTerminalSnapshot *out);
-uint8_t suisei_engine_terminal_for_pane(const SuiseiEngine *e, uint32_t pane,
-                                        SuiseiTerminalSnapshot *out);
-/* Scroll the terminal panel through its scrollback; positive = older output. */
-void suisei_engine_terminal_scroll(SuiseiEngine *ptr, int32_t delta_rows);
-void suisei_engine_terminal_scroll_pane(SuiseiEngine *ptr, uint32_t pane, int32_t delta_rows);
 uint8_t suisei_engine_status_extra(const SuiseiEngine *ptr, SuiseiStatusExtra *out);
 uint8_t suisei_engine_settings(const SuiseiEngine *ptr, SuiseiSettingsSnapshot *out);
 uint8_t suisei_engine_theme(const SuiseiEngine *ptr, SuiseiThemeSnapshot *out);
@@ -905,14 +878,6 @@ uint8_t suisei_engine_replace_in_file(const char *path, uint32_t row,
 /* Returns number of replacements written. */
 uint32_t suisei_engine_replace_all_in_file(const char *path, const char *query,
                                           const char *replace);
-
-/* Forward a mouse event to a terminal's inner app (xterm tracking).
-   pane = 0xFFFF targets the dock. Returns 1 when consumed (the face should
-   NOT also act — e.g. wheel scrollback). button: 0 left, 1 middle, 2 right,
-   64 wheel-up, 65 wheel-down. x/y: 1-based cells. */
-uint8_t suisei_engine_terminal_mouse(SuiseiEngine *ptr, uint32_t pane, uint8_t button,
-                                     uint16_t x, uint16_t y, uint8_t pressed,
-                                     uint8_t motion);
 
 /* ── Session persistence ───────────────────────────────────────────────── */
 

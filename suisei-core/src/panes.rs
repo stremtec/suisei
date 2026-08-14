@@ -14,15 +14,20 @@ use crate::term::Terminal;
 use crate::undo::UndoStack;
 
 impl App {
+    /// ⌃T — show or hide the docked shell strip.
+    ///
+    /// Show and hide, not start and stop. The shells are the face's now (see
+    /// `Terminal::placeholder`), and it keeps them running while the dock is
+    /// closed — which is both what every other editor does and the fix for the
+    /// old behaviour, where ⌃T to get the editor's full height killed whatever
+    /// was running. A session ends when its chip is closed.
     pub fn toggle_terminal_side(&mut self) {
         if self.terminal.open {
             self.terminal.open = false;
-            self.terminal.shutdown();
             self.mode = Mode::Editor;
         } else {
             self.terminal.close_confirm = false;
             self.terminal.open = true;
-            self.terminal.start(self.filename.as_ref());
             self.mode = Mode::Terminal;
         }
     }

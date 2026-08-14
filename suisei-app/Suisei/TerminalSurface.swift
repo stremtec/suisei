@@ -24,18 +24,14 @@ import SwiftUI
 /// `EngineBridge` has to answer two questions about the first responder: may
 /// ⌘-chords still reach the engine (yes — ⌘S must save the document behind the
 /// split), and should plain keys be handed back to AppKit (yes — the view runs
-/// the input method and writes to its own PTY). Both were asked as
-/// `responder is TermCanvas`, which is a class, and there are two classes now.
+/// the input method and writes to its own PTY).
 ///
-/// A protocol rather than a second `is` test at each site: the answer is a
-/// property of being a terminal, and the next terminal surface should not have
-/// to find every place that enumerates the current ones.
+/// A protocol rather than an `is TerminalView` test at each site: the answer is
+/// a property of being a terminal, and the next terminal surface should not
+/// have to find every place that enumerates the current ones.
 protocol TerminalKeySurface: AnyObject {}
 
 extension TerminalView: TerminalKeySurface {}
-/// The docked shell (⌃T) still runs on core's emulator, and its canvas answers
-/// the same two questions. Both conformances live here so the set is one list.
-extension TermCanvas: TerminalKeySurface {}
 
 /// How a pane terminal should look. Everything here is the editor's, so the
 /// shell in a split does not read as a foreign application dropped into it.
@@ -91,28 +87,46 @@ final class PaneTerminalView: LocalProcessTerminalView {
     }
 }
 
-/// One shell: the process, the view that draws it, and the tab that owns both.
+/// Which shell this is.
+///
+/// A pane's is named by the tab showing it — `BufferTab::id`, stable for that
+/// tab's lifetime and never reused. The docked strip's shells have no tab at
+/// all: they are a list of their own, so they get an ordinal from a counter
+/// that also never repeats. Two namespaces in one enum rather than two
+/// registries, because everything below this line treats them identically.
+enum TerminalOwner: Hashable {
+    case tab(UInt64)
+    case dock(UInt64)
+
+    /// The tab to report a title to, if any. The dock's chips carry their own
+    /// titles on this side; core has no name for those shells.
+    var tabId: UInt64? {
+        if case .tab(let id) = self { return id }
+        return nil
+    }
+}
+
+/// One shell: the process, the view that draws it, and whoever owns both.
 ///
 /// A class rather than a struct because it is a delegate and an owner of a
 /// live process — and because the whole point is that it survives the SwiftUI
 /// view that shows it.
 final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate {
-    /// `BufferTab::id`. Stable for the tab's lifetime and never reused, which
-    /// is exactly the lifetime this session wants.
-    let tabId: UInt64
+    let owner: TerminalOwner
     let view: PaneTerminalView
-    /// Reported by the shell (OSC 0/2) and pushed back to core, which puts it
-    /// on the tab chip. `nil` until the shell says something.
-    private(set) var title: String?
+    /// Reported by the shell (OSC 0/2). A pane's goes back to core for the tab
+    /// chip; a dock session's is shown on its own chip from here. `nil` until
+    /// the shell says something.
+    @Published private(set) var title: String?
     /// The shell has ended. Its view stays — with whatever it printed last
-    /// still on screen — until the tab closes.
+    /// still on screen — until the tab or chip closes.
     private(set) var exited = false
 
-    var onTitle: ((UInt64, String?) -> Void)?
-    var onExit: ((UInt64) -> Void)?
+    var onTitle: ((TerminalOwner, String?) -> Void)?
+    var onExit: ((TerminalOwner) -> Void)?
 
-    init(tabId: UInt64, cwd: String?, palette: TerminalPalette) {
-        self.tabId = tabId
+    init(owner: TerminalOwner, cwd: String?, palette: TerminalPalette) {
+        self.owner = owner
         view = PaneTerminalView(frame: NSRect(x: 0, y: 0, width: 640, height: 400))
         super.init()
         view.processDelegate = self
@@ -215,7 +229,7 @@ final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate {
         let value = next.isEmpty ? nil : next
         guard value != self.title else { return }
         self.title = value
-        onTitle?(tabId, value)
+        onTitle?(owner, value)
     }
 
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
@@ -227,66 +241,67 @@ final class TerminalSession: NSObject, LocalProcessTerminalViewDelegate {
     func processTerminated(source: TerminalView, exitCode: Int32?) {
         guard !exited else { return }
         exited = true
-        onExit?(tabId)
+        onExit?(owner)
     }
 }
 
-/// Every shell the face owns, keyed by the tab showing it.
+/// Every shell the face owns.
 ///
 /// The registry exists because SwiftUI view structs are values that get
 /// rebuilt constantly — a shell living in one would be forked again on every
 /// re-render, and killed on every tab switch. What the user means by "my
-/// terminal" is tied to the tab, so that is what holds it.
+/// terminal" outlives any view of it, so something else has to hold it.
 ///
-/// Not an `ObservableObject`: nothing here drives a SwiftUI update. The view
-/// it hands out is an AppKit view that paints itself.
+/// It holds both kinds. A pane's shell is reaped when core says its tab is
+/// gone; the docked strip's are a list this class owns outright, because core
+/// has no idea they exist.
 ///
 /// One registry for the app because there is one `EngineBridge` for the app,
 /// and therefore one `BufferTab::id` space. A second engine would need a
 /// second registry — the ids would collide, not merge.
-final class TerminalSessions {
+final class TerminalSessions: ObservableObject {
     static let shared = TerminalSessions()
 
-    private var sessions: [UInt64: TerminalSession] = [:]
+    private var sessions: [TerminalOwner: TerminalSession] = [:]
 
-    /// Set by the face once, so a session made deep inside a view update can
-    /// still report a title or an exit without every call site threading the
-    /// bridge through.
+    /// The docked strip's sessions, in chip order, and which chip is showing.
+    ///
+    /// Published because the chip strip is SwiftUI and this is the only thing
+    /// that knows how many shells there are. Core used to: an active
+    /// `Terminal` plus a `parked_terminals` vector, with chip indices that
+    /// skipped the active slot — arithmetic that existed only because the
+    /// active session had to live in a particular field for core's key routing
+    /// to find it. Nothing routes through core any more, so the list is a list.
+    @Published private(set) var dock: [UInt64] = []
+    @Published private(set) var dockActive: Int = 0
+    private var nextDockId: UInt64 = 1
+
+    /// Set by the face, so a session made deep inside a view update can still
+    /// report a title or an exit without every call site threading the bridge
+    /// through.
     weak var engine: EngineBridge?
 
     private init() {}
 
-    /// The session for a tab, forking a shell the first time it is asked for.
+    // MARK: - Pane shells
+
+    /// The session for a terminal tab, forking a shell the first time it is
+    /// asked for.
     func session(for tabId: UInt64, cwd: String?, palette: TerminalPalette) -> TerminalSession? {
         // Tab 0 is "no tab" over the ABI. A shell keyed there would be adopted
         // by the next pane that also failed to identify itself.
         guard tabId != 0 else { return nil }
-        if let live = sessions[tabId] {
-            live.apply(palette)
-            return live
-        }
-        let session = TerminalSession(tabId: tabId, cwd: cwd, palette: palette)
-        session.onTitle = { [weak self] id, title in
-            self?.engine?.setTerminalTitle(tabId: id, title: title)
-        }
-        session.onExit = { [weak self] id in
-            // `exit` at the prompt should close the tab, the way it closes a
-            // window in every other terminal. Deferred because this arrives on
-            // the process-reader's queue, and closing a tab republishes the
-            // chrome.
-            DispatchQueue.main.async { self?.engine?.closeTabId(id) }
-        }
-        sessions[tabId] = session
-        return session
+        return session(owner: .tab(tabId), cwd: cwd, palette: palette)
     }
 
     /// Whether a tab already has a shell — asked before making one, when the
-    /// caller has no palette and does not want to fork by accident.
+    /// caller has no working directory in hand and does not want to fork by
+    /// accident just to find out.
     func hasSession(for tabId: UInt64) -> Bool {
-        sessions[tabId] != nil
+        sessions[.tab(tabId)] != nil
     }
 
-    /// Kill every shell whose tab is gone.
+    /// Kill every pane shell whose tab is gone.
     ///
     /// Driven from the chrome republish rather than from a close button: every
     /// route that can remove a document — the tab ×, ⌘W, a palette command,
@@ -302,26 +317,165 @@ final class TerminalSessions {
     func reap(isOpen: (UInt64) -> Bool) {
         // The list first, then the removals. `sessions.keys` is a view onto the
         // dictionary, not a copy of it.
-        let gone = sessions.keys.filter { !isOpen($0) }
-        for id in gone {
-            sessions.removeValue(forKey: id)?.terminate()
+        let gone = sessions.keys.filter { owner in
+            guard let id = owner.tabId else { return false }  // dock: not core's
+            return !isOpen(id)
+        }
+        for owner in gone {
+            sessions.removeValue(forKey: owner)?.terminate()
         }
     }
+
+    // MARK: - The docked strip
+
+    /// The shell the dock is showing, opening the first one on demand.
+    ///
+    /// On demand, because ⌃T is "show the strip" and an empty strip is not a
+    /// terminal. The alternative — spawning at launch — is a shell nobody asked
+    /// for in every window.
+    func dockSession(cwd: @autoclosure () -> String?, palette: TerminalPalette) -> TerminalSession? {
+        if dock.isEmpty { openDockSession(cwd: cwd(), palette: palette) }
+        guard dock.indices.contains(dockActive) else { return nil }
+        return session(owner: .dock(dock[dockActive]), cwd: nil, palette: palette)
+    }
+
+    /// Add a session after the showing one and switch to it.
+    func openDockSession(cwd: String?, palette: TerminalPalette) {
+        let id = nextDockId
+        nextDockId += 1
+        _ = session(owner: .dock(id), cwd: cwd, palette: palette)
+        let at = dock.isEmpty ? 0 : min(dockActive + 1, dock.count)
+        dock.insert(id, at: at)
+        dockActive = at
+    }
+
+    func selectDockSession(_ index: Int) {
+        guard dock.indices.contains(index) else { return }
+        dockActive = index
+    }
+
+    /// Close one chip. The strip promotes a neighbour; closing the last one
+    /// leaves it empty, and the next ⌃T opens a fresh shell.
+    func closeDockSession(_ index: Int) {
+        guard dock.indices.contains(index) else { return }
+        let id = dock.remove(at: index)
+        sessions.removeValue(forKey: .dock(id))?.terminate()
+        dockActive = min(dockActive, max(0, dock.count - 1))
+    }
+
+    /// What a dock chip is called: the shell's own title, else its ordinal.
+    func dockTitle(_ index: Int) -> String {
+        guard dock.indices.contains(index) else { return "Shell" }
+        if let t = sessions[.dock(dock[index])]?.title, !t.isEmpty { return t }
+        return "Shell \(index + 1)"
+    }
+
+    // MARK: - Both
 
     /// Kill everything. The app is quitting.
     func closeAll() {
         for session in sessions.values { session.terminate() }
         sessions.removeAll()
+        dock.removeAll()
+        dockActive = 0
+    }
+
+    private func session(
+        owner: TerminalOwner, cwd: String?, palette: TerminalPalette
+    ) -> TerminalSession {
+        if let live = sessions[owner] {
+            live.apply(palette)
+            return live
+        }
+        let session = TerminalSession(owner: owner, cwd: cwd, palette: palette)
+        session.onTitle = { [weak self] owner, title in
+            guard let self else { return }
+            if let tabId = owner.tabId {
+                self.engine?.setTerminalTitle(tabId: tabId, title: title)
+            } else {
+                // A dock chip's name lives here; nothing over the ABI has a
+                // word for it. The strip is watching this object.
+                self.objectWillChange.send()
+            }
+        }
+        session.onExit = { [weak self] owner in
+            // `exit` at the prompt closes the thing showing the shell, the way
+            // it closes a window in every other terminal. Deferred because this
+            // arrives on the process-reader's queue.
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch owner {
+                case .tab(let id):
+                    self.engine?.closeTabId(id)
+                case .dock(let id):
+                    guard let at = self.dock.firstIndex(of: id) else { return }
+                    self.closeDockSession(at)
+                }
+            }
+        }
+        sessions[owner] = session
+        return session
+    }
+}
+
+/// The empty box a session's view is put into.
+///
+/// A container rather than the terminal itself, because the representable's
+/// own view is created and destroyed by SwiftUI: the terminal belongs to the
+/// session, a pane can be torn down and rebuilt while its shell keeps running,
+/// and the same shell moves between hosts (pane ⇄ pane in a split, chip ⇄ chip
+/// in the dock). None of that is expressible if the representable owns it.
+///
+/// Flipped so a subview pinned at the origin sits at the TOP, which is where a
+/// terminal goes; an unflipped container puts the shell at the bottom of a tall
+/// pane with the gap above it.
+final class TerminalHostView: NSView {
+    override var isFlipped: Bool { true }
+
+    /// Put `term` in this box, taking it off whatever box had it.
+    ///
+    /// Returns true when it actually moved, so the caller can decide about
+    /// focus only on a real arrival.
+    @discardableResult
+    func mount(_ term: PaneTerminalView) -> Bool {
+        if term.superview === self {
+            if term.frame != bounds { term.frame = bounds }
+            return false
+        }
+        term.removeFromSuperview()
+        term.frame = bounds
+        term.autoresizingMask = [.width, .height]
+        addSubview(term)
+        return true
+    }
+
+    /// Hand the keyboard over on the next pass.
+    ///
+    /// Deferred: this runs inside a SwiftUI view update, and the window may not
+    /// even have the view yet. Re-checked on arrival because by then the layout
+    /// may have moved on.
+    func claimKeyboard(for term: PaneTerminalView) {
+        DispatchQueue.main.async { [weak self, weak term] in
+            guard let self, let term, term.superview === self,
+                  let window = term.window, window.firstResponder !== term
+            else { return }
+            window.makeFirstResponder(term)
+        }
+    }
+
+    /// Give up the terminal without ending it.
+    ///
+    /// The host going away is a layout change — a split closing, a tab switch,
+    /// the dock being hidden — not the shell ending. Sessions end in the
+    /// registry, which knows the difference.
+    static func release(_ container: NSView) {
+        for sub in container.subviews where sub is PaneTerminalView {
+            sub.removeFromSuperview()
+        }
     }
 }
 
 /// A terminal pane: SwiftTerm's view, held by the registry, shown here.
-///
-/// `makeNSView` returns an empty container rather than the terminal itself.
-/// The terminal belongs to the session, one pane can be torn down and rebuilt
-/// while its shell keeps running, and the same shell can move between panes in
-/// a split — none of which is expressible if the representable's own view is
-/// the terminal.
 struct TerminalPaneSurface: NSViewRepresentable {
     /// `BufferTab::id` of the terminal tab this pane shows.
     let tabId: UInt64
@@ -330,13 +484,13 @@ struct TerminalPaneSurface: NSViewRepresentable {
     let paneIndex: Int
     let engine: EngineBridge
 
-    func makeNSView(context: Context) -> NSView {
-        let container = FlippedContainer()
-        container.autoresizesSubviews = true
-        return container
+    func makeNSView(context: Context) -> TerminalHostView {
+        let host = TerminalHostView()
+        host.autoresizesSubviews = true
+        return host
     }
 
-    func updateNSView(_ container: NSView, context: Context) {
+    func updateNSView(_ host: TerminalHostView, context: Context) {
         let sessions = TerminalSessions.shared
         sessions.engine = engine
         // The working directory is asked for only when a shell is about to be
@@ -349,48 +503,55 @@ struct TerminalPaneSurface: NSViewRepresentable {
         ) else { return }
         let term = session.view
         term.onFocus = { [weak engine] in engine?.focusTerminalPane(paneIndex) }
-        if term.superview !== container {
-            // Re-parenting rather than adding: in a split, the same tab can be
-            // shown by a pane that is being built while the pane that had it is
-            // still being torn down.
-            term.removeFromSuperview()
-            term.frame = container.bounds
-            term.autoresizingMask = [.width, .height]
-            container.addSubview(term)
-            // A pane that appears because the user asked for a terminal should
-            // be typable without a second click — but ONLY when core already
-            // considers this pane focused. Re-parenting also happens for
-            // reasons the user did not ask for (a font change rebuilds every
-            // representable, a split rearranges), and grabbing the keyboard
-            // then would take it out of the document they are typing in.
-            if engine.editorSplit.focus == paneIndex {
-                DispatchQueue.main.async {
-                    guard term.superview === container, let window = term.window,
-                          window.firstResponder !== term
-                    else { return }
-                    window.makeFirstResponder(term)
-                }
-            }
-        } else if term.frame != container.bounds {
-            term.frame = container.bounds
-        }
+        guard host.mount(term) else { return }
+        // A pane that appears because the user asked for a terminal should be
+        // typable without a second click — but ONLY when core already considers
+        // this pane focused. Mounting also happens for reasons the user did not
+        // ask for (a font change rebuilds every representable, a split
+        // rearranges), and grabbing the keyboard then would take it out of the
+        // document they are typing in.
+        if engine.editorSplit.focus == paneIndex { host.claimKeyboard(for: term) }
     }
 
-    static func dismantleNSView(_ container: NSView, coordinator: ()) {
-        // The terminal leaves with the container, but it is NOT terminated:
-        // the pane going away is a layout change (a split closing, a tab
-        // switch), not the shell ending. `reap` is what ends shells, and it
-        // asks core which tabs are still open.
-        for sub in container.subviews where sub is PaneTerminalView {
-            sub.removeFromSuperview()
-        }
+    static func dismantleNSView(_ host: TerminalHostView, coordinator: ()) {
+        TerminalHostView.release(host)
+    }
+}
+
+/// The docked strip's shell (⌃T) — whichever chip is selected.
+///
+/// The dock's sessions are the registry's own list, not core's, so this asks
+/// for one by nothing at all: "the one showing". Switching chips swaps which
+/// view is mounted here and leaves both processes running.
+struct TerminalDockSurface: NSViewRepresentable {
+    let palette: TerminalPalette
+    let engine: EngineBridge
+    /// Bumped by the chip strip so SwiftUI re-runs `updateNSView` on a switch.
+    let activeChip: Int
+
+    func makeNSView(context: Context) -> TerminalHostView {
+        let host = TerminalHostView()
+        host.autoresizesSubviews = true
+        return host
     }
 
-    /// Flipped so a subview pinned at the origin sits at the TOP, which is
-    /// where a terminal goes. An unflipped container puts the shell at the
-    /// bottom of a tall pane with the gap above it.
-    private final class FlippedContainer: NSView {
-        override var isFlipped: Bool { true }
+    func updateNSView(_ host: TerminalHostView, context: Context) {
+        let sessions = TerminalSessions.shared
+        sessions.engine = engine
+        guard let session = sessions.dockSession(
+            cwd: engine.dockTerminalCwd(), palette: palette
+        ) else { return }
+        let term = session.view
+        term.onFocus = { [weak engine] in engine?.focusTerminal(true) }
+        guard host.mount(term) else { return }
+        // Unlike a pane, the dock only ever appears because the user asked for
+        // it — ⌃T, the Debug-area button, or a chip — so it always takes the
+        // keyboard on arrival.
+        host.claimKeyboard(for: term)
+    }
+
+    static func dismantleNSView(_ host: TerminalHostView, coordinator: ()) {
+        TerminalHostView.release(host)
     }
 }
 
@@ -399,6 +560,9 @@ struct TerminalPaneSurface: NSViewRepresentable {
 /// A view modifier for the same reason `AudioTabLifetimeModifier` is one: the
 /// signal is the chrome republish, which every close route already performs,
 /// and `ContentView.body` is at Swift's type-checking limit without it.
+///
+/// Dock sessions are deliberately not reaped here. They belong to no tab, and
+/// hiding the strip is not closing them — that is what ⌃T means now.
 struct TerminalTabLifetimeModifier: ViewModifier {
     let engine: EngineBridge
 

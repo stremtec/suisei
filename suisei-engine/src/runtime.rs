@@ -92,19 +92,8 @@ pub struct Engine {
     /// what lets inactive tabs acquire/clear their warning glyph without
     /// forcing a full recompose every second while a file remains absent.
     missing_tab_ids: std::collections::HashSet<suisei_core::app::BufferId>,
-    /// Parked terminal sessions (VS Code-style multi-shell). The ACTIVE session
-    /// always lives in `app.terminal` so all core routing (keys/paste/resize)
-    /// keeps working untouched; switching swaps sessions in and out.
-    parked_terminals: Vec<suisei_core::term::Terminal>,
-    /// Index of the active session within the conceptual list
-    /// `[..parked[0..active], ACTIVE, parked[active..]..]`.
-    active_terminal: usize,
     /// Shadow WAL — crash-recovery journal for unsaved buffers (D0).
     pub journal: crate::journal::Journal,
-    /// Grid the face last measured for the terminal panel, in cells. The face
-    /// knows the panel's real size; the editor viewport is only a stand-in for
-    /// before it has reported one.
-    face_terminal_grid: Option<(u16, u16)>,
     /// Per-shell content generation: bumped whenever a pane terminal's screen
     /// changes. Shipped as a u16 in `SuiseiPaneC.term_gen` so the face skips
     /// re-pulling a ~300 KiB grid it already has — pulling one per keystroke
@@ -215,10 +204,7 @@ impl Engine {
             outline_cache_path: None,
             tick_count: 0,
             missing_tab_ids: std::collections::HashSet::new(),
-            parked_terminals: Vec::new(),
-            active_terminal: 0,
             journal: crate::journal::Journal::new(),
-            face_terminal_grid: None,
             pane_term_gens: std::collections::HashMap::new(),
             reporter: None,
             syntax_worker: suisei_core::syntax_worker::SyntaxWorker::start(),
@@ -268,102 +254,12 @@ impl Engine {
         }
     }
 
-    // ── Multi-session terminal (VS Code-style shell list) ──
-
-    pub fn terminal_session_count(&self) -> u32 {
-        (self.parked_terminals.len() + 1) as u32
-    }
-
-    pub fn terminal_active_session(&self) -> u32 {
-        self.active_terminal.min(self.parked_terminals.len()) as u32
-    }
-
-    /// Park the active shell and spawn a fresh one.
-    pub fn terminal_new_session(&mut self) {
-        if !self.app.terminal.open {
-            self.app.toggle_terminal_side();
-        }
-        self.ensure_terminal_started();
-        let mut fresh = suisei_core::term::Terminal::new();
-        fresh.open = true;
-        // Where the terminal lives is the layout tree's business now, so a
-        // session swap carries nothing about placement.
-        std::mem::swap(&mut self.app.terminal, &mut fresh);
-        // `fresh` now holds the previously active session — park it in place.
-        self.parked_terminals
-            .insert(self.active_terminal.min(self.parked_terminals.len()), fresh);
-        self.active_terminal = self.parked_terminals.len();
-        self.ensure_terminal_started();
-        self.app.mode = suisei_core::app::Mode::Terminal;
-        self.shell.dirty = true;
-        self.recompose();
-    }
-
-    /// Swap session `idx` (conceptual list order) into `app.terminal`.
-    pub fn terminal_select_session(&mut self, idx: u32) {
-        let idx = idx as usize;
-        let count = self.parked_terminals.len() + 1;
-        if idx >= count || idx == self.active_terminal {
-            return;
-        }
-        // Parked slot for `idx`: indices skip the active position.
-        let parked_idx = if idx < self.active_terminal {
-            idx
-        } else {
-            idx - 1
-        };
-        if parked_idx >= self.parked_terminals.len() {
-            return;
-        }
-        std::mem::swap(
-            &mut self.app.terminal,
-            &mut self.parked_terminals[parked_idx],
-        );
-        self.active_terminal = idx;
-        self.app.terminal.open = true;
-        self.app.mode = suisei_core::app::Mode::Terminal;
-        self.shell.dirty = true;
-        self.recompose();
-    }
-
-    /// Close session `idx`; closing the active one promotes a neighbor.
-    pub fn terminal_close_session(&mut self, idx: u32) {
-        let idx = idx as usize;
-        let count = self.parked_terminals.len() + 1;
-        if idx >= count {
-            return;
-        }
-        if idx == self.active_terminal {
-            self.app.terminal.shutdown();
-            if let Some(mut next) = self.parked_terminals.pop() {
-                std::mem::swap(&mut self.app.terminal, &mut next);
-                self.app.terminal.open = true;
-                self.active_terminal = self.parked_terminals.len();
-            } else {
-                // Last shell closed → close the panel.
-                self.app.terminal.open = false;
-                if matches!(self.app.mode, Mode::Terminal) {
-                    self.app.mode = Mode::Editor;
-                }
-                self.active_terminal = 0;
-            }
-        } else {
-            let parked_idx = if idx < self.active_terminal {
-                idx
-            } else {
-                idx - 1
-            };
-            if parked_idx < self.parked_terminals.len() {
-                let mut t = self.parked_terminals.remove(parked_idx);
-                t.shutdown();
-                if idx < self.active_terminal {
-                    self.active_terminal -= 1;
-                }
-            }
-        }
-        self.shell.dirty = true;
-        self.recompose();
-    }
+    // The docked shell strip used to live here: an active `Terminal` in
+    // `app.terminal` plus a `parked_terminals` vector, with the face's chip
+    // indices skipping the active slot. The shells are SwiftTerm's now, so the
+    // list is the face's too — a list of processes this side cannot see is a
+    // list it cannot serve. What core still owns is whether the dock is
+    // showing (`app.terminal.open`) and what that means for the keyboard.
 
     // ─── GUI semantic editing commands ────────────────────────────────────────
     //
@@ -848,35 +744,11 @@ impl Engine {
                 need_full = true;
             }
         }
-        // Every pane shell flows, not just the focused one — a build running in
-        // one terminal pane must keep going while you type in another.
-        for (tid, t) in self.app.pane_terminals.iter_mut() {
-            t.poll();
-            if t.take_damage() {
-                self.shell.dirty = true;
-                *self.pane_term_gens.entry(*tid).or_insert(0) += 1;
-            }
-        }
-        if self.app.terminal.open || matches!(self.app.mode, Mode::Terminal) {
-            // Face never paints TUI rows that call start() — boot PTY here if deferred.
-            if !self.app.terminal.started {
-                self.ensure_terminal_started();
-            }
-            self.app.terminal.poll();
-            // Only repaint when the PTY actually changed the screen —
-            // unconditional dirty here advanced frame_gen every 50ms, and the
-            // face's resulting 20Hz SwiftUI republish made editor scrolling
-            // visibly stutter whenever a terminal was open.
-            if self.app.terminal.take_damage() {
-                self.shell.dirty = true;
-            }
-        }
-        // Parked shells keep flowing (background jobs, long builds).
-        for t in &mut self.parked_terminals {
-            if t.started {
-                t.poll();
-            }
-        }
+        // No shell is polled here any more. Every terminal in the window —
+        // the panes and the dock alike — is a SwiftTerm view that reads its own
+        // PTY on its own queue and draws itself. This loop used to be the only
+        // thing that moved their output, and the tick it ran on is why a busy
+        // shell used to cost the editor a republish at 20Hz.
         if self.app.poll_git_refresh() {
             self.shell.dirty = true;
             need_full = true;
@@ -1267,43 +1139,6 @@ impl Engine {
         // Keep split pane mirrors in sync so inactive panes paint correctly.
         // Scroll never moves the caret — only the window.
         self.recompose_scroll();
-    }
-
-    /// Size + spawn PTY for side/full terminal (Suisei has no TUI first-draw hook).
-    pub(crate) fn ensure_terminal_started(&mut self) {
-        if !self.app.terminal.open || self.app.terminal.started {
-            return;
-        }
-        // Spawn at the size the PANEL will actually be. This used to size the
-        // PTY from the editor viewport and then let the face's own measurement
-        // shrink it a moment later — and shrinking a grid pushes its top rows
-        // into scrollback, so the shell's greeting had already scrolled away
-        // before the first paint. The editor viewport is only the fallback for
-        // the case where the face has not measured yet.
-        let (cols, rows) = match self.face_terminal_grid {
-            Some(grid) => grid,
-            None => {
-                let cols = self.app.grid_cols().max(40);
-                let rows = if !self.app.pane_terminals.is_empty() {
-                    self.app.grid_rows().max(24)
-                } else {
-                    self.app.grid_rows().max(8).min(24).max(8)
-                };
-                (cols, rows)
-            }
-        };
-        self.app.terminal.resize(cols, rows);
-        // `Terminal::start` consumes an anchor and starts in its parent.
-        // Every shell uses the same explicit project-root policy.
-        let anchor_owned = self
-            .app
-            .terminal_working_directory()
-            .join(".suisei-terminal");
-        self.app.terminal.start(Some(&anchor_owned));
-        if !self.app.terminal.started {
-            self.app.message = "Terminal: failed to spawn shell (PTY)".into();
-        }
-        self.shell.dirty = true;
     }
 
     /// Horizontal pan when wrap_lines is off (trackpad / zh·zl).
@@ -1732,9 +1567,6 @@ impl Engine {
     /// control has to call the thing it names.
     pub fn toggle_terminal_dock(&mut self) {
         self.app.toggle_terminal_side();
-        if self.app.terminal.open {
-            self.ensure_terminal_started();
-        }
         self.shell.dirty = true;
         self.recompose();
     }
@@ -1753,10 +1585,6 @@ impl Engine {
     }
 
     /// Open a terminal TAB, or close it when one is already focused.
-    ///
-    /// `App::toggle_terminal_full` spawns and starts its own shell, so there is
-    /// no `ensure_terminal_started` here — that call belongs to the docked
-    /// terminal, which shares one session.
     pub fn toggle_terminal_tab(&mut self) {
         self.app.toggle_terminal_full();
         self.shell.dirty = true;
@@ -1766,7 +1594,6 @@ impl Engine {
     pub fn focus_terminal(&mut self, on: bool) {
         if on {
             if self.app.terminal.open {
-                self.ensure_terminal_started();
                 self.app.mode = Mode::Terminal;
             }
         } else if matches!(self.app.mode, Mode::Terminal) {
@@ -1775,24 +1602,6 @@ impl Engine {
         self.recompose();
     }
 
-    /// Size the PTY to the face's terminal panel (cols × rows in cells).
-    pub fn terminal_resize(&mut self, cols: u32, rows: u32) {
-        if cols < 10 || rows < 3 {
-            return;
-        }
-        let cols = cols.min(500) as u16;
-        let rows = rows.min(200) as u16;
-        // Remembered even when the panel is not open yet, so the PTY can be
-        // spawned at the right size instead of being resized into scrollback
-        // right after it prints its greeting.
-        self.face_terminal_grid = Some((cols, rows));
-        if !self.app.terminal.open {
-            return;
-        }
-        self.app.terminal.resize(cols, rows);
-        self.shell.dirty = true;
-        self.recompose_scroll();
-    }
 
     /// Scroll the terminal panel through its scrollback. Positive reveals
     /// older output. The GUI had no path to this at all — core kept a 5,000-row
@@ -3617,33 +3426,35 @@ mod tests {
     /// Dock controls must not touch pane shells. They are separate processes,
     /// and before the per-pane entries existed, a resize or scroll aimed at
     /// the dock was the only resize a pane ever saw — by accident, through
-    /// the face misreporting pane geometry into the dock.
+    /// ⌃T shows and hides the docked strip. It does not start or stop
+    /// anything.
+    ///
+    /// It used to do both — opening spawned a shell, closing called
+    /// `shutdown()` — so hiding the dock to get the editor's full height
+    /// killed whatever was running in it. The shells are the face's now and
+    /// outlive the strip; a session ends when its chip is closed. All core
+    /// still decides is whether the strip shows, and what that means for the
+    /// keyboard.
     #[test]
-    fn dock_resize_and_scroll_leave_pane_terminals_alone() {
+    fn hiding_the_dock_is_not_closing_its_shells() {
         let mut eng = Engine::new();
         eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
         eng.split_vertical();
         eng.focus_pane(0);
         eng.app.toggle_terminal_full();
-        let (cols0, rows0) = eng
-            .app
-            .pane_terminal(0)
-            .map(|t| (t.cols(), t.rows_count()))
-            .expect("pane shell running");
+        let pane_tab = eng.app.split.panes[0].buffer;
 
-        // Open the dock and work its controls.
-        eng.app.toggle_terminal_side();
-        eng.terminal_resize(133, 44);
-        eng.terminal_scroll(7);
+        eng.toggle_terminal_dock();
+        assert!(eng.app.terminal.open);
+        assert!(matches!(eng.app.mode, Mode::Terminal), "keys go to the dock");
 
-        assert_eq!(eng.app.terminal.cols(), 133, "dock did resize");
-        let p = eng.app.pane_terminal(0).expect("pane shell still there");
-        assert_eq!(
-            (p.cols(), p.rows_count()),
-            (cols0, rows0),
-            "pane grid untouched"
-        );
-        assert_eq!(p.scroll(), 0, "pane scroll untouched");
+        eng.toggle_terminal_dock();
+        assert!(!eng.app.terminal.open, "the strip is hidden");
+        assert!(matches!(eng.app.mode, Mode::Editor), "keys come back");
+        // And the terminal TAB in pane 0 is still a terminal tab. The dock and
+        // the panes were one `Mode` and one shared session for long enough
+        // that this is worth stating.
+        assert!(eng.app.is_terminal_tab(pane_tab));
     }
 
     /// The chip of a terminal tab carries the shell's own OSC title once the
@@ -3654,15 +3465,10 @@ mod tests {
         eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
         eng.recompose();
         eng.app.toggle_terminal_full();
-        {
-            let term = eng
-                .app
-                .pane_terminals
-                .values_mut()
-                .next()
-                .expect("pane shell");
-            term.title = Some("make [42]".into());
-        }
+        // Through the path the face actually uses: SwiftTerm reads the OSC
+        // escape and reports it, keyed by the tab.
+        let tab = eng.app.split.panes[eng.app.split.focus_index()].buffer;
+        assert!(eng.app.set_terminal_title(tab, Some("make [42]")));
         eng.recompose();
         let c = eng.last_diff.chrome.as_ref().unwrap();
         let titles: Vec<&str> = c.tabs.iter().map(|t| t.title.as_str()).collect();

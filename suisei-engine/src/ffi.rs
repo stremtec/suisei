@@ -1262,51 +1262,6 @@ pub extern "C" fn suisei_engine_paste_text(ptr: *mut SuiseiEngine, text: *const 
     }
 }
 
-/// Raw keyboard text into the focused terminal's PTY (IME-committed Hangul/CJK,
-/// typed characters) — UTF-8 bytes, not bracketed-paste-wrapped.
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_input(ptr: *mut SuiseiEngine, text: *const c_char) {
-    if ptr.is_null() || text.is_null() {
-        return;
-    }
-    let cstr = unsafe { CStr::from_ptr(text) };
-    let Ok(s) = cstr.to_str() else {
-        return;
-    };
-    unsafe {
-        (*ptr).0.terminal_input(s);
-    }
-}
-
-/// Size the PTY grid to the face terminal panel (cells).
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_resize(ptr: *mut SuiseiEngine, cols: u32, rows: u32) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        (*ptr).0.terminal_resize(cols, rows);
-    }
-}
-
-/// Size a PANE terminal's PTY to the face's measured grid (cells). Pane
-/// shells are separate processes — the docked `terminal_resize` never touched
-/// them, so they kept their spawn-time guess forever.
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_resize_pane(
-    ptr: *mut SuiseiEngine,
-    pane: u32,
-    cols: u32,
-    rows: u32,
-) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        (*ptr).0.terminal_resize_pane(pane, cols, rows);
-    }
-}
-
 /// Route keys to the PTY (`on != 0`) or back to the editor buffer.
 /// Fold the editor's arrangement into a layout tab (J7). Returns 1 on success.
 #[unsafe(no_mangle)]
@@ -1406,81 +1361,6 @@ pub extern "C" fn suisei_engine_focus_terminal(ptr: *mut SuiseiEngine, on: u8) {
     }
     unsafe {
         (*ptr).0.focus_terminal(on != 0);
-    }
-}
-
-/// Multi-session shell list (VS Code-style).
-/// Scroll the terminal panel through its scrollback; positive reveals older
-/// output. Nothing in the GUI could reach the scrollback before this.
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_scroll(ptr: *mut SuiseiEngine, delta_rows: i32) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        (*ptr).0.terminal_scroll(delta_rows);
-    }
-}
-
-/// Scroll a PANE terminal through its scrollback; positive reveals older
-/// output. The pane twin of `suisei_engine_terminal_scroll`.
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_scroll_pane(
-    ptr: *mut SuiseiEngine,
-    pane: u32,
-    delta_rows: i32,
-) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        (*ptr).0.terminal_scroll_pane(pane, delta_rows);
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_sessions(ptr: *const SuiseiEngine) -> u32 {
-    if ptr.is_null() {
-        return 0;
-    }
-    unsafe { (*ptr).0.terminal_session_count() }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_active_session(ptr: *const SuiseiEngine) -> u32 {
-    if ptr.is_null() {
-        return 0;
-    }
-    unsafe { (*ptr).0.terminal_active_session() }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_new_session(ptr: *mut SuiseiEngine) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        (*ptr).0.terminal_new_session();
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_select_session(ptr: *mut SuiseiEngine, idx: u32) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        (*ptr).0.terminal_select_session(idx);
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_close_session(ptr: *mut SuiseiEngine, idx: u32) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        (*ptr).0.terminal_close_session(idx);
     }
 }
 
@@ -2004,15 +1884,6 @@ pub const SUISEI_HINT_KEY: usize = 16;
 pub const SUISEI_HINT_DESC: usize = 48;
 pub const SUISEI_MAX_COMP: usize = 20;
 pub const SUISEI_COMP_LABEL: usize = 64;
-/// Rows the terminal snapshot can carry. Was 120; a full-panel terminal on a
-/// tall display asks for more than that, and rows past the cap simply vanished.
-pub const SUISEI_MAX_TERM_LINES: usize = 200;
-/// **Bytes** per terminal row — not columns. Each row is a truecolor SGR string
-/// (`Terminal::visible_rows_sgr`), so one colour change costs up to 19 bytes on
-/// top of the character it colours. At the old 256 a wide `ls --color` or build
-/// log ran out of budget after roughly a dozen colour changes and the rest of
-/// the line was dropped: the reported "terminal gets cut off".
-pub const SUISEI_TERM_LINE: usize = 1536;
 
 #[repr(C)]
 pub struct SuiseiCompletionsSnapshot {
@@ -2024,20 +1895,11 @@ pub struct SuiseiCompletionsSnapshot {
     pub details: [[c_char; SUISEI_COMP_LABEL]; SUISEI_MAX_COMP],
 }
 
-#[repr(C)]
-pub struct SuiseiTerminalSnapshot {
-    pub open: u8,
-    pub full_panel: u8,
-    /// Split pane index for pane-bound full terminal; `0xFFFFFFFF` = none / whole main.
-    pub pane_bound: u32,
-    pub count: u32,
-    /// Shell cursor within the emitted grid. Never sent before, which is why
-    /// the terminal had no visible caret at all — nothing was missing in the
-    /// renderer, the position simply never crossed the bridge.
-    pub cursor_row: u32,
-    pub cursor_col: u32,
-    pub lines: [[c_char; SUISEI_TERM_LINE]; SUISEI_MAX_TERM_LINES],
-}
+// The 300 KiB `SuiseiTerminalSnapshot` used to live here — 200 rows × 1536
+// bytes of truecolor SGR, re-encoded from a cell grid on one side of the ABI
+// and re-parsed on the other, pulled on every refresh while a terminal was
+// open. Nothing draws from it: every terminal in the window is a SwiftTerm
+// view that reads its own PTY.
 
 #[repr(C)]
 pub struct SuiseiStatusExtra {
@@ -2069,93 +1931,6 @@ pub extern "C" fn suisei_engine_completions(
     for (i, (lab, det)) in c.items.iter().take(n).enumerate() {
         write_cstr(&mut o.labels[i], lab);
         write_cstr(&mut o.details[i], det);
-    }
-    1
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal(
-    ptr: *const SuiseiEngine,
-    out: *mut SuiseiTerminalSnapshot,
-) -> u8 {
-    if ptr.is_null() || out.is_null() {
-        return 0;
-    }
-    let eng = unsafe { &*ptr };
-    let Some(chrome) = eng.0.last_diff.chrome.as_ref() else {
-        return 0;
-    };
-    let t = &chrome.terminal;
-    // Deliberately NOT a blanket `write_bytes(.., 0, size_of::<..>())`: this
-    // struct is 300 KiB and the face pulls it on every refresh while the
-    // terminal is open. Every header field is assigned below, and a row only
-    // needs its first byte cleared to read as an empty C string — `write_cstr`
-    // zeroes the rows it fills. That turns a 300 KiB memset into 200 stores.
-    let o = unsafe { &mut *out };
-    o.open = u8::from(t.open);
-    o.full_panel = u8::from(t.full_panel);
-    o.pane_bound = t.pane_bound.unwrap_or(u32::MAX);
-    let n = t.lines.len().min(SUISEI_MAX_TERM_LINES);
-    o.count = n as u32;
-    for row in o.lines.iter_mut().skip(n) {
-        row[0] = 0;
-    }
-    // Shell cursor, so the face can actually draw a caret in the terminal.
-    // NOTE: cursor_position() returns (COL, ROW) — reading it as (row, col)
-    // put the caret on the wrong line, which read as "no cursor at all".
-    let (ccol, crow) = eng.0.app().terminal.cursor_position();
-    o.cursor_row = crow as u32;
-    o.cursor_col = ccol as u32;
-    for (i, line) in t.lines.iter().take(n).enumerate() {
-        write_cstr(&mut o.lines[i], line);
-    }
-    1
-}
-
-/// Rows for the shell running in a specific pane.
-///
-/// Pane terminals are separate processes, so there is no single "the terminal"
-/// to ask for. `suisei_engine_terminal` remains the docked one.
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_for_pane(
-    ptr: *const SuiseiEngine,
-    pane: u32,
-    out: *mut SuiseiTerminalSnapshot,
-) -> u8 {
-    if ptr.is_null() || out.is_null() {
-        return 0;
-    }
-    let eng = unsafe { &*ptr };
-    let Some(term) = eng.0.app().pane_terminal(pane as usize) else {
-        return 0;
-    };
-    let o = unsafe { &mut *out };
-    o.open = 1;
-    o.full_panel = 1;
-    o.pane_bound = pane;
-    let lines: Vec<String> = term
-        .visible_rows_sgr()
-        .into_iter()
-        .take(SUISEI_MAX_TERM_LINES)
-        .collect();
-    let n = lines.len();
-    o.count = n as u32;
-    for row in o.lines.iter_mut().skip(n) {
-        row[0] = 0;
-    }
-    let (ccol, crow) = term.cursor_position();
-    // While the user views scrollback the live caret is not on the screen —
-    // u16::MAX tells the face to suppress the block cursor instead of drawing
-    // it at live-grid coordinates over scrolled-back content.
-    if term.scroll() > 0 {
-        o.cursor_row = u32::from(u16::MAX);
-        o.cursor_col = u32::from(u16::MAX);
-    } else {
-        o.cursor_row = crow as u32;
-        o.cursor_col = ccol as u32;
-    }
-    for (i, line) in lines.iter().enumerate() {
-        write_cstr(&mut o.lines[i], line);
     }
     1
 }
@@ -3523,7 +3298,7 @@ pub extern "C" fn suisei_engine_live_files(
 /// no file — an untitled document, or a shell.
 ///
 /// A pull rather than a field on the chrome snapshot, on the same reasoning as
-/// `suisei_engine_terminal_for_pane`: only the non-text viewers need it, they
+/// `suisei_engine_pane_terminal_cwd`: only the non-text viewers need it, they
 /// need it once when they appear, and four more 512-byte arrays in a struct
 /// that is rebuilt every frame would be paid for by every frame that has no
 /// viewer in it — which is nearly all of them.
@@ -3629,6 +3404,28 @@ pub extern "C" fn suisei_engine_pane_terminal_cwd(
     else {
         return 0;
     };
+    let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(dst, &cwd.display().to_string());
+    1
+}
+
+/// Where a shell with no pane of its own should start — the docked strip's.
+///
+/// Core's answer to "which directory is this window about": the explorer's
+/// current directory, else the project root, else `$HOME`. Every shell in the
+/// window has always used this policy; a pane's is frozen at spawn time into
+/// `BufferTab::terminal_cwd` so a restore can reproduce it, and the dock's is
+/// asked for fresh each time a session is opened.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_terminal_cwd(
+    ptr: *const SuiseiEngine,
+    out: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if ptr.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let cwd = unsafe { &*ptr }.0.app().terminal_working_directory();
     let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
     write_cstr(dst, &cwd.display().to_string());
     1
@@ -3777,28 +3574,6 @@ pub extern "C" fn suisei_engine_replace_all_in_file(
 /// event (the face should then NOT also act on it — e.g. wheel scrollback).
 /// button: 0 left, 1 middle, 2 right, 64 wheel-up, 65 wheel-down.
 /// x/y: 1-based cell coordinates.
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_terminal_mouse(
-    ptr: *mut SuiseiEngine,
-    pane: u32,
-    button: u8,
-    x: u16,
-    y: u16,
-    pressed: u8,
-    motion: u8,
-) -> u8 {
-    if ptr.is_null() {
-        return 0;
-    }
-    unsafe {
-        u8::from(
-            (*ptr)
-                .0
-                .terminal_mouse(pane, button, x, y, pressed != 0, motion != 0),
-        )
-    }
-}
-
 /// Restore the previous session's files + cursors (call once at startup).
 /// Landing named buffers flips the welcome rule, so Welcome yields to the
 /// restored editor.

@@ -195,11 +195,11 @@ pub struct CompletionsScene {
 
 #[derive(Debug, Clone)]
 pub struct TerminalScene {
+    /// Whether the docked strip (⌃T) is showing. That is the whole of what
+    /// core knows about it now: the shells inside are SwiftTerm's, and their
+    /// rows never cross the ABI. `full_panel`, `pane_bound` and 200 rows of
+    /// truecolor SGR used to live here.
     pub open: bool,
-    pub full_panel: bool,
-    /// Split pane index showing the full terminal, or `None` = whole main area.
-    pub pane_bound: Option<u32>,
-    pub lines: Vec<String>,
 }
 
 /// Packed RGB for Swift face (0x00RRGGBB).
@@ -1801,37 +1801,8 @@ fn build_completions(app: &App) -> CompletionsScene {
 }
 
 fn build_terminal(app: &App) -> TerminalScene {
-    if !app.terminal.open && !matches!(app.mode, Mode::Terminal) {
-        return TerminalScene {
-            open: false,
-            full_panel: false,
-            pane_bound: None,
-            lines: Vec::new(),
-        };
-    }
-    // Truecolor SGR lines from Core PTY cells (see Terminal::visible_rows_sgr).
-    // One budget for both shapes. The side panel used to get 48 rows, so
-    // dragging it taller than that silently cut the bottom off — the panel drew
-    // rows the scene never sent. The real ceiling is the snapshot's.
-    let max_rows = crate::ffi::SUISEI_MAX_TERM_LINES;
-    let mut lines: Vec<String> = app
-        .terminal
-        .visible_rows_sgr()
-        .into_iter()
-        .take(max_rows)
-        .collect();
-    if lines.is_empty() {
-        lines.push(" ".into());
-    }
-    // This snapshot is the DOCKED terminal. Pane shells are separate processes
-    // and the face pulls each one by pane index, because there can be several
-    // and they must not be conflated — which is exactly what one shared
-    // snapshot did.
     TerminalScene {
-        open: true,
-        full_panel: false,
-        pane_bound: None,
-        lines,
+        open: app.terminal.open || matches!(app.mode, Mode::Terminal),
     }
 }
 

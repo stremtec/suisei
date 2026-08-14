@@ -49,6 +49,10 @@ struct ContentView: View {
     /// Observed separately from `engine` so the toolbar sees viewer state
     /// without the viewer state riding on the chrome's publish rate.
     @ObservedObject var viewerControls = EngineBridge.shared.viewerControls
+    /// The window's shells. The docked strip's chip list lives here rather than
+    /// in the engine — the processes are on this side now, and a list core
+    /// cannot see is a list it cannot serve.
+    @ObservedObject var shells = TerminalSessions.shared
     /// A player is a window session, not an audio pane. The pane is replaced
     /// whenever focus moves to another document; this object deliberately is
     /// not, so ordinary tab navigation does not stop the track or reset it.
@@ -2701,7 +2705,7 @@ struct ContentView: View {
                         ScrollViewReader { proxy in
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 3) {
-                                    ForEach(0..<engine.terminalSessionCount, id: \.self) { i in
+                                    ForEach(0..<shells.dock.count, id: \.self) { i in
                                         terminalSessionChip(i).id(i)
                                     }
                                 }
@@ -2714,12 +2718,12 @@ struct ContentView: View {
                             }
                             // Hug the chips; scroll only once they pass the cap.
                             .frame(width: min(260, max(1, terminalChipsWidth)))
-                            .onChange(of: engine.terminalActiveSession) { _, i in
+                            .onChange(of: shells.dockActive) { _, i in
                                 withAnimation(.snappy(duration: 0.2)) {
                                     proxy.scrollTo(i, anchor: .center)
                                 }
                             }
-                            .onChange(of: engine.terminalSessionCount) { _, n in
+                            .onChange(of: shells.dock.count) { _, n in
                                 withAnimation(.snappy(duration: 0.2)) {
                                     proxy.scrollTo(max(0, n - 1), anchor: .trailing)
                                 }
@@ -2731,7 +2735,10 @@ struct ContentView: View {
                             systemImage: "plus", help: "New Shell",
                             fg: dockHeaderFg, dim: dockHeaderDim
                         ) {
-                            engine.terminalNewSession()
+                            shells.openDockSession(
+                                cwd: engine.dockTerminalCwd(), palette: terminalPalette
+                            )
+                            engine.focusTerminal(true)
                         }
                     }
                     .padding(.trailing, 4)
@@ -2793,19 +2800,22 @@ struct ContentView: View {
     }
 
     private func terminalSessionChip(_ i: Int) -> some View {
-        let active = i == engine.terminalActiveSession
+        let active = i == shells.dockActive
         return Button {
-            engine.terminalSelectSession(i)
-            focused = true
+            shells.selectDockSession(i)
+            engine.focusTerminal(true)
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "terminal")
                     .font(.system(size: 8, weight: .semibold))
-                Text("zsh \(i + 1)")
+                // The shell's own name once it reports one (OSC 0/2), so a
+                // running `make` or an ssh session says so on its chip.
+                Text(shells.dockTitle(i))
                     .font(.system(size: 10, weight: active ? .semibold : .regular))
-                if active, engine.terminalSessionCount > 1 {
+                    .lineLimit(1)
+                if active, shells.dock.count > 1 {
                     Button {
-                        engine.terminalCloseSession(i)
+                        shells.closeDockSession(i)
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 7, weight: .bold))
@@ -2834,65 +2844,36 @@ struct ContentView: View {
         focused = true
     }
 
-    /// Terminal body (Debug strip): PTY grid sized to the panel, theme background,
-    /// click-to-focus keys.
+    /// Terminal body (Debug strip) — the selected shell, drawn by SwiftTerm.
     private var terminalPanelInner: some View {
-        GeometryReader { geo in
-            TerminalGridView(
-                lines: engine.chrome.terminal.lines,
-                cursorRow: engine.chrome.terminal.cursorRow,
-                cursorCol: engine.chrome.terminal.cursorCol,
-                fontSize: 12,
-                bg: NSColor(terminalGridBg),
-                fg: NSColor(terminalGridFg),
-                onScrollback: { engine.terminalScroll($0) },
-                paneIndex: -1,
-                engine: engine
-            )
-            .frame(width: geo.size.width, height: geo.size.height)
-            // The SAME fill behind the whole panel. The grid's canvas can land
-            // a few points shy of the panel — measured 4pt at the bottom — and
-            // the panel's own dock fill is a different tint, so that residue
-            // read as a strip the terminal "did not reach". Painting one colour
-            // behind both makes the seam impossible rather than arithmetically
-            // avoided.
-            .background(terminalGridBg)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                engine.focusTerminal(true)
-                // RELEASE the editor's SwiftUI focus — `focused` drives the
-                // editor canvas's first responder. Setting it true here (the old
-                // code) re-focused the EDITOR the instant you clicked the
-                // terminal, so the input method composed Hangul in the document
-                // instead of the shell. TermCanvas.mouseDown makes itself first
-                // responder; this just stops the editor stealing it back.
-                focused = false
-            }
-            .onAppear { reportTerminalCells(geo.size) }
-            .onChange(of: geo.size) { _, s in reportTerminalCells(s) }
+        TerminalDockSurface(
+            palette: terminalPalette,
+            engine: engine,
+            activeChip: shells.dockActive
+        )
+        // The SAME fill behind the whole panel. The view can land a few points
+        // shy of it — measured 4pt at the bottom — and the panel's own dock
+        // fill is a different tint, so that residue read as a strip the
+        // terminal "did not reach". Painting one colour behind both makes the
+        // seam impossible rather than arithmetically avoided.
+        .background(terminalGridBg)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            engine.focusTerminal(true)
+            // RELEASE the editor's SwiftUI focus — `focused` drives the editor
+            // canvas's first responder. Setting it true here (the old code)
+            // re-focused the EDITOR the instant you clicked the terminal, so
+            // the input method composed Hangul in the document instead of the
+            // shell. The terminal claims the responder itself.
+            focused = false
         }
     }
 
-    /// Keep the docked PTY's grid in sync with the visible panel (fixes
-    /// mis-wrapped output).
-    ///
-    /// Only the dock now. A terminal PANE measures itself — SwiftTerm sizes its
-    /// own PTY from its own frame, in the same view that draws the cells, so
-    /// there is no second measurement to keep in agreement with the first.
-    /// That agreement is what the `pane` argument used to be for, and what the
-    /// comment below about matching the painted pitch is still about.
-    private func reportTerminalCells(_ size: CGSize) {
-        let cell = max(6, ("M" as NSString).size(withAttributes: [
-            .font: EditorMetrics.monospaced(12, weight: .regular)
-        ]).width)
-        // Must match TermCanvas' painted pitch (fontSize 12 + 5). The report
-        // used 16pt rows against a 17pt canvas, so the PTY got one more row
-        // than the grid could show — a full screen (vim, htop) lost its top
-        // row to stick-to-bottom.
-        let lineH: CGFloat = 12 + 5
-        let cols = Int((size.width - 20) / cell)
-        let rows = Int((size.height - 16) / lineH)
-        engine.terminalResize(cols: cols, rows: rows)
+    /// One palette for every shell in the window, docked or in a pane.
+    private var terminalPalette: TerminalPalette {
+        TerminalPalette(
+            background: terminalGridBg, foreground: terminalGridFg, fontSize: 12
+        )
     }
 
     /// Push theme appearance into AppKit windows so titlebar / materials follow
@@ -5366,12 +5347,12 @@ struct ContentView: View {
         }
     }
 
-    /// Ctrl/Cmd+Shift+T body — PTY output (header optional: split path bar already has one).
-    /// Sizes the PTY grid to the visible pane and takes key focus on click.
-    /// `pane` = a terminal pane's own shell; `nil` = the docked terminal.
+    /// ⌃⇧T body — this pane's own shell (header optional: the split's path bar
+    /// already has one).
     ///
-    /// These are different processes. Painting every terminal pane from
-    /// `chrome.terminal` made them all views of one session.
+    /// Every terminal in the window is a separate process. Painting them all
+    /// from one `chrome.terminal` snapshot, which is what the face used to do,
+    /// made them views of a single session.
     private func terminalPaneBody(
         showClose: Bool,
         showHeader: Bool = true,
@@ -5416,11 +5397,7 @@ struct ContentView: View {
             // did across the ABI happens inside this view.
             TerminalPaneSurface(
                 tabId: pane.tabStableId,
-                palette: TerminalPalette(
-                    background: terminalGridBg,
-                    foreground: terminalGridFg,
-                    fontSize: 12
-                ),
+                palette: terminalPalette,
                 paneIndex: idx,
                 engine: engine
             )
@@ -6852,764 +6829,14 @@ struct MinimapStrip: View {
     }
 }
 
-// MARK: - Shared terminal / jump-bar helpers
+// The docked terminal's renderer used to live here: `TerminalGridView`, the
+// `TermScroll` that forwarded wheel events past its own ends into core's
+// scrollback, the `TermCanvas` that drew a cell grid and implemented
+// `NSTextInputClient` so Hangul could be composed into a PTY, and an SGR
+// parser to turn core's re-encoded rows back into colours. About 750 lines,
+// all of it a second emulator's worth of work done to display the first one.
+// SwiftTerm draws its own cells.
 
-/// PTY grid — native canvas, one uniform background, fixed row pitch.
-/// (The SwiftUI LazyVStack version painted per-run background boxes with row
-/// gaps: the "striped" terminal artifact.)
-private struct TerminalGridView: NSViewRepresentable {
-    var lines: [String]
-    /// Shell cursor within `lines` — drawn as a block caret like every terminal.
-    var cursorRow: Int = 0
-    var cursorCol: Int = 0
-    var fontSize: CGFloat
-    var bg: NSColor
-    var fg: NSColor
-    /// Wheel past the ends of the live grid; positive = older output.
-    var onScrollback: (Int32) -> Void = { _ in }
-    /// Called when the grid takes the keyboard, so the engine can follow.
-    var onFocus: () -> Void = {}
-    /// Pane index for mouse reporting (-1 = the docked shell).
-    var paneIndex: Int32 = -1
-    var engine: EngineBridge?
-
-    func makeNSView(context: Context) -> TermScroll {
-        TermScroll()
-    }
-
-    func updateNSView(_ view: TermScroll, context: Context) {
-        view.cursorRow = cursorRow
-        view.cursorCol = cursorCol
-        view.onScrollback = onScrollback
-        view.canvas.onFocusRequest = onFocus
-        view.canvas.paneIndex = paneIndex
-        view.canvas.engine = engine
-        view.apply(lines: lines, fontSize: fontSize, bg: bg, fg: fg)
-    }
-}
-
-private final class TermScroll: NSScrollView {
-    var cursorRow: Int = 0 { didSet { canvas.setCursor(row: cursorRow, col: cursorCol) } }
-    var cursorCol: Int = 0 { didSet { canvas.setCursor(row: cursorRow, col: cursorCol) } }
-    let canvas = TermCanvas()
-    /// Positive = reveal older output.
-    var onScrollback: ((Int32) -> Void)?
-    /// Sub-row remainder, so a slow trackpad drag eventually moves instead of
-    /// rounding every delta away.
-    private var scrollbackResidue: CGFloat = 0
-
-    /// The grid this view holds is the LIVE SCREEN — core sizes the PTY to the
-    /// panel, so there is usually nothing here to scroll natively at all. The
-    /// 5,000 rows of history live on the other side of the ABI, and until this
-    /// existed nothing could ask for them: scrolling the terminal panel did
-    /// nothing whatsoever. Native scrolling still wins whenever there IS
-    /// content to move; only the part that runs off an end is forwarded.
-    override func scrollWheel(with event: NSEvent) {
-        let dy = event.scrollingDeltaY
-        // Shell asked for wheel tracking (vim/less/man): the wheel goes to
-        // the inner app, not the scrollback.
-        if dy != 0, let engine = canvas.engine {
-            let (x, y) = canvas.mouseCell(event)
-            if engine.terminalMouse(
-                pane: canvas.paneIndex, button: dy > 0 ? 64 : 65,
-                x: x, y: y, pressed: true, motion: false
-            ) {
-                return
-            }
-        }
-        guard dy != 0 else {
-            super.scrollWheel(with: event)
-            return
-        }
-        let scrollable = canvas.frame.height > contentView.bounds.height + 1
-        let atTop = !scrollable || documentVisibleRect.minY <= 0.5
-        let atBottom = !scrollable || documentVisibleRect.maxY >= canvas.frame.height - 0.5
-        guard (dy > 0 && atTop) || (dy < 0 && atBottom) else {
-            super.scrollWheel(with: event)
-            return
-        }
-        // A notched wheel reports whole lines; a trackpad reports pixels.
-        let perRow: CGFloat = event.hasPreciseScrollingDeltas ? 16 : 1
-        scrollbackResidue += dy / perRow
-        let rows = scrollbackResidue.rounded(.towardZero)
-        guard rows != 0 else { return }
-        scrollbackResidue -= rows
-        onScrollback?(Int32(rows))
-    }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        drawsBackground = false
-        borderType = .noBorder
-        hasVerticalScroller = true
-        // Lines wider than the panel scroll instead of clipping (the canvas
-        // grows past the bounds in `fitCanvasToBounds`).
-        hasHorizontalScroller = true
-        autohidesScrollers = true
-        scrollerStyle = .overlay
-        automaticallyAdjustsContentInsets = false
-        contentInsets = .init()
-        documentView = canvas
-    }
-
-    required init?(coder: NSCoder) { fatalError("unused") }
-
-    override var isFlipped: Bool { true }
-
-    /// Row count and metrics as of the last `apply`, so a frame change can
-    /// re-fit without one.
-    private var lastRowCount: Int = 1
-    private var lastFontSize: CGFloat = 12
-
-    /// Re-fit the grid whenever OUR frame changes.
-    ///
-    /// The canvas was sized only inside `apply`, which runs when SwiftUI hands
-    /// down new lines — but a panel resize changes this view's frame through
-    /// AppKit layout instead. The grid kept its old width, so the terminal's
-    /// dark background stopped short of the new edge until the next output
-    /// arrived.
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        fitCanvasToBounds()
-    }
-
-    private func fitCanvasToBounds() {
-        let lineH = lastFontSize + 5
-        let h = max(bounds.height, CGFloat(lastRowCount) * lineH + 12)
-        // Grow to the widest row so a line wider than the panel scrolls
-        // horizontally rather than being clipped (older output does not reflow
-        // when the panel narrows). Falls back to the panel width when nothing
-        // overflows, so the common case has no horizontal scroll at all.
-        let w = max(bounds.width, max(200, canvas.contentWidth()))
-        guard abs(canvas.frame.height - h) > 0.5 || abs(canvas.frame.width - w) > 0.5
-        else { return }
-        canvas.setFrameSize(NSSize(width: w, height: h))
-        canvas.needsDisplay = true
-    }
-
-    /// A row with nothing on it once the SGR escapes are stripped.
-    ///
-    /// The trim below used to test `row == " "`, which was true back when core
-    /// sent bare spaces for empty rows. Core wraps **every** row in colour
-    /// escapes now, so no row ever equalled `" "` and nothing was ever
-    /// trimmed: a fresh shell handed over ~40 rows of decorated blanks, the
-    /// canvas grew to fit all of them, and the stick-to-bottom below scrolled
-    /// straight past the one row with the prompt on it. That is the reported
-    /// "터미널을 생성할때마다 스크롤이 맨 아래로 되면서 시작 메시지가 안보인다".
-    private static func isBlankRow(_ s: String) -> Bool {
-        var i = s.startIndex
-        while i < s.endIndex {
-            if s[i] == "\u{1b}" {
-                var j = s.index(after: i)
-                if j < s.endIndex, s[j] == "[" {
-                    j = s.index(after: j)
-                    while j < s.endIndex, !s[j].isLetter { j = s.index(after: j) }
-                    if j < s.endIndex { j = s.index(after: j) }
-                }
-                i = j
-            } else {
-                if !s[i].isWhitespace { return false }
-                i = s.index(after: i)
-            }
-        }
-        return true
-    }
-
-    func apply(lines: [String], fontSize: CGFloat, bg: NSColor, fg: NSColor) {
-        // Trailing blanks carry no information, and keeping them is what makes
-        // the grid taller than the viewport in the first place.
-        var lines = lines
-        while lines.count > 1, Self.isBlankRow(lines[lines.count - 1]) {
-            lines.removeLast()
-        }
-        let lineH = fontSize + 5
-        // Only stick to the bottom if there was a bottom to be at. Without the
-        // `scrollable` test this was true on the very first apply — the canvas
-        // still had zero height — so the terminal jumped to the end of itself
-        // before it had drawn anything.
-        let scrollable = canvas.frame.height > contentView.bounds.height + 1
-        let wasAtBottom = scrollable
-            && documentVisibleRect.maxY >= canvas.frame.height - lineH * 2
-        let changed = canvas.set(lines: lines, fontSize: fontSize, bg: bg, fg: fg)
-        lastRowCount = lines.count
-        lastFontSize = fontSize
-        fitCanvasToBounds()
-        if changed, wasAtBottom {
-            let y = max(0, canvas.frame.height - contentView.bounds.height)
-            contentView.setBoundsOrigin(NSPoint(x: 0, y: y))
-            reflectScrolledClipView(contentView)
-        }
-    }
-}
-
-final class TermCanvas: NSView {
-    private var cursorRow = 0
-    private var cursorCol = 0
-
-    func setCursor(row: Int, col: Int) {
-        guard row != cursorRow || col != cursorCol else { return }
-        cursorRow = row
-        cursorCol = col
-        needsDisplay = true
-    }
-
-    private var lines: [String] = []
-    private var fontSize: CGFloat = 12
-    private var bg: NSColor = .black
-    private var fg: NSColor = .white
-    private let rowCache = LRUCache<Int, (CTLine, [AnsiParser.Run])>(capacity: 400)
-
-    /// Told when this canvas takes the keyboard, so the engine can point the
-    /// shell at it too.
-    var onFocusRequest: (() -> Void)?
-    /// Pane index for xterm mouse reporting (-1 = the docked shell).
-    var paneIndex: Int32 = -1
-    weak var engine: EngineBridge?
-
-    override var isFlipped: Bool { true }
-    override var isOpaque: Bool { false }
-
-    /// The terminal has to be able to *hold* the keyboard, not just be told it
-    /// has focus.
-    ///
-    /// Clicking it set focus in the engine and left the window's first
-    /// responder wherever it was — usually the project tree's filter, which is
-    /// an `NSTextField`, so `editorOwnsKeyEvents` stood down and every
-    /// keystroke went on landing in that filter. A plain `NSView` as first
-    /// responder is exactly what that check wants: not a text field, so the
-    /// monitor takes the key and routes it to the PTY.
-    override var acceptsFirstResponder: Bool { true }
-
-    // ── Keyboard input (NSTextInputClient) ──────────────────────────────
-    // The terminal is a real text-input view, not a dumb canvas the global
-    // monitor feeds. That is what lets the input method compose Hangul/CJK here
-    // (setMarkedText/insertText) exactly as the editor canvas does, and anchors
-    // focus to this view's first-responder status. Committed text goes to the
-    // PTY as raw bytes; control/non-text keys take the core's key encoder.
-
-    /// IME composition in flight — drawn under the caret until committed.
-    fileprivate var markedText: String = ""
-    /// The event being interpreted, so a selector we do not map falls back to
-    /// the raw terminal key path instead of vanishing.
-    private var currentKeyEvent: NSEvent?
-
-    override func becomeFirstResponder() -> Bool {
-        let ok = super.becomeFirstResponder()
-        if ok { onFocusRequest?() }
-        return ok
-    }
-
-    override func keyDown(with event: NSEvent) {
-        let flags = event.modifierFlags
-        // Control/Command/Option chords and non-text keys (Enter, Backspace,
-        // Tab, arrows, Esc, Fn) bypass the IME and take the core's terminal key
-        // encoder — they are control sequences, not composable text. A live
-        // composition commits first so the syllable is not lost.
-        if flags.contains(.control) || flags.contains(.command)
-            || flags.contains(.option) || Self.isNonTextKey(event.keyCode) {
-            commitMarkedIfNeeded()
-            engine?.handleNSEvent(event)
-            return
-        }
-        currentKeyEvent = event
-        defer { currentKeyEvent = nil }
-        interpretKeyEvents([event])
-    }
-
-    fileprivate func commitMarkedIfNeeded() {
-        guard !markedText.isEmpty else { return }
-        let pending = markedText
-        markedText = ""
-        inputContext?.discardMarkedText()
-        engine?.terminalInput(pending)
-        needsDisplay = true
-    }
-
-    /// Keys that are control sequences to a terminal, not text — routed raw.
-    private static func isNonTextKey(_ keyCode: UInt16) -> Bool {
-        switch keyCode {
-        case 53, 36, 76, 51, 117, 48, // esc return enter delete fwd-del tab
-             123, 124, 125, 126,       // arrows
-             115, 116, 119, 121,       // home pageup end pagedown
-             122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111: // F1-F12
-            return true
-        default:
-            return false
-        }
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
-        onFocusRequest?()
-        reportMouse(event, button: 0, pressed: true, motion: false)
-    }
-
-    // xterm tracking: the inner app (vim/htop/tmux) requested mouse events;
-    // the engine reports whether the shell consumed each one.
-    override func mouseDragged(with event: NSEvent) {
-        reportMouse(event, button: 0, pressed: true, motion: true)
-    }
-    override func mouseUp(with event: NSEvent) {
-        reportMouse(event, button: 0, pressed: false, motion: false)
-    }
-    override func rightMouseDown(with event: NSEvent) {
-        reportMouse(event, button: 2, pressed: true, motion: false)
-    }
-    override func rightMouseDragged(with event: NSEvent) {
-        reportMouse(event, button: 2, pressed: true, motion: true)
-    }
-    override func rightMouseUp(with event: NSEvent) {
-        reportMouse(event, button: 2, pressed: false, motion: false)
-    }
-    override func otherMouseDown(with event: NSEvent) {
-        reportMouse(event, button: 1, pressed: true, motion: false)
-    }
-    override func otherMouseUp(with event: NSEvent) {
-        reportMouse(event, button: 1, pressed: false, motion: false)
-    }
-
-    /// 1-based cell coordinates (xterm convention) from an event.
-    func mouseCell(_ event: NSEvent) -> (Int32, Int32) {
-        let p = convert(event.locationInWindow, from: nil)
-        let lineH = fontSize + 5
-        let cellW = max(1, ("M" as NSString).size(
-            withAttributes: [.font: EditorMetrics.monospaced(fontSize, weight: .regular)]
-        ).width)
-        return (max(1, Int32((p.x - 10) / cellW) + 1), max(1, Int32(p.y / lineH) + 1))
-    }
-
-    @discardableResult
-    private func reportMouse(_ event: NSEvent, button: UInt8, pressed: Bool, motion: Bool) -> Bool {
-        guard let engine else { return false }
-        let (x, y) = mouseCell(event)
-        return engine.terminalMouse(
-            pane: paneIndex, button: button, x: x, y: y, pressed: pressed, motion: motion
-        )
-    }
-
-    /// Returns true when content changed (caller sticks to bottom).
-    func set(lines: [String], fontSize: CGFloat, bg: NSColor, fg: NSColor) -> Bool {
-        let changed = lines != self.lines || fontSize != self.fontSize
-            || bg != self.bg || fg != self.fg
-        guard changed else { return false }
-        self.lines = lines
-        self.fontSize = fontSize
-        self.bg = bg
-        self.fg = fg
-        rowCache.removeAll(keepingCapacity: true)
-        needsDisplay = true
-        return true
-    }
-
-    /// Width the widest current row needs, in points — used to grow the canvas
-    /// so lines wider than the panel scroll horizontally instead of clipping.
-    /// Output printed at one width does not reflow when the panel shrinks (the
-    /// grid/scrollback is fixed), so without this the tail of every such line
-    /// was simply cut off.
-    func contentWidth() -> CGFloat {
-        let font = EditorMetrics.monospaced(fontSize, weight: .regular)
-        let cellW = ("M" as NSString).size(withAttributes: [.font: font]).width
-        var maxCells = 0
-        for line in lines {
-            var cells = 0
-            for run in AnsiParser.parse(line, defaultFg: Color(nsColor: fg)) {
-                for ch in run.text.unicodeScalars {
-                    cells += ch.value > 0x2E80 ? 2 : 1 // CJK is two cells wide
-                }
-            }
-            if cells > maxCells { maxCells = cells }
-        }
-        return CGFloat(maxCells) * cellW + 20
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        bg.setFill()
-        dirtyRect.fill()
-        guard let cg = NSGraphicsContext.current?.cgContext else { return }
-        let lineH = fontSize + 5
-        let font = EditorMetrics.monospaced(fontSize, weight: .regular)
-        let r0 = max(0, Int(floor(dirtyRect.minY / lineH)))
-        let r1 = min(lines.count - 1, Int(ceil(dirtyRect.maxY / lineH)))
-        guard r1 >= r0 else { return }
-        for i in r0...r1 {
-            let y = CGFloat(i) * lineH + 6
-            let (ct, runs) = row(i, font: font)
-
-            // Per-run backgrounds — CoreText does not draw `.backgroundColor`,
-            // so without these rects reverse-video and coloured-bg cells (vim
-            // status lines, man headers, selections) painted black-on-black.
-            var charIdx = 0
-            for run in runs {
-                let len = (run.text as NSString).length
-                if let runBg = run.bg, len > 0 {
-                    let x0 = CTLineGetOffsetForStringIndex(ct, CFIndex(charIdx), nil)
-                    let x1 = CTLineGetOffsetForStringIndex(ct, CFIndex(charIdx + len), nil)
-                    NSColor(runBg).setFill()
-                    // Fill the FULL row cell (y-6 … y-6+lineH), not `lineH-2`.
-                    // The 2px short-fall left a gap at every row's foot that read
-                    // as a faint horizontal rule once the row had any painted
-                    // background; tiling the cells makes coloured bands seamless.
-                    CGRect(x: 10 + x0, y: y - 6, width: x1 - x0, height: lineH).fill()
-                }
-                charIdx += len
-            }
-
-            cg.saveGState()
-            cg.textMatrix = .identity
-            cg.translateBy(x: 10, y: y + font.ascender)
-            cg.scaleBy(x: 1, y: -1)
-            CTLineDraw(ct, cg)
-            cg.restoreGState()
-
-            // Block caret, the way terminals draw it — measured against the
-            // rendered line so wide glyphs land correctly. u16::MAX means the
-            // engine is showing scrollback: the live caret is off-screen, so
-            // drawing it here put a block on the wrong row of old output.
-            if i == cursorRow, cursorRow < 0xFFFF {
-                let cellW = ("M" as NSString)
-                    .size(withAttributes: [.font: font]).width
-                let x = 10 + CTLineGetOffsetForStringIndex(ct, CFIndex(cursorCol), nil)
-                let caret = CGRect(x: x, y: y, width: max(2, cellW), height: lineH - 2)
-                fg.withAlphaComponent(0.55).setFill()
-                caret.fill()
-            }
-        }
-        // IME composition (Hangul/CJK) under the caret, underlined, until the
-        // input method commits it to the PTY.
-        if !markedText.isEmpty, cursorRow < 0xFFFF {
-            let cellW = ("M" as NSString).size(withAttributes: [.font: font]).width
-            let x = 10 + CGFloat(cursorCol) * cellW
-            let rowTop = CGFloat(cursorRow) * lineH
-            let attr = NSAttributedString(string: markedText, attributes: [
-                .font: font,
-                .foregroundColor: fg,
-                .underlineStyle: NSUnderlineStyle.single.rawValue,
-            ])
-            bg.setFill()
-            CGRect(x: x, y: rowTop, width: attr.size().width, height: lineH).fill()
-            attr.draw(at: NSPoint(x: x, y: rowTop + 3))
-        }
-    }
-
-    private func row(_ i: Int, font: NSFont) -> (CTLine, [AnsiParser.Run]) {
-        if let cached = rowCache[i] { return cached }
-        let runs = AnsiParser.parse(lines[i], defaultFg: Color(nsColor: fg))
-        let out = NSMutableAttributedString()
-        for run in runs {
-            out.append(NSAttributedString(
-                string: run.text,
-                attributes: [
-                    .font: run.bold
-                        ? EditorMetrics.monospaced(fontSize, weight: .semibold)
-                        : font,
-                    .foregroundColor: NSColor(run.fg),
-                ]
-            ))
-        }
-        if out.length == 0 {
-            out.append(NSAttributedString(string: " ", attributes: [.font: font]))
-        }
-        let ct = CTLineCreateWithAttributedString(out)
-        rowCache[i] = (ct, runs)
-        return (ct, runs)
-    }
-}
-
-// The macOS text-input contract, so the terminal composes Hangul/CJK through
-// the input method (marked → committed) exactly like the editor canvas. Marked
-// text lives only in this view until the IME commits; committed text is sent to
-// the PTY as raw UTF-8 (`terminalInput`), never as a bracketed paste.
-extension TermCanvas: NSTextInputClient {
-    private func asString(_ any: Any) -> String {
-        if let s = any as? String { return s }
-        if let a = any as? NSAttributedString { return a.string }
-        return ""
-    }
-
-    func insertText(_ string: Any, replacementRange: NSRange) {
-        markedText = ""
-        needsDisplay = true
-        let s = asString(string)
-        if !s.isEmpty { engine?.terminalInput(s) }
-    }
-
-    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        markedText = asString(string)
-        needsDisplay = true
-    }
-
-    func unmarkText() {
-        markedText = ""
-        needsDisplay = true
-    }
-
-    func hasMarkedText() -> Bool { !markedText.isEmpty }
-
-    func markedRange() -> NSRange {
-        markedText.isEmpty
-            ? NSRange(location: NSNotFound, length: 0)
-            : NSRange(location: 0, length: markedText.utf16.count)
-    }
-
-    func selectedRange() -> NSRange {
-        NSRange(location: markedText.utf16.count, length: 0)
-    }
-
-    func attributedSubstring(
-        forProposedRange range: NSRange, actualRange: NSRangePointer?
-    ) -> NSAttributedString? { nil }
-
-    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
-
-    /// Where the candidate window goes — the caret cell, in screen coordinates.
-    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-        let lineH = fontSize + 5
-        let font = EditorMetrics.monospaced(fontSize, weight: .regular)
-        let cellW = ("M" as NSString).size(withAttributes: [.font: font]).width
-        let r = NSRect(x: 10 + CGFloat(cursorCol) * cellW,
-                       y: CGFloat(cursorRow) * lineH, width: cellW, height: lineH)
-        let inWindow = convert(r, to: nil)
-        return window?.convertToScreen(inWindow) ?? inWindow
-    }
-
-    func characterIndex(for point: NSPoint) -> Int { NSNotFound }
-
-    /// A key `interpretKeyEvents` turned into a command we did not pre-route in
-    /// `keyDown` — fall back to the raw terminal key path so nothing vanishes.
-    override func doCommand(by selector: Selector) {
-        if let e = currentKeyEvent { engine?.handleNSEvent(e) }
-    }
-}
-
-/// PTY / terminal log with stick-to-bottom + ANSI SGR (truecolor / 16-color).
-private struct TerminalOutputView: View {
-    var lines: [String]
-    var fg: Color
-    var dim: Color
-    var fontSize: CGFloat
-    var stickToBottom: Bool
-
-    @State private var pinBottom = true
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    if lines.isEmpty {
-                        Text(" ")
-                            .font(.system(size: fontSize, design: .monospaced))
-                            .id("term-empty")
-                    }
-                    ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
-                        ansiLineView(line)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .id(i)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-            }
-            .onChange(of: lines.count) { _, n in
-                guard stickToBottom, pinBottom, n > 0 else { return }
-                proxy.scrollTo(n - 1, anchor: .bottom)
-            }
-            .onChange(of: lines) { _, newLines in
-                guard stickToBottom, pinBottom, !newLines.isEmpty else { return }
-                proxy.scrollTo(newLines.count - 1, anchor: .bottom)
-            }
-            .onAppear {
-                if stickToBottom, !lines.isEmpty {
-                    proxy.scrollTo(lines.count - 1, anchor: .bottom)
-                }
-            }
-            .contextMenu {
-                Button(pinBottom ? "Pause auto-scroll" : "Resume auto-scroll") {
-                    pinBottom.toggle()
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func ansiLineView(_ raw: String) -> some View {
-        let runs = AnsiParser.parse(raw, defaultFg: fg)
-        if runs.isEmpty {
-            Text(" ")
-                .font(.system(size: fontSize, design: .monospaced))
-                .foregroundStyle(.primary)
-        } else if runs.count == 1 {
-            Text(runs[0].text.isEmpty ? " " : runs[0].text)
-                .font(.system(size: fontSize, design: .monospaced))
-                .foregroundStyle(runs[0].fg)
-                .background(runs[0].bg.map { Rectangle().fill($0) })
-        } else {
-            HStack(alignment: .firstTextBaseline, spacing: 0) {
-                ForEach(Array(runs.enumerated()), id: \.offset) { _, r in
-                    Text(r.text.isEmpty ? " " : r.text)
-                        .font(.system(size: fontSize, design: .monospaced))
-                        .foregroundStyle(r.fg)
-                        .background(r.bg.map { Rectangle().fill($0) })
-                }
-            }
-        }
-    }
-}
-
-/// Minimal CSI SGR parser for terminal face paint (`\x1b[…m`).
-private enum AnsiParser {
-    struct Run {
-        var text: String
-        var fg: Color
-        var bg: Color?
-        var bold: Bool = false
-    }
-
-    static func parse(_ raw: String, defaultFg: Color) -> [Run] {
-        guard raw.contains("\u{1b}") else {
-            return [Run(text: raw.isEmpty ? " " : raw, fg: defaultFg.opacity(0.92), bg: nil)]
-        }
-        var runs: [Run] = []
-        var fg = defaultFg.opacity(0.92)
-        var bg: Color? = nil
-        var bold = false
-        var buf = ""
-        var i = raw.startIndex
-        while i < raw.endIndex {
-            if raw[i] == "\u{1b}", raw.index(after: i) < raw.endIndex, raw[raw.index(after: i)] == "[" {
-                if !buf.isEmpty {
-                    runs.append(Run(text: buf, fg: fg, bg: bg, bold: bold))
-                    buf = ""
-                }
-                var j = raw.index(i, offsetBy: 2)
-                var params = ""
-                while j < raw.endIndex {
-                    let ch = raw[j]
-                    if ch == "m" {
-                        applySgr(params, fg: &fg, bg: &bg, bold: &bold, defaultFg: defaultFg)
-                        j = raw.index(after: j)
-                        break
-                    }
-                    if ch.isNumber || ch == ";" {
-                        params.append(ch)
-                        j = raw.index(after: j)
-                    } else {
-                        // Unknown CSI — skip until letter
-                        while j < raw.endIndex, raw[j].isASCII, raw[j].isLetter == false {
-                            j = raw.index(after: j)
-                        }
-                        if j < raw.endIndex { j = raw.index(after: j) }
-                        break
-                    }
-                }
-                i = j
-            } else {
-                buf.append(raw[i])
-                i = raw.index(after: i)
-            }
-        }
-        if !buf.isEmpty {
-            runs.append(Run(text: buf, fg: fg, bg: bg, bold: bold))
-        }
-        return runs.isEmpty ? [Run(text: " ", fg: defaultFg.opacity(0.92), bg: nil)] : runs
-    }
-
-    private static func applySgr(_ params: String, fg: inout Color, bg: inout Color?, bold: inout Bool, defaultFg: Color) {
-        let parts = params.isEmpty ? ["0"] : params.split(separator: ";").map(String.init)
-        var i = 0
-        while i < parts.count {
-            let n = Int(parts[i]) ?? 0
-            switch n {
-            case 0:
-                fg = defaultFg.opacity(0.92)
-                bg = nil
-                bold = false
-            case 1:
-                bold = true
-            case 22:
-                bold = false
-            case 39:
-                fg = defaultFg.opacity(0.92)
-            case 49:
-                bg = nil
-            case 30...37:
-                fg = basicColor(n - 30, bright: false)
-            case 90...97:
-                fg = basicColor(n - 90, bright: true)
-            case 40...47:
-                bg = basicColor(n - 40, bright: false).opacity(0.35)
-            case 100...107:
-                bg = basicColor(n - 100, bright: true).opacity(0.35)
-            case 38:
-                if i + 1 < parts.count, parts[i + 1] == "2", i + 4 < parts.count {
-                    let r = Double(Int(parts[i + 2]) ?? 200) / 255
-                    let g = Double(Int(parts[i + 3]) ?? 200) / 255
-                    let b = Double(Int(parts[i + 4]) ?? 200) / 255
-                    fg = Color(red: r, green: g, blue: b)
-                    i += 4
-                } else if i + 1 < parts.count, parts[i + 1] == "5", i + 2 < parts.count {
-                    fg = index256(Int(parts[i + 2]) ?? 7)
-                    i += 2
-                }
-            case 48:
-                if i + 1 < parts.count, parts[i + 1] == "2", i + 4 < parts.count {
-                    let r = Double(Int(parts[i + 2]) ?? 0) / 255
-                    let g = Double(Int(parts[i + 3]) ?? 0) / 255
-                    let b = Double(Int(parts[i + 4]) ?? 0) / 255
-                    bg = Color(red: r, green: g, blue: b).opacity(0.45)
-                    i += 4
-                } else if i + 1 < parts.count, parts[i + 1] == "5", i + 2 < parts.count {
-                    bg = index256(Int(parts[i + 2]) ?? 0).opacity(0.35)
-                    i += 2
-                }
-            default:
-                break
-            }
-            i += 1
-        }
-    }
-
-    private static func basicColor(_ i: Int, bright: Bool) -> Color {
-        let table: [(Double, Double, Double)] = [
-            (0.0, 0.0, 0.0),
-            (0.80, 0.19, 0.19),
-            (0.05, 0.74, 0.47),
-            (0.90, 0.90, 0.06),
-            (0.14, 0.45, 0.78),
-            (0.74, 0.25, 0.74),
-            (0.07, 0.66, 0.80),
-            (0.90, 0.90, 0.90),
-        ]
-        let brightTable: [(Double, Double, Double)] = [
-            (0.40, 0.40, 0.40),
-            (0.95, 0.30, 0.30),
-            (0.14, 0.82, 0.55),
-            (0.96, 0.96, 0.26),
-            (0.23, 0.56, 0.92),
-            (0.84, 0.44, 0.84),
-            (0.16, 0.72, 0.86),
-            (1.0, 1.0, 1.0),
-        ]
-        let t = bright ? brightTable : table
-        let c = t[max(0, min(7, i))]
-        return Color(red: c.0, green: c.1, blue: c.2)
-    }
-
-    private static func index256(_ i: Int) -> Color {
-        if i < 16 {
-            return basicColor(i % 8, bright: i >= 8)
-        }
-        if i <= 231 {
-            let n = i - 16
-            let r = Double((n / 36) % 6) / 5.0
-            let g = Double((n / 6) % 6) / 5.0
-            let b = Double(n % 6) / 5.0
-            return Color(red: r, green: g, blue: b)
-        }
-        let v = Double((i - 232) * 10 + 8) / 255.0
-        return Color(white: min(1, v))
-    }
-}
 
 /// Small icon button with an iOS-quality hover state (used by the find bar etc.).
 struct HoverIconButton: View {

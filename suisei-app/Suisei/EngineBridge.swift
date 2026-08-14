@@ -433,13 +433,11 @@ struct CompletionsSnap: Equatable {
 /// truth for panes, so every branch reading them was dead. Removed
 /// 2026-07-29.)
 struct TerminalSnap: Equatable {
+    /// Whether the docked strip is showing. All of it: the shells inside are
+    /// SwiftTerm's, so their rows, their caret and the 300 KiB that carried
+    /// them are gone from this struct and from the ABI behind it.
     var open: Bool
-    var lines: [String]
-    /// Shell cursor within `lines`. Never crossed the bridge before, which is
-    /// why the terminal had no caret at all.
-    var cursorRow: Int = 0
-    var cursorCol: Int = 0
-    static let empty = TerminalSnap(open: false, lines: [])
+    static let empty = TerminalSnap(open: false)
 }
 
 struct ScmEntryItem: Equatable, Identifiable {
@@ -3487,118 +3485,26 @@ final class EngineBridge: ObservableObject {
         refreshChrome()
     }
 
-    // Multi-session shells (VS Code-style).
-    var terminalSessionCount: Int {
-        guard let engine else { return 1 }
-        return max(1, Int(suisei_engine_terminal_sessions(engine)))
-    }
-
-    var terminalActiveSession: Int {
-        guard let engine else { return 0 }
-        return Int(suisei_engine_terminal_active_session(engine))
-    }
-
-    func terminalNewSession() {
-        guard let engine else { return }
-        suisei_engine_terminal_new_session(engine)
-        refreshChrome()
-    }
-
-    func terminalSelectSession(_ i: Int) {
-        guard let engine else { return }
-        suisei_engine_terminal_select_session(engine, UInt32(i))
-        refreshChrome()
-    }
-
-    func terminalCloseSession(_ i: Int) {
-        guard let engine else { return }
-        suisei_engine_terminal_close_session(engine, UInt32(i))
-        refreshChrome()
-    }
-
-    /// Raw keyboard text into the focused terminal's PTY (IME-committed
-    /// Hangul/CJK, typed characters). The terminal input view routes
-    /// `insertText` here — NOT `pasteText`, which the shell would treat as a
-    /// bracketed paste. Repaints the shell at once.
-    func terminalInput(_ text: String) {
-        guard let engine, !text.isEmpty else { return }
-        text.withCString { suisei_engine_terminal_input(engine, $0) }
-        refreshChrome()
-    }
-
-    /// Scroll the terminal panel through its scrollback; positive = older.
-    func terminalScroll(_ rows: Int32) {
-        guard let engine, rows != 0 else { return }
-        suisei_engine_terminal_scroll(engine, rows)
-        refreshChrome()
-    }
-
-    /// Size the PTY grid to the terminal panel (cells).
-    ///
-    /// The resize is DEBOUNCED to the drag's settle, not applied per step. A
-    /// live drag crosses many cell boundaries; resizing the PTY on each one
-    /// sent a burst of `SIGWINCH`es, and — crucially — a drag that dips to the
-    /// minimum width made the shell reflow (wrap) its output at that tiny width.
-    /// Widening back cannot un-wrap it, so the grid came back "clipped and
-    /// stuck". Applying exactly one resize at the FINAL size skips every
-    /// intermediate width, so the shell only ever reflows to where the panel
-    /// actually settles.
-    func terminalResize(cols: Int, rows: Int) {
-        guard cols > 0, rows > 0 else { return }
-        pendingTerminalResize = (cols, rows, nil)
-        scheduleTerminalResize()
-    }
-
-    /// Size a docked/pane PTY once the resize drag settles. `pane == nil` is the
-    /// docked shell (`chrome.terminal`); a pane index routes to that pane's PTY
-    /// and repaints through the split path instead.
-    private var pendingTerminalResize: (cols: Int, rows: Int, pane: Int?)?
-    private var terminalResizeWork: DispatchWorkItem?
-    private func scheduleTerminalResize() {
-        terminalResizeWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, let engine = self.engine,
-                  let (cols, rows, pane) = self.pendingTerminalResize else { return }
-            if let pane {
-                suisei_engine_terminal_resize_pane(engine, UInt32(pane), UInt32(cols), UInt32(rows))
-                self.refreshEditorPaintOnly()
-            } else {
-                suisei_engine_terminal_resize(engine, UInt32(cols), UInt32(rows))
-                self.refreshChrome()
-            }
+    /// Where a docked shell should start. Core's answer to "which directory is
+    /// this window about" — the explorer's cwd, else the project root, else
+    /// `$HOME`. Asked once per session the strip opens.
+    func dockTerminalCwd() -> String? {
+        guard let engine else { return nil }
+        var buf = [CChar](repeating: 0, count: Int(SUISEI_PATH_CAP))
+        let ok = buf.withUnsafeMutableBufferPointer {
+            suisei_engine_terminal_cwd(engine, $0.baseAddress, UInt32(SUISEI_PATH_CAP))
         }
-        terminalResizeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+        guard ok != 0 else { return nil }
+        let path = String(cString: buf)
+        return path.isEmpty ? nil : path
     }
 
-    /// Size a PANE terminal's own PTY (cells). Pane shells are separate
-    /// processes — the docked `terminalResize` never touched them, so they
-    /// kept their spawn-time guess and output wrapped at the wrong column.
-    func terminalResizePane(_ pane: Int, cols: Int, rows: Int) {
-        guard cols > 0, rows > 0 else { return }
-        // Debounced to settle, same as the docked shell (see `terminalResize`).
-        pendingTerminalResize = (cols, rows, pane)
-        scheduleTerminalResize()
-    }
-
-    /// Scroll a pane terminal through its scrollback; positive = older.
-    func terminalScrollPane(_ pane: Int, _ rows: Int32) {
-        guard let engine, rows != 0 else { return }
-        suisei_engine_terminal_scroll_pane(engine, UInt32(pane), rows)
-        refreshChrome()
-    }
-
-    /// Forward a mouse event to a terminal's inner app (xterm tracking).
-    /// pane = -1 targets the dock. True when the shell consumed the event
-    /// (the caller should not also act on it — e.g. wheel → scrollback).
-    func terminalMouse(pane: Int32, button: UInt8, x: Int32, y: Int32, pressed: Bool, motion: Bool) -> Bool {
-        guard let engine else { return false }
-        let p: UInt32 = pane < 0 ? 0xFFFF : UInt32(pane)
-        return suisei_engine_terminal_mouse(
-            engine, p, button, UInt16(x), UInt16(y),
-            pressed ? 1 : 0, motion ? 1 : 0
-        ) != 0
-    }
+    // `terminalResize` / `terminalResizePane` / `terminalScrollPane` /
+    // `terminalMouse` were here, along with a debounce that applied exactly one
+    // resize at a drag's settle — because resizing a PTY mid-drag made the
+    // shell reflow its output at the narrowest width the drag touched, and
+    // widening back cannot un-wrap it. SwiftTerm sizes its own PTY from its own
+    // frame, so there is no second measurement to debounce.
 
     /// Tell Core the face has acted on its scroll intent.
     func clearScrollIntent() {
@@ -4694,18 +4600,10 @@ final class EngineBridge: ObservableObject {
             let completions = loadCompletions(engine)
             next.completions = completions.open ? completions : .empty
         }
-        // The docked terminal snapshot is 300 KiB, and pulling it cost ~3.7ms
-        // EVERY keystroke — even with no terminal open. Skip it unless the dock
-        // is actually open. The light path is only entered when the shell
-        // surface did NOT change, and opening/closing the dock IS a shell
-        // change (full path), so last frame's flag is accurate here. Pane
-        // terminals cost nothing at all: they never cross this boundary.
-        if chrome.terminal.open {
-            PerfProbe.measure("  loadTerminal (300KiB)") {
-                let terminal = loadTerminal(engine)
-                next.terminal = terminal.open ? terminal : .empty
-            }
-        }
+        // A 300 KiB terminal snapshot used to be pulled here, and it cost
+        // ~3.7ms EVERY keystroke until this path learned to skip it while the
+        // dock was closed. There is nothing to skip now — the dock's state is
+        // one bit, and it arrives with the panel mask below.
         // Outline is cheap to copy and the engine refreshes it on idle ticks —
         // keep it live on the light path too (typing never does a full pull).
         PerfProbe.measure("  loadOutline") {
@@ -5063,9 +4961,8 @@ final class EngineBridge: ObservableObject {
         let compOut = open(SUISEI_PANEL_COMPLETIONS)
             ? PerfProbe.measure("  loadCompletions") { loadCompletions(engine) }
             : CompletionsSnap.empty
-        let termOut = open(SUISEI_PANEL_TERMINAL)
-            ? PerfProbe.measure("  loadTerminal") { loadTerminal(engine) }
-            : TerminalSnap.empty
+        // One bit, straight off the panel mask: whether the docked strip shows.
+        let termOut = TerminalSnap(open: open(SUISEI_PANEL_TERMINAL))
         let settingsOut = open(SUISEI_PANEL_SETTINGS)
             ? PerfProbe.measure("  loadSettings") { loadSettings(engine) }
             : SettingsSnap.empty
@@ -5866,27 +5763,6 @@ final class EngineBridge: ObservableObject {
         return out
     }
 
-    private func loadTerminal(_ engine: OpaquePointer) -> TerminalSnap {
-        var snap = SuiseiTerminalSnapshot()
-        guard suisei_engine_terminal(engine, &snap) != 0 else { return .empty }
-        var lines: [String] = []
-        let n = Int(snap.count)
-        withUnsafeBytes(of: snap.lines) { raw in
-            let cap = Int(SUISEI_TERM_LINE)
-            for i in 0..<min(n, Int(SUISEI_MAX_TERM_LINES)) {
-                let b = raw.baseAddress!.advanced(by: i * cap)
-                lines.append(String(cString: b.assumingMemoryBound(to: CChar.self)))
-            }
-        }
-        let pane: Int? = snap.pane_bound == UInt32.max ? nil : Int(snap.pane_bound)
-        _ = pane // ABI carries a pane binding; the dock has no use for it.
-        return TerminalSnap(
-            open: snap.open != 0,
-            lines: lines,
-            cursorRow: Int(snap.cursor_row),
-            cursorCol: Int(snap.cursor_col)
-        )
-    }
 }
 
 private func cStringField<T>(_ field: T) -> String {
