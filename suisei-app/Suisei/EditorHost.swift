@@ -58,12 +58,6 @@ struct EditorHost: NSViewRepresentable {
             theme: theme
         )
         if key == paletteKey, let cached = paletteValue { return cached }
-        // The bracket flash is one colour in both themes; only how much of it
-        // survives the background it sits on differs.
-        let bgSRGB = NSColor(editorBg).usingColorSpace(.sRGB) ?? .black
-        var br: CGFloat = 0, bgc: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
-        bgSRGB.getRed(&br, green: &bgc, blue: &bb, alpha: &ba)
-        let lightBg = (0.299 * br + 0.587 * bgc + 0.114 * bb) > 0.55
         let colors = EditorCanvasView.Colors(
             bg: NSColor(editorBg),
             fg: NSColor(fg),
@@ -93,8 +87,7 @@ struct EditorHost: NSViewRepresentable {
             removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
             breakpoint: .systemYellow,
             breakpointInk: .black,
-            bracketFill: EditorCanvasView.bracketYellow
-                .withAlphaComponent(lightBg ? 0.70 : 0.52),
+            bracketFill: EditorCanvasView.bracketYellow,
             bracketInk: .black
         )
         paletteKey = key
@@ -704,13 +697,18 @@ final class EditorCanvasView: NSView {
         var breakpointInk: NSColor
         /// The flash behind a matching delimiter, and the ink redrawn on it.
         ///
-        /// A fixed sRGB value, NOT `systemYellow`. That is a dynamic colour:
-        /// AppKit resolves it to a different yellow per appearance, so the
-        /// bracket flash was one hue in the light theme and another in the
-        /// dark one without anything here asking for that. The flash means the
-        /// same thing in both, so it is the same colour in both, and the alpha
-        /// differs per theme only because 55% over white and 55% over near
-        /// black do not land in the same place.
+        /// A fixed sRGB value and OPAQUE, in both themes.
+        ///
+        /// Two things had made it differ. It was `systemYellow`, which is a
+        /// dynamic colour AppKit resolves to a different hue per appearance.
+        /// And it was translucent, so even one hue at one alpha could not come
+        /// out the same: 55% yellow over white and 55% over near-black are not
+        /// the same colour, and tuning the alpha per theme to compensate only
+        /// made the difference deliberate instead of removing it.
+        ///
+        /// Opaque is the only way two themes get the same pixels. The flash
+        /// means the same thing in both, so it looks the same in both. The
+        /// fade still runs through alpha — a fade has to — but it ends here.
         var bracketFill: NSColor
         var bracketInk: NSColor
     }
@@ -742,13 +740,14 @@ final class EditorCanvasView: NSView {
         removedFg: NSColor.labelColor.withAlphaComponent(0.82),
         removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
         breakpoint: .systemYellow, breakpointInk: .black,
-        bracketFill: bracketYellow.withAlphaComponent(0.52),
+        bracketFill: bracketYellow,
         bracketInk: .black
     )
 
-    /// One yellow for the bracket flash, in both themes.
+    /// One yellow for the bracket flash, in both themes. Opaque — see
+    /// `Colors.bracketFill`.
     static let bracketYellow = NSColor(
-        srgbRed: 1.0, green: 0.80, blue: 0.20, alpha: 1
+        srgbRed: 0.99, green: 0.79, blue: 0.22, alpha: 1
     )
 
     var isLiveScrolling = false
@@ -1430,9 +1429,7 @@ final class EditorCanvasView: NSView {
                 let fade = raw * raw * (3 - 2 * raw)
                 renderer.addRect(
                     CGRect(x: x0 - 1, y: y + 1, width: max(cell, x1 - x0) + 2, height: lineH - 2),
-                    colors.bracketFill.withAlphaComponent(
-                        colors.bracketFill.alphaComponent * fade
-                    )
+                    colors.bracketFill.withAlphaComponent(fade)
                 )
                 bracketRects.append(rowRect)
             }
@@ -1852,9 +1849,7 @@ final class EditorCanvasView: NSView {
                     dx: -base.width * (scale - 1) / 2,
                     dy: -base.height * (scale - 1) / 2
                 )
-                colors.bracketFill
-                    .withAlphaComponent(colors.bracketFill.alphaComponent * fade)
-                    .setFill()
+                colors.bracketFill.withAlphaComponent(fade).setFill()
                 NSBezierPath(roundedRect: box, xRadius: 4, yRadius: 4).fill()
 
                 // Redraw the delimiter itself bold and dark on top: the fill
