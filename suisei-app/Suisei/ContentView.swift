@@ -6698,9 +6698,9 @@ struct MinimapStrip: View {
                 // A scale rather than interpolating the bar list: the bars are
                 // discrete and there is no half a row, so stretching the
                 // column is both the honest picture and the cheap one.
-                TimelineView(.animation(paused: live.growth == nil)) { _ in
-                    let p = live.growthProgress()
-                    let grew = CGFloat(live.growth?.rows ?? 0)
+                TimelineView(.animation(paused: !live.isShifting)) { _ in
+                    let p = live.shiftProgress()
+                    let grew = CGFloat(live.shift?.rows ?? 0)
                     let n = CGFloat(max(1, data?.len.count ?? 1))
                     // Where the column started: this many rows fewer (or more,
                     // for a removal) than it has now.
@@ -6711,7 +6711,7 @@ struct MinimapStrip: View {
                     )
                     .equatable()
                     .scaleEffect(
-                        x: 1, y: live.growth == nil ? 1 : from + (1 - from) * p,
+                        x: 1, y: live.isShifting ? from + (1 - from) * p : 1,
                         anchor: .top
                     )
                 }

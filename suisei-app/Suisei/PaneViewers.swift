@@ -389,29 +389,33 @@ final class LiveMarks: ObservableObject {
     /// Handed to whichever canvas is showing the live document, once. The
     /// slide belongs to a view, not to this list — but only this list knows
     /// where it should start.
-    /// `rows` is signed: positive when lines arrived and the document has to
-    /// make room, negative when they left and it has to close over the space.
-    /// One value, because both are the same motion in opposite directions.
-    private(set) var pendingShift: (below: Int, rows: Int)?
-
-    func takePendingShift() -> (below: Int, rows: Int)? {
-        defer { pendingShift = nil }
-        return pendingShift
-    }
-
-    /// How much the document just grew or shrank, and when — for surfaces that
-    /// have to move in step with the editor but are not the editor. Expires on
-    /// its own; nothing consumes it.
-    private(set) var growth: (rows: Int, start: CFTimeInterval)?
+    /// The document just changed length: from which row, by how many, when.
+    ///
+    /// `rows` is signed — positive when lines arrived and the document has to
+    /// make room, negative when they left and it closes over the space. One
+    /// value, because both are the same motion in opposite directions.
+    ///
+    /// READ, never taken. It was a token the first reader consumed, and that
+    /// is why the animation ran sometimes: whichever canvas drew first ate it,
+    /// so a split pane, or a canvas that is not the one on screen, could
+    /// swallow the slide before the visible pane ever asked. The minimap read
+    /// its own copy and moved anyway, which is what made it look arbitrary.
+    /// Now every surface reads the same value and derives its own progress
+    /// from the same clock.
+    ///
+    /// Expires on its own.
+    @Published private(set) var shift: (below: Int, rows: Int, start: CFTimeInterval)?
 
     static let shiftDuration: CFTimeInterval = 0.24
 
     /// 0…1 through the current grow/shrink, 1 when none is running.
-    func growthProgress(now: CFTimeInterval = CACurrentMediaTime()) -> CGFloat {
-        guard let g = growth else { return 1 }
-        let t = min(1, max(0, (now - g.start) / Self.shiftDuration))
+    func shiftProgress(now: CFTimeInterval = CACurrentMediaTime()) -> CGFloat {
+        guard let s = shift else { return 1 }
+        let t = min(1, max(0, (now - s.start) / Self.shiftDuration))
         return CGFloat(1 - pow(1 - t, 3))
     }
+
+    var isShifting: Bool { shift != nil }
 
     /// 0 when the row is not flashing. Eased out — it leaves quickly and the
     /// tail is a whisper rather than a step to nothing.
@@ -459,17 +463,17 @@ final class LiveMarks: ObservableObject {
             // How the document changed length, and from where. Added rows are
             // a contiguous run and the slide starts under them; a removal is
             // one mark carrying how many lines went.
-            pendingShift = nil
             let added = nextRows.filter { $0.value == .added }.keys.sorted()
             if let first = added.first, let last = added.last,
                added.count == Int(last - first) + 1
             {
-                pendingShift = (below: Int(last) + 1, rows: added.count)
+                shift = (below: Int(last) + 1, rows: added.count, start: now)
             } else if let gone = removedSpan {
-                pendingShift = (below: gone.row + 1, rows: -gone.count)
-            }
-            if let shift = pendingShift {
-                growth = (rows: shift.rows, start: now)
+                shift = (below: gone.row + 1, rows: -gone.count, start: now)
+            } else if !nextRows.isEmpty {
+                // A same-length replacement moves nothing. The flash says it
+                // happened; there is no slide because nothing slid.
+                shift = nil
             }
             rows = nextRows
 
@@ -498,6 +502,6 @@ final class LiveMarks: ObservableObject {
         // decides when a flash is over, and its length is not core's.
         let cutoff = CACurrentMediaTime()
         seenAt = seenAt.filter { cutoff - $0.value < Self.flashDuration }
-        if let g = growth, cutoff - g.start >= Self.shiftDuration { growth = nil }
+        if let s = shift, cutoff - s.start >= Self.shiftDuration { shift = nil }
     }
 }

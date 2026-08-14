@@ -2454,12 +2454,7 @@ final class EditorCanvasView: NSView {
     /// that are off screen and a per-row flag can only describe the band. This
     /// view only has to keep drawing while the fade runs.
     private func syncLiveFlashes() {
-        // Claim the slide before anything is measured this pass, so the first
-        // frame drawn is already the compressed one rather than the settled
-        // one — starting a frame late is a visible jump followed by a slide.
-        if let shift = engine?.live.takePendingShift() {
-            noteLiveShift(below: shift.below, rows: shift.rows)
-        }
+        syncLiveShift()
         guard engine?.live.isFlashing == true else { return }
         startLiveFlashTimer()
     }
@@ -2674,41 +2669,37 @@ final class EditorCanvasView: NSView {
         return h
     }
 
-    /// A live reload's inserted rows, still opening.
+    /// The live document's shift, if one is running and this pane is showing
+    /// that document.
     ///
-    /// `below` is the first row that has to travel; `rows` is how far, SIGNED.
-    /// Positive means lines arrived and the document opens for them; negative
-    /// means lines left and it closes over the space they were in. The closing
-    /// gap is drawn empty — the removed text is gone by the time the face
-    /// hears about it, and a gap that closes says "these went" without
-    /// pretending to still have them.
-    private var liveOpening: (below: Int, rows: Int, start: CFTimeInterval)?
-    private var liveOpenTimer: Timer?
-    static let liveOpenDuration: CFTimeInterval = 0.24
-
-    private var liveOpenProgress: CGFloat {
-        guard let o = liveOpening else { return 1 }
-        let t = min(1, max(0, (CACurrentMediaTime() - o.start) / Self.liveOpenDuration))
-        return CGFloat(1 - pow(1 - t, 3))
+    /// Read from `LiveMarks`, not stored: the value belongs to the reload, not
+    /// to a view, and every pane has to agree about it. Gated on focus because
+    /// the row numbers are the LIVE document's — applying them to a pane
+    /// showing another file would slide the wrong text.
+    private var liveOpening: (below: Int, rows: Int)? {
+        guard let live = engine?.live, let s = live.shift else { return nil }
+        if let split = engine?.editorSplit, split.isSplit, paneIndex != split.focus {
+            return nil
+        }
+        return (below: s.below, rows: s.rows)
     }
 
-    /// Begin the slide, if this reload actually made the document longer.
-    ///
-    /// Driven by the row marks rather than by a line-count delta on its own:
-    /// the marks say WHERE, and a slide anchored anywhere else would move the
-    /// wrong half of the file.
-    func noteLiveShift(below: Int, rows: Int) {
-        guard rows != 0, abs(rows) < 400 else { return }
-        liveOpening = (below: below, rows: rows, start: CACurrentMediaTime())
+    private var liveOpenProgress: CGFloat {
+        engine?.live.shiftProgress() ?? 1
+    }
+
+    private var liveOpenTimer: Timer?
+
+    /// Keep drawing while a shift runs. No state of its own — the value and
+    /// the clock are both `LiveMarks`'s.
+    private func syncLiveShift() {
+        guard engine?.live.isShifting == true, liveOpenTimer == nil else { return }
         scrollView?.refitCanvas()
-        needsDisplay = true
-        guard liveOpenTimer == nil else { return }
         let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             self.scrollView?.refitCanvas()
             self.needsDisplay = true
-            if self.liveOpenProgress >= 1 {
-                self.liveOpening = nil
+            if self.engine?.live.isShifting != true {
                 timer.invalidate()
                 self.liveOpenTimer = nil
                 self.needsDisplay = true
