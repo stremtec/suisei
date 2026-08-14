@@ -699,11 +699,46 @@ struct RecoverySheet: View {
 /// Lives in its own `View` so the observation is on `MenuState`, not on the
 /// engine: these three titles are the only reason the menu needed to know
 /// anything, and they change on command, not on keystroke.
-private var minimapBinding: Binding<Bool> {
+/// Menu bindings straight to `UserDefaults`, because these commands live
+/// outside any view that could own `@AppStorage` — `ContentView` reads the same
+/// keys and updates when they change.
+private func defaultsBinding(_ key: String, default fallback: Bool) -> Binding<Bool> {
     Binding(
-        get: { UserDefaults.standard.object(forKey: "suisei.minimap") as? Bool ?? true },
-        set: { UserDefaults.standard.set($0, forKey: "suisei.minimap") }
+        get: { UserDefaults.standard.object(forKey: key) as? Bool ?? fallback },
+        set: { UserDefaults.standard.set($0, forKey: key) }
     )
+}
+
+private var minimapBinding: Binding<Bool> {
+    defaultsBinding("suisei.minimap", default: true)
+}
+
+/// The two shape questions, each as a two-value picker rather than a checkbox.
+///
+/// A `Toggle("Show in All Panes")` states one of the choices and leaves the
+/// other implied; an inline picker names both and shows which is in force,
+/// which is what the menu bar does for this kind of either/or everywhere else
+/// in macOS.
+private struct MinimapOptionsMenu: View {
+    var body: some View {
+        Menu("Minimap") {
+            Toggle("Show Minimap", isOn: minimapBinding)
+            Divider()
+            Picker("Panes", selection: defaultsBinding("suisei.minimap.allPanes", default: false)) {
+                Text("Focused Pane Only").tag(false)
+                Text("All Panes").tag(true)
+            }
+            .pickerStyle(.inline)
+            Picker(
+                "Width",
+                selection: defaultsBinding("suisei.minimap.proportional", default: false)
+            ) {
+                Text("Fixed Width").tag(false)
+                Text("Proportional to Pane").tag(true)
+            }
+            .pickerStyle(.inline)
+        }
+    }
 }
 
 private struct PanelToggleCommands: View {
@@ -739,8 +774,7 @@ private struct PanelToggleCommands: View {
         }
         .keyboardShortcut("y", modifiers: [.command, .shift])
 
-        Toggle("Minimap", isOn: minimapBinding)
-
+        MinimapOptionsMenu()
     }
 }
 

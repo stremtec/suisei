@@ -230,6 +230,23 @@ struct ContentView: View {
     /// Split divider drag override (committed to Core on release).
     /// Minimap toggle (View menu).
     @AppStorage("suisei.minimap") private var minimapEnabled = true
+    /// Show a minimap in every split pane, not only the focused one.
+    ///
+    /// Off by default because the minimap follows the focused pane, and one
+    /// strip that moves is less to read than four that do not. On, it is a
+    /// per-pane overview — closer to how VS Code behaves in a split.
+    @AppStorage("suisei.minimap.allPanes") private var minimapAllPanes = false
+    /// Scale the strip with the pane instead of pinning it to 62pt.
+    ///
+    /// A fixed strip is a fixed fraction of a wide window and half a narrow
+    /// pane. Proportional keeps the ratio; the clamp keeps it legible at one
+    /// end and out of the way at the other.
+    @AppStorage("suisei.minimap.proportional") private var minimapProportional = false
+    /// Editor area in points, from the one `GeometryReader` that already
+    /// measures it. A proportional minimap needs its pane's width, and a
+    /// pane's width is this times `pane.rect.width` — exact, and cheaper than
+    /// a second reader per pane.
+    @State private var editorAreaSize: CGSize = .zero
     /// Live window-resize HUD (blur + dimensions).
     @State private var isLiveResizing = false
     @State private var liveResizeSize: CGSize = .zero
@@ -454,6 +471,14 @@ struct ContentView: View {
             // Normalised rects, so the island's edges are 0 and 1.
             return bottom ? pane.rect.maxY > 0.999 : pane.rect.minY < 0.001
         }
+    }
+    /// How wide the minimap is over a pane this wide.
+    ///
+    /// Clamped at both ends: below ~44pt the thumbnail stops resembling the
+    /// code, and above ~120pt it is taking room from the thing it summarises.
+    private func minimapWidth(paneWidth: CGFloat) -> CGFloat {
+        guard minimapProportional, paneWidth > 0 else { return 62 }
+        return min(120, max(44, paneWidth * 0.12))
     }
     private var gutterFg: Color { isLightTheme ? Color.black.opacity(0.32) : dim.opacity(0.9) }
     /// Xcode-level current-line wash — barely visible, not a gray slab.
@@ -5106,7 +5131,7 @@ struct ContentView: View {
                         bg: editorBg,
                         isLight: isLightTheme
                     )
-                    .frame(width: 62)
+                    .frame(width: minimapWidth(paneWidth: editorAreaSize.width))
                     .transition(.opacity)
                 }
             }
@@ -5465,6 +5490,7 @@ struct ContentView: View {
             .clipped()
             .id(engine.fontGeneration)
             .onAppear {
+                editorAreaSize = geo.size
                 engine.resizeEditor(width: geo.size.width, height: geo.size.height)
                 // Ensure shell chrome (nav tree) is seeded after light-path sessions.
                 if engine.uiNavVisible {
@@ -5472,6 +5498,7 @@ struct ContentView: View {
                 }
             }
             .onChange(of: geo.size) { _, newSize in
+                editorAreaSize = newSize
                 guard newSize.width > 80, newSize.height > 80 else { return }
                 engine.resizeEditor(width: newSize.width, height: newSize.height)
             }
@@ -5680,7 +5707,7 @@ struct ContentView: View {
                     showFocusRing: pane.focused
                 )
                 .overlay(alignment: .trailing) {
-                    if minimapEnabled, pane.focused {
+                    if minimapEnabled, pane.focused || minimapAllPanes {
                         MinimapStrip(
                             engine: engine,
                             accent: accent,
@@ -5688,7 +5715,12 @@ struct ContentView: View {
                             bg: editorBg,
                             isLight: isLightTheme
                         )
-                        .frame(width: 62)
+                        // The pane's own width, not the editor's: a strip
+                        // proportional to the whole area would be the same
+                        // width in a pane half the size.
+                        .frame(width: minimapWidth(
+                            paneWidth: contentSize.width * pane.rect.width
+                        ))
                         .transition(.opacity)
                     }
                 }
