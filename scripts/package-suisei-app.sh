@@ -67,6 +67,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/EditorHost.swift"
   "$ROOT/suisei-app/Suisei/EditorDiagnostics.swift"
   "$ROOT/suisei-app/Suisei/PaneViewers.swift"
+  "$ROOT/suisei-app/Suisei/TerminalSurface.swift"
   "$ROOT/suisei-app/Suisei/AudioViewer.swift"
   "$ROOT/suisei-app/Suisei/ImagePDFViewers.swift"
   "$ROOT/suisei-app/Suisei/MetalTextRenderer.swift"
@@ -93,20 +94,38 @@ SWIFT_FILES=(
 need_engine=0
 need_swift=0
 need_icon=0
+need_swiftterm=0
 
 DYLIB_SRC="$ROOT/target/$PROFILE/libsuisei_engine.dylib"
 DYLIB_STAGE="$STAGE/libsuisei_engine.dylib"
 BIN="$MACOS/Suisei"
 HDR="$ROOT/suisei-engine/include/suisei_engine.h"
 OPT_STAMP="$BUILD/.swift-opt"
+# Vendored SwiftTerm — the terminal emulator and its AppKit view. Built once
+# into a static library and linked like any other; see third_party/SwiftTerm.
+ST_DIR="$ROOT/third_party/SwiftTerm"
+ST_BUILD="$ST_DIR/.build/release"
+ST_LIB="$STAGE/libSwiftTerm.a"
 
 if [[ "$FORCE" == "1" ]]; then
   need_engine=1
   need_swift=1
   need_icon=1
+  need_swiftterm=1
   rm -rf "$APP"
   mkdir -p "$MACOS" "$FW" "$RES"
 else
+  # SwiftTerm: any vendored source newer than the staged archive? It is pinned
+  # and changes only when someone re-vendors it, so this is nearly always a
+  # no-op — but a stale archive next to updated sources is a silent wrong build.
+  if [[ ! -f "$ST_LIB" ]]; then
+    need_swiftterm=1
+  else
+    while IFS= read -r f; do
+      if [[ "$f" -nt "$ST_LIB" ]]; then need_swiftterm=1; break; fi
+    done < <(find "$ST_DIR/Sources" "$ST_DIR/Package.swift" -type f 2>/dev/null)
+  fi
+
   # Engine: any rust/header newer than staged dylib?
   if [[ ! -f "$DYLIB_STAGE" ]]; then
     need_engine=1
@@ -120,7 +139,7 @@ else
   if [[ ! -f "$BIN" ]]; then
     need_swift=1
   else
-    for f in "${SWIFT_FILES[@]}" "$HDR" "$DYLIB_STAGE"; do
+    for f in "${SWIFT_FILES[@]}" "$HDR" "$DYLIB_STAGE" "$ST_LIB"; do
       if [[ -e "$f" && "$f" -nt "$BIN" ]]; then need_swift=1; break; fi
     done
   fi
@@ -147,6 +166,24 @@ else
   elif [[ -f "$ICON_SCRIPT" && "$ICON_SCRIPT" -nt "$ICON_ICNS" ]]; then
     need_icon=1
   fi
+fi
+
+if [[ "$need_swiftterm" == "1" ]]; then
+  echo "→ SwiftTerm (vendored, pinned — see third_party/SwiftTerm/VENDOR.md)"
+  ( cd "$ST_DIR" && swift build -c release --disable-automatic-resolution >/dev/null )
+  mkdir -p "$STAGE"
+  # SwiftPM builds a library target to objects and links them into products; it
+  # emits no archive of its own, and `swiftc` needs one to link against.
+  libtool -static -o "$ST_LIB" "$ST_BUILD"/SwiftTerm.build/*.o 2>/dev/null
+  # The Metal shaders travel as a SwiftPM resource bundle. The GPU renderer
+  # probes for it by name and falls through when it is absent, so this is not
+  # load-bearing — but shipping it is what lets that path work at all.
+  if [[ -d "$ST_BUILD/SwiftTerm_SwiftTerm.bundle" ]]; then
+    rm -rf "$RES/SwiftTerm_SwiftTerm.bundle"
+    cp -R "$ST_BUILD/SwiftTerm_SwiftTerm.bundle" "$RES/"
+  fi
+else
+  echo "→ SwiftTerm up-to-date (skip)"
 fi
 
 if [[ "$need_engine" == "1" ]]; then
@@ -186,6 +223,8 @@ if [[ "$need_swift" == "1" ]]; then
     -framework AppKit \
     -framework Combine \
     -import-objc-header "$STAGE/suisei_engine.h" \
+    -I "$ST_BUILD/Modules" \
+    "$ST_LIB" \
     -L "$STAGE" \
     -lsuisei_engine \
     -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
@@ -267,6 +306,9 @@ PLIST
 # Presented from the native About panel. Keep the shipped text identical to
 # the repository license rather than maintaining a second UI-only copy.
 cp -f "$ROOT/LICENSE" "$RES/LICENSE"
+# SwiftTerm is MIT and its notice has to travel with the binary that contains
+# it. Named for what it covers, beside our own licence rather than replacing it.
+cp -f "$ROOT/third_party/SwiftTerm/LICENSE" "$RES/LICENSE-SwiftTerm"
 
 ICON_SRC_DIR="$ROOT/suisei-app/Resources"
 if [[ "$need_icon" == "1" || ! -f "$RES/Suisei.icns" ]]; then

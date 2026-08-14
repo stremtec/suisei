@@ -17,3 +17,6 @@ suisei-agent/.build/
 # Generated performance fixtures. Multi-megabyte, reproducible from the
 # generator in the session that made them, and not worth a diff.
 /perf-fixtures/
+
+# Vendored third-party build output.
+third_party/*/.build/
