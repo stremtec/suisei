@@ -101,40 +101,64 @@ final class TabStripHostView: NSView {
     /// so the hit test never sees a different corridor than the eye.
     func setBoundaries(leading: CGFloat, trailing: CGFloat) {
         guard leadingInset != leading || trailingInset != trailing else { return }
-        let live = liveInsets()
         leadingInset = leading
         trailingInset = trailing
-        insetAnimation = InsetAnimation(
-            fromLeading: live.leading, toLeading: leading,
-            fromTrailing: live.trailing, toTrailing: trailing,
+        retargetCorridor()
+    }
+
+    private struct CorridorAnimation {
+        let fromLeading: CGFloat
+        let fromTrailing: CGFloat
+        /// Nil when the toolbar had never been measured — there is no position
+        /// to travel from, so the first measurement lands rather than slides.
+        let fromToolbar: CGFloat?
+        let start: TimeInterval
+        let duration: TimeInterval
+    }
+
+    private var corridorAnimation: CorridorAnimation?
+
+    /// Travel to whatever the three boundaries now say, from wherever they are
+    /// being drawn.
+    ///
+    /// One animation for all three, restarted on any change: a toolbar that
+    /// grows while the sidebar is still opening picks the run up mid-glide
+    /// instead of queueing behind it, because `from` is always the live value
+    /// rather than the last target.
+    private func retargetCorridor() {
+        let live = liveCorridor()
+        corridorAnimation = CorridorAnimation(
+            fromLeading: live.leading,
+            fromTrailing: live.trailing,
+            fromToolbar: live.toolbar,
             start: CACurrentMediaTime(), duration: 0.25
         )
         startDisplayLink()
         needsDisplay = true
     }
 
-    private struct InsetAnimation {
-        let fromLeading: CGFloat
-        let toLeading: CGFloat
-        let fromTrailing: CGFloat
-        let toTrailing: CGFloat
-        let start: TimeInterval
-        let duration: TimeInterval
-    }
-
-    private var insetAnimation: InsetAnimation?
-
     /// The corridor's edges RIGHT NOW — derived from the clock, like every
     /// other motion here, so a dropped frame costs a frame and never a
     /// position.
-    private func liveInsets() -> (leading: CGFloat, trailing: CGFloat) {
-        guard let a = insetAnimation else { return (leadingInset, trailingInset) }
+    private func liveCorridor() -> (leading: CGFloat, trailing: CGFloat, toolbar: CGFloat?) {
+        let settled = (leadingInset, trailingInset, toolbarLeadingX)
+        guard let a = corridorAnimation else { return settled }
         let t = min(1, (CACurrentMediaTime() - a.start) / a.duration)
-        guard t < 1 else { return (leadingInset, trailingInset) }
+        guard t < 1 else { return settled }
         let e = CGFloat(1 - pow(1 - t, 3))
+        func lerp(_ from: CGFloat, _ to: CGFloat) -> CGFloat { from + (to - from) * e }
+        // A toolbar edge that has only just appeared, or has gone away, has
+        // nothing to interpolate against; take the destination.
+        let toolbar: CGFloat?
+        if let from = a.fromToolbar, let to = toolbarLeadingX {
+            toolbar = lerp(from, to)
+        } else {
+            toolbar = toolbarLeadingX
+        }
         return (
-            leading: a.fromLeading + (a.toLeading - a.fromLeading) * e,
-            trailing: a.fromTrailing + (a.toTrailing - a.fromTrailing) * e
+            leading: lerp(a.fromLeading, leadingInset),
+            trailing: lerp(a.fromTrailing, trailingInset),
+            toolbar: toolbar
         )
     }
 
@@ -286,20 +310,25 @@ final class TabStripHostView: NSView {
         // Falling back to a wide viewport for that one frame is the overlap the
         // measurement exists to prevent.
         guard let next = frames.map(\.minX).min() else { return }
-        if next != toolbarLeadingX {
-            toolbarLeadingX = next
-            // Deliberately does NOT clear `originAnimation`.
-            //
-            // This runs two run-loop turns after `apply`, which lands it in
-            // the middle of the travel a sidebar toggle just started, and
-            // AppKit nudges toolbar item frames by a point or two when the
-            // split view re-lays out. Clearing the animation there snapped the
-            // run to its settled origin — the second jump after the first
-            // animation.
-            //
-            // Letting it run is safe because `animatedOrigin` returns the LIVE
-            // `layout.originX` once the curve is over, so the last stretch is
-            // aimed a point or two short and then lands exactly right.
+        // Half a point of measurement noise is not the toolbar moving, and
+        // treating it as such would restart the travel on every pass.
+        guard abs((toolbarLeadingX ?? .infinity) - next) > 0.5 else { return }
+        let hadOne = toolbarLeadingX != nil
+        toolbarLeadingX = next
+
+        // The toolbar's run grows and shrinks — viewer controls arrive with an
+        // image or a PDF and leave with it — so its edge is a boundary that
+        // moves, and the corridor should travel to it exactly as it does to
+        // the sidebar's.
+        //
+        // Never during a live resize. The window is already moving under the
+        // pointer, and a second easing on top of it reads as lag: that is the
+        // same reason `windowGeometryChanged` re-centres without animating.
+        // Nor on the first measurement, which has nothing to travel from.
+        if hadOne, !window.inLiveResize {
+            retargetCorridor()
+        } else {
+            corridorAnimation = nil
             needsDisplay = true
         }
     }
@@ -386,13 +415,13 @@ final class TabStripHostView: NSView {
         guard content.width > 0 else { return nil }
         // The INTERPOLATED edges, so the clip and the layout width travel with
         // the sidebar instead of arriving in one frame — see `setBoundaries`.
-        let inset = liveInsets()
+        let corridor = liveCorridor()
         guard let viewport = TabStripViewportGeometry.resolve(
             contentMinX: content.minX,
             contentMaxX: content.maxX,
-            leadingInset: inset.leading,
-            trailingInset: inset.trailing,
-            toolbarLeadingX: toolbarLeadingX,
+            leadingInset: corridor.leading,
+            trailingInset: corridor.trailing,
+            toolbarLeadingX: corridor.toolbar,
             // The + is drawn just beyond the chip clip. Keep its 22pt box and
             // two normal gaps wholly before the native toolbar.
             trailingRunReserve: trailingRunReserve
@@ -892,8 +921,8 @@ final class TabStripHostView: NSView {
         if let a = originAnimation, now - a.start >= a.duration {
             originAnimation = nil
         }
-        if let a = insetAnimation, now - a.start >= a.duration {
-            insetAnimation = nil
+        if let a = corridorAnimation, now - a.start >= a.duration {
+            corridorAnimation = nil
         }
         ghosts.removeAll { now - $0.start >= Self.vanishDuration }
         appearing = appearing.filter { now - $0.value < Self.appearDuration }
@@ -903,7 +932,7 @@ final class TabStripHostView: NSView {
         }
 
         needsDisplay = true
-        if originAnimation == nil, insetAnimation == nil, ghosts.isEmpty,
+        if originAnimation == nil, corridorAnimation == nil, ghosts.isEmpty,
            appearing.isEmpty, pillStart == nil
         {
             stopDisplayLink()
