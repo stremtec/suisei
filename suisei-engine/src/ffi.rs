@@ -609,11 +609,9 @@ pub extern "C" fn suisei_engine_chrome(
             line_count: line_n as u32,
             focused: 1,
             kind: chrome.pane0_kind as u8,
-            term_gen: if chrome.pane0_kind == suisei_core::media::FileKind::Terminal {
-                engine.0.pane_term_gen(0)
-            } else {
-                0
-            },
+            // Was a pane shell's content generation, so the face could skip
+            // re-pulling a grid it already had. Nothing pulls a grid.
+            term_gen: 0,
             doc_line_count: chrome.line_count,
             hscroll: chrome.hscroll,
             // Unsplit: the one pane is the whole editor.
@@ -641,11 +639,7 @@ pub extern "C" fn suisei_engine_chrome(
                 // Reuses a pad byte — no size change, so the pane stride and
                 // every offset after it stay put.
                 kind: pane.kind as u8,
-                term_gen: if pane.is_terminal() {
-                    engine.0.pane_term_gen(pi)
-                } else {
-                    0
-                },
+                term_gen: 0,
                 rect_x: pane.rect.x,
                 rect_y: pane.rect.y,
                 rect_w: pane.rect.w,

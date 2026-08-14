@@ -36,9 +36,19 @@ pub struct BufferTab {
     pub saved_hash: u64,
     pub undo_stack: UndoStack,
     pub file_mtime: Option<std::time::SystemTime>,
-    /// This tab is a terminal pane. The shell lives in `App::pane_terminals`
-    /// keyed by this id. `None` for ordinary document tabs.
+    /// This tab is a terminal pane, and this id names its shell.
+    ///
+    /// The shell itself is the face's — SwiftTerm runs it in the view that
+    /// draws it. `None` for ordinary document tabs, which is what makes this
+    /// the "is a shell" axis of [`App::tab_kind`].
     pub terminal: Option<crate::split::TerminalId>,
+    /// What that shell called itself (OSC 0/2), so the chip can say `make` or
+    /// `vim README.md` instead of "Terminal".
+    ///
+    /// Reported over the ABI by the face, which is the only side that reads
+    /// the escapes. It lived on the emulator that parsed it until there was no
+    /// emulator; the tab is the thing the title is about.
+    pub terminal_title: Option<String>,
     /// What kind of file this tab holds — decided once, when the tab is built
     /// from a path, because [`crate::media::classify_path`] can reach the disk
     /// and the face asks this question on every frame.
@@ -78,6 +88,7 @@ impl TabStrip {
             undo_stack: UndoStack::new(),
             file_mtime: None,
             terminal: None,
+            terminal_title: None,
             kind: crate::media::FileKind::Text,
             terminal_cwd: None,
         })
@@ -155,6 +166,7 @@ impl App {
             undo_stack: undo,
             file_mtime: None,
             terminal: None,
+            terminal_title: None,
             kind: crate::media::FileKind::Text,
             terminal_cwd: None,
         });
@@ -511,6 +523,7 @@ impl App {
             undo_stack: undo,
             file_mtime: mtime,
             terminal: None,
+            terminal_title: None,
             kind,
             terminal_cwd: None,
         });
@@ -592,10 +605,6 @@ impl App {
             self.terminal_replaced.remove(&closed);
             return false;
         }
-        // End the shell the tab hosted.
-        if let Some(mut t) = self.pane_terminals.remove(&tid) {
-            t.shutdown();
-        }
         if self.pane_close_confirm == Some(tid) {
             self.pane_close_confirm = None;
         }
@@ -645,16 +654,13 @@ impl App {
                 tab.undo_stack.finish(self.undo_caching, &text);
             }
         }
-        // If the closing tab is a terminal, end its shell.
-        if let Some(tab) = self.tabs.buffers.get(idx) {
-            if let Some(tid) = tab.terminal {
-                if let Some(mut t) = self.pane_terminals.remove(&tid) {
-                    t.shutdown();
-                }
-                if self.pane_close_confirm == Some(tid) {
-                    self.pane_close_confirm = None;
-                }
-            }
+        // Clear a close-confirm dialog that was about this shell. Ending the
+        // process itself is the face's — it reaps by asking which tabs remain.
+        if let Some(tab) = self.tabs.buffers.get(idx)
+            && tab.terminal.is_some()
+            && self.pane_close_confirm == tab.terminal
+        {
+            self.pane_close_confirm = None;
         }
         let closed = self.tabs.buffers[idx].id;
         // Drop the closed document from any layout's membership.
@@ -685,16 +691,12 @@ impl App {
             }
         }
         let closed = self.current_buffer_id();
-        // If the closing tab is a terminal, end its shell.
-        if let Some(tab) = self.tabs.buffers.get(self.current_buffer()) {
-            if let Some(tid) = tab.terminal {
-                if let Some(mut t) = self.pane_terminals.remove(&tid) {
-                    t.shutdown();
-                }
-                if self.pane_close_confirm == Some(tid) {
-                    self.pane_close_confirm = None;
-                }
-            }
+        // Same as `close_tab_at`: only the dialog is ours to clear.
+        if let Some(tab) = self.tabs.buffers.get(self.current_buffer())
+            && tab.terminal.is_some()
+            && self.pane_close_confirm == tab.terminal
+        {
+            self.pane_close_confirm = None;
         }
         // Drop the closed document from any layout's membership.
         self.remove_doc_from_layouts(closed);
@@ -719,6 +721,7 @@ impl App {
                 undo_stack: self.undo_stack.clone(),
                 file_mtime: None,
                 terminal: None,
+                terminal_title: None,
                 kind: crate::media::FileKind::Text,
                 terminal_cwd: None,
             };

@@ -63,7 +63,7 @@ Struct sizes, measured by compiling `suisei_engine.h`:
 
 | Snapshot | Size | Pulled by `refreshChrome()` |
 |---|---:|---|
-| `SuiseiTerminalSnapshot` | **300.0 KiB** | unconditionally |
+| ~~`SuiseiTerminalSnapshot`~~ | ~~**300.0 KiB**~~ | removed 2026-08-14 — terminals are SwiftTerm's |
 | `SuiseiChromeSnapshot` | **181.1 KiB** | unconditionally |
 | `SuiseiPreviewSnapshot` | 64.1 KiB | version-gated |
 | `SuiseiGitWbSnapshot` | 55.5 KiB | unconditionally |
@@ -204,8 +204,9 @@ The codebase's own number, at `EditorHost.swift:1500`:
 > "A full repaint measured **1.6 ms** in a release build"
 
 1.6 ms is 19% of a 120 Hz frame for editor text alone, before SwiftUI,
-before the marshal. `TermCanvas.draw` (`ContentView.swift:6977`) is the same
-shape with an ANSI parse layered on top.
+before the marshal. (`TermCanvas.draw` used to be the same shape with an ANSI
+parse layered on top; it was deleted with the rest of the terminal boundary on
+2026-08-14.)
 
 **And `visualToUTF16Map` was most of it.** Measured on a 60-row viewport of
 mixed Latin/Korean source, per full repaint:
@@ -985,9 +986,9 @@ frame still falls back to CoreText. Metal should not become automatic again
 until bracket/find/IME overlays and live-scroll pacing have visual regression
 tests, not merely glyph-pixel benchmarks.
 
-**G3 — Metal terminal canvas.** `TermCanvas` has the same shape and benefits
-more, because PTY damage is continuous. Its ANSI runs map directly onto
-`RunSpan` + `style_id`.
+**G3 — Metal terminal canvas.** ~~`TermCanvas` has the same shape and benefits
+more, because PTY damage is continuous.~~ Moot: terminals are SwiftTerm views
+now, and SwiftTerm has its own Metal path.
 
 **G4 — shared-memory packets.** Replace the fixed-struct FFI with the arena
 (§7). Only after G2/G3 have proven the renderer — the ABI change is the most

@@ -1,5 +1,11 @@
 # Pane terminals and the tab strip: audit, fixes, and what stays open
 
+> **Superseded for the terminal half, 2026-08-14.** Every terminal in the
+> window is a SwiftTerm view now: core's `term.rs` emulator, the pane and dock
+> PTY plumbing, and the whole terminal ABI are gone. The findings below are the
+> record of why — most of them are defects of the boundary this describes, not
+> of the emulator behind it. The tab-strip half still stands.
+
 Code-verified 2026-07-29, on branch `devim-and-theme`. A full-stack pass over
 the pane terminal feature (core `term.rs` / `app.rs`, engine `runtime.rs` /
 `ffi.rs`, face `ContentView.swift` / `EngineBridge.swift`) and the tab strip's

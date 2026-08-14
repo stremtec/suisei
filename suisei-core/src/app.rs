@@ -20,7 +20,6 @@ use crate::session::{self, Session, SessionFile};
 use crate::settings::SettingsPanel;
 use crate::syntax::SyntaxEngine;
 pub use crate::tabs::{BufferTab, FIRST_TAB_ID, TabStrip};
-use crate::term::Terminal;
 use crate::theme::{self, OCEAN, Theme};
 use crate::undo::UndoStack;
 
@@ -148,21 +147,14 @@ pub struct App {
     /// [`App::grid_rows`].
     pub stage: Stage,
     pub explorer: Explorer,
-    /// The **docked** terminal (⌃T). Pane terminals are separate processes,
-    /// one per pane, in `pane_terminals`.
-    pub terminal: Terminal,
+    /// The **docked** shell strip (⌃T) — whether it is showing, and nothing
+    /// else. The shells inside are the face's (SwiftTerm), as are the panes'.
+    pub terminal: TerminalDock,
     /// Folded layouts, in strip order. See `layout_tab`.
     pub layouts: Vec<crate::layout_tab::LayoutTab>,
     /// The layout the editor is currently showing, if any. Switching to a
     /// document tab clears it — that is the whole point of folding.
     pub active_layout: Option<u64>,
-    /// A shell per terminal pane, keyed by the id its pane carries.
-    ///
-    /// There used to be exactly one `Terminal` for everything, so a second
-    /// terminal pane was a second *view* of the same session — typing in one
-    /// echoed in the other, and converting a second pane moved the shell
-    /// instead of starting one.
-    pub pane_terminals: std::collections::HashMap<crate::split::TerminalId, Terminal>,
     /// Which pane shell's close-confirm dialog is open, if any. Per-shell:
     /// the old shared dock flag let pane B answer pane A's prompt, blackholed
     /// B's keys while A's dialog was up, and `y` killed whichever shell was
@@ -437,6 +429,20 @@ pub struct App {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BufferId(pub u64);
 
+/// The docked shell strip.
+///
+/// This used to be a 1,775-line terminal emulator: a PTY, a cell grid, a
+/// 5,000-row scrollback, an escape parser, mouse tracking, and a re-encoder
+/// that turned the grid back into ANSI so it could cross the C ABI and be
+/// re-parsed on the other side. All of that is SwiftTerm's now — it runs the
+/// shell in the same view that draws it, on the same side of the boundary as
+/// the user. What core needs to know about the strip is whether it is showing,
+/// because that decides the editor's height and where the keyboard goes.
+#[derive(Clone, Copy, Default)]
+pub struct TerminalDock {
+    pub open: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResizeTarget {
     Explorer,
@@ -572,10 +578,9 @@ impl Default for App {
             mouse: MouseState::default(),
             stage: Stage::default(),
             explorer: Explorer::new(),
-            terminal: Terminal::new(),
+            terminal: TerminalDock::default(),
             layouts: Vec::new(),
             active_layout: None,
-            pane_terminals: std::collections::HashMap::new(),
             explorer_width: 22,
             terminal_width: 30,
             resize_target: None,
@@ -951,6 +956,7 @@ impl App {
                 undo_stack: undo,
                 file_mtime: mtime,
                 terminal: None,
+                terminal_title: None,
                 kind,
                 terminal_cwd: None,
             }),
@@ -4941,6 +4947,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                terminal_title: None,
                 kind: crate::media::FileKind::Text,
                 terminal_cwd: None,
             });
@@ -4998,6 +5005,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                terminal_title: None,
                 kind: crate::media::FileKind::Text,
                 terminal_cwd: None,
             });
@@ -5096,6 +5104,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                terminal_title: None,
                 kind: crate::media::FileKind::Text,
                 terminal_cwd: None,
             });
@@ -5191,6 +5200,7 @@ mod tests {
             undo_stack: UndoStack::new(),
             file_mtime: None,
             terminal: None,
+            terminal_title: None,
             kind: crate::media::FileKind::Text,
             terminal_cwd: None,
         });
@@ -5241,6 +5251,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                terminal_title: None,
                 kind: crate::media::FileKind::Text,
                 terminal_cwd: None,
             });
@@ -5285,6 +5296,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                terminal_title: None,
                 kind: crate::media::FileKind::Text,
                 terminal_cwd: None,
             });
@@ -5467,6 +5479,7 @@ mod tests {
                 undo_stack: UndoStack::new(),
                 file_mtime: None,
                 terminal: None,
+                terminal_title: None,
                 kind: crate::media::FileKind::Text,
                 terminal_cwd: None,
             });
@@ -6042,21 +6055,26 @@ mod tests {
             !app.tabs.buffers.iter().any(|t| t.id == term_id),
             "terminal tab gone"
         );
-        assert!(app.pane_terminals.is_empty(), "shell ended");
+        assert!(
+            !app.tabs.buffers.iter().any(|t| t.terminal.is_some()),
+            "no terminal tab left for a shell to belong to"
+        );
 
         // The group no longer contains the terminal.
         let docs = app.layout_docs(layout_id);
         assert!(!docs.contains(&term_id), "terminal left the group on close");
     }
 
-    /// Give the two documents terminal tabs without spawning real shells —
-    /// the confirm dialog's state machine is what's under test, not the PTY.
+    /// Mark these documents as terminal tabs.
+    ///
+    /// No shell is started — none would be here in any case, since the
+    /// processes are the face's. What is under test is core's bookkeeping: the
+    /// confirm dialog's state machine, the close paths, and the titles.
     fn terminal_tabs_on(app: &mut App, docs: &[BufferId]) -> Vec<crate::split::TerminalId> {
         docs.iter()
             .map(|id| {
                 let tid = crate::split::TerminalId(app.next_terminal_id);
                 app.next_terminal_id += 1;
-                app.pane_terminals.insert(tid, crate::term::Terminal::new());
                 app.tabs
                     .buffers
                     .iter_mut()
@@ -6088,7 +6106,6 @@ mod tests {
         // Pane 0's shell tab is gone; pane 1's is untouched.
         assert!(!app.tabs.buffers.iter().any(|t| t.terminal == Some(tids[0])));
         assert!(app.tabs.buffers.iter().any(|t| t.terminal == Some(tids[1])));
-        assert!(app.pane_terminals.contains_key(&tids[1]));
         assert!(!app.pane_close_confirm_open(), "latch cleared");
     }
 
@@ -6110,7 +6127,7 @@ mod tests {
         let idx = app.buffer_index(ids[0]).unwrap();
         app.close_tab_at(idx);
         assert!(!app.pane_close_confirm_open());
-        assert!(!app.pane_terminals.contains_key(&tids[0]));
+        assert!(!app.tabs.buffers.iter().any(|t| t.terminal == Some(tids[0])));
 
         // A stray confirm now does nothing.
         app.confirm_close_pane_terminal(true);
@@ -6132,10 +6149,10 @@ mod tests {
         let tids = terminal_tabs_on(&mut app, &ids[..2]);
 
         assert!(app.set_terminal_title(ids[0], Some("vim README.md")));
-        assert_eq!(app.terminal_title(tids[0]), Some("vim README.md"));
+        assert_eq!(app.terminal_title(ids[0]), Some("vim README.md"));
         // The other shell is untouched: two terminals in one window are two
         // processes, and one naming itself must not name the other.
-        assert_eq!(app.terminal_title(tids[1]), None);
+        assert_eq!(app.terminal_title(ids[1]), None);
 
         // The same string again is not news.
         assert!(!app.set_terminal_title(ids[0], Some("vim README.md")));
@@ -6143,12 +6160,13 @@ mod tests {
         // A shell that clears its title, or reports only whitespace, goes back
         // to the generic name rather than showing an empty chip.
         assert!(app.set_terminal_title(ids[0], Some("   ")));
-        assert_eq!(app.terminal_title(tids[0]), None);
+        assert_eq!(app.terminal_title(ids[0]), None);
 
         // A document tab has no shell to name, and saying so must not panic or
         // silently land the title on some other tab.
         assert!(!app.set_terminal_title(ids[2], Some("nope")));
-        assert_eq!(app.terminal_title(tids[1]), None);
+        assert_eq!(app.terminal_title(ids[1]), None);
+        let _ = tids;
     }
 
     /// Split layout tokens round-trip through the session format, nesting

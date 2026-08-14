@@ -10,45 +10,24 @@
 use crate::app::{App, BufferId, EMPTY_TEXT_HASH, Mode};
 use crate::buffer::Buffer;
 use crate::tabs::BufferTab;
-use crate::term::Terminal;
 use crate::undo::UndoStack;
 
 impl App {
     /// ⌃T — show or hide the docked shell strip.
     ///
-    /// Show and hide, not start and stop. The shells are the face's now (see
-    /// `Terminal::placeholder`), and it keeps them running while the dock is
-    /// closed — which is both what every other editor does and the fix for the
-    /// old behaviour, where ⌃T to get the editor's full height killed whatever
-    /// was running. A session ends when its chip is closed.
+    /// Show and hide, not start and stop. The shells are the face's now and it
+    /// keeps them running while the strip is hidden — which is both what every
+    /// other editor does and the fix for the old behaviour, where ⌃T to get the
+    /// editor's full height killed whatever was running in the strip. A session
+    /// ends when its chip is closed.
     pub fn toggle_terminal_side(&mut self) {
         if self.terminal.open {
             self.terminal.open = false;
             self.mode = Mode::Editor;
         } else {
-            self.terminal.close_confirm = false;
             self.terminal.open = true;
             self.mode = Mode::Terminal;
         }
-    }
-    /// The shell running in the pane at `idx`, if that pane shows a terminal tab.
-    pub fn pane_terminal(&self, idx: usize) -> Option<&Terminal> {
-        let buf_id = self.split.panes.get(idx)?.buffer;
-        let tab = self.tabs.buffers.iter().find(|t| t.id == buf_id)?;
-        let tid = tab.terminal?;
-        self.pane_terminals.get(&tid)
-    }
-    pub fn pane_terminal_mut(&mut self, idx: usize) -> Option<&mut Terminal> {
-        let buf_id = self.split.panes.get(idx)?.buffer;
-        let tab = self.tabs.buffers.iter().find(|t| t.id == buf_id)?;
-        let tid = tab.terminal?;
-        self.pane_terminals.get_mut(&tid)
-    }
-    /// The shell the keyboard is pointed at — the focused pane's, if it shows
-    /// a terminal tab.
-    pub fn focused_pane_terminal_mut(&mut self) -> Option<&mut Terminal> {
-        let idx = self.split.focus_index();
-        self.pane_terminal_mut(idx)
     }
     /// Whether the focused pane currently shows a terminal tab.
     pub fn terminal_window_focused(&self) -> bool {
@@ -85,44 +64,43 @@ impl App {
     pub fn live_tab_kind(&self) -> crate::media::FileKind {
         self.tab_kind(self.live_doc)
     }
-    /// The title the shell reported (OSC 0/2) for a terminal tab, if any —
-    /// the tab strip shows it in place of the generic "Terminal".
-    pub fn terminal_title(&self, tid: crate::split::TerminalId) -> Option<&str> {
-        self.pane_terminals
-            .get(&tid)
-            .and_then(|t| t.title.as_deref())
+    /// The title a terminal tab's shell reported (OSC 0/2), if any — the tab
+    /// strip shows it in place of the generic "Terminal".
+    pub fn terminal_title(&self, tab: BufferId) -> Option<&str> {
+        self.tabs
+            .buffers
+            .iter()
+            .find(|t| t.id == tab)
+            .and_then(|t| t.terminal_title.as_deref())
     }
     /// The face reporting a title its shell announced (OSC 0/2).
     ///
-    /// The docked terminal parses its own escapes and fills this in as it
-    /// reads them. A pane's shell is SwiftTerm's, so its escapes are never
-    /// seen here — this is the one way that fact gets back, and without it
-    /// every terminal tab would read "Terminal" forever.
+    /// A shell's escapes are read by SwiftTerm and never seen here, so this is
+    /// the one way that fact reaches core — and without it every terminal tab
+    /// would read "Terminal" forever.
     ///
-    /// Addressed by the **tab**, not by `TerminalId`: the face knows tabs (it
-    /// keys its own sessions by `BufferTab::id`) and has no name for the
-    /// terminal ids, which are ours.
+    /// Addressed by the **tab**, which is also where the title is kept. It used
+    /// to live on the `Terminal` in `pane_terminals`, next to the emulator that
+    /// parsed it; with the emulator gone the tab is the only thing left that
+    /// the title is about.
     ///
     /// Returns whether anything changed, so the caller can skip republishing
     /// the chrome for a title the shell re-sends on every prompt.
     pub fn set_terminal_title(&mut self, tab: BufferId, title: Option<&str>) -> bool {
-        let Some(tid) = self
+        let Some(t) = self
             .tabs
             .buffers
-            .iter()
+            .iter_mut()
             .find(|t| t.id == tab)
-            .and_then(|t| t.terminal)
+            .filter(|t| t.terminal.is_some())
         else {
             return false;
         };
-        let Some(term) = self.pane_terminals.get_mut(&tid) else {
-            return false;
-        };
         let next = title.map(str::to_string).filter(|s| !s.trim().is_empty());
-        if term.title == next {
+        if t.terminal_title == next {
             return false;
         }
-        term.title = next;
+        t.terminal_title = next;
         true
     }
     /// Ctrl+Shift+T — open a terminal as a **tab** in the focused pane.
@@ -145,20 +123,17 @@ impl App {
         // stale copy once the terminal tab is switched away from.
         self.save_state_to_tab();
 
-        // The shell itself belongs to the face — see `Terminal::placeholder`.
-        // Nothing can fail here any more, which is why there is no longer a
-        // "failed to spawn" path leaving the pane as it was: the tab is made
-        // unconditionally and SwiftTerm reports its own trouble in the pane
-        // where the user can read it.
+        // The shell itself belongs to the face. Nothing can fail here any
+        // more, which is why there is no longer a "failed to spawn" path
+        // leaving the pane as it was: the tab is made unconditionally and
+        // SwiftTerm reports its own trouble in the pane where the user can
+        // read it.
         let cwd = self.terminal_working_directory();
-        let term = Terminal::placeholder();
-
         let tid = crate::split::TerminalId(self.next_terminal_id);
         self.next_terminal_id = self
             .next_terminal_id
             .checked_add(1)
             .expect("terminal id space exhausted");
-        self.pane_terminals.insert(tid, term);
 
         // Create a tab for the terminal and switch to it.
         let tab_id = self.take_tab_id();
@@ -172,6 +147,7 @@ impl App {
             undo_stack: UndoStack::new(),
             file_mtime: None,
             terminal: Some(tid),
+            terminal_title: None,
             kind: crate::media::FileKind::Text,
             terminal_cwd: Some(cwd),
         });
@@ -206,13 +182,11 @@ impl App {
     /// no displaced document, nothing to toggle, and the tab has to land in
     /// strip order beside the files it was saved with.
     pub fn open_terminal_tab_at(&mut self, cwd: &std::path::Path) {
-        let term = Terminal::placeholder();
         let tid = crate::split::TerminalId(self.next_terminal_id);
         self.next_terminal_id = self
             .next_terminal_id
             .checked_add(1)
             .expect("terminal id space exhausted");
-        self.pane_terminals.insert(tid, term);
 
         let tab_id = self.take_tab_id();
         self.tabs.buffers.push(BufferTab {
@@ -225,6 +199,7 @@ impl App {
             undo_stack: UndoStack::new(),
             file_mtime: None,
             terminal: Some(tid),
+            terminal_title: None,
             kind: crate::media::FileKind::Text,
             terminal_cwd: Some(cwd.to_path_buf()),
         });
@@ -328,17 +303,14 @@ impl App {
         if !self.split.is_split() {
             return;
         }
-        // If the focused pane shows a terminal tab, end the shell.
+        // The face ends the shell when it sees the tab go (`TerminalSessions
+        // .reap`); what is left here is the dialog that was asking about it.
         let buf_id = self.split.focused_pane().buffer;
-        if let Some(tab) = self.tabs.buffers.iter().find(|t| t.id == buf_id) {
-            if let Some(tid) = tab.terminal {
-                if let Some(mut t) = self.pane_terminals.remove(&tid) {
-                    t.shutdown();
-                }
-                if self.pane_close_confirm == Some(tid) {
-                    self.pane_close_confirm = None;
-                }
-            }
+        if let Some(tab) = self.tabs.buffers.iter().find(|t| t.id == buf_id)
+            && tab.terminal.is_some()
+            && self.pane_close_confirm == tab.terminal
+        {
+            self.pane_close_confirm = None;
         }
         // Closing the pane itself (not the tab) discards the shell — there is
         // no pane left to restore the displaced document into, so drop the

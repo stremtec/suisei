@@ -15,28 +15,6 @@ impl App {
 /// Paste OS clipboard into the terminal PTY that owns the keyboard — the
 /// focused pane's shell when there is one, else the dock (text, or image
 /// path). The old dock-only target silently dropped ⌘V in pane terminals.
-fn paste_clipboard_to_terminal(app: &mut App) {
-    if let Some(text) = crate::clipboard::paste() {
-        if !text.is_empty() {
-            if let Some(t) = app.focused_pane_terminal_mut() {
-                t.paste_input(&text);
-            } else {
-                app.terminal.paste_input(&text);
-            }
-            return;
-        }
-    }
-    if let Some(p) = crate::clipboard::paste_image_to_temp() {
-        let path = p.to_string_lossy().to_string();
-        if let Some(t) = app.focused_pane_terminal_mut() {
-            t.paste_input(&path);
-        } else {
-            app.terminal.paste_input(&path);
-        }
-        app.message = String::from("Pasted image → terminal");
-    }
-}
-
 fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     // ── Pane terminal (Ctrl+Shift+T): strict PTY policy ─────────────────
     // When the terminal *window* is focused, almost every key goes to the
@@ -93,14 +71,10 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 return;
             }
             KeyCode::Char('v') | KeyCode::Char('V') => {
-                // Terminal focused → paste into the child PTY (text or image path),
-                // not the editor. (Pane-window terminal is handled earlier.)
-                if app.terminal_window_focused()
-                    || (app.terminal.open && app.mode == Mode::Terminal)
-                {
-                    paste_clipboard_to_terminal(app);
-                    return;
-                }
+                // No terminal branch here. A focused shell is an AppKit view
+                // that implements `paste:`, and the face never dispatches a key
+                // to us while it holds the responder — routing ⌘V through here
+                // would paste into a PTY core does not own.
                 // Shift+V under cmd_like → pretty preview toggle (VS Code Markdown preview).
                 if modifiers.contains(KeyModifiers::SHIFT) {
                     if matches!(app.mode, Mode::Editor | Mode::Preview | Mode::Explorer) {
@@ -398,15 +372,7 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     }
 
     if code == KeyCode::F(12) {
-        if app.terminal.open {
-            app.terminal.open = false;
-            app.terminal.shutdown();
-            app.mode = Mode::Editor;
-        } else {
-            app.terminal.open = true;
-            app.terminal.start(app.filename.as_ref());
-            app.mode = Mode::Terminal;
-        }
+        app.toggle_terminal_side();
         return;
     }
 
@@ -422,7 +388,6 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         if ctrl_char == 'q' {
             if app.terminal.open {
                 app.terminal.open = false;
-                app.terminal.shutdown();
                 app.mode = Mode::Editor;
             }
             return;
@@ -550,14 +515,6 @@ fn dispatch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 }
                 _ => {}
             }
-        } else if let KeyCode::Char(c) = code {
-            let ctrl_byte = if c.is_ascii_lowercase() {
-                c as u8 - b'a' + 1
-            } else {
-                c as u8
-            };
-            app.terminal.write_input(&[ctrl_byte]);
-            return;
         }
     }
 
@@ -1900,10 +1857,6 @@ fn open_file(app: &mut App, path: &std::path::PathBuf) {
 /// (almost always sent to the child). Returns `false` only for the tiny
 /// allowlist that must reach editor chrome (Ctrl+W split chord second key, etc.).
 fn handle_pane_terminal_window(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
-    if let Some(t) = app.focused_pane_terminal_mut() {
-        t.poll();
-    }
-
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     let alt = modifiers.contains(KeyModifiers::ALT);
@@ -1937,14 +1890,6 @@ fn handle_pane_terminal_window(app: &mut App, code: KeyCode, modifiers: KeyModif
         app.request_close_pane_terminal();
         return true;
     }
-    // Cmd+V / Ctrl+Shift+V — paste clipboard into the child (text or image path).
-    // Must precede the Ctrl-byte block below (else Ctrl+Shift+V → literal 0x16).
-    // Note: Super+Shift+V is pretty-preview when editor focused; in the terminal
-    // pane we always paste (preview is not open here).
-    if (super_key || (ctrl && shift)) && matches!(code, KeyCode::Char('v') | KeyCode::Char('V')) {
-        paste_clipboard_to_terminal(app);
-        return true;
-    }
     // Ctrl+W alone — start split chord so user can focus the other pane
     if ctrl
         && !shift
@@ -1962,134 +1907,29 @@ fn handle_pane_terminal_window(app: &mut App, code: KeyCode, modifiers: KeyModif
         return false;
     }
 
-    // ── Everything else → PTY ───────────────────────────────────────────
-    // From here on every key belongs to THIS pane's shell. Each terminal pane
-    // owns its own process, so the write target is the focused pane's, never a
-    // single shared `App.terminal`.
-    let Some(term) = app.focused_pane_terminal_mut() else {
-        return true;
-    };
-    // Ctrl+C / Ctrl+D / Ctrl+Z / Ctrl+L … as real control bytes
-    if ctrl && !super_key {
-        if let KeyCode::Char(c) = code {
-            let lower = c.to_ascii_lowercase();
-            if lower.is_ascii_lowercase() {
-                let byte = (lower as u8) - b'a' + 1;
-                term.write_input(&[byte]);
-                return true;
-            }
-        }
-        // Ctrl+Arrow etc. — still useful in some REPLs
-        match code {
-            KeyCode::Left => {
-                term.write_input(b"\x1b[1;5D");
-                return true;
-            }
-            KeyCode::Right => {
-                term.write_input(b"\x1b[1;5C");
-                return true;
-            }
-            KeyCode::Up => {
-                term.write_input(b"\x1b[1;5A");
-                return true;
-            }
-            KeyCode::Down => {
-                term.write_input(b"\x1b[1;5B");
-                return true;
-            }
-            _ => {}
-        }
-    }
-
-    // Alt+char → ESC + char (readline / fish bindings)
-    if alt && !ctrl {
-        if let KeyCode::Char(c) = code {
-            let mut buf = [0u8; 8];
-            buf[0] = 0x1b;
-            let s = c.encode_utf8(&mut buf[1..]);
-            let n = 1 + s.len();
-            term.write_input(&buf[..n]);
-            return true;
-        }
-    }
-
-    write_terminal_key(term, apply_shift_for_pty(code, shift));
+    // Everything else belongs to the shell, and the shell is not ours. A
+    // focused terminal is an AppKit view holding the first responder, so the
+    // face does not send us its keys at all — this arm exists for the ones
+    // that arrive anyway (a chord the window handled first, a stale focus) and
+    // swallowing them is right: they are not the editor's either.
+    //
+    // What used to be here was a full keyboard→PTY encoder: control bytes,
+    // DECCKM-aware arrows, Alt as ESC-prefix, and a shift re-application step
+    // because core's key model carries case as a modifier and the shell was
+    // being handed `echo hello` for `echo HELLO`. SwiftTerm does all of it,
+    // against the emulator state that actually knows whether DECCKM is set.
     true
 }
 
-/// Re-apply Shift to a letter on its way to the PTY.
+/// Docked strip (⌃T) — still `Mode::Terminal`.
 ///
-/// Core's key model has no separate uppercase key: the face lowercases letters
-/// and carries the case as `KeyModifiers::SHIFT`, which is what the editor's
-/// own bindings expect. `write_terminal_key` only ever saw the `KeyCode`, so
-/// the shell was handed the lowercased character and `echo HELLO` arrived as
-/// `echo hello`. Non-letters need no help — they cross with their real glyph.
-fn apply_shift_for_pty(code: KeyCode, shift: bool) -> KeyCode {
-    match code {
-        KeyCode::Char(c) if shift && c.is_lowercase() => {
-            let mut up = c.to_uppercase();
-            match (up.next(), up.next()) {
-                (Some(u), None) => KeyCode::Char(u),
-                _ => code,
-            }
-        }
-        other => other,
-    }
-}
-
-fn write_terminal_key(term: &mut crate::term::Terminal, code: KeyCode) {
-    match code {
-        KeyCode::Enter => term.write_input(b"\r"),
-        KeyCode::Backspace => term.write_input(&[0x7f]),
-        KeyCode::Tab => term.write_input(b"\t"),
-        // Arrows honor DECCKM (vim/less switch to application cursor keys).
-        KeyCode::Left => {
-            let seq = term.arrow_seq('D');
-            term.write_input(seq);
-        }
-        KeyCode::Right => {
-            let seq = term.arrow_seq('C');
-            term.write_input(seq);
-        }
-        KeyCode::Up => {
-            let seq = term.arrow_seq('A');
-            term.write_input(seq);
-        }
-        KeyCode::Down => {
-            let seq = term.arrow_seq('B');
-            term.write_input(seq);
-        }
-        KeyCode::Home => term.write_input(b"\x1b[H"),
-        KeyCode::End => term.write_input(b"\x1b[F"),
-        KeyCode::PageUp => term.scroll_up(3),
-        KeyCode::PageDown => term.scroll_down(3),
-        KeyCode::Delete => term.write_input(b"\x1b[3~"),
-        KeyCode::Esc => term.write_input(b"\x1b"),
-        KeyCode::Char(c) => {
-            let mut buf = [0u8; 4];
-            let s = c.encode_utf8(&mut buf);
-            term.write_input(s.as_bytes());
-        }
-        _ => {}
-    }
-}
-
-/// Side-panel terminal (Ctrl+T) — still Mode::Terminal.
-fn handle_terminal(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
-    app.terminal.poll();
-
-    match code {
-        KeyCode::Esc => {
-            // Side terminal: Esc closes. Pane terminals are tabs now and
-            // handled by `handle_pane_terminal_window` before this runs.
-            app.terminal.open = false;
-            app.terminal.shutdown();
-            app.mode = Mode::Editor;
-        }
-        other => write_terminal_key(
-            &mut app.terminal,
-            apply_shift_for_pty(other, modifiers.contains(KeyModifiers::SHIFT)),
-        ),
+/// Esc hides it and gives the keyboard back to the editor. Nothing else: the
+/// shell in the strip is a SwiftTerm view that has the first responder while
+/// the user is typing at it, so its keys never reach core.
+fn handle_terminal(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) {
+    if matches!(code, KeyCode::Esc) {
+        app.terminal.open = false;
+        app.mode = Mode::Editor;
     }
 }
 

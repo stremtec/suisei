@@ -1994,12 +1994,12 @@ fn tab_title(app: &App, tab_index: usize) -> String {
     let Some(tab) = app.tabs.buffers.get(tab_index) else {
         return "[No Name]".into();
     };
-    if let Some(terminal) = tab.terminal {
+    if tab.terminal.is_some() {
         // The shell's own title (OSC 0/2) when it has reported one —
         // `make`, `vim file`, an ssh session each name their tab.
-        return app
-            .terminal_title(terminal)
-            .map(str::to_string)
+        return tab
+            .terminal_title
+            .clone()
             .unwrap_or_else(|| "Terminal".to_string());
     }
     let filename = if tab_index == app.current_buffer() {

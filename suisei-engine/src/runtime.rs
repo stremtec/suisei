@@ -94,11 +94,6 @@ pub struct Engine {
     missing_tab_ids: std::collections::HashSet<suisei_core::app::BufferId>,
     /// Shadow WAL — crash-recovery journal for unsaved buffers (D0).
     pub journal: crate::journal::Journal,
-    /// Per-shell content generation: bumped whenever a pane terminal's screen
-    /// changes. Shipped as a u16 in `SuiseiPaneC.term_gen` so the face skips
-    /// re-pulling a ~300 KiB grid it already has — pulling one per keystroke
-    /// per idle terminal was pure churn.
-    pane_term_gens: std::collections::HashMap<suisei_core::split::TerminalId, u64>,
     /// Pushes LSP/DAP/project state to the daemon for the menu-bar agent.
     /// `None` outside the real app — tests must not report into the developer's
     /// running daemon, so only the FFI constructor turns it on.
@@ -205,7 +200,6 @@ impl Engine {
             tick_count: 0,
             missing_tab_ids: std::collections::HashSet::new(),
             journal: crate::journal::Journal::new(),
-            pane_term_gens: std::collections::HashMap::new(),
             reporter: None,
             syntax_worker: suisei_core::syntax_worker::SyntaxWorker::start(),
             syntax_requested: None,
@@ -1428,29 +1422,20 @@ impl Engine {
         self.recompose();
     }
 
-    /// Insert text at the caret (file drop / IME commit). Routes to the PTY
-    /// when the terminal owns input, like the TUI bracketed-paste path.
+    /// Insert text at the caret (file drop / IME commit).
+    ///
+    /// A focused terminal is skipped rather than pasted into: it is an AppKit
+    /// view with its own `paste:`, and it is holding the first responder, so
+    /// nothing that belongs to it arrives here. This used to route to a PTY,
+    /// because the shell had no way of its own to receive one.
     pub fn paste_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
-        // The docked shell owns the paste only while it has the keyboard…
-        if matches!(self.app.mode, Mode::Terminal) && self.app.terminal.open {
-            self.app.terminal.paste_input(text);
-            self.shell.dirty = true;
-            self.recompose_scroll();
+        if (matches!(self.app.mode, Mode::Terminal) && self.app.terminal.open)
+            || self.app.terminal_window_focused()
+        {
             return;
-        }
-        // …otherwise a focused pane shell takes it. This used to fall through
-        // to the editor (or the dock) — IME commits and drops landed in the
-        // terminal tab's hidden buffer while the shell had the keyboard.
-        if self.app.terminal_window_focused() {
-            if let Some(t) = self.app.focused_pane_terminal_mut() {
-                t.paste_input(text);
-                self.shell.dirty = true;
-                self.recompose_scroll();
-                return;
-            }
         }
         if self.text_editor_owns_keys() {
             // IME commits and programmatic paste must use the same exclusive
@@ -1472,30 +1457,6 @@ impl Engine {
         }
         self.app.paste_text_at_cursor(text);
         self.recompose();
-    }
-
-    /// Raw keyboard text into the FOCUSED terminal's PTY as UTF-8 bytes — the
-    /// path the terminal input view uses for IME-committed Hangul/CJK and for
-    /// ordinary typed characters. Unlike `paste_text` this is NOT wrapped in a
-    /// bracketed-paste envelope: it is keystrokes, not a paste, so the shell and
-    /// its TUIs must see it as typed input. No-op when no terminal has focus.
-    pub fn terminal_input(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        if matches!(self.app.mode, Mode::Terminal) && self.app.terminal.open {
-            self.app.terminal.write_input(text.as_bytes());
-            self.shell.dirty = true;
-            self.recompose_scroll();
-            return;
-        }
-        if self.app.terminal_window_focused() {
-            if let Some(t) = self.app.focused_pane_terminal_mut() {
-                t.write_input(text.as_bytes());
-                self.shell.dirty = true;
-                self.recompose_scroll();
-            }
-        }
     }
 
     /// GUI focus contract: clicking the terminal panel routes keys to the PTY,
@@ -1603,79 +1564,6 @@ impl Engine {
     }
 
 
-    /// Scroll the terminal panel through its scrollback. Positive reveals
-    /// older output. The GUI had no path to this at all — core kept a 5,000-row
-    /// scrollback and a `scroll_offset`, and nothing on this side of the ABI
-    /// ever moved or read either.
-    pub fn terminal_scroll(&mut self, delta_rows: i32) {
-        if !self.app.terminal.open || delta_rows == 0 {
-            return;
-        }
-        if delta_rows > 0 {
-            self.app.terminal.scroll_up(delta_rows as usize);
-        } else {
-            self.app.terminal.scroll_down((-delta_rows) as usize);
-        }
-        self.shell.dirty = true;
-        self.recompose();
-    }
-
-    /// Size a PANE terminal's PTY to the face's measured grid (cells). Pane
-    /// shells used to get no resize after spawn — they started at a viewport
-    /// guess, so output wrapped at the wrong column forever, divider drags and
-    /// window resizes never reflowed them, and vim/htop drew garbled.
-    pub fn terminal_resize_pane(&mut self, pane: u32, cols: u32, rows: u32) {
-        if cols < 10 || rows < 3 {
-            return;
-        }
-        let cols = cols.min(500) as u16;
-        let rows = rows.min(200) as u16;
-        let Some(t) = self.app.pane_terminal_mut(pane as usize) else {
-            return;
-        };
-        t.resize(cols, rows);
-        self.shell.dirty = true;
-        self.recompose_scroll();
-    }
-
-    /// Scroll a pane terminal through its scrollback — the pane twin of
-    /// `terminal_scroll`. Positive reveals older output.
-    pub fn terminal_scroll_pane(&mut self, pane: u32, delta_rows: i32) {
-        if delta_rows == 0 {
-            return;
-        }
-        let Some(t) = self.app.pane_terminal_mut(pane as usize) else {
-            return;
-        };
-        if delta_rows > 0 {
-            t.scroll_up(delta_rows as usize);
-        } else {
-            t.scroll_down((-delta_rows) as usize);
-        }
-        self.shell.dirty = true;
-        self.recompose();
-    }
-
-    /// Wrapping u16 generation of a pane shell's content, for the face to skip
-    /// re-pulling a grid it already has. 0 while the shell has produced
-    /// nothing.
-    pub fn pane_term_gen(&self, pane: usize) -> u16 {
-        let Some(buf_id) = self.app.split.panes.get(pane).map(|p| p.buffer) else {
-            return 0;
-        };
-        let Some(tid) = self
-            .app
-            .tabs
-            .buffers
-            .iter()
-            .find(|t| t.id == buf_id)
-            .and_then(|t| t.terminal)
-        else {
-            return 0;
-        };
-        self.pane_term_gens.get(&tid).copied().unwrap_or(0) as u16
-    }
-
     pub fn save_as(&mut self, path: &str) {
         self.app.filename = Some(std::path::PathBuf::from(path));
         self.app.save_file();
@@ -1781,37 +1669,6 @@ impl Engine {
             // pane per pixel.
             self.recompose_scroll();
         }
-    }
-
-    /// Forward a face mouse event to a terminal's inner app when it
-    /// requested tracking (vim/htop/tmux). `pane == 0xFFFF` targets the
-    /// dock. Returns true when the shell consumed the event — the face
-    /// should not also act on it (e.g. wheel → scrollback).
-    pub fn terminal_mouse(
-        &mut self,
-        pane: u32,
-        button: u8,
-        x: u16,
-        y: u16,
-        pressed: bool,
-        motion: bool,
-    ) -> bool {
-        let term = if pane == 0xFFFF {
-            if !self.app.terminal.open {
-                return false;
-            }
-            &mut self.app.terminal
-        } else {
-            match self.app.pane_terminal_mut(pane as usize) {
-                Some(t) => t,
-                None => return false,
-            }
-        };
-        if !term.wants_mouse() {
-            return false;
-        }
-        term.mouse_report(button, x, y, pressed, motion);
-        true
     }
 
     /// Restore the previous session's files + cursors, if a session was
@@ -3287,7 +3144,6 @@ mod tests {
             tabs_before + 1,
             "a terminal tab was added"
         );
-        assert_eq!(eng.app.pane_terminals.len(), 1, "one shell, for that tab");
         assert!(
             eng.app.terminal_window_focused(),
             "focused pane shows the terminal tab"
@@ -3305,7 +3161,10 @@ mod tests {
             panes_before,
             "still no split churn"
         );
-        assert!(eng.app.pane_terminals.is_empty(), "its shell ended with it");
+        assert!(
+            !eng.app.tabs.buffers.iter().any(|t| t.terminal.is_some()),
+            "no terminal tab left"
+        );
     }
 
     /// Closing a pane terminal restores the exact document the pane showed
@@ -3375,57 +3234,30 @@ mod tests {
         eng.app.toggle_terminal_full();
 
         assert_eq!(eng.app.split.pane_count(), 2, "still two panes");
-        assert_eq!(eng.app.pane_terminals.len(), 2, "two live processes");
-        let ids: Vec<_> = eng.app.pane_terminals.keys().collect();
-        assert_ne!(ids[0], ids[1], "and they are different shells");
+        let ids: Vec<_> = eng
+            .app
+            .tabs
+            .buffers
+            .iter()
+            .filter_map(|t| t.terminal)
+            .collect();
+        assert_eq!(ids.len(), 2, "two terminal tabs");
+        assert_ne!(ids[0], ids[1], "and they name different shells");
 
-        // Closing one leaves the other's shell alone.
+        // Closing one leaves the other alone.
         eng.focus_pane(1);
         eng.app.toggle_terminal_full();
-        assert_eq!(eng.app.pane_terminals.len(), 1, "one shell ended");
+        assert_eq!(
+            eng.app.tabs.buffers.iter().filter(|t| t.terminal.is_some()).count(),
+            1,
+            "one terminal tab left"
+        );
         assert!(
             eng.app.is_terminal_tab(eng.app.split.panes[0].buffer),
             "pane 0 kept its shell"
         );
     }
 
-    /// A pane terminal's PTY must take its size from the face's measurement —
-    /// before `terminal_resize_pane` existed, pane shells kept their spawn
-    /// guess forever and vim/htop drew garbled.
-    #[test]
-    fn pane_terminal_resize_reaches_the_pane_pty() {
-        let mut eng = Engine::new();
-        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
-        eng.recompose();
-        eng.split_vertical();
-        eng.focus_pane(0);
-        eng.app.toggle_terminal_full();
-        eng.focus_pane(1);
-        eng.app.toggle_terminal_full();
-
-        // Resize pane 1's shell; pane 0's must not move.
-        let before = eng.app.pane_terminal(0).map(|t| (t.cols(), t.rows_count()));
-        eng.terminal_resize_pane(1, 111, 33);
-        let p1 = eng.app.pane_terminal(1).expect("pane 1 runs a shell");
-        assert_eq!(
-            (p1.cols(), p1.rows_count()),
-            (111, 33),
-            "pane 1 PTY resized"
-        );
-        let p0 = eng.app.pane_terminal(0).expect("pane 0 runs a shell");
-        assert_eq!(
-            Some((p0.cols(), p0.rows_count())),
-            before,
-            "pane 0 untouched"
-        );
-
-        // Out-of-range pane is a no-op, not a panic.
-        eng.terminal_resize_pane(7, 80, 24);
-    }
-
-    /// Dock controls must not touch pane shells. They are separate processes,
-    /// and before the per-pane entries existed, a resize or scroll aimed at
-    /// the dock was the only resize a pane ever saw — by accident, through
     /// ⌃T shows and hides the docked strip. It does not start or stop
     /// anything.
     ///
@@ -3531,31 +3363,6 @@ mod tests {
         assert_eq!(c.tabs.len(), 2);
         assert!(c.tabs[0].is_layout, "unified chip keeps the anchor slot");
         assert!(!c.tabs[1].is_layout);
-    }
-
-    /// Pane scrollback is per pane — scrolling one shell must not move the
-    /// other's view.
-    #[test]
-    fn pane_terminal_scroll_moves_only_that_pane() {
-        let mut eng = Engine::new();
-        eng.resize(1200.0, 720.0, 18.0, 9.0, 2.0);
-        eng.recompose();
-        eng.split_vertical();
-        eng.focus_pane(0);
-        eng.app.toggle_terminal_full();
-        eng.focus_pane(1);
-        eng.app.toggle_terminal_full();
-
-        // Give pane 0 some scrollback: feed output through the emulator.
-        // (No PTY round-trip needed — scroll_up bounds at the scrollback len,
-        // so push rows by writing lines through a resize-induced reflow is
-        // overkill; scroll math is what's under test.)
-        eng.terminal_scroll_pane(0, 5);
-        // No scrollback yet → offset stays 0, but the call must not panic and
-        // must leave pane 1 alone either way.
-        assert_eq!(eng.app.pane_terminal(1).map(|t| t.scroll()), Some(0));
-        eng.terminal_scroll_pane(0, -3);
-        assert_eq!(eng.app.pane_terminal(0).map(|t| t.scroll()), Some(0));
     }
 
     /// The unified chip sits at its first member's strip position — the merge

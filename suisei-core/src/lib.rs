@@ -41,7 +41,6 @@ pub mod split;
 pub mod syntax;
 pub mod syntax_worker;
 pub mod tabs;
-pub mod term;
 pub mod theme;
 pub mod undo;
 pub mod update;
