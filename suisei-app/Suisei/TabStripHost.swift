@@ -57,12 +57,14 @@ final class TabStripHostView: NSView {
     /// Tabs the engine has beyond the ABI cap; drawn as a "+N" counter.
     var overflowCount: Int = 0 { didSet { needsDisplay = true } }
 
-    /// Window-space keep-out at each end: the live sidebar boundary on the left
-    /// and a fallback for the document toolbar on the right. The toolbar's real
-    /// leading edge is measured below; these values are boundaries only and do
-    /// not participate in any chip/close/drag arithmetic.
-    /// Set through `setBoundaries` — see there for why they are not assigned
-    /// one at a time.
+    /// Window-space keep-out at each end: the SETTLED sidebar boundary on the
+    /// left (`ContentView.navSettledWidth`, never the live one) and a fallback
+    /// for the document toolbar on the right, whose real leading edge is
+    /// measured below. Boundaries only — neither takes part in any
+    /// chip/close/drag arithmetic.
+    ///
+    /// Assigned together, through `setBoundaries`, so the run can be animated
+    /// to wherever the pair puts it rather than jumping there.
     private(set) var leadingInset: CGFloat = 150 { didSet { needsDisplay = true } }
     private(set) var trailingInset: CGFloat = 150 { didSet { needsDisplay = true } }
 
@@ -310,10 +312,10 @@ final class TabStripHostView: NSView {
         /// `TabStripLayout.plusX` clamps into the viewport, which parks the
         /// button on top of the last tab as soon as the run fills it: it then
         /// draws over a chip and cannot be pressed, because a chip owns that
-        /// point. There is no need for the clamp here. The viewport is
-        /// symmetric about the window's centre and the trailing keep-out is
-        /// 150pt, so past the viewport's right edge there is always 150pt of
-        /// empty band and the button needs 26 of it.
+        /// point. There is no need for the clamp here: the corridor is cut
+        /// short by `trailingRunReserve`, which is exactly this button's box
+        /// and its gaps, so the lane it rides in is already empty and already
+        /// clear of the native toolbar.
         var plusRect: CGRect {
             let trailing = originX + layout.contentWidth + TabStripLayout.gap
             let parked = layout.viewportWidth + TabStripLayout.gap
@@ -779,6 +781,7 @@ final class TabStripHostView: NSView {
     }
 
     /// Move the active capsule to `rect`, travelling from where it is drawn.
+    /// Both are CONTENT-space — see `drawActiveCapsule` for why that matters.
     private func retargetPill(_ rect: CGRect?) {
         guard pillTo != rect else { return }
         pillFrom = livePillRect() ?? rect
@@ -787,7 +790,7 @@ final class TabStripHostView: NSView {
         if rect != nil { startDisplayLink() }
     }
 
-    /// Where the capsule is right now, interpolated.
+    /// Where the capsule is right now, interpolated. Content space.
     private func livePillRect() -> CGRect? {
         guard let to = pillTo else { return nil }
         guard let from = pillFrom, let start = pillStart else { return to }
@@ -941,12 +944,31 @@ final class TabStripHostView: NSView {
     /// an invisible anchor inside every chip, which made the selection's
     /// position a SwiftUI measurement of a chip — one more authority to
     /// disagree with the hit test. The rect is known here.
+    ///
+    /// The pill is tracked in CONTENT space — `chip.x`, with no `viewportX` and
+    /// no `originX` — and translated only when it is drawn.
+    ///
+    /// That distinction is the whole of it. Tracked in view space, the target
+    /// moved on every frame that the RUN moved, and `retargetPill` treats a new
+    /// target as a new journey: it restarted a 0.20s ease each frame and
+    /// therefore only ever completed one frame's worth of one, closing about a
+    /// fifth of the gap per tick. A follower that never arrives — which is
+    /// precisely "선택 회색 알약이 항상 좀 늦게 따라감", and it showed up
+    /// wherever the run translated: sidebar travel, scrolling, a window resize.
+    ///
+    /// A chip's content-space x does not change when the run translates, so
+    /// there is nothing to retarget and the capsule rides the chips rigidly.
+    /// It still travels for the thing it exists for: the selection moving to a
+    /// different chip, or the chips themselves being reordered or resized.
     private func drawActiveCapsule(_ f: Frame, in ctx: CGContext) {
         let target = f.layout.chips.first { c in
             tabs.first { $0.id == c.slot }?.active == true
-        }.map { f.chipRect($0) }
+        }.map { chip in
+            CGRect(x: chip.x, y: f.rowY, width: chip.width, height: TabChipBox.height)
+        }
         retargetPill(target)
-        guard let rect = livePillRect() else { return }
+        guard var rect = livePillRect() else { return }
+        rect.origin.x += f.viewportX + f.originX
         fillCapsule(rect, palette.activeFill, in: ctx)
     }
 
