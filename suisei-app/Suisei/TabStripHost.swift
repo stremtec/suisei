@@ -100,37 +100,44 @@ final class TabStripHostView: NSView {
     /// here is — `currentFrame()` reads the same interpolation the paint does,
     /// so the hit test never sees a different corridor than the eye.
     func setBoundaries(leading: CGFloat, trailing: CGFloat) {
-        guard leadingInset != leading || trailingInset != trailing else { return }
+        moveCorridor(
+            leading: leading, trailing: trailing,
+            toolbar: toolbarLeadingX, animated: true
+        )
+    }
+
+    private var corridorAnimation: TabStripCorridorTravel?
+
+    /// The ONLY way the corridor's three edges are written.
+    ///
+    /// Capturing where the corridor is drawn RIGHT NOW has to happen before
+    /// the new values land, or the journey departs from its own destination
+    /// and nothing moves. That ordering was got wrong twice while the capture
+    /// and the assignment were separate calls, and neither time did anything
+    /// but the eye notice. Here they cannot be separated: the edges are
+    /// private, and this is the only function that sets them.
+    private func moveCorridor(
+        leading: CGFloat, trailing: CGFloat, toolbar: CGFloat?, animated: Bool
+    ) {
+        guard leading != leadingInset
+            || trailing != trailingInset
+            || toolbar != toolbarLeadingX
+        else { return }
+
+        let from = liveCorridor()
         leadingInset = leading
         trailingInset = trailing
-        retargetCorridor()
-    }
+        toolbarLeadingX = toolbar
 
-    private struct CorridorAnimation {
-        let fromLeading: CGFloat
-        let fromTrailing: CGFloat
-        /// Nil when the toolbar had never been measured — there is no position
-        /// to travel from, so the first measurement lands rather than slides.
-        let fromToolbar: CGFloat?
-        let start: TimeInterval
-        let duration: TimeInterval
-    }
-
-    private var corridorAnimation: CorridorAnimation?
-
-    /// Travel to whatever the three boundaries now say, from wherever they are
-    /// being drawn.
-    ///
-    /// One animation for all three, restarted on any change: a toolbar that
-    /// grows while the sidebar is still opening picks the run up mid-glide
-    /// instead of queueing behind it, because `from` is always the live value
-    /// rather than the last target.
-    private func retargetCorridor() {
-        let live = liveCorridor()
-        corridorAnimation = CorridorAnimation(
-            fromLeading: live.leading,
-            fromTrailing: live.trailing,
-            fromToolbar: live.toolbar,
+        guard animated else {
+            corridorAnimation = nil
+            needsDisplay = true
+            return
+        }
+        corridorAnimation = TabStripCorridorTravel(
+            fromLeading: from.leading,
+            fromTrailing: from.trailing,
+            fromToolbar: from.toolbar,
             start: CACurrentMediaTime(), duration: 0.25
         )
         startDisplayLink()
@@ -141,24 +148,14 @@ final class TabStripHostView: NSView {
     /// other motion here, so a dropped frame costs a frame and never a
     /// position.
     private func liveCorridor() -> (leading: CGFloat, trailing: CGFloat, toolbar: CGFloat?) {
-        let settled = (leadingInset, trailingInset, toolbarLeadingX)
-        guard let a = corridorAnimation else { return settled }
-        let t = min(1, (CACurrentMediaTime() - a.start) / a.duration)
-        guard t < 1 else { return settled }
-        let e = CGFloat(1 - pow(1 - t, 3))
-        func lerp(_ from: CGFloat, _ to: CGFloat) -> CGFloat { from + (to - from) * e }
-        // A toolbar edge that has only just appeared, or has gone away, has
-        // nothing to interpolate against; take the destination.
-        let toolbar: CGFloat?
-        if let from = a.fromToolbar, let to = toolbarLeadingX {
-            toolbar = lerp(from, to)
-        } else {
-            toolbar = toolbarLeadingX
+        guard let a = corridorAnimation else {
+            return (leadingInset, trailingInset, toolbarLeadingX)
         }
-        return (
-            leading: lerp(a.fromLeading, leadingInset),
-            trailing: lerp(a.fromTrailing, trailingInset),
-            toolbar: toolbar
+        return a.edges(
+            at: CACurrentMediaTime(),
+            settledLeading: leadingInset,
+            settledTrailing: trailingInset,
+            settledToolbar: toolbarLeadingX
         )
     }
 
@@ -313,24 +310,22 @@ final class TabStripHostView: NSView {
         // Half a point of measurement noise is not the toolbar moving, and
         // treating it as such would restart the travel on every pass.
         guard abs((toolbarLeadingX ?? .infinity) - next) > 0.5 else { return }
-        let hadOne = toolbarLeadingX != nil
-        toolbarLeadingX = next
 
-        // The toolbar's run grows and shrinks — viewer controls arrive with an
-        // image or a PDF and leave with it — so its edge is a boundary that
-        // moves, and the corridor should travel to it exactly as it does to
-        // the sidebar's.
+        // The toolbar's run grows and shrinks — the zoom group and the info
+        // button arrive with an image or a PDF and leave with them — so its
+        // edge is a boundary that moves, and the corridor travels to it as it
+        // does to the sidebar's.
         //
-        // Never during a live resize. The window is already moving under the
-        // pointer, and a second easing on top of it reads as lag: that is the
-        // same reason `windowGeometryChanged` re-centres without animating.
-        // Nor on the first measurement, which has nothing to travel from.
-        if hadOne, !window.inLiveResize {
-            retargetCorridor()
-        } else {
-            corridorAnimation = nil
-            needsDisplay = true
-        }
+        // Two exceptions. The first measurement has nothing to travel from.
+        // And a live resize snaps: the toolbar's edge moves with the window
+        // there, and easing it while the window is already moving under the
+        // pointer is the lag `windowGeometryChanged` avoids for the same
+        // reason.
+        let canTravel = toolbarLeadingX != nil && !window.inLiveResize
+        moveCorridor(
+            leading: leadingInset, trailing: trailingInset,
+            toolbar: next, animated: canTravel
+        )
     }
 
     deinit {
@@ -921,7 +916,7 @@ final class TabStripHostView: NSView {
         if let a = originAnimation, now - a.start >= a.duration {
             originAnimation = nil
         }
-        if let a = corridorAnimation, now - a.start >= a.duration {
+        if corridorAnimation?.isFinished(at: now) == true {
             corridorAnimation = nil
         }
         ghosts.removeAll { now - $0.start >= Self.vanishDuration }

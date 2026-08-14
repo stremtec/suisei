@@ -66,6 +66,63 @@ struct TabStripViewportGeometry: Equatable {
     }
 }
 
+/// An eased journey of the corridor's edges, as a value.
+///
+/// Extracted from the host because the same mistake has now been made three
+/// times in a row, and every one of them was invisible to the compiler: an
+/// animation whose `from` was captured AFTER the destination had already been
+/// written, so it travelled from the target to the target and nothing moved.
+/// Here it is a pure function of a clock and can be asserted on.
+///
+/// Holds only the departure point. The destination is whatever the boundaries
+/// settle at, passed in at sample time — so a target that changes mid-flight
+/// is followed rather than fought.
+struct TabStripCorridorTravel: Equatable {
+    let fromLeading: CGFloat
+    let fromTrailing: CGFloat
+    /// Nil when the toolbar had never been measured: there is no position to
+    /// leave from, so the first measurement lands instead of sliding.
+    let fromToolbar: CGFloat?
+    let start: TimeInterval
+    let duration: TimeInterval
+
+    func isFinished(at now: TimeInterval) -> Bool {
+        now - start >= duration
+    }
+
+    /// Ease-out cubic — leaves quickly, settles softly, the same curve the
+    /// run's origin and the selection capsule use.
+    private func eased(at now: TimeInterval) -> CGFloat {
+        guard duration > 0 else { return 1 }
+        let t = min(1, max(0, (now - start) / duration))
+        return CGFloat(1 - pow(1 - t, 3))
+    }
+
+    func edges(
+        at now: TimeInterval,
+        settledLeading: CGFloat,
+        settledTrailing: CGFloat,
+        settledToolbar: CGFloat?
+    ) -> (leading: CGFloat, trailing: CGFloat, toolbar: CGFloat?) {
+        guard !isFinished(at: now) else {
+            return (settledLeading, settledTrailing, settledToolbar)
+        }
+        let e = eased(at: now)
+        func lerp(_ from: CGFloat, _ to: CGFloat) -> CGFloat { from + (to - from) * e }
+        let toolbar: CGFloat?
+        if let from = fromToolbar, let to = settledToolbar {
+            toolbar = lerp(from, to)
+        } else {
+            toolbar = settledToolbar
+        }
+        return (
+            leading: lerp(fromLeading, settledLeading),
+            trailing: lerp(fromTrailing, settledTrailing),
+            toolbar: toolbar
+        )
+    }
+}
+
 /// Where every tab chip is, computed rather than measured.
 ///
 /// The strip's geometry used to be four independent SwiftUI measurements —

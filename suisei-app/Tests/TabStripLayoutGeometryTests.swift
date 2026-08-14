@@ -27,6 +27,9 @@ private enum TabStripLayoutGeometryTests {
         testViewportStopsBeforeTheNativeToolbar()
         testSidebarSweepDoesNotMoveTheRun()
         testANarrowCorridorStillPushesTheRunClear()
+        testCorridorActuallyTravels()
+        testRetargetingMidFlightLeavesFromWhereItIs()
+        testTheToolbarEdgeTravelsWithTheRest()
         print("TabStripLayoutGeometryTests: passed")
     }
 
@@ -223,6 +226,88 @@ private enum TabStripLayoutGeometryTests {
         // The window centre sits left of where this run can go, so the clamp
         // must have taken it — pinned to the sidebar edge, not centred.
         require(layout.originX == 0, "the clamp did not engage")
+    }
+
+    /// A journey has to have a length.
+    ///
+    /// Twice now the corridor's `from` was captured AFTER the destination had
+    /// been written, so it travelled from the target to the target: the code
+    /// looked animated, compiled, and produced a hard cut. Nothing but an
+    /// assertion catches that.
+    private static func testCorridorActuallyTravels() {
+        let travel = TabStripCorridorTravel(
+            fromLeading: 288, fromTrailing: 150, fromToolbar: 900,
+            start: 0, duration: 0.25
+        )
+        let atStart = travel.edges(
+            at: 0, settledLeading: 150, settledTrailing: 150, settledToolbar: 900
+        )
+        require(abs(atStart.leading - 288) < 0.01, "did not leave from where it was")
+
+        let midway = travel.edges(
+            at: 0.125, settledLeading: 150, settledTrailing: 150, settledToolbar: 900
+        )
+        require(
+            midway.leading < 288 - 1 && midway.leading > 150 + 1,
+            "the corridor teleported instead of travelling: \(midway.leading)"
+        )
+
+        let done = travel.edges(
+            at: 0.25, settledLeading: 150, settledTrailing: 150, settledToolbar: 900
+        )
+        require(abs(done.leading - 150) < 0.01, "did not arrive")
+        require(travel.isFinished(at: 0.25), "finished but not reported so")
+        require(!travel.isFinished(at: 0.2), "reported finished early")
+    }
+
+    /// The destination is read at sample time, not frozen into the journey, so
+    /// a boundary that moves mid-flight is followed rather than fought — and a
+    /// new journey started from the live value picks the run up where it is.
+    private static func testRetargetingMidFlightLeavesFromWhereItIs() {
+        let first = TabStripCorridorTravel(
+            fromLeading: 288, fromTrailing: 150, fromToolbar: nil,
+            start: 0, duration: 0.25
+        )
+        let live = first.edges(
+            at: 0.1, settledLeading: 150, settledTrailing: 150, settledToolbar: nil
+        )
+        let second = TabStripCorridorTravel(
+            fromLeading: live.leading, fromTrailing: live.trailing,
+            fromToolbar: live.toolbar, start: 0.1, duration: 0.25
+        )
+        let resumed = second.edges(
+            at: 0.1, settledLeading: 288, settledTrailing: 150, settledToolbar: nil
+        )
+        require(
+            abs(resumed.leading - live.leading) < 0.01,
+            "the retarget jumped instead of continuing from \(live.leading)"
+        )
+    }
+
+    /// The toolbar's edge grows and shrinks with the viewer controls, so it is
+    /// a moving boundary like the others — except the very first measurement,
+    /// which has no departure point and must land.
+    private static func testTheToolbarEdgeTravelsWithTheRest() {
+        let travel = TabStripCorridorTravel(
+            fromLeading: 150, fromTrailing: 150, fromToolbar: 1000,
+            start: 0, duration: 0.25
+        )
+        let midway = travel.edges(
+            at: 0.125, settledLeading: 150, settledTrailing: 150, settledToolbar: 800
+        )
+        require(
+            (midway.toolbar ?? 0) < 1000 - 1 && (midway.toolbar ?? 0) > 800 + 1,
+            "the toolbar edge snapped: \(String(describing: midway.toolbar))"
+        )
+
+        let firstEver = TabStripCorridorTravel(
+            fromLeading: 150, fromTrailing: 150, fromToolbar: nil,
+            start: 0, duration: 0.25
+        )
+        let landed = firstEver.edges(
+            at: 0.125, settledLeading: 150, settledTrailing: 150, settledToolbar: 800
+        )
+        require(landed.toolbar == 800, "a first measurement should land, not slide")
     }
 
     private static func makeLayout(
