@@ -2158,11 +2158,25 @@ final class EditorCanvasView: NSView {
         // that says the bar is a control and not a decoration — the pointer is
         // already in its column, about to press it. `grown` is 0…1 so the swell
         // is animated rather than stepped.
+        let ease = max(0, min(1, grown))
         let w = EditorMetrics.gitStripeWidth
-            + EditorCanvasView.gitBarHoverGrowth * max(0, min(1, grown))
+            + EditorCanvasView.gitBarHoverGrowth * ease
         let r = w / 2   // a true capsule
-        var out: [CGRect] = []
 
+        // The swell is UNIFORM: the outline moves outward by the same amount
+        // in every direction, which is what the whole shape growing looks
+        // like. Widening alone reads as the bar being stretched sideways —
+        // the ends stay on exactly the rows they sat on, so only the middle
+        // appears to move. Half the width's growth is the per-side amount, so
+        // the hovered outline is the resting one offset by that everywhere.
+        //
+        // Only a capped end can extend. An end that runs off the band has no
+        // end to move; pushing it would just draw further into the clip.
+        let bulge = EditorCanvasView.gitBarHoverGrowth / 2 * ease
+        let top = topCap ? top - bulge : top
+        let bottom = bottomCap ? bottom + bulge : bottom
+
+        var out: [CGRect] = []
         let bodyTop = top + (topCap ? r : 0)
         let bodyBottom = bottom - (bottomCap ? r : 0)
         out += barSlice(
