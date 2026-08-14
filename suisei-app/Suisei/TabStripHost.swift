@@ -117,7 +117,8 @@ final class TabStripHostView: NSView {
     /// but the eye notice. Here they cannot be separated: the edges are
     /// private, and this is the only function that sets them.
     private func moveCorridor(
-        leading: CGFloat, trailing: CGFloat, toolbar: CGFloat?, animated: Bool
+        leading: CGFloat, trailing: CGFloat, toolbar: CGFloat?,
+        animated: Bool, snapToolbar: Bool = false
     ) {
         guard leading != leadingInset
             || trailing != trailingInset
@@ -137,7 +138,11 @@ final class TabStripHostView: NSView {
         corridorAnimation = TabStripCorridorTravel(
             fromLeading: from.leading,
             fromTrailing: from.trailing,
-            fromToolbar: from.toolbar,
+            // A snapped edge departs from its own destination: zero distance,
+            // so it is already there on the first frame while the others keep
+            // travelling. Killing the whole animation to snap one edge is what
+            // put a second jump in the middle of a sidebar toggle before.
+            fromToolbar: snapToolbar ? toolbar : from.toolbar,
             start: CACurrentMediaTime(), duration: 0.25
         )
         startDisplayLink()
@@ -311,20 +316,37 @@ final class TabStripHostView: NSView {
         // treating it as such would restart the travel on every pass.
         guard abs((toolbarLeadingX ?? .infinity) - next) > 0.5 else { return }
 
-        // The toolbar's run grows and shrinks — the zoom group and the info
-        // button arrive with an image or a PDF and leave with them — so its
-        // edge is a boundary that moves, and the corridor travels to it as it
-        // does to the sidebar's.
+        // Give way at once; take the space back gently.
         //
-        // Two exceptions. The first measurement has nothing to travel from.
-        // And a live resize snaps: the toolbar's edge moves with the window
-        // there, and easing it while the window is already moving under the
-        // pointer is the lag `windowGeometryChanged` avoids for the same
-        // reason.
-        let canTravel = toolbarLeadingX != nil && !window.inLiveResize
+        // The toolbar's run grows and shrinks with the viewer controls, and
+        // measured (`scripts/toolbar_grow_probe.swift`) it does so in a single
+        // frame — macOS 26 will not animate a platter whose item set changed,
+        // by any of the four routes there are. So the two directions are not
+        // the same problem.
+        //
+        // GROWING, the toolbar's leading edge moves left and the corridor has
+        // to shrink. Easing that would leave chips drawn under the toolbar for
+        // the length of the ease, which is the overlap the measurement exists
+        // to prevent — and it would be easing against a boundary that already
+        // arrived. Snapping WITH it reads as one coordinated change.
+        //
+        // SHRINKING, the corridor only gains room. Nothing can overlap while
+        // it waits, so it can travel, and the tabs spread into the space
+        // instead of appearing in it.
+        // A first measurement has nowhere to travel from, and a live resize
+        // moves this edge with the window — easing either is the lag
+        // `windowGeometryChanged` avoids. Both settle everything at once.
+        guard toolbarLeadingX != nil, !window.inLiveResize else {
+            moveCorridor(
+                leading: leadingInset, trailing: trailingInset,
+                toolbar: next, animated: false
+            )
+            return
+        }
+        let grew = next < (toolbarLeadingX ?? next)
         moveCorridor(
             leading: leadingInset, trailing: trailingInset,
-            toolbar: next, animated: canTravel
+            toolbar: next, animated: true, snapToolbar: grew
         )
     }
 

@@ -30,6 +30,7 @@ private enum TabStripLayoutGeometryTests {
         testCorridorActuallyTravels()
         testRetargetingMidFlightLeavesFromWhereItIs()
         testTheToolbarEdgeTravelsWithTheRest()
+        testASnappedEdgeDoesNotStopTheOthers()
         print("TabStripLayoutGeometryTests: passed")
     }
 
@@ -308,6 +309,30 @@ private enum TabStripLayoutGeometryTests {
             at: 0.125, settledLeading: 150, settledTrailing: 150, settledToolbar: 800
         )
         require(landed.toolbar == 800, "a first measurement should land, not slide")
+    }
+
+    /// A toolbar that grows must take its space back at once — measured, the
+    /// platter itself changes width in one frame, and easing after it leaves
+    /// chips drawn underneath. But snapping it must not stop a sidebar travel
+    /// that is already running: killing the whole animation to settle one edge
+    /// is what once put a second jump in the middle of a toggle.
+    ///
+    /// The mechanism is that a snapped edge departs from its own destination.
+    private static func testASnappedEdgeDoesNotStopTheOthers() {
+        let travel = TabStripCorridorTravel(
+            fromLeading: 288,          // sidebar still closing
+            fromTrailing: 150,
+            fromToolbar: 800,          // toolbar snapped: from == to
+            start: 0, duration: 0.25
+        )
+        let midway = travel.edges(
+            at: 0.1, settledLeading: 150, settledTrailing: 150, settledToolbar: 800
+        )
+        require(midway.toolbar == 800, "a snapped edge drifted")
+        require(
+            midway.leading < 288 - 1 && midway.leading > 150 + 1,
+            "snapping the toolbar stopped the sidebar travel: \(midway.leading)"
+        )
     }
 
     private static func makeLayout(
