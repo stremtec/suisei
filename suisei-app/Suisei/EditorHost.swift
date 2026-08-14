@@ -2133,7 +2133,7 @@ final class EditorCanvasView: NSView {
         guard height > 0, hw > 0 else { return [] }
         // Centre is FIXED, so a hovered bar grows about its own axis instead of
         // sliding sideways as it thickens.
-        let cx = EditorCanvasView.gitBarX + EditorMetrics.gitStripeWidth / 2
+        let cx = gitBarCentreX
         let t = EditorCanvasView.gitBarStroke
         if staged || hw <= t {
             return [CGRect(x: cx - hw, y: y, width: hw * 2, height: height)]
@@ -2169,23 +2169,59 @@ final class EditorCanvasView: NSView {
             y: bodyTop, height: bodyBottom - bodyTop, halfWidth: r, staged: staged
         )
 
-        // Rounded ends, stepped at half a point — one pixel at 2x.
-        let step = EditorCanvasView.gitBarCapStep
-        var d: CGFloat = 0
-        while d < r {
-            let mid = d + step / 2
-            let hw = (r * r - (r - mid) * (r - mid)).squareRoot()
-            if topCap {
-                out += barSlice(y: top + d, height: step, halfWidth: hw, staged: staged)
-            }
-            if bottomCap {
-                out += barSlice(
-                    y: bottom - d - step, height: step, halfWidth: hw, staged: staged
-                )
-            }
-            d += step
+        if topCap { out += capRects(centreY: top + r, r: r, up: true, staged: staged) }
+        if bottomCap {
+            out += capRects(centreY: bottom - r, r: r, up: false, staged: staged)
         }
         return out
+    }
+
+    /// One rounded end, sliced into COLUMNS.
+    ///
+    /// It was sliced into rows, and that is why a hovered bar looked squared
+    /// off: the topmost row of a dome spans the chord at that depth, so the
+    /// apex came out as one flat horizontal run — the two side strokes meeting
+    /// in a straight line — and the run got longer as the bar thickened,
+    /// because the chord grows with the radius. Round, and reading as square.
+    ///
+    /// A dome is steep in x at the apex and shallow at the shoulders, so
+    /// columns put the unavoidable flat parts on the shoulders, where the
+    /// curve is nearly flat anyway, and let the apex taper.
+    ///
+    /// Rects rather than a path because the Metal renderer takes nothing else,
+    /// and both renderers have to agree about the shape.
+    private static func capRects(
+        centreY cy: CGFloat, r: CGFloat, up: Bool, staged: Bool
+    ) -> [CGRect] {
+        let cx = gitBarCentreX
+        let t = EditorCanvasView.gitBarStroke
+        let step = EditorCanvasView.gitBarCapStep
+        var out: [CGRect] = []
+        var x = cx - r
+        while x < cx + r - 0.0001 {
+            let w = min(step, cx + r - x)
+            let dx = x + w / 2 - cx
+            let outer = (max(0, r * r - dx * dx)).squareRoot()
+            // The hollow's inner edge is the same arc, one stroke smaller. Past
+            // where that circle ends, the stroke is all there is and the column
+            // runs to the cap's base — which is what closes the tip.
+            let inner = r - t
+            let hole = abs(dx) < inner ? (inner * inner - dx * dx).squareRoot() : 0
+            let depth = staged ? outer : outer - hole
+            guard depth > 0.01 else { x += w; continue }
+            out.append(CGRect(
+                x: x, y: up ? cy - outer : cy + outer - depth,
+                width: w, height: depth
+            ))
+            x += w
+        }
+        return out
+    }
+
+    /// The bar's axis. Fixed, from the RESTING width, so a hover thickens it
+    /// about its own centre instead of sliding it sideways.
+    private static var gitBarCentreX: CGFloat {
+        EditorCanvasView.gitBarX + EditorMetrics.gitStripeWidth / 2
     }
 
     /// The menu a change bar opens.
@@ -2372,7 +2408,7 @@ final class EditorCanvasView: NSView {
     /// it exists to show.
     static let gitBarStroke: CGFloat = 1.5
     /// Vertical resolution of the rounded ends.
-    static let gitBarCapStep: CGFloat = 0.5
+    static let gitBarCapStep: CGFloat = 0.25
     /// How much wider a hovered hunk's bar is.
     static let gitBarHoverGrowth: CGFloat = 2
     /// The rules closing the top and bottom of a hovered hunk.
