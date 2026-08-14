@@ -1097,6 +1097,34 @@ pub extern "C" fn suisei_engine_gui_type_char(ptr: *mut SuiseiEngine, ch: u32) {
     }
 }
 
+/// Where the caret is: 1-based row in the high 32 bits, visual column in the
+/// low 32. Zero when there is no engine.
+///
+/// The same two numbers `SuiseiChromeSnapshot` carries — and that is the point.
+/// The typing fast path (`suisei_engine_gui_type_char`) deliberately publishes
+/// no chrome: the face's canvas is a pull renderer and repaints itself from the
+/// engine, so a 180 KiB snapshot per keystroke would be pure waste. But the
+/// face also has to scroll the caret into view on every keystroke, and the only
+/// copy of the caret it had was the one inside that snapshot — so while the
+/// user typed continuously the scroll never moved at all.
+///
+/// The visual column, not the buffer column: a tab is one character and several
+/// cells, and this is used to place a caret on screen.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_caret_row_vcol(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let app = unsafe { (*ptr).0.app() };
+    let cursor = app.buffer.cursor();
+    let row = cursor.row.saturating_add(1) as u64;
+    let vcol = crate::compositor::visual_col(
+        app.buffer.line(cursor.row),
+        crate::compositor::drawn_caret_col(app),
+    ) as u64;
+    (row << 32) | (vcol & 0xFFFF_FFFF)
+}
+
 /// Absolute UTF-16 caret offset in the focused document.
 ///
 /// AppKit's NSTextInputClient ranges are document offsets, not line-local

@@ -457,19 +457,22 @@ final class EditorScrollView: NSScrollView {
     /// the last paint (≤ one frame stale on the same line — the padding covers
     /// it); on a fresh row a cell estimate is enough to bring the row on screen,
     /// and the next paint refines it. Focused pane only — the caret is its own.
-    private func revealCaret() {
+    func revealCaret() {
         if let engine, engine.editorSplit.isSplit, paneIndex != engine.editorSplit.focus {
             return
         }
         guard let engine else { return }
         let lineH = EditorMetrics.lineHeight
         let cell = max(1, EditorMetrics.cellWidth)
-        let row = max(0, Int(engine.chrome.cursorRow) - 1)  // cursorRow is 1-based
+        // Pulled, not read off `chrome`: the typing fast path publishes no
+        // chrome, so the snapshot's caret is from before this run of
+        // keystrokes. Scrolling to it put the view where the caret used to be.
+        let (row, vcol) = engine.caretRowVCol()
         let y = visualY(row)
-        // Real-time glyph x from the CURRENT snapshot (not last paint). Falls
-        // back to a cell estimate only if the caret line can't be fetched.
-        let x: CGFloat = canvas.liveCaretGlyphX()
-            ?? (EditorMetrics.gutter + CGFloat(engine.chrome.caretVCol) * cell)
+        // Real-time glyph x against the same CTLine the draw uses. Falls back
+        // to a cell estimate only if the caret line can't be fetched.
+        let x: CGFloat = canvas.liveCaretGlyphX(row: row)
+            ?? (EditorMetrics.gutter + CGFloat(vcol) * cell)
         // A couple of columns of horizontal lead and half a line above/below so
         // the caret never sits flush against an edge.
         let rect = CGRect(
@@ -993,6 +996,15 @@ final class EditorCanvasView: NSView {
                 // Fast path took it: drop the cached rows and repaint straight
                 // from the engine, without waiting on a SwiftUI publish cycle.
                 noteContentChanged()
+                // …and scroll to the caret ourselves, for the same reason. The
+                // slow path gets this from `EditorScrollView.apply` reading
+                // `scrollIntent == .caret` — but `apply` only runs on a SwiftUI
+                // publish, and this path deliberately does not publish. Chrome
+                // settles 120 ms after the LAST keystroke and the timer is reset
+                // by each one, so while the user typed continuously the view
+                // never followed the caret at all: type past the right edge, or
+                // add lines at the bottom, and the text simply left the screen.
+                (enclosingScrollView as? EditorScrollView)?.revealCaret()
                 return
             }
             engine.dispatch(code: .char_, ch: scalar.value, mods: [])
@@ -1178,9 +1190,11 @@ final class EditorCanvasView: NSView {
     /// caret reveal never lags a frame. Nil when the caret's line can't be
     /// fetched — the caller then falls back to a cell estimate to bring the row
     /// on screen and the next pass refines it.
-    func liveCaretGlyphX() -> CGFloat? {
+    ///
+    /// The row is passed in rather than read from `chrome.cursorRow`: that
+    /// snapshot is stale for the whole of a continuous typing run.
+    func liveCaretGlyphX(row: Int) -> CGFloat? {
         guard engine != nil else { return nil }
-        let row = max(0, Int(engine!.chrome.cursorRow) - 1)
         let band = rows(row, row)
         guard let line = band.first(where: { Int($0.lineNo) - 1 == row && $0.isCursor })
             ?? band.first(where: { Int($0.lineNo) - 1 == row })

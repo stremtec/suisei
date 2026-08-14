@@ -2718,7 +2718,7 @@ fn kind_to_u8(kind: suisei_core::highlight::TokenKind) -> u8 {
 /// edge. Double-clicking a word therefore looked like it left the caret one
 /// place short of the end. Shift the drawn caret past the character when the
 /// cursor is the far end of a selection; the selection itself is untouched.
-fn drawn_caret_col(app: &App) -> usize {
+pub(crate) fn drawn_caret_col(app: &App) -> usize {
     let c = app.buffer.cursor();
     if let Some((start, end)) = app.selected_range() {
         if c.row == end.row && c.col == end.col && (end.row, end.col) >= (start.row, start.col) {
@@ -2785,7 +2785,7 @@ fn expand_tabs(s: &str) -> String {
     out
 }
 
-fn visual_col(line: &str, buf_col: usize) -> usize {
+pub(crate) fn visual_col(line: &str, buf_col: usize) -> usize {
     let mut col = 0usize;
     for (i, ch) in line.chars().enumerate() {
         if i >= buf_col {

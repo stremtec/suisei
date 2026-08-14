@@ -1540,6 +1540,22 @@ final class EngineBridge: ObservableObject {
         return Int(clamping: suisei_engine_caret_utf16_offset(engine))
     }
 
+    /// Where the caret is *now* — 0-based row and visual column.
+    ///
+    /// Not `chrome.cursorRow`. The typing fast path publishes no chrome, on
+    /// purpose: the canvas is a pull renderer and a 180 KiB snapshot per
+    /// keystroke would be waste. But scrolling the caret into view is also a
+    /// per-keystroke job, and the only caret the face had was the one inside
+    /// that snapshot — so while the user typed continuously it read a caret
+    /// from up to 120 ms ago, or from before the whole run of keystrokes.
+    func caretRowVCol() -> (row: Int, vcol: Int) {
+        guard let engine else { return (0, 0) }
+        let packed = suisei_engine_caret_row_vcol(engine)
+        // Row arrives 1-based, like `chrome.cursorRow`; every caller here
+        // wants the buffer row.
+        return (max(0, Int(packed >> 32) - 1), Int(packed & 0xFFFF_FFFF))
+    }
+
     /// Coalesced catch-up for everything typing deliberately skipped.
     private func scheduleChromeSettle() {
         chromeSettleWork?.cancel()

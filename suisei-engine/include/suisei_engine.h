@@ -294,6 +294,10 @@ void suisei_engine_select_all(SuiseiEngine *ptr);
 void suisei_engine_gui_type_char(SuiseiEngine *ptr, uint32_t ch);
 /* Absolute UTF-16 document offset used by NSTextInputClient composition. */
 uint64_t suisei_engine_caret_utf16_offset(const SuiseiEngine *ptr);
+/* Caret position without the chrome snapshot: 1-based row in the high 32 bits,
+   visual column in the low 32. The typing fast path publishes no chrome, and
+   the face still has to scroll the caret into view on every keystroke. */
+uint64_t suisei_engine_caret_row_vcol(const SuiseiEngine *ptr);
 /* Backspace with Mac selection semantics (deletes selection if active). */
 void suisei_engine_gui_delete_backward(SuiseiEngine *ptr);
 /* Forward-delete with Mac selection semantics. */
