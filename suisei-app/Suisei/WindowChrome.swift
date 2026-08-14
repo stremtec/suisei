@@ -76,6 +76,19 @@ enum WindowChrome {
         window.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
         window.titlebarSeparatorStyle = .none
         window.isMovableByWindowBackground = false
+        if window.identifier == settingsIdentifier {
+            // System Settings grows in height, not width. The sidebar +
+            // grouped detail are composed for one column; stretching it
+            // sideways just pads empty glass.
+            let width: CGFloat = 780
+            window.minSize = NSSize(width: width, height: 520)
+            window.maxSize = NSSize(width: width, height: 12_000)
+            if window.frame.width != width {
+                var frame = window.frame
+                frame.size.width = width
+                window.setFrame(frame, display: true)
+            }
+        }
 
         for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
             guard let button = window.standardWindowButton(kind) else { continue }

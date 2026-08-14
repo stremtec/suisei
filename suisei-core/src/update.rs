@@ -20,10 +20,12 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 pub struct UpdateState {
     /// Newer version available (plain semver, no leading `v`).
     pub latest: Option<String>,
+    /// Release notes for `latest`, when the check returned a body.
+    pub notes: String,
     /// A self-update finished this session — restart to load it.
     pub installed: bool,
     pub installing: bool,
-    check_rx: Option<Receiver<Option<String>>>,
+    check_rx: Option<Receiver<Option<LatestRelease>>>,
     /// `:update` before any check finished — install as soon as one lands.
     install_after_check: bool,
     install_rx: Option<Receiver<Result<String, String>>>,
@@ -44,7 +46,7 @@ impl UpdateState {
             Throttle::Ready => self.spawn_check(current),
             Throttle::Wait(cached) => {
                 if let Some(v) = cached {
-                    if is_newer(&v, current) {
+                    if is_suisei_release(&v) && is_newer(&v, current) {
                         self.latest = Some(v);
                     }
                 }
@@ -58,10 +60,22 @@ impl UpdateState {
         self.check_rx = Some(rx);
         std::thread::spawn(move || {
             let found = fetch_latest();
-            write_stamp(found.as_deref());
-            let newer = found.filter(|v| is_newer(v, &current));
+            write_stamp(found.as_ref().map(|r| r.tag.as_str()));
+            let newer = found.filter(|r| is_suisei_release(&r.tag) && is_newer(&r.tag, &current));
             let _ = tx.send(newer);
         });
+    }
+
+    /// Settings "Check Now" — ignore the 4h throttle.
+    pub fn check_now(&mut self, current: &str) {
+        if self.check_rx.is_some() {
+            return;
+        }
+        self.spawn_check(current);
+    }
+
+    pub fn is_checking(&self) -> bool {
+        self.check_rx.is_some()
     }
 
     /// `:update` with nothing known yet: force a fresh check (bypasses the
@@ -77,14 +91,22 @@ impl UpdateState {
         if let Some(rx) = self.check_rx.take() {
             match rx.try_recv() {
                 Ok(found) => {
-                    self.latest = found;
+                    match found {
+                        Some(release) => {
+                            self.latest = Some(release.tag);
+                            self.notes = release.notes;
+                        }
+                        None => {
+                            self.latest = None;
+                            self.notes.clear();
+                        }
+                    }
                     let auto = std::mem::take(&mut self.install_after_check);
                     if self.latest.is_some() {
                         if auto {
                             return Some(self.start_install());
                         }
-                        let v = self.latest.as_deref().unwrap_or_default();
-                        return Some(format!("⬆ xei v{v} available — :update to install"));
+                        return Some("This is not a valid Suisei release.".into());
                     } else if auto {
                         return Some("Already up to date".into());
                     }
@@ -112,31 +134,24 @@ impl UpdateState {
         None
     }
 
-    /// `:update` — replace the running binary with the latest release build.
+    /// Install is gated until Suisei publishes its own signed snapshots.
+    /// The old xei 3.x line must never be written over this binary.
     pub fn start_install(&mut self) -> String {
-        let Some(latest) = self.latest.clone() else {
-            return "Already up to date".into();
-        };
-        if self.installing {
-            return "Update already running…".into();
-        }
-        let Some(triple) = release_triple() else {
-            return format!(
-                "Self-update unsupported on this platform — run: npm i -g xei-editor (or brew upgrade xei) for v{latest}"
-            );
-        };
-        let Ok(exe) = std::env::current_exe() else {
-            return "update: cannot locate current executable".into();
-        };
-        self.installing = true;
-        let (tx, rx) = mpsc::channel();
-        self.install_rx = Some(rx);
-        let msg = format!("⬇ downloading v{latest}…");
-        std::thread::spawn(move || {
-            let _ = tx.send(install_binary(&latest, triple, exe));
-        });
-        msg
+        self.installing = false;
+        "This is not a valid Suisei release.".into()
     }
+}
+
+/// Historic xei tags (3.0.10, …) are not Suisei releases. A leftover
+/// `~/.suisei/update_check` stamp used to offer those as an upgrade.
+fn is_suisei_release(tag: &str) -> bool {
+    let t = tag.trim_start_matches('v');
+    let major = t
+        .split('.')
+        .next()
+        .and_then(|p| p.parse::<u32>().ok())
+        .unwrap_or(0);
+    major < 1 || t.contains("dev") || t.contains("2026")
 }
 
 /// Numeric semver compare on `a.b.c`; returns true when `latest` > `current`.
@@ -177,7 +192,8 @@ enum Throttle {
     Wait(Option<String>),
 }
 
-/// Stamp format: `<unix-ts> [<latest-version>]`.
+/// Stamp format: `suisei2 <unix-ts> [<latest-version>]`.
+/// Older unprefixed stamps are the xei 3.x cache and are ignored.
 fn throttle_state() -> Throttle {
     let stamp = xei_dir().join("update_check");
     let now = SystemTime::now()
@@ -186,9 +202,11 @@ fn throttle_state() -> Throttle {
         .as_secs();
     if let Ok(prev) = std::fs::read_to_string(&stamp) {
         let mut parts = prev.split_whitespace();
-        if let Some(Ok(ts)) = parts.next().map(|p| p.parse::<u64>()) {
-            if now.saturating_sub(ts) < CHECK_INTERVAL.as_secs() {
-                return Throttle::Wait(parts.next().map(|s| s.to_string()));
+        if parts.next() == Some("suisei2") {
+            if let Some(Ok(ts)) = parts.next().map(|p| p.parse::<u64>()) {
+                if now.saturating_sub(ts) < CHECK_INTERVAL.as_secs() {
+                    return Throttle::Wait(parts.next().map(|s| s.to_string()));
+                }
             }
         }
     }
@@ -202,22 +220,27 @@ fn write_stamp(latest: Option<&str>) {
         .as_secs();
     let _ = std::fs::create_dir_all(xei_dir());
     let body = match latest {
-        Some(v) => format!("{now} {v}"),
-        None => now.to_string(),
+        Some(v) => format!("suisei2 {now} {v}"),
+        None => format!("suisei2 {now}"),
     };
     let _ = std::fs::write(xei_dir().join("update_check"), body);
 }
 
-/// Latest release tag from GitHub (regardless of comparison).
-fn fetch_latest() -> Option<String> {
+struct LatestRelease {
+    tag: String,
+    notes: String,
+}
+
+/// Latest GitHub release for Suisei (tag + first paragraph of notes).
+fn fetch_latest() -> Option<LatestRelease> {
     let out = Command::new("curl")
         .args([
             "-fsSL",
             "--max-time",
             "5",
             "-H",
-            "User-Agent: xei-update-check",
-            "https://api.github.com/repos/stremtec/xei/releases/latest",
+            "User-Agent: suisei-update-check",
+            "https://api.github.com/repos/stremtec/suisei/releases/latest",
         ])
         .output()
         .ok()?;
@@ -226,10 +249,32 @@ fn fetch_latest() -> Option<String> {
     }
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     let tag = v.get("tag_name")?.as_str()?;
-    Some(tag.trim_start_matches('v').to_string())
+    let notes = v
+        .get("body")
+        .and_then(|b| b.as_str())
+        .map(first_paragraph)
+        .unwrap_or_default();
+    Some(LatestRelease {
+        tag: tag.trim_start_matches('v').to_string(),
+        notes,
+    })
+}
+
+fn first_paragraph(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let para = trimmed
+        .split("\n\n")
+        .next()
+        .unwrap_or(trimmed)
+        .replace('\n', " ");
+    para.chars().take(480).collect()
 }
 
 /// Release asset triple for the running platform (self-update targets).
+#[allow(dead_code)]
 fn release_triple() -> Option<&'static str> {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Some("aarch64-apple-darwin")
@@ -246,9 +291,10 @@ fn release_triple() -> Option<&'static str> {
 }
 
 /// Download + gunzip + atomic rename over the running executable.
+#[allow(dead_code)]
 fn install_binary(latest: &str, triple: &str, exe: PathBuf) -> Result<String, String> {
     let url =
-        format!("https://github.com/stremtec/xei/releases/download/v{latest}/xei-{triple}.gz");
+        format!("https://github.com/stremtec/suisei/releases/download/v{latest}/suisei-{triple}.gz");
     let tmp = exe.with_extension(format!("update-{latest}"));
     let tmp_s = tmp.display().to_string();
     let exe_s = exe.display().to_string();
@@ -261,7 +307,7 @@ fn install_binary(latest: &str, triple: &str, exe: PathBuf) -> Result<String, St
         .output()
         .map_err(|e| e.to_string())?;
     if out.status.success() {
-        Ok(format!("✓ updated to v{latest} — restart xei to use it"))
+        Ok(format!("Updated to v{latest} — restart Suisei to use it"))
     } else {
         let _ = std::fs::remove_file(&tmp);
         let err = String::from_utf8_lossy(&out.stderr);
@@ -288,5 +334,13 @@ mod tests {
         // extra components / junk tolerated
         assert!(is_newer("3.0.1.1", "3.0.1"));
         assert!(!is_newer("garbage", "3.0.1"));
+    }
+
+    #[test]
+    fn xei_three_is_not_a_suisei_release() {
+        assert!(!is_suisei_release("3.0.10"));
+        assert!(!is_suisei_release("v3.0.10"));
+        assert!(is_suisei_release("0.1.0"));
+        assert!(is_suisei_release("2026dev416ad08"));
     }
 }

@@ -57,17 +57,18 @@ final class TabStripHostView: NSView {
     /// Tabs the engine has beyond the ABI cap; drawn as a "+N" counter.
     var overflowCount: Int = 0 { didSet { needsDisplay = true } }
 
-    /// Window-space keep-out at each end: traffic lights and the sidebar toggle
-    /// on the left, the document toolbar on the right.
-    ///
-    /// A STEP, deliberately — the caller passes a constant per sidebar state,
-    /// never the splitter's live width. It narrows the viewport and never moves
-    /// the centre (measured: the first chip moves 0.00pt across eleven keep-out
-    /// widths while the run fits), so the only case a live width could disturb
-    /// is an overflowing run pinned against the clamp. Feeding a value that
-    /// sweeps with the sidebar animation is exactly what H1 exists to stop.
+    /// Window-space keep-out at each end: the live sidebar boundary on the left
+    /// and a fallback for the document toolbar on the right. The toolbar's real
+    /// leading edge is measured below; these values are boundaries only and do
+    /// not participate in any chip/close/drag arithmetic.
     var leadingInset: CGFloat = 150 { didSet { needsDisplay = true } }
     var trailingInset: CGFloat = 150 { didSet { needsDisplay = true } }
+
+    /// Leading edge of the real native toolbar run in window coordinates.
+    /// `NSToolbar` owns this layout, so reading its item views is the only answer
+    /// that remains correct when audio, image and PDF controls coexist.
+    private var toolbarLeadingX: CGFloat?
+    private var toolbarRefreshScheduled = false
 
     /// Extra drop of the 24pt chip row inside the band, so the strip sits on
     /// the same line as the native toolbar items beside it.
@@ -152,16 +153,70 @@ final class TabStripHostView: NSView {
                 name: name, object: window
             )
         }
+        for name: NSNotification.Name in [
+            NSToolbar.willAddItemNotification,
+            NSToolbar.didRemoveItemNotification,
+        ] {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(nativeToolbarChanged),
+                // SwiftUI may replace the NSToolbar object while keeping this
+                // window and strip alive. Observe the notification globally and
+                // always re-read THIS window below.
+                name: name, object: nil
+            )
+        }
+        scheduleNativeToolbarBoundaryRefresh()
         needsDisplay = true
     }
 
     @objc private func windowGeometryChanged() {
         if let content = superview { pinToTop(of: content) }
+        refreshNativeToolbarBoundary()
         // A resize re-centres the run. It does NOT animate: the window is
         // already moving under the pointer and a second easing on top reads as
         // lag. Only scrolling and tab-set changes animate.
         originAnimation = nil
         needsDisplay = true
+    }
+
+    @objc private func nativeToolbarChanged() {
+        scheduleNativeToolbarBoundaryRefresh()
+    }
+
+    /// SwiftUI may install the item on one run-loop turn and let AppKit assign
+    /// its final frame on the next. Sample after both turns; this never writes
+    /// toolbar geometry and therefore cannot enter the titlebar layout loop.
+    func scheduleNativeToolbarBoundaryRefresh() {
+        guard !toolbarRefreshScheduled else { return }
+        toolbarRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshNativeToolbarBoundary()
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshNativeToolbarBoundary()
+                self?.toolbarRefreshScheduled = false
+            }
+        }
+    }
+
+    private func refreshNativeToolbarBoundary() {
+        guard let window else { return }
+        window.contentView?.superview?.layoutSubtreeIfNeeded()
+        let frames = (window.toolbar?.items ?? []).compactMap { item -> CGRect? in
+            guard item.isVisible, !item.isHidden, let view = item.view,
+                  view.window === window, view.bounds.width > 1
+            else { return nil }
+            return view.convert(view.bounds, to: nil)
+        }
+        // Keep the last valid boundary during the brief turn in which SwiftUI
+        // has removed old item views but AppKit has not placed their replacements.
+        // Falling back to a wide viewport for that one frame is the overlap the
+        // measurement exists to prevent.
+        guard let next = frames.map(\.minX).min() else { return }
+        if next != toolbarLeadingX {
+            toolbarLeadingX = next
+            originAnimation = nil
+            needsDisplay = true
+        }
     }
 
     deinit {
@@ -236,26 +291,40 @@ final class TabStripHostView: NSView {
         }
     }
 
-    /// The viewport, in WINDOW coordinates: the widest span that is symmetric
-    /// about the window's centre and clears both insets.
-    ///
-    /// Symmetry is what makes this "창 기준 중앙" rather than "에디터 기준
-    /// 중앙" — `TabStripLayout` centres the run in its viewport, so a viewport
-    /// centred on the window puts the run on the window's centre line for free,
-    /// and an asymmetric pair of insets only makes the viewport narrower. The
-    /// centre does not move when one side's inset changes, which is the whole
-    /// complaint about the previous strip.
-    private func viewportInWindow() -> (x: CGFloat, width: CGFloat)? {
+    /// The viewport, in WINDOW coordinates: the actual corridor between the
+    /// sidebar and AppKit's native toolbar. It is intentionally asymmetric.
+    /// Mirroring a wide trailing toolbar onto the left was what created the
+    /// hundred-point gap beside the navigator.
+    private func viewportInWindow() -> (x: CGFloat, width: CGFloat, anchor: CGFloat)? {
         guard let window else { return nil }
         let content = window.contentLayoutRect
         guard content.width > 0 else { return nil }
-        let centre = content.midX
-        let half = min(
-            centre - (content.minX + leadingInset),
-            (content.maxX - trailingInset) - centre
-        )
-        guard half > 1 else { return nil }
-        return (x: centre - half, width: half * 2)
+        guard let viewport = TabStripViewportGeometry.resolve(
+            contentMinX: content.minX,
+            contentMaxX: content.maxX,
+            leadingInset: leadingInset,
+            trailingInset: trailingInset,
+            toolbarLeadingX: toolbarLeadingX,
+            // The + is drawn just beyond the chip clip. Keep its 22pt box and
+            // two normal gaps wholly before the native toolbar.
+            trailingRunReserve: trailingRunReserve
+        ) else { return nil }
+        // The WINDOW's centre, carried alongside the corridor rather than
+        // derived from it. `contentLayoutRect` does not move when the sidebar
+        // opens, which is the property the strip's position rests on.
+        return (x: viewport.x, width: viewport.width, anchor: content.midX)
+    }
+
+    private var trailingRunReserve: CGFloat {
+        let counter: CGFloat
+        if overflowCount > 0 {
+            counter = NSAttributedString(string: "+\(overflowCount)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            ]).size().width + TabStripLayout.gap
+        } else {
+            counter = 0
+        }
+        return TabStripLayout.plusWidth + TabStripLayout.gap * 2 + counter
     }
 
     /// Where everything is, right now.
@@ -265,6 +334,7 @@ final class TabStripHostView: NSView {
             tabs: tabs.map { (stableId: $0.stableId, group: $0.group) },
             viewportWidth: vp.width,
             scrollOffset: scrollOffset,
+            preferredCentre: vp.anchor - vp.x,
             widthFor: { [tabs] slot in
                 let t = tabs[slot]
                 return TabChipMetrics.width(
@@ -320,11 +390,18 @@ final class TabStripHostView: NSView {
     }
 
     private func hitTestLocal(_ local: NSPoint) -> NSView? {
-        guard let vp = viewportInWindow() else { return nil }
-        let selfOriginInWindow = convert(NSPoint.zero, to: nil).x
-        let vpX = vp.x - selfOriginInWindow
-        guard local.x >= vpX, local.x <= vpX + vp.width else { return nil }
         guard bounds.contains(local) else { return nil }
+        guard let f = currentFrame() else { return nil }
+        // Chips stop at the viewport. The + deliberately rides just beyond it,
+        // in the lane reserved by `trailingRunReserve`; include only that exact
+        // box rather than making the whole native-toolbar keep-out interactive.
+        let chips = CGRect(
+            x: f.viewportX, y: 0,
+            width: f.layout.viewportWidth, height: bounds.height
+        )
+        guard chips.contains(local)
+                || f.plusRect.insetBy(dx: -2, dy: -2).contains(local)
+        else { return nil }
         return self
     }
 
@@ -1339,6 +1416,11 @@ struct TabStripHost: NSViewRepresentable {
         v.rowDrop = rowDrop
         v.overflowCount = overflowCount
         v.tabs = tabs
+        // Conditional SwiftUI toolbar content can be re-laid out without an
+        // AppKit add/remove notification. This read is coalesced inside the
+        // host and never publishes back into SwiftUI, so it cannot form a
+        // layout feedback loop.
+        v.scheduleNativeToolbarBoundaryRefresh()
 
         let c = context.coordinator
         if c.lastActive != .some(activeSlot) {

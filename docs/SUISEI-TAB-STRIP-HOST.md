@@ -179,13 +179,33 @@ tracking area is the catcher's 24pt bounds inside a 26pt row.
 
 ## 3. Rules the host must obey
 
-**H1 — the viewport is not measured from the layout.**
-The strip is centred on the **window**, so its width comes from the window:
-`NSWindow.frame.width`, which does not animate when the sidebar opens. The
-sidebar's width is an input to *nothing* here. This is also the behaviour asked
-for directly — "탭 바가 사이드바가 열리든 뭐든 창 기준 중앙" — and it supersedes
+**H1 — the run is anchored to the window, not to the corridor.**
+The strip is centred on the **window**: `contentLayoutRect.midX`, which does not
+move when the sidebar opens. This is the behaviour asked for directly — "탭 바가
+사이드바가 열리든 뭐든 창 기준 중앙" — and it supersedes
 `SUISEI-TAB-STRIP-GEOMETRY.md` §4's `originX = (viewportW − contentW) / 2`,
 which centres on the viewport.
+
+> **Amended.** H1 first said the sidebar's width is "an input to *nothing*
+> here", and the strip took a constant keep-out per sidebar state. That is too
+> strong, and it cost the two complaints the constant could not answer: a
+> 146pt hole beside a closed navigator, and overflowing tabs underneath a
+> widened one. The sidebar's width IS an input — to the **corridor**, the span
+> in which chips may be drawn. It is not an input to the **anchor**.
+>
+> `TabStripLayout` takes a `preferredCentre` and clamps it to the corridor. A
+> run that fits sits on the window's centreline no matter what either boundary
+> does; only a corridor too narrow to hold a centred run pushes it clear, which
+> is exactly the case where a boundary must win. `testSidebarSweepDoesNotMoveTheRun`
+> asserts both halves across a full open/close sweep.
+>
+> And the corridor reads the **settled** sidebar width, never the live one.
+> `SplitColumnWidthReporter` republishes on every frame of the animation and
+> every pixel of a splitter drag; `ContentView.settleNavWidth` waits 120ms of
+> quiet before committing, so a toggle produces one step at its end instead of
+> twenty during it. Feeding `navLiveWidth` straight through — the failure this
+> rule was written for, and one of the four values named below as already
+> tried — put the sweep back in June's shape.
 
 **H2 — one `originX`, one instant.**
 Whatever moves the row must be readable by the hit test at event time. Either

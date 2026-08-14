@@ -62,7 +62,7 @@ pub use dap::{
 pub use edit::{Change, Delta, Edit};
 pub use fold::FoldState;
 pub use fs_atomic::atomic_write_file;
-pub use gh::{AuthLoginSession, GhAuthInfo, GhAuthState};
+pub use gh::{AuthLoginSession, GhAuthInfo, GhAuthState, GhContributions, GhProfile};
 pub use git::{GitBlame, GitGutter, GitSign};
 pub use git_graph::{GraphGlyph, GraphRow};
 pub use git_workbench::{

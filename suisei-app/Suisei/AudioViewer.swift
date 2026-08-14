@@ -23,6 +23,18 @@ import SwiftUI
 
 // MARK: - Model
 
+/// The only 20 Hz observable in the playback stack. Views that draw motion
+/// subscribe to this child directly; `ContentView` observes the parent model
+/// and therefore does not rebuild the editor chrome for every audio frame.
+@MainActor
+final class AudioPlayhead: ObservableObject {
+    @Published private(set) var elapsed: Double = 0
+
+    func move(to seconds: Double) {
+        elapsed = seconds.isFinite ? max(0, seconds) : 0
+    }
+}
+
 @MainActor
 final class AudioPlayerModel: ObservableObject {
     @Published var title = ""
@@ -31,8 +43,24 @@ final class AudioPlayerModel: ObservableObject {
     @Published var year = ""
     @Published var artwork: NSImage?
     @Published var duration: Double = 0
-    @Published var elapsed: Double = 0
+    let playhead = AudioPlayhead()
+    var elapsed: Double { playhead.elapsed }
     @Published var playing = false
+    /// The file currently owned by this window's playback session.
+    ///
+    /// This is public state for two small consumers outside the full viewer:
+    /// the titlebar's Now Playing control and the action that reopens the track
+    /// after its document tab was closed.  The player, not either view, remains
+    /// the authority for which file is making sound.
+    @Published private(set) var sourcePath = ""
+    /// Stable document tab that owns `sourcePath`. The player survives ordinary
+    /// pane replacement, but closing this id is an explicit end to the session.
+    @Published private(set) var sourceTabId: UInt64 = 0
+    /// True after the user has actually asked this session to play. Merely
+    /// opening an audio file must not occupy the titlebar or steal Now Playing.
+    /// It stays true while paused so the compact control does not disappear at
+    /// the exact moment its play button changes into a resume button.
+    @Published private(set) var engaged = false
     /// 0…1, this player's own level — not the system's. Persisted, because a
     /// volume that resets every time a file is opened is not a setting.
     @Published var volume: Float = AudioPlayerModel.storedVolume {
@@ -46,6 +74,7 @@ final class AudioPlayerModel: ObservableObject {
     }
 
     private static let volumeKey = "suisei.audio.volume"
+    private static let resumePositionsKey = "suisei.audio.resumePositions"
     private static var storedVolume: Float {
         // `object(forKey:)` first: `float(forKey:)` answers 0 for a key that
         // was never written, which would open every first session silent.
@@ -71,6 +100,7 @@ final class AudioPlayerModel: ObservableObject {
     /// Set while this model owns the system's Now Playing slot, so it is only
     /// given back by whoever took it.
     private var isNowPlaying = false
+    private var lastCheckpointSecond = -1
 
     /// How many buckets the waveform is reduced to. Fixed rather than derived
     /// from the pane width: the scan is the expensive part, panes get resized,
@@ -80,12 +110,17 @@ final class AudioPlayerModel: ObservableObject {
 
     // MARK: Lifecycle
 
-    func open(_ path: String) {
+    func open(_ path: String, tabId: UInt64) {
         guard !path.isEmpty else { return }
-        let url = URL(fileURLWithPath: path)
-        guard url != self.url else { return }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        if url == self.url {
+            if tabId != 0 { sourceTabId = tabId }
+            return
+        }
         close()
         self.url = url
+        sourcePath = url.path
+        sourceTabId = tabId
 
         let item = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: item)
@@ -97,20 +132,29 @@ final class AudioPlayerModel: ObservableObject {
             forInterval: CMTime(seconds: 0.05, preferredTimescale: 600),
             queue: .main
         ) { [weak self] t in
-            MainActor.assumeIsolated { self?.elapsed = t.seconds }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.playhead.move(to: t.seconds)
+                self.checkpointPosition()
+            }
         }
         // Fall back to the filename immediately, so the pane is never blank
         // while the metadata loads. Real titles overwrite it if they exist.
         title = url.deletingPathExtension().lastPathComponent
 
         loadTask = Task { [weak self] in await self?.loadMetadata(url) }
-        scanTask = Task.detached(priority: .utility) { [weak self] in
-            let peaks = Self.scanPeaks(url, buckets: Self.bucketCount)
-            await MainActor.run { self?.peaks = peaks }
+        let buckets = Self.bucketCount
+        scanTask = Task { [weak self] in
+            let peaks = await Task.detached(priority: .utility) {
+                Self.scanPeaks(url, buckets: buckets)
+            }.value
+            guard !Task.isCancelled, self?.url == url else { return }
+            self?.peaks = peaks
         }
     }
 
     func close() {
+        checkpointPosition(force: true)
         resignNowPlaying()
         scanTask?.cancel()
         loadTask?.cancel()
@@ -121,13 +165,25 @@ final class AudioPlayerModel: ObservableObject {
         player?.pause()
         player = nil
         url = nil
+        sourcePath = ""
+        sourceTabId = 0
+        engaged = false
         playing = false
-        elapsed = 0
+        playhead.move(to: 0)
         duration = 0
         peaks = []
         artwork = nil
         sections = []
         title = ""; artist = ""; album = ""; year = ""; format = ""
+        lastCheckpointSecond = -1
+    }
+
+    /// Repairs the tab owner when an older playback session was started before
+    /// stable viewer ids were available. New sessions already carry a non-zero
+    /// id; this is only a compatibility seam and never changes a valid owner.
+    func adoptTabIdIfMissing(_ tabId: UInt64) {
+        guard sourceTabId == 0, tabId != 0 else { return }
+        sourceTabId = tabId
     }
 
     deinit {
@@ -149,6 +205,7 @@ final class AudioPlayerModel: ObservableObject {
         // Restart from the top rather than sitting at the end doing nothing.
         if duration > 0, elapsed >= duration - 0.05 { seek(to: 0) }
         player.play()
+        engaged = true
         playing = true
         becomeNowPlaying()
     }
@@ -156,6 +213,7 @@ final class AudioPlayerModel: ObservableObject {
     func pause() {
         player?.pause()
         playing = false
+        checkpointPosition(force: true)
         // Keep the Now Playing entry but tell the system it is paused, which
         // is what leaves the Control Center tile showing this track with a
         // play button instead of blanking it.
@@ -170,7 +228,8 @@ final class AudioPlayerModel: ObservableObject {
             to: CMTime(seconds: clamped, preferredTimescale: 600),
             toleranceBefore: .zero, toleranceAfter: .zero
         )
-        elapsed = clamped
+        playhead.move(to: clamped)
+        checkpointPosition(force: true)
         pushNowPlayingTime()
     }
 
@@ -219,7 +278,7 @@ final class AudioPlayerModel: ObservableObject {
             MPMediaItemPropertyAlbumTitle: album,
             MPMediaItemPropertyPlaybackDuration: duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
-            MPNowPlayingInfoPropertyPlaybackRate: 1.0,
+            MPNowPlayingInfoPropertyPlaybackRate: playing ? 1.0 : 0.0,
         ]
         if let artwork {
             info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: artwork.size) { _ in
@@ -227,7 +286,7 @@ final class AudioPlayerModel: ObservableObject {
             }
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        MPNowPlayingInfoCenter.default().playbackState = .playing
+        MPNowPlayingInfoCenter.default().playbackState = playing ? .playing : .paused
     }
 
     private func pushNowPlayingTime() {
@@ -255,7 +314,9 @@ final class AudioPlayerModel: ObservableObject {
     private func loadMetadata(_ url: URL) async {
         let asset = AVURLAsset(url: url)
         if let d = try? await asset.load(.duration), d.isNumeric {
+            guard self.url == url else { return }
             duration = d.seconds
+            restorePosition(for: url, duration: d.seconds)
         }
         // Every metadata format the container carries, not just the common
         // keys: an MP3's ID3 has a genre, a track number and a composer that
@@ -287,6 +348,37 @@ final class AudioPlayerModel: ObservableObject {
         let audio = await Self.audioFacts(asset)
         format = Self.oneLineFormat(audio, url: url)
         sections = Self.buildSections(audio, tags: tags, url: url, duration: duration)
+        // Playback can begin before metadata finishes loading. Refresh the
+        // system tile once the real title/artwork arrives instead of leaving
+        // it with the filename fallback for the rest of the track.
+        if isNowPlaying { becomeNowPlaying() }
+    }
+
+    // MARK: Resume position
+
+    /// The 20 Hz observer exists for a smooth waveform, not for storage.
+    /// Checkpoint at most every two seconds and immediately on pause/seek/close.
+    private func checkpointPosition(force: Bool = false) {
+        guard let url, elapsed.isFinite, elapsed >= 0 else { return }
+        let second = Int(elapsed.rounded(.down))
+        guard force || abs(second - lastCheckpointSecond) >= 2 else { return }
+        lastCheckpointSecond = second
+
+        var positions = UserDefaults.standard.dictionary(forKey: Self.resumePositionsKey)
+            as? [String: Double] ?? [:]
+        positions[url.standardizedFileURL.path] =
+            duration > 0 && elapsed >= duration - 2 ? 0 : elapsed
+        UserDefaults.standard.set(positions, forKey: Self.resumePositionsKey)
+    }
+
+    private func restorePosition(for url: URL, duration: Double) {
+        guard elapsed < 0.05,
+              let positions = UserDefaults.standard.dictionary(forKey: Self.resumePositionsKey)
+                as? [String: Double],
+              let saved = positions[url.standardizedFileURL.path],
+              saved > 0.25, saved < duration - 2
+        else { return }
+        seek(to: saved)
     }
 
     /// What the container says about the audio stream itself.
@@ -557,9 +649,21 @@ final class AudioPlayerModel: ObservableObject {
 
 struct AudioViewer: View {
     let path: String
+    let tabId: UInt64
     let palette: ViewerPalette
+    /// Owned by the editor WINDOW, not this transient pane. Switching tabs
+    /// destroys and recreates `AudioViewer`; tying AVPlayer to this view made
+    /// that ordinary navigation indistinguishable from pressing Stop.
+    @ObservedObject var model: AudioPlayerModel
+    @ObservedObject private var playhead: AudioPlayhead
 
-    @StateObject private var model = AudioPlayerModel()
+    init(path: String, tabId: UInt64, palette: ViewerPalette, model: AudioPlayerModel) {
+        self.path = path
+        self.tabId = tabId
+        self.palette = palette
+        self.model = model
+        _playhead = ObservedObject(wrappedValue: model.playhead)
+    }
 
     /// How big the hero block is drawn — artwork, title, artist, year and the
     /// two buttons, all off this one number so they grow as one thing.
@@ -667,11 +771,10 @@ struct AudioViewer: View {
             .padding(.bottom, 18)
         }
         .background(palette.bg)
-        .task(id: path) { model.open(path) }
+        .task(id: "\(tabId):\(path)") { model.open(path, tabId: tabId) }
         .onAppear { claimToolbar() }
         .onDisappear {
             controls.release(.audio)
-            model.close()
         }
         .onChange(of: heroScale) { _, _ in pushScale() }
         .onChange(of: model.sections) { _, next in controls.setSections(next) }
@@ -840,7 +943,7 @@ struct AudioViewer: View {
                 iconButton("goforward.10") { model.skip(10) }
                 WaveformStrip(
                     peaks: model.peaks,
-                    progress: model.duration > 0 ? model.elapsed / model.duration : 0,
+                    progress: model.duration > 0 ? playhead.elapsed / model.duration : 0,
                     palette: palette
                 ) { frac in
                     model.seek(to: frac * model.duration)
@@ -901,13 +1004,240 @@ struct AudioViewer: View {
     }
 
     private var timeLabel: String {
-        "\(Self.clock(model.elapsed)) / \(Self.clock(model.duration))"
+        "\(Self.clock(playhead.elapsed)) / \(Self.clock(model.duration))"
     }
 
     static func clock(_ s: Double) -> String {
         guard s.isFinite, s >= 0 else { return "0:00" }
         let t = Int(s.rounded(.down))
         return String(format: "%d:%02d", t / 60, t % 60)
+    }
+}
+
+// MARK: - Native toolbar identity
+
+/// Artwork and two-line identity inside the editor's real NSToolbar platter.
+///
+/// Transport buttons and this identity live in one `ToolbarItemGroup`, so
+/// AppKit supplies the continuous native platter and each button's hover well.
+/// This centre item is deliberately one fixed-width piece: only the title ink
+/// moves, never the platter or the controls around it.
+struct CompactNowPlayingIdentity: View {
+    @ObservedObject var model: AudioPlayerModel
+    let openTrack: () -> Void
+
+    @State private var showsScrubber = false
+    @State private var identityHovered = false
+    @State private var scrubberHovered = false
+    @State private var hoverTask: Task<Void, Never>?
+    @State private var closeTask: Task<Void, Never>?
+
+    var body: some View {
+        Button(action: openTrack) {
+            HStack(spacing: 7) {
+                artwork
+                    .frame(width: 24, height: 24)
+                    .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 0) {
+                    MarqueeText(model.title.isEmpty ? "오디오" : model.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 112, height: 13, alignment: .leading)
+
+                    Text(model.artist.isEmpty ? "Suisei" : model.artist)
+                        .font(.system(size: 9.5, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(width: 112, alignment: .leading)
+                }
+            }
+            .frame(height: 28)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("재생 중인 파일 열기")
+        .accessibilityLabel("\(model.title), \(model.artist)")
+        .onHover { inside in
+            identityHovered = inside
+            if inside {
+                scheduleScrubber()
+            } else {
+                scheduleClose()
+            }
+        }
+        .popover(isPresented: $showsScrubber, arrowEdge: .top) {
+            NowPlayingScrubber(model: model)
+                .onHover { inside in
+                    scrubberHovered = inside
+                    if inside {
+                        closeTask?.cancel()
+                    } else {
+                        scheduleClose()
+                    }
+                }
+        }
+        .onDisappear {
+            hoverTask?.cancel()
+            closeTask?.cancel()
+        }
+    }
+
+    @ViewBuilder
+    private var artwork: some View {
+        if let image = model.artwork {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fill)
+        } else {
+            ZStack {
+                Color.accentColor.opacity(0.16)
+                Image(systemName: "music.note")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// A deliberate dwell keeps an incidental pass across the titlebar from
+    /// opening UI.  The close grace is longer than the physical gap between
+    /// toolbar item and popover, so the pointer can travel into the scrubber
+    /// without the surface disappearing under it.
+    private func scheduleScrubber() {
+        closeTask?.cancel()
+        guard !showsScrubber else { return }
+        hoverTask?.cancel()
+        hoverTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled, identityHovered else { return }
+            showsScrubber = true
+        }
+    }
+
+    private func scheduleClose() {
+        hoverTask?.cancel()
+        closeTask?.cancel()
+        closeTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 320_000_000)
+            guard !Task.isCancelled, !identityHovered, !scrubberHovered else { return }
+            showsScrubber = false
+        }
+    }
+}
+
+/// The secondary surface is intentionally a system popover rather than a
+/// hand-drawn overlay in the titlebar. It gets the current macOS glass,
+/// shadow, vibrancy, keyboard dismissal and window attachment for free.
+private struct NowPlayingScrubber: View {
+    @ObservedObject var model: AudioPlayerModel
+    @ObservedObject private var playhead: AudioPlayhead
+    @State private var draggedPosition: Double?
+
+    init(model: AudioPlayerModel) {
+        self.model = model
+        _playhead = ObservedObject(wrappedValue: model.playhead)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(AudioViewer.clock(position))
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+                .frame(width: 34, alignment: .trailing)
+
+            Slider(
+                value: Binding(
+                    get: { position },
+                    set: { draggedPosition = $0 }
+                ),
+                in: 0...max(1, model.duration),
+                onEditingChanged: { editing in
+                    if editing {
+                        draggedPosition = model.elapsed
+                    } else if let destination = draggedPosition {
+                        model.seek(to: destination)
+                        draggedPosition = nil
+                    }
+                }
+            )
+            .frame(width: 208)
+            .disabled(model.duration <= 0)
+
+            Text("\u{2212}\(AudioViewer.clock(remaining))")
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+                .frame(width: 42, alignment: .leading)
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .padding(.horizontal, 13)
+        .padding(.vertical, 9)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("재생 위치")
+    }
+
+    private var position: Double {
+        min(max(0, draggedPosition ?? playhead.elapsed), model.duration)
+    }
+
+    private var remaining: Double {
+        max(0, model.duration - position)
+    }
+}
+
+/// A restrained native-player marquee. It starts only when the label is
+/// genuinely wider than its mask, rests at each end, and honours Reduce Motion.
+private struct MarqueeText: View {
+    let text: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var textWidth: CGFloat = 0
+    @State private var viewportWidth: CGFloat = 0
+    @State private var shifted = false
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { textWidth = geo.size.width }
+                        .onChange(of: geo.size.width) { _, width in textWidth = width }
+                }
+            )
+            .offset(x: shifted ? -overflow : 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { viewportWidth = geo.size.width; restart() }
+                        .onChange(of: geo.size.width) { _, width in
+                            viewportWidth = width
+                            restart()
+                        }
+                }
+            )
+            .onChange(of: textWidth) { _, _ in restart() }
+            .onChange(of: text) { _, _ in restart() }
+    }
+
+    private var overflow: CGFloat { max(0, textWidth - viewportWidth) }
+
+    private func restart() {
+        shifted = false
+        guard !reduceMotion, overflow > 6 else { return }
+        // The reference nudges the title rather than racing a ticker. A fixed
+        // reading speed keeps short and long overflows equally calm.
+        withAnimation(
+            .easeInOut(duration: max(2.8, Double(overflow) / 13))
+                .delay(1.2)
+                .repeatForever(autoreverses: true)
+        ) {
+            shifted = true
+        }
     }
 }
 

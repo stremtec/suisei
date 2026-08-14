@@ -5,12 +5,14 @@ import AppKit
 /// forms, live theme preview. Values come from Core rows (single source).
 struct SettingsWindowView: View {
     @ObservedObject var engine: EngineBridge
+    @ObservedObject private var accountStore = EngineBridge.shared.githubAccount
     @Environment(\.dismiss) private var dismiss
     @State private var engineReferenceExpanded = false
     @State private var searchText = ""
     @State private var selectedPageID: PageID = .general
     @State private var pageHistory: [PageID] = [.general]
     @State private var historyIndex = 0
+    @State private var confirmSignOut = false
 
     private static let sidebarWidth: CGFloat = 240
 
@@ -56,8 +58,10 @@ struct SettingsWindowView: View {
     }
 
     private enum PageID: String, Hashable {
-        case general
         case accounts
+        case accountProfile
+        case accountSecurity
+        case general
         case appearance
         case editor
         case languageServers
@@ -65,6 +69,22 @@ struct SettingsWindowView: View {
         case extensions
         case shortcuts
         case softwareUpdate
+        case softwareUpdateAutomatic
+        case softwareUpdateBeta
+
+        var isAccountFamily: Bool {
+            switch self {
+            case .accounts, .accountProfile, .accountSecurity: return true
+            default: return false
+            }
+        }
+
+        var isSoftwareUpdateFamily: Bool {
+            switch self {
+            case .softwareUpdate, .softwareUpdateAutomatic, .softwareUpdateBeta: return true
+            default: return false
+            }
+        }
     }
 
     private struct Page: Identifiable {
@@ -93,12 +113,12 @@ struct SettingsWindowView: View {
     /// but present a much smaller, focused settings surface.
     private let pages: [Page] = [
         Page(
-            id: .general, title: "General", symbol: "gearshape",
-            searchTerms: "overview settings preferences", corePage: 1
+            id: .accounts, title: "GitHub Account", symbol: "person.crop.circle",
+            searchTerms: "account github sign in profile avatar token", corePage: 1
         ),
         Page(
-            id: .accounts, title: "Accounts", symbol: "at",
-            searchTerms: "account google sign in sync", corePage: 1
+            id: .general, title: "General", symbol: "gearshape",
+            searchTerms: "overview settings preferences", corePage: 1
         ),
         Page(
             id: .appearance, title: "Appearance", symbol: "paintbrush",
@@ -126,7 +146,7 @@ struct SettingsWindowView: View {
         ),
         Page(
             id: .softwareUpdate, title: "Software Update", symbol: "arrow.triangle.2.circlepath",
-            searchTerms: "software update version release", corePage: 1
+            searchTerms: "software update version release beta automatic", corePage: 1
         ),
     ]
 
@@ -147,12 +167,39 @@ struct SettingsWindowView: View {
     /// selection drawn as a 14%-accent wash instead of the filled capsule every
     /// other Mac sidebar uses.
     private var currentPage: Page {
-        pages.first(where: { $0.id == selectedPageID }) ?? pages[0]
+        switch selectedPageID {
+        case .accountProfile:
+            return Page(
+                id: .accountProfile, title: "Profile", symbol: "person.crop.circle",
+                searchTerms: "", corePage: 1
+            )
+        case .accountSecurity:
+            return Page(
+                id: .accountSecurity, title: "Sign-In & Security", symbol: "lock",
+                searchTerms: "", corePage: 1
+            )
+        case .softwareUpdateAutomatic:
+            return Page(
+                id: .softwareUpdateAutomatic, title: "Automatic Updates",
+                symbol: "arrow.triangle.2.circlepath", searchTerms: "", corePage: 1
+            )
+        case .softwareUpdateBeta:
+            return Page(
+                id: .softwareUpdateBeta, title: "Beta Updates",
+                symbol: "hammer", searchTerms: "", corePage: 1
+            )
+        default:
+            return pages.first(where: { $0.id == selectedPageID }) ?? pages[0]
+        }
     }
 
     private var selectedPage: Binding<PageID?> {
         Binding(
-            get: { selectedPageID },
+            get: {
+                if selectedPageID.isAccountFamily { return .accounts }
+                if selectedPageID.isSoftwareUpdateFamily { return .softwareUpdate }
+                return selectedPageID
+            },
             set: { if let id = $0 { navigate(to: id) } }
         )
     }
@@ -164,6 +211,16 @@ struct SettingsWindowView: View {
             settingsDetail
         }
         .navigationTitle(currentPage.title)
+        .confirmationDialog(
+            "Sign out of GitHub?",
+            isPresented: $confirmSignOut,
+            titleVisibility: .visible
+        ) {
+            Button("Sign Out", role: .destructive) { engine.githubSignOut() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Suisei will stop using this GitHub identity. Local repositories stay on disk.")
+        }
         .toolbarTitleDisplayMode(.inlineLarge)
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -172,8 +229,7 @@ struct SettingsWindowView: View {
         }
         // Keep the split view responsible for the entire resizable window so
         // the sidebar material and the detail background both reach the bottom.
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .frame(minWidth: 740, minHeight: 480)
+        .frame(minWidth: 780, idealWidth: 780, maxWidth: 780, minHeight: 520)
         .preferredColorScheme(preferredScheme)
         .tint(theme.color(theme.accent))
         .accentColor(theme.color(theme.accent))
@@ -219,7 +275,12 @@ struct SettingsWindowView: View {
     /// below the titlebar safe area instead of one full-height surface.
     private var sidebar: some View {
         List(selection: selectedPage) {
-            ForEach(visiblePages) { page in
+            if visiblePages.contains(where: { $0.id == .accounts }) {
+                Section {
+                    accountSidebarRow.tag(PageID.accounts)
+                }
+            }
+            ForEach(visiblePages.filter { $0.id != .accounts }) { page in
                 sidebarRow(page).tag(page.id)
             }
         }
@@ -271,6 +332,26 @@ struct SettingsWindowView: View {
         }
     }
 
+    /// System Settings puts the signed-in identity first: a circular photo,
+    /// the person's name, and a small "GitHub Account" caption. Signed out
+    /// keeps the same row so the destination does not jump.
+    private var accountSidebarRow: some View {
+        let snap = accountStore.snap
+        return HStack(spacing: 8) {
+            GitHubAvatarView(image: accountStore.avatar, size: 36, signedIn: snap.isSignedIn)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(snap.isSignedIn ? snap.displayName : "GitHub Account")
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                Text(snap.isSignedIn ? "GitHub Account" : (snap.isMissingCLI ? "Not Installed" : "Sign In"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
     private func sidebarIcon(for page: Page, size: CGFloat) -> some View {
         Image(systemName: page.symbol)
             .symbolRenderingMode(.monochrome)
@@ -304,7 +385,32 @@ struct SettingsWindowView: View {
     }
 
     private func navigate(to id: PageID, recordingHistory: Bool = true) {
-        guard let page = pages.first(where: { $0.id == id }) else { return }
+        let page: Page
+        switch id {
+        case .accountProfile:
+            page = Page(
+                id: .accountProfile, title: "Profile", symbol: "person.crop.circle",
+                searchTerms: "", corePage: 1
+            )
+        case .accountSecurity:
+            page = Page(
+                id: .accountSecurity, title: "Sign-In & Security", symbol: "lock",
+                searchTerms: "", corePage: 1
+            )
+        case .softwareUpdateAutomatic:
+            page = Page(
+                id: .softwareUpdateAutomatic, title: "Automatic Updates",
+                symbol: "arrow.triangle.2.circlepath", searchTerms: "", corePage: 1
+            )
+        case .softwareUpdateBeta:
+            page = Page(
+                id: .softwareUpdateBeta, title: "Beta Updates",
+                symbol: "hammer", searchTerms: "", corePage: 1
+            )
+        default:
+            guard let listed = pages.first(where: { $0.id == id }) else { return }
+            page = listed
+        }
 
         if recordingHistory, id != selectedPageID {
             pageHistory = Array(pageHistory.prefix(historyIndex + 1))
@@ -319,6 +425,9 @@ struct SettingsWindowView: View {
         // but backed by About/empty rows. The Core operation is idempotent and
         // is the correct authority for this transition.
         engine.settingsGotoPage(page.corePage)
+        if id.isAccountFamily {
+            engine.refreshGitHubAccount()
+        }
     }
 
     /// Rows of one kind, in Core's order.
@@ -359,27 +468,72 @@ struct SettingsWindowView: View {
 
     private var settingsDetail: some View {
         VStack(spacing: 0) {
-            // No `ScrollView` around this: `.formStyle(.grouped)` already
-            // scrolls, and nesting the two gave the page a second scroller and
-            // its own inset that never lined up with the group insets.
-            //
-            // The big inline page title is gone too — the window title carries
-            // it now, which is where System Settings puts it, and it stops the
-            // heading from scrolling away from the groups it names.
-            Form {
+            // Account pages own their Form so the Apple Account hero can sit
+            // above the grouped rows. Everything else stays a single grouped
+            // Form — nesting a ScrollView around it used to grow a second
+            // scroller whose insets never lined up with the groups.
+            Group {
                 switch selectedPageID {
-                case .general: generalSections
-                case .accounts: accountSections
-                case .appearance: appearanceSections
-                case .editor: editorSections
-                case .languageServers: languageServerSections
-                case .sourceControl: sourceControlSections
-                case .extensions: extensionsSections
-                case .shortcuts: helpSections
-                case .softwareUpdate: softwareUpdateSections
+                case .softwareUpdate:
+                    SoftwareUpdatePage(
+                        store: EngineBridge.shared.softwareUpdate,
+                        automaticUpdates: rows(.updateCheck).first,
+                        onOpenAutomatic: { navigate(to: .softwareUpdateAutomatic) },
+                        onOpenBeta: { navigate(to: .softwareUpdateBeta) },
+                        onInfo: { engine.openSoftwareUpdateNotes() }
+                    )
+                case .softwareUpdateAutomatic:
+                    SoftwareUpdateAutomaticPage(
+                        automaticUpdates: rows(.updateCheck).first,
+                        onSetAutomatic: { on in
+                            if let row = rows(.updateCheck).first {
+                                engine.settingsSetValue(row.id, value: on ? 1 : 0)
+                            }
+                        }
+                    )
+                case .softwareUpdateBeta:
+                    SoftwareUpdateBetaPage(store: EngineBridge.shared.softwareUpdate)
+                case .accounts:
+                    GitHubAccountRootPage(
+                        store: accountStore,
+                        accent: liveAccent,
+                        onOpenProfile: { navigate(to: .accountProfile) },
+                        onOpenSecurity: { navigate(to: .accountSecurity) },
+                        onSignIn: { engine.githubSignIn() },
+                        onCancel: { engine.githubCancelSignIn() },
+                        onSignOut: { confirmSignOut = true },
+                        onRefresh: { engine.refreshGitHubAccount() },
+                        onInstall: { engine.githubInstallDocs() },
+                        onOpenGitHub: { engine.githubOpenProfile() },
+                        onHelp: { engine.githubInstallDocs() }
+                    )
+                case .accountProfile:
+                    GitHubAccountProfilePage(
+                        store: accountStore,
+                        onOpenGitHub: { engine.githubOpenProfile() }
+                    )
+                case .accountSecurity:
+                    GitHubAccountSecurityPage(
+                        store: accountStore,
+                        onSetupGit: { engine.githubSetupGit() },
+                        onRefresh: { engine.refreshGitHubAccount() }
+                    )
+                default:
+                    Form {
+                        switch selectedPageID {
+                        case .general: generalSections
+                        case .appearance: appearanceSections
+                        case .editor: editorSections
+                        case .languageServers: languageServerSections
+                        case .sourceControl: sourceControlSections
+                        case .extensions: extensionsSections
+                        case .shortcuts: helpSections
+                        default: EmptyView()
+                        }
+                    }
+                    .formStyle(.grouped)
                 }
             }
-            .formStyle(.grouped)
             .animation(nil, value: selectedPageID)
 
             // Apply bar, only where something can be applied.
@@ -425,61 +579,8 @@ struct SettingsWindowView: View {
         }
     }
 
-    @ViewBuilder private var accountSections: some View {
-        Section {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "person.crop.circle")
-                    .font(.system(size: 28, weight: .regular))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Sign in to a Google Account")
-                        .fontWeight(.medium)
-                    Text("Account sync is planned but is not available in this build.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, 4)
-        }
-
-        Section {
-            LabeledContent("Status", value: "Not Connected")
-        } footer: {
-            Text("Suisei does not store placeholder credentials or make an account request from this page.")
-        }
-    }
-
-    @ViewBuilder private var softwareUpdateSections: some View {
-        Section {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 24, weight: .regular))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Software Update")
-                        .fontWeight(.medium)
-                    Text("Suisei can check for a newer release in the background at launch.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, 4)
-        }
-
-        Section {
-            LabeledContent("Current Version", value: EngineBridge.engineVersion)
-            LabeledContent("Release Channel", value: "Development")
-            if let updateCheck = rows(.updateCheck).first {
-                settingControl(updateCheck)
-            }
-        } footer: {
-            Text("Automatic checks are throttled and do not block editor startup.")
-        }
-    }
+    // Account pages live in GitHubAccount.swift — they are a System Settings
+    // identity surface, not another Core settings row list.
 
     // MARK: General
 

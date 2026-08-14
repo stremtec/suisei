@@ -102,6 +102,9 @@ struct EditorPaneSnap: Equatable, Identifiable {
     var id: Int
     var focused: Bool
     var tabIndex: Int
+    /// Stable document identity (`BufferTab::id`). Viewer sessions outlive a
+    /// pane transition, so they must not retain the reorderable slot index.
+    var tabStableId: UInt64 = 0
     /// Actual document title supplied per pane. A visible unified layout chip
     /// is not a reliable lookup key for the buffers inside that layout.
     var title: String = "[No Name]"
@@ -149,6 +152,7 @@ extension SplitSnap {
             if x.id != y.id { return "split.pane.id" }
             if x.focused != y.focused { return "split.pane.focused" }
             if x.tabIndex != y.tabIndex { return "split.pane.tabIndex" }
+            if x.tabStableId != y.tabStableId { return "split.pane.tabStableId" }
             if x.title != y.title { return "split.pane.title" }
             if x.scroll != y.scroll { return "split.pane.scroll" }
             if x.hscroll != y.hscroll { return "split.pane.hscroll" }
@@ -948,6 +952,9 @@ enum EditorMetrics {
 final class EngineBridge: ObservableObject {
     @Published private(set) var chrome: ChromeSnapshot = .empty
     let gitWorkbenchStore = GitWorkbenchStore()
+    /// Settings account page. Own object so a profile refresh cannot rebuild
+    /// the editor, and so the sidebar avatar updates without waiting on chrome.
+    let githubAccount = GitHubAccountStore()
     /// Lightweight bridge used only to present/dismiss the independent Window
     /// scene. Workbench rows themselves live in `gitWorkbenchStore`.
     @Published private(set) var gitWorkbenchWindowOpen = false
@@ -982,6 +989,7 @@ final class EngineBridge: ObservableObject {
     /// a small object with its own publish rate, so the window chrome can
     /// observe it without observing the typing path.
     let viewerControls = ViewerControls()
+    let softwareUpdate = SoftwareUpdateStore()
 
     @Published private(set) var editorSplit: SplitSnap = .empty
     /// From Core only (`snap.scroll_frac`). Never a parallel face accumulator.
@@ -1075,6 +1083,8 @@ final class EngineBridge: ObservableObject {
     private var gitDiffLinesCache: [String] = []
     /// Independent Core generation for the structured workbench model.
     private var gitWbGeneration = UInt64.max
+    private var githubAccountGeneration = UInt64.max
+    private var softwareUpdateGeneration = UInt64.max
     private var keyMonitor: Any?
     /// Debounced catch-up refresh scheduled by the typing fast path.
     private var chromeSettleWork: DispatchWorkItem?
@@ -1383,6 +1393,8 @@ final class EngineBridge: ObservableObject {
             // cheap probe is safe at display cadence and performs no snapshot
             // copy when Git state did not change.
             self.refreshGitWorkbenchIfNeeded()
+            self.refreshGitHubAccountIfNeeded()
+            self.refreshSoftwareUpdateIfNeeded()
             // Never publish SwiftUI editor updates mid-gesture — the canvas
             // already merges paint windows itself; publishing re-enters
             // updateNSView while AppKit scrolls and shows as jitter.
@@ -3639,6 +3651,11 @@ final class EngineBridge: ObservableObject {
         ensureEditorFocus()
     }
 
+    func tabIdIsOpen(_ stableId: UInt64) -> Bool {
+        guard let engine, stableId != 0 else { return false }
+        return suisei_engine_tab_id_is_open(engine, stableId) != 0
+    }
+
     func moveTabIds(from: UInt64, to: UInt64) -> Bool {
         guard let engine, from != to else { return false }
         let moved = suisei_engine_move_tab_ids(engine, from, to) != 0
@@ -4366,6 +4383,76 @@ final class EngineBridge: ObservableObject {
         refreshChrome()
     }
 
+    func refreshGitHubAccount() {
+        guard let engine else { return }
+        suisei_engine_github_account_refresh(engine)
+        githubAccountGeneration = .max
+        refreshGitHubAccountIfNeeded()
+    }
+
+    func githubSignIn() {
+        guard let engine else { return }
+        suisei_engine_github_sign_in(engine)
+        githubAccountGeneration = .max
+        refreshGitHubAccountIfNeeded()
+    }
+
+    func githubSignOut() {
+        guard let engine else { return }
+        suisei_engine_github_sign_out(engine)
+        githubAccountGeneration = .max
+        refreshGitHubAccountIfNeeded()
+    }
+
+    func githubCancelSignIn() {
+        guard let engine else { return }
+        suisei_engine_github_cancel_sign_in(engine)
+        githubAccountGeneration = .max
+        refreshGitHubAccountIfNeeded()
+    }
+
+    func githubOpenProfile() {
+        guard let engine else { return }
+        suisei_engine_github_open_profile(engine)
+    }
+
+    func githubSetupGit() {
+        guard let engine else { return }
+        suisei_engine_github_setup_git(engine)
+        githubAccountGeneration = .max
+        refreshGitHubAccountIfNeeded()
+    }
+
+    func setGitHubContribYear(_ year: UInt32) {
+        guard let engine else { return }
+        suisei_engine_github_set_contrib_year(engine, year)
+        githubAccountGeneration = .max
+        refreshGitHubAccountIfNeeded()
+    }
+
+    func githubInstallDocs() {
+        guard let engine else { return }
+        suisei_engine_github_install_docs(engine)
+    }
+
+    func checkForSoftwareUpdate() {
+        guard let engine else { return }
+        suisei_engine_update_check(engine)
+        softwareUpdateGeneration = .max
+        refreshSoftwareUpdateIfNeeded()
+    }
+
+    func installSoftwareUpdate() {
+        guard let engine else { return }
+        suisei_engine_update_install(engine)
+        softwareUpdateGeneration = .max
+        refreshSoftwareUpdateIfNeeded()
+    }
+
+    func openSoftwareUpdateNotes() {
+        NSWorkspace.shared.open(URL(string: "https://github.com/stremtec/suisei/releases")!)
+    }
+
     private func installScrollMonitor() {
         // Editor scroll is owned exclusively by EditorScrollView / NSScrollView panels.
         // Never dual-drive Core via scrollByFrac here — that desynced clip vs viewport.
@@ -4778,6 +4865,7 @@ final class EngineBridge: ObservableObject {
         if paneCount < 2 {
             var single = EditorPaneSnap(
                 id: 0, focused: true, tabIndex: Int(snap.tab_active),
+                tabStableId: suisei_engine_pane_tab_id(engine, 0),
                 title: paneTitle(0),
                 scroll: snap.scroll, hscroll: snap.hscroll,
                 docLineCount: snap.line_count, lines: allLines
@@ -4829,6 +4917,7 @@ final class EngineBridge: ObservableObject {
                     id: pi,
                     focused: isFocused,
                     tabIndex: Int(tabIndex),
+                    tabStableId: suisei_engine_pane_tab_id(engine, UInt32(pi)),
                     title: paneTitle(pi),
                     scroll: scroll,
                     hscroll: hscroll,
@@ -5062,6 +5151,69 @@ final class EngineBridge: ObservableObject {
     /// changed. This is intentionally separate from `refreshChrome()`: the
     /// workbench window is independent and neither editor paint nor LSP noise
     /// should copy its large snapshot or invalidate its SwiftUI tree.
+    private func refreshSoftwareUpdateIfNeeded() {
+        guard let engine else { return }
+        let generation = suisei_engine_update_generation(engine)
+        guard generation != softwareUpdateGeneration else { return }
+        softwareUpdateGeneration = generation
+        var snap = SuiseiUpdateSnapshot()
+        guard suisei_engine_update(engine, &snap) != 0 else { return }
+        softwareUpdate.publish(SoftwareUpdateSnap(
+            generation: snap.generation,
+            available: snap.available != 0,
+            installing: snap.installing != 0,
+            installed: snap.installed != 0,
+            checking: snap.checking != 0,
+            current: cStringField(snap.current),
+            latest: cStringField(snap.latest),
+            notes: cStringField(snap.notes)
+        ))
+    }
+
+    private func refreshGitHubAccountIfNeeded() {
+        guard let engine else { return }
+        let generation = suisei_engine_github_account_generation(engine)
+        // Generation 0 is the unloaded engine. Still pull once so `ensure_loaded`
+        // can start the first probe.
+        guard generation != githubAccountGeneration else { return }
+        githubAccountGeneration = generation
+        var snap = SuiseiGitHubAccount()
+        guard suisei_engine_github_account(engine, &snap) != 0 else { return }
+        githubAccount.publish(GitHubAccountSnap(
+            generation: snap.generation,
+            state: snap.state,
+            loading: snap.loading != 0,
+            signingIn: snap.signing_in != 0,
+            publicRepos: snap.public_repos,
+            followers: snap.followers,
+            following: snap.following,
+            login: cStringField(snap.user),
+            name: cStringField(snap.name),
+            email: cStringField(snap.email),
+            avatarURL: cStringField(snap.avatar_url),
+            bio: cStringField(snap.bio),
+            company: cStringField(snap.company),
+            location: cStringField(snap.location),
+            htmlURL: cStringField(snap.html_url),
+            host: cStringField(snap.host),
+            protocolName: cStringField(snap.`protocol`),
+            scopes: cStringField(snap.scopes),
+            tokenSource: cStringField(snap.token_source),
+            deviceCode: cStringField(snap.device_code),
+            message: cStringField(snap.message),
+            contribTotal: snap.contrib_total,
+            contribLevels: {
+                let n = min(Int(snap.contrib_days), Int(SUISEI_GH_CONTRIB_DAYS))
+                return withUnsafeBytes(of: snap.contrib_levels) { raw in
+                    Array(raw.prefix(n))
+                }
+            }(),
+            contribStart: cStringField(snap.contrib_start),
+            contribYear: snap.contrib_year,
+            contribYearMin: snap.contrib_year_min
+        ))
+    }
+
     private func refreshGitWorkbenchIfNeeded() {
         guard let engine else { return }
         let generation = suisei_engine_git_wb_generation(engine)

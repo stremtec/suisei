@@ -343,6 +343,13 @@ impl App {
         true
     }
     pub fn save_state_to_tab(&mut self) {
+        // Viewer tabs use the same buffer-shaped slot as text documents, but
+        // that empty buffer is only compatibility state. A historical or
+        // stray edit flag must never survive tab parking as if an MP3/PDF/
+        // image had editable bytes waiting to be saved.
+        if self.live_tab_kind().is_viewer() {
+            self.modified = false;
+        }
         if let Some(idx) = self.buffer_index(self.live_doc) {
             let tab = &mut self.tabs.buffers[idx];
             tab.buffer = self.buffer.clone();
@@ -361,7 +368,11 @@ impl App {
             self.buffer = tab.buffer;
             self.filename = tab.filename;
             self.scroll = tab.scroll;
-            self.modified = tab.modified;
+            self.modified = if tab.kind.is_viewer() {
+                false
+            } else {
+                tab.modified
+            };
             self.saved_hash = tab.saved_hash;
             self.content_width = 0; // different document, different extent
             self.undo_stack = tab.undo_stack;
@@ -431,11 +442,23 @@ impl App {
             env::current_dir().unwrap_or_default().join(&pathbuf)
         };
 
+        // A toolbar reopen can hand this function a standardised absolute URL
+        // while the original explorer open retained a lexical `..`, `.`, or a
+        // symlink spelling. PathBuf equality treats those as different files
+        // and used to create a second tab for the track already playing.
+        // Identity is the filesystem's canonical path when available; retain
+        // `abs_path` itself for display and for files that do not exist yet.
+        let requested_identity = fs::canonicalize(&abs_path).unwrap_or_else(|_| abs_path.clone());
         let existing = self
             .tabs
             .buffers
             .iter()
-            .find(|t| t.filename.as_ref() == Some(&abs_path))
+            .find(|tab| {
+                tab.filename.as_ref().is_some_and(|open_path| {
+                    fs::canonicalize(open_path).unwrap_or_else(|_| open_path.clone())
+                        == requested_identity
+                })
+            })
             .map(|t| t.id);
         if let Some(id) = existing {
             self.split.focused_pane_mut().buffer = id;

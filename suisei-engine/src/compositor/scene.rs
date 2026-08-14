@@ -1931,7 +1931,9 @@ fn build_tabs(app: &App) -> Vec<TabScene> {
         let is_current = i == current;
         let is_term = tab.terminal.is_some();
         let title = tab_title(app, i);
-        let dirty = if is_current {
+        let dirty = if tab.kind.is_viewer() {
+            false
+        } else if is_current {
             app.modified
         } else {
             tab.modified

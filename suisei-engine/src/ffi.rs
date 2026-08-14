@@ -163,6 +163,62 @@ pub struct SuiseiChromeSnapshot {
     pub pane_titles: [[c_char; SUISEI_TITLE_CAP]; SUISEI_MAX_PANES],
 }
 
+pub const SUISEI_GH_STATE_MISSING: u8 = 0;
+pub const SUISEI_GH_STATE_OUT: u8 = 1;
+pub const SUISEI_GH_STATE_IN: u8 = 2;
+pub const SUISEI_GH_NAME_CAP: usize = 96;
+pub const SUISEI_GH_URL_CAP: usize = 256;
+pub const SUISEI_GH_HOST_CAP: usize = 64;
+pub const SUISEI_GH_CODE_CAP: usize = 32;
+pub const SUISEI_GH_CONTRIB_DAYS: usize = 371;
+
+#[repr(C)]
+pub struct SuiseiGitHubAccount {
+    pub generation: u64,
+    pub state: u8,
+    pub loading: u8,
+    pub signing_in: u8,
+    pub _pad: u8,
+    pub public_repos: u32,
+    pub followers: u32,
+    pub following: u32,
+    pub user: [c_char; SUISEI_GH_NAME_CAP],
+    pub name: [c_char; SUISEI_GH_NAME_CAP],
+    pub email: [c_char; SUISEI_GH_NAME_CAP],
+    pub avatar_url: [c_char; SUISEI_GH_URL_CAP],
+    pub bio: [c_char; SUISEI_GH_URL_CAP],
+    pub company: [c_char; SUISEI_GH_NAME_CAP],
+    pub location: [c_char; SUISEI_GH_NAME_CAP],
+    pub html_url: [c_char; SUISEI_GH_URL_CAP],
+    pub host: [c_char; SUISEI_GH_HOST_CAP],
+    pub protocol: [c_char; 24],
+    pub scopes: [c_char; SUISEI_GH_URL_CAP],
+    pub token_source: [c_char; SUISEI_GH_HOST_CAP],
+    pub device_code: [c_char; SUISEI_GH_CODE_CAP],
+    pub message: [c_char; SUISEI_MSG_CAP],
+    pub contrib_total: u32,
+    pub contrib_days: u16,
+    pub _contrib_pad: u16,
+    pub contrib_levels: [u8; SUISEI_GH_CONTRIB_DAYS],
+    pub contrib_start: [c_char; 12],
+    pub contrib_year: u32,
+    pub contrib_year_min: u32,
+}
+
+pub const SUISEI_UPDATE_NOTES_CAP: usize = 512;
+
+#[repr(C)]
+pub struct SuiseiUpdateSnapshot {
+    pub generation: u64,
+    pub available: u8,
+    pub installing: u8,
+    pub installed: u8,
+    pub checking: u8,
+    pub current: [c_char; 64],
+    pub latest: [c_char; 64],
+    pub notes: [c_char; SUISEI_UPDATE_NOTES_CAP],
+}
+
 fn write_cstr(dst: &mut [c_char], s: &str) {
     dst.fill(0);
     // Truncate on a char boundary: a mid-UTF-8 cut used to hand the face an
@@ -3401,6 +3457,43 @@ pub extern "C" fn suisei_engine_pane_path(
     1
 }
 
+/// Stable `BufferTab::id` for the document shown by one pane.
+///
+/// Kept as a cheap pull beside `suisei_engine_pane_path`: only viewer panes
+/// need it and carrying another u64 through every chrome snapshot would charge
+/// the ordinary text-editor path for a viewer lifetime hook.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_pane_tab_id(ptr: *const SuiseiEngine, idx: u32) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { &*ptr }
+        .0
+        .app()
+        .split
+        .panes
+        .get(idx as usize)
+        .map(|pane| pane.buffer.0)
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_tab_id_is_open(ptr: *const SuiseiEngine, id: u64) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    u8::from(
+        id != 0
+            && unsafe { &*ptr }
+                .0
+                .app()
+                .tabs
+                .buffers
+                .iter()
+                .any(|tab| tab.id.0 == id),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // LSP face surfaces — thin wrappers over existing App methods.
 // ---------------------------------------------------------------------------
@@ -3548,6 +3641,194 @@ pub extern "C" fn suisei_engine_save_session(ptr: *const SuiseiEngine) {
     }
     let eng = unsafe { &*ptr };
     eng.0.save_session();
+}
+
+fn github_state_code(state: suisei_core::GhAuthState) -> u8 {
+    match state {
+        suisei_core::GhAuthState::NotInstalled => SUISEI_GH_STATE_MISSING,
+        suisei_core::GhAuthState::LoggedOut => SUISEI_GH_STATE_OUT,
+        suisei_core::GhAuthState::LoggedIn => SUISEI_GH_STATE_IN,
+    }
+}
+
+/// Settings account page. First pull starts a background probe so the face
+/// does not block on `gh api user`.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_account(
+    ptr: *mut SuiseiEngine,
+    out: *mut SuiseiGitHubAccount,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let eng = unsafe { &mut *ptr };
+    eng.0.github_account.ensure_loaded();
+    let acc = &eng.0.github_account;
+    unsafe {
+        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiGitHubAccount>());
+    }
+    let o = unsafe { &mut *out };
+    o.generation = acc.generation;
+    o.state = github_state_code(acc.info.state);
+    o.loading = u8::from(acc.loading);
+    o.signing_in = u8::from(acc.signing_in());
+    o.public_repos = acc.profile.public_repos;
+    o.followers = acc.profile.followers;
+    o.following = acc.profile.following;
+    write_cstr(&mut o.user, &acc.info.user);
+    if o.user[0] == 0 {
+        write_cstr(&mut o.user, &acc.profile.login);
+    }
+    write_cstr(&mut o.name, acc.profile.display_name());
+    write_cstr(&mut o.email, &acc.profile.email);
+    write_cstr(&mut o.avatar_url, &acc.profile.avatar_url);
+    write_cstr(&mut o.bio, &acc.profile.bio);
+    write_cstr(&mut o.company, &acc.profile.company);
+    write_cstr(&mut o.location, &acc.profile.location);
+    write_cstr(&mut o.html_url, &acc.profile.html_url);
+    write_cstr(&mut o.host, &acc.info.host);
+    write_cstr(&mut o.protocol, &acc.info.protocol);
+    write_cstr(&mut o.scopes, &acc.info.scopes);
+    write_cstr(&mut o.token_source, &acc.info.token_source);
+    write_cstr(&mut o.device_code, acc.device_code());
+    write_cstr(&mut o.message, &acc.message);
+    o.contrib_total = acc.contributions.total;
+    let n = acc.contributions.levels.len().min(SUISEI_GH_CONTRIB_DAYS);
+    o.contrib_days = n as u16;
+    o.contrib_levels[..n].copy_from_slice(&acc.contributions.levels[..n]);
+    write_cstr(&mut o.contrib_start, &acc.contributions.start);
+    o.contrib_year = acc.contrib_year;
+    o.contrib_year_min = acc.contrib_year_min;
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_account_generation(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).0.github_account.generation }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_account_refresh(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.github_account.refresh() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_sign_in(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.github_account.sign_in() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_sign_out(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.github_account.sign_out() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_cancel_sign_in(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.github_account.cancel_sign_in() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_open_profile(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.github_account.open_profile() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_setup_git(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.github_account.setup_git() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_set_contrib_year(ptr: *mut SuiseiEngine, year: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.github_account.set_contrib_year(year) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_github_install_docs(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { (*ptr).0.github_account.open_install_docs() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update(
+    ptr: *const SuiseiEngine,
+    out: *mut SuiseiUpdateSnapshot,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let eng = unsafe { &*ptr };
+    unsafe {
+        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiUpdateSnapshot>());
+    }
+    let o = unsafe { &mut *out };
+    o.generation = eng.0.update_generation;
+    o.available = u8::from(eng.0.app.update.latest.is_some());
+    o.installing = u8::from(eng.0.app.update.installing);
+    o.installed = u8::from(eng.0.app.update.installed);
+    o.checking = u8::from(eng.0.app.update.is_checking());
+    write_cstr(&mut o.current, env!("CARGO_PKG_VERSION"));
+    if let Some(latest) = eng.0.app.update.latest.as_deref() {
+        write_cstr(&mut o.latest, latest);
+    }
+    write_cstr(&mut o.notes, &eng.0.app.update.notes);
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_generation(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).0.update_generation }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_check(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    let eng = unsafe { &mut *ptr };
+    eng.0.app.update.check_now(env!("CARGO_PKG_VERSION"));
+    eng.0.update_generation = eng.0.update_generation.wrapping_add(1);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_install(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    let eng = unsafe { &mut *ptr };
+    let msg = eng.0.app.update.start_install();
+    if !msg.is_empty() {
+        eng.0.app.message = msg;
+    }
+    eng.0.update_generation = eng.0.update_generation.wrapping_add(1);
 }
 
 /// Microseconds the last completion pass took, and how much of that was the

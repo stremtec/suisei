@@ -118,6 +118,11 @@ pub struct Engine {
     /// snapshot per buffer version and never waits; frames come back and are
     /// adopted at the next recompose or tick.
     syntax_worker: suisei_core::syntax_worker::SyntaxWorker,
+    /// Settings account page. Independent of chrome / git workbench so a
+    /// profile refresh cannot republish the editor tree.
+    pub github_account: crate::github_account::GitHubAccount,
+    /// Settings Software Update page. Independent of chrome.
+    pub update_generation: u64,
     /// `(version, path, window)` of the outstanding parse request — one
     /// request per change, so a typing run coalesces on the worker.
     syntax_requested: Option<(u64, String, std::ops::Range<usize>)>,
@@ -222,6 +227,8 @@ impl Engine {
             syntax_cached: 0,
             outline_dirty: false,
             outline_built_at: None,
+            github_account: crate::github_account::GitHubAccount::new(),
+            update_generation: 0,
         }
     }
 
@@ -364,9 +371,14 @@ impl Engine {
     // `c`, `d`). Core stays modal internally (shared with the xei TUI) but the
     // GUI never surfaces modes — these commands handle transitions invisibly.
 
-    /// True when the editor (rather than a panel or the terminal) has focus.
+    /// True when an editable text document (rather than a viewer, panel or the
+    /// terminal) has focus. Media panes deliberately own no hidden text input:
+    /// typing over an MP3 used to mutate its empty backing buffer and put a
+    /// meaningless dirty dot on a file the save path correctly refuses to
+    /// write.
     fn is_editing_mode(&self) -> bool {
         matches!(self.app.mode, Mode::Editor)
+            && matches!(self.app.live_tab_kind(), suisei_core::media::FileKind::Text)
     }
 
     /// Type a printable character at the caret(s) — GUI fast path.
@@ -518,7 +530,7 @@ impl Engine {
     /// bare arrow moves the caret and collapses any selection.
     fn try_gui_navigation(&mut self, ev: KeyEvent) -> bool {
         use suisei_core::gui_edit::Motion;
-        if !self.editor_owns_keys() {
+        if !self.text_editor_owns_keys() {
             return false;
         }
         let m = ev.modifiers;
@@ -567,7 +579,7 @@ impl Engine {
     /// opened and never accepted: the accept path lived in the vim insert
     /// handler, so the GUI had no way to take a suggestion at all.
     fn try_completion_keys(&mut self, ev: KeyEvent) -> bool {
-        if !self.app.completions.active || !self.editor_owns_keys() {
+        if !self.app.completions.active || !self.text_editor_owns_keys() {
             return false;
         }
         let m = ev.modifiers;
@@ -587,7 +599,7 @@ impl Engine {
     }
 
     fn try_gui_edit(&mut self, ev: KeyEvent) -> bool {
-        if !self.editor_owns_keys() {
+        if !self.text_editor_owns_keys() {
             return false;
         }
         let m = ev.modifiers;
@@ -646,6 +658,34 @@ impl Engine {
         matches!(self.app.mode, Mode::Editor) && !self.app.terminal_window_focused()
     }
 
+    /// Keyboard ownership and text-editability are separate facts. A media
+    /// viewer still seals ordinary keys away from the legacy Vim dispatcher,
+    /// but must never offer them to the Selection-model editing table.
+    fn text_editor_owns_keys(&self) -> bool {
+        self.editor_owns_keys()
+            && matches!(self.app.live_tab_kind(), suisei_core::media::FileKind::Text)
+    }
+
+    /// Standard text-responder chords are not application commands in a media
+    /// viewer. They must be consumed here before Core's shared dispatcher sees
+    /// the viewer's empty compatibility buffer (Cmd+Backspace was the clearest
+    /// route to a phantom dirty flag). Real app shortcuts continue below.
+    fn is_text_only_shortcut(ev: KeyEvent) -> bool {
+        let command = ev.modifiers.contains(KeyModifiers::SUPER)
+            || ev.modifiers.contains(KeyModifiers::CONTROL);
+        command
+            && matches!(
+                ev.code,
+                KeyCode::Char('a' | 'A' | 'c' | 'C' | 'v' | 'V' | 'x' | 'X' | 'z' | 'Z')
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+            )
+    }
+
     /// Keys that still belong to `App::dispatch` while the editor has focus:
     /// modifier chords are application shortcuts (Ctrl+F explorer, Ctrl+, …)
     /// and function keys drive the debugger. Everything else unmodified is the
@@ -679,6 +719,12 @@ impl Engine {
         // into a fold prefix and Tab into a jumplist jump. Only real
         // application shortcuts still pass.
         if self.editor_owns_keys() && !Self::is_app_shortcut(ev) {
+            return;
+        }
+        if self.editor_owns_keys()
+            && self.app.live_tab_kind().is_viewer()
+            && Self::is_text_only_shortcut(ev)
+        {
             return;
         }
         // Hard rule: chrome-only keys (explorer / XLC / settings / SCM / git wb)
@@ -863,6 +909,13 @@ impl Engine {
             if let Some(r) = self.reporter.as_mut() {
                 r.offer(status);
             }
+        }
+        // Settings account login / profile fetch. Does not dirty chrome —
+        // the face probes `github_account.generation` on its own object.
+        let _ = self.github_account.poll();
+        if let Some(msg) = self.app.update.poll() {
+            self.app.message = msg;
+            self.update_generation = self.update_generation.wrapping_add(1);
         }
         // A background parse landed — paint the fresh tokens (paint-only).
         if self.adopt_syntax_frames().is_some() {
@@ -1451,18 +1504,27 @@ impl Engine {
     // ── GUI-editor commands (face menu / standard Mac chords) ──
 
     pub fn undo(&mut self) {
+        if !self.text_editor_owns_keys() {
+            return;
+        }
         self.app.undo();
         self.app.update_scroll();
         self.recompose();
     }
 
     pub fn redo(&mut self) {
+        if !self.text_editor_owns_keys() {
+            return;
+        }
         self.app.redo();
         self.app.update_scroll();
         self.recompose();
     }
 
     pub fn select_all(&mut self) {
+        if !self.text_editor_owns_keys() {
+            return;
+        }
         self.app.select_all();
         self.recompose_scroll();
     }
@@ -1546,7 +1608,7 @@ impl Engine {
                 return;
             }
         }
-        if matches!(self.app.mode, Mode::Editor) {
+        if self.text_editor_owns_keys() {
             // IME commits and programmatic paste must use the same exclusive
             // Selection model as clicks, drags and ordinary typing. The old
             // cursor-only paste path inserted at `buffer.cursor`, then tried to
@@ -1555,6 +1617,13 @@ impl Engine {
             self.app.gui_insert_text(&text.replace('\r', ""));
             self.app.update_scroll();
             self.recompose_scroll();
+            return;
+        }
+        // A viewer has no editable backing document. In particular, an IME
+        // commit and AppKit Paste both arrive here rather than `dispatch_key`;
+        // letting either fall through used to dirty an audio/image/PDF tab's
+        // intentionally empty buffer.
+        if matches!(self.app.mode, Mode::Editor) && self.app.live_tab_kind().is_viewer() {
             return;
         }
         self.app.paste_text_at_cursor(text);
@@ -3875,6 +3944,78 @@ mod tests {
         let c = eng.last_diff.chrome.as_ref().unwrap();
         assert!(c.tabs.len() >= 2);
         assert!(!c.welcome);
+    }
+
+    /// Viewer tabs carry an empty compatibility buffer because the rest of the
+    /// editor addresses every open document through the same tab structure.
+    /// That buffer is implementation detail, not something typing, IME commits
+    /// or standard text chords may mutate.
+    #[test]
+    fn audio_viewer_input_never_marks_the_file_dirty() {
+        let dir = std::env::temp_dir().join("suisei_audio_viewer_read_only");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("track.mp3");
+        std::fs::write(&path, b"ID3").unwrap();
+
+        let mut eng = Engine::new();
+        eng.app = App::open_file(path.to_str().unwrap());
+        assert_eq!(eng.app.live_tab_kind(), suisei_core::media::FileKind::Audio);
+        let before_text = eng.app.buffer.text();
+        let before_version = eng.app.buffer.version();
+
+        eng.dispatch_key(KeyEvent::char('x'));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        eng.dispatch_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER));
+        eng.gui_type_char('y');
+        eng.gui_delete_backward();
+        eng.paste_text("한글 IME commit");
+
+        assert_eq!(eng.app.buffer.text(), before_text);
+        assert_eq!(eng.app.buffer.version(), before_version);
+        assert!(!eng.app.modified, "read-only audio viewer must stay clean");
+        assert!(
+            eng.app.tabs.buffers.iter().all(|tab| !tab.modified),
+            "the tab-strip dirty dot must stay clear too"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The compact Now Playing identity reopens its source through a
+    /// standardised URL. That spelling can differ from the path originally
+    /// supplied by the project tree without naming a different file.
+    #[test]
+    fn reopening_audio_by_an_equivalent_path_reuses_its_tab() {
+        let dir = std::env::temp_dir().join("suisei_audio_tab_identity");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("track.mp3");
+        std::fs::write(&path, b"ID3").unwrap();
+
+        let lexical_path = dir.join(".").join("track.mp3");
+        let mut eng = Engine::new();
+        eng.app = App::open_file(lexical_path.to_str().unwrap());
+        let original_id = eng.app.current_buffer_id();
+
+        eng.app.open_new_tab(path.to_str().unwrap());
+
+        assert_eq!(eng.app.tabs.buffers.len(), 1, "must not duplicate the tab");
+        assert_eq!(eng.app.current_buffer_id(), original_id);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Settings account state is engine-owned and starts empty. A cancel
+    /// with no session is a no-op, and a refresh without `gh` still produces
+    /// a snapshot the face can draw.
+    #[test]
+    fn github_account_starts_empty_and_cancel_is_safe() {
+        let mut eng = Engine::new();
+        assert_eq!(eng.github_account.generation, 0);
+        assert!(!eng.github_account.signing_in());
+        assert!(eng.github_account.profile.login.is_empty());
+        eng.github_account.cancel_sign_in();
+        assert!(!eng.github_account.signing_in());
+        eng.github_account.ensure_loaded();
+        assert!(eng.github_account.generation > 0);
     }
 
     #[test]

@@ -53,6 +53,201 @@ impl Default for GhAuthInfo {
     }
 }
 
+/// Public GitHub user profile, fetched through `gh api user`.
+///
+/// Auth status only knows the login and token metadata. Settings wants the
+/// name, email, avatar and the handful of facts the Apple Account page shows
+/// for a signed-in identity — those live on this type so the workbench and
+/// the Settings face share one parser.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GhProfile {
+    pub login: String,
+    pub name: String,
+    pub email: String,
+    pub avatar_url: String,
+    pub bio: String,
+    pub company: String,
+    pub location: String,
+    pub html_url: String,
+    pub public_repos: u32,
+    pub followers: u32,
+    pub following: u32,
+    /// Account creation year, for the contribution year menu.
+    pub created_year: u32,
+}
+
+impl GhProfile {
+    /// Best display name: the profile name when GitHub has one, otherwise
+    /// the login. Empty only when nothing has been fetched.
+    pub fn display_name(&self) -> &str {
+        if self.name.is_empty() {
+            &self.login
+        } else {
+            &self.name
+        }
+    }
+}
+
+/// One year of the GitHub contribution calendar, Sunday-first, consecutive days.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GhContributions {
+    pub total: u32,
+    /// 0 = none … 4 = top quartile. Empty when the calendar has not loaded.
+    pub levels: Vec<u8>,
+    /// `YYYY-MM-DD` of `levels[0]`.
+    pub start: String,
+}
+
+/// Viewer contribution calendar via `gh api graphql`. `year = None` is the
+/// rolling last 365 days; `Some(y)` is that calendar year.
+pub fn fetch_contributions(year: Option<u32>) -> Option<GhContributions> {
+    if !gh_installed() {
+        return None;
+    }
+    let jq = r#".data.viewer.contributionsCollection.contributionCalendar | "\(.totalContributions)\n" + ([.weeks[].contributionDays[] | "\(.date)\t\(.contributionLevel)"] | join("\n"))"#;
+    let out = if let Some(year) = year {
+        let from = format!("{year}-01-01T00:00:00Z");
+        let to = format!("{year}-12-31T23:59:59Z");
+        const QUERY: &str = "query($from: DateTime!, $to: DateTime!) { viewer { contributionsCollection(from: $from, to: $to) { contributionCalendar { totalContributions weeks { contributionDays { date contributionLevel } } } } } }";
+        Command::new("gh")
+            .args([
+                "api",
+                "graphql",
+                "-F",
+                &format!("from={from}"),
+                "-F",
+                &format!("to={to}"),
+                "-f",
+                &format!("query={QUERY}"),
+                "-q",
+                jq,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?
+    } else {
+        const QUERY: &str = "query { viewer { contributionsCollection { contributionCalendar { totalContributions weeks { contributionDays { date contributionLevel } } } } } }";
+        Command::new("gh")
+            .args([
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={QUERY}"),
+                "-q",
+                jq,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?
+    };
+    if !out.status.success() {
+        return None;
+    }
+    parse_contribution_table(&String::from_utf8_lossy(&out.stdout))
+}
+
+pub(crate) fn parse_contribution_table(text: &str) -> Option<GhContributions> {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let total: u32 = lines.next()?.trim().parse().ok()?;
+    let mut levels = Vec::new();
+    let mut start = String::new();
+    for line in lines {
+        let mut parts = line.split('\t');
+        let date = parts.next()?.trim();
+        let level = contribution_level(parts.next().unwrap_or(""));
+        if start.is_empty() {
+            start = date.to_string();
+        }
+        levels.push(level);
+    }
+    if levels.is_empty() {
+        return None;
+    }
+    Some(GhContributions {
+        total,
+        levels,
+        start,
+    })
+}
+
+fn contribution_level(raw: &str) -> u8 {
+    match raw.trim() {
+        "FIRST_QUARTILE" => 1,
+        "SECOND_QUARTILE" => 2,
+        "THIRD_QUARTILE" => 3,
+        "FOURTH_QUARTILE" => 4,
+        _ => 0,
+    }
+}
+
+/// Live profile for the signed-in user. `None` when `gh` is missing, the
+/// token is dead, or GitHub did not answer.
+pub fn fetch_profile() -> Option<GhProfile> {
+    if !gh_installed() {
+        return None;
+    }
+    let out = Command::new("gh")
+        .args(["api", "user"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut profile = parse_user_json(&text)?;
+    if profile.email.is_empty() {
+        if let Some(email) = fetch_primary_email() {
+            profile.email = email;
+        }
+    }
+    if profile.html_url.is_empty() && !profile.login.is_empty() {
+        profile.html_url = format!("https://github.com/{}", profile.login);
+    }
+    Some(profile)
+}
+
+fn fetch_primary_email() -> Option<String> {
+    let out = Command::new("gh")
+        .args(["api", "user/emails", "-q", ".[] | select(.primary==true) | .email"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let email = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if email.is_empty() || !email.contains('@') {
+        None
+    } else {
+        Some(email)
+    }
+}
+
+pub(crate) fn parse_user_json(text: &str) -> Option<GhProfile> {
+    let login = extract_str(text, "\"login\":").filter(|s| !s.is_empty())?;
+    Some(GhProfile {
+        name: extract_str(text, "\"name\":").unwrap_or_default(),
+        email: extract_str(text, "\"email\":").unwrap_or_default(),
+        avatar_url: extract_str(text, "\"avatar_url\":").unwrap_or_default(),
+        bio: extract_str(text, "\"bio\":").unwrap_or_default(),
+        company: extract_str(text, "\"company\":").unwrap_or_default(),
+        location: extract_str(text, "\"location\":").unwrap_or_default(),
+        html_url: extract_str(text, "\"html_url\":").unwrap_or_default(),
+        public_repos: extract_u64(text, "\"public_repos\":").unwrap_or(0) as u32,
+        followers: extract_u64(text, "\"followers\":").unwrap_or(0) as u32,
+        following: extract_u64(text, "\"following\":").unwrap_or(0) as u32,
+        created_year: extract_str(text, "\"created_at\":")
+            .and_then(|s| s.get(..4)?.parse().ok())
+            .unwrap_or(0),
+        login,
+    })
+}
+
 /// Live browser/device login session (non-blocking).
 #[derive(Debug)]
 pub struct AuthLoginSession {
@@ -1065,6 +1260,51 @@ mod auth_tests {
             extract_device_code("! First copy your one-time code: ABCD-1234").expect("code");
         assert_eq!(c, "ABCD-1234");
         assert!(u.contains("github.com"));
+    }
+
+    #[test]
+    fn parse_user_json_fills_the_account_page() {
+        let j = r#"{
+            "login":"stremtec",
+            "name":"Suisei Dev",
+            "email":"dev@example.com",
+            "avatar_url":"https://avatars.githubusercontent.com/u/1?v=4",
+            "bio":"comet editor",
+            "company":"@stremtec",
+            "location":"Seoul",
+            "html_url":"https://github.com/stremtec",
+            "public_repos":12,
+            "followers":3,
+            "following":8
+        }"#;
+        let p = parse_user_json(j).expect("parse");
+        assert_eq!(p.login, "stremtec");
+        assert_eq!(p.display_name(), "Suisei Dev");
+        assert_eq!(p.email, "dev@example.com");
+        assert!(p.avatar_url.contains("avatars.githubusercontent.com"));
+        assert_eq!(p.public_repos, 12);
+        assert_eq!(p.followers, 3);
+        assert_eq!(p.following, 8);
+    }
+
+    #[test]
+    fn parse_user_json_tolerates_null_optional_fields() {
+        let j = r#"{"login":"octocat","name":null,"email":null,"bio":null,"company":null,"location":null,"avatar_url":"https://example.com/a.png","html_url":"https://github.com/octocat","public_repos":0,"followers":0,"following":0}"#;
+        let p = parse_user_json(j).expect("parse");
+        assert_eq!(p.login, "octocat");
+        assert_eq!(p.display_name(), "octocat");
+        assert!(p.email.is_empty());
+        assert!(p.name.is_empty());
+        assert_eq!(p.html_url, "https://github.com/octocat");
+    }
+
+    #[test]
+    fn parse_contribution_table_maps_quartiles() {
+        let text = "12\n2025-01-05\tNONE\n2025-01-06\tFIRST_QUARTILE\n2025-01-07\tFOURTH_QUARTILE\n";
+        let c = parse_contribution_table(text).expect("parse");
+        assert_eq!(c.total, 12);
+        assert_eq!(c.start, "2025-01-05");
+        assert_eq!(c.levels, vec![0, 1, 4]);
     }
 }
 

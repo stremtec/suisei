@@ -79,6 +79,8 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/ProjectTreeView.swift"
   "$ROOT/suisei-app/Suisei/ProjectIndex.swift"
   "$ROOT/suisei-app/Suisei/SettingsWindowView.swift"
+  "$ROOT/suisei-app/Suisei/GitHubAccount.swift"
+  "$ROOT/suisei-app/Suisei/SoftwareUpdate.swift"
   "$ROOT/suisei-app/Suisei/GitWorkbenchWindowView.swift"
   "$ROOT/suisei-app/Suisei/AboutPanel.swift"
   "$ROOT/suisei-app/Suisei/GlassChrome.swift"
@@ -216,6 +218,8 @@ fi
 # Info.plist — always rewrite (tiny). Version = workspace Cargo version (single source).
 SUISEI_VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
 SUISEI_VERSION="${SUISEI_VERSION:-0.0.0}"
+SUISEI_GIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo 416ad08)"
+SUISEI_BUILD_NAME="Suisei2026dev${SUISEI_GIT}"
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -240,7 +244,9 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 Stremtec. All rights reserved.</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${SUISEI_BUILD_NAME}</string>
+  <key>SuiseiBuildName</key>
+  <string>${SUISEI_BUILD_NAME}</string>
   <key>LSMinimumSystemVersion</key>
   <string>${MACOS_MIN}</string>
   <key>NSHighResolutionCapable</key>

@@ -527,6 +527,81 @@ void suisei_engine_settings_set_highlight_color(SuiseiEngine *ptr, const char *v
 void suisei_engine_settings_goto_page(SuiseiEngine *ptr, uint32_t page);
 void suisei_engine_settings_save(SuiseiEngine *ptr);
 
+/* ── GitHub account (Settings) ─────────────────────────────────────────── */
+/* Independent of chrome. The face probes generation and copies this only
+   when it moves, so a profile refresh cannot republish the editor. */
+
+#define SUISEI_GH_STATE_MISSING 0
+#define SUISEI_GH_STATE_OUT 1
+#define SUISEI_GH_STATE_IN 2
+
+#define SUISEI_GH_NAME_CAP 96
+#define SUISEI_GH_URL_CAP 256
+#define SUISEI_GH_HOST_CAP 64
+#define SUISEI_GH_CODE_CAP 32
+#define SUISEI_GH_CONTRIB_DAYS 371
+
+typedef struct SuiseiGitHubAccount {
+  uint64_t generation;
+  uint8_t state;      /* SUISEI_GH_STATE_* */
+  uint8_t loading;
+  uint8_t signing_in;
+  uint8_t _pad;
+  uint32_t public_repos;
+  uint32_t followers;
+  uint32_t following;
+  char user[SUISEI_GH_NAME_CAP];
+  char name[SUISEI_GH_NAME_CAP];
+  char email[SUISEI_GH_NAME_CAP];
+  char avatar_url[SUISEI_GH_URL_CAP];
+  char bio[SUISEI_GH_URL_CAP];
+  char company[SUISEI_GH_NAME_CAP];
+  char location[SUISEI_GH_NAME_CAP];
+  char html_url[SUISEI_GH_URL_CAP];
+  char host[SUISEI_GH_HOST_CAP];
+  char protocol[24];
+  char scopes[SUISEI_GH_URL_CAP];
+  char token_source[SUISEI_GH_HOST_CAP];
+  char device_code[SUISEI_GH_CODE_CAP];
+  char message[SUISEI_MSG_CAP];
+  uint32_t contrib_total;
+  uint16_t contrib_days;
+  uint16_t _contrib_pad;
+  uint8_t contrib_levels[SUISEI_GH_CONTRIB_DAYS];
+  char contrib_start[12];
+  uint32_t contrib_year;
+  uint32_t contrib_year_min;
+} SuiseiGitHubAccount;
+
+uint8_t suisei_engine_github_account(SuiseiEngine *ptr, SuiseiGitHubAccount *out);
+uint64_t suisei_engine_github_account_generation(const SuiseiEngine *ptr);
+void suisei_engine_github_account_refresh(SuiseiEngine *ptr);
+void suisei_engine_github_sign_in(SuiseiEngine *ptr);
+void suisei_engine_github_sign_out(SuiseiEngine *ptr);
+void suisei_engine_github_cancel_sign_in(SuiseiEngine *ptr);
+void suisei_engine_github_open_profile(SuiseiEngine *ptr);
+void suisei_engine_github_setup_git(SuiseiEngine *ptr);
+void suisei_engine_github_set_contrib_year(SuiseiEngine *ptr, uint32_t year);
+void suisei_engine_github_install_docs(SuiseiEngine *ptr);
+
+#define SUISEI_UPDATE_NOTES_CAP 512
+
+typedef struct SuiseiUpdateSnapshot {
+  uint64_t generation;
+  uint8_t available;
+  uint8_t installing;
+  uint8_t installed;
+  uint8_t checking;
+  char current[64];
+  char latest[64];
+  char notes[SUISEI_UPDATE_NOTES_CAP];
+} SuiseiUpdateSnapshot;
+
+uint8_t suisei_engine_update(const SuiseiEngine *ptr, SuiseiUpdateSnapshot *out);
+uint64_t suisei_engine_update_generation(const SuiseiEngine *ptr);
+void suisei_engine_update_check(SuiseiEngine *ptr);
+void suisei_engine_update_install(SuiseiEngine *ptr);
+
 #define SUISEI_MAX_SCM 48
 #define SUISEI_SCM_PATH 160
 #define SUISEI_MAX_SCM_GRAPH 40
@@ -775,6 +850,10 @@ uint8_t suisei_engine_hover_text(const SuiseiEngine *ptr, char *out, uint32_t ca
    this is how they find it. Pulled on demand — see the Rust doc comment. */
 uint8_t suisei_engine_pane_path(const SuiseiEngine *ptr, uint32_t idx, char *out,
                                 uint32_t cap);
+/* Stable BufferTab::id shown by one pane; 0 when no document owns it. */
+uint64_t suisei_engine_pane_tab_id(const SuiseiEngine *ptr, uint32_t idx);
+/* True while this stable BufferTab::id still owns an open document. */
+uint8_t suisei_engine_tab_id_is_open(const SuiseiEngine *ptr, uint64_t id);
 
 /* LSP face surfaces — same App methods the TUI dispatches (gd / format / rename / code actions). */
 void suisei_engine_format_document(SuiseiEngine *ptr);

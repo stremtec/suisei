@@ -49,6 +49,10 @@ struct ContentView: View {
     /// Observed separately from `engine` so the toolbar sees viewer state
     /// without the viewer state riding on the chrome's publish rate.
     @ObservedObject var viewerControls = EngineBridge.shared.viewerControls
+    /// A player is a window session, not an audio pane. The pane is replaced
+    /// whenever focus moves to another document; this object deliberately is
+    /// not, so ordinary tab navigation does not stop the track or reset it.
+    @StateObject private var audioPlayer = AudioPlayerModel()
     @FocusState private var focused: Bool
     @FocusState private var overlayTextInput: OverlayTextInput?
     @Environment(\.openWindow) private var openWindow
@@ -70,6 +74,25 @@ struct ContentView: View {
     /// splitter, mid-drag and mid-collapse. `topBar` uses it to keep the tab
     /// strip on the window's centreline rather than the detail column's.
     @State private var navLiveWidth: CGFloat = 280
+    /// The sidebar width the TAB STRIP is allowed to see — the settled one.
+    ///
+    /// `navLiveWidth` is republished on every frame of an open/close animation
+    /// and on every pixel of a splitter drag. Feeding that to the strip is
+    /// rule H1's named failure (`SUISEI-TAB-STRIP-HOST.md`: "the strip's
+    /// viewport width must not be read from a view that resizes when the
+    /// sidebar does", and `navLiveWidth` is one of the four values listed
+    /// there as already tried).
+    ///
+    /// It cannot simply be ignored either: a resized navigator has to move the
+    /// corridor, or overflowing tabs end up underneath it. So the strip sees
+    /// the width only once it has stopped moving — the animation produces one
+    /// step at its end instead of twenty during it.
+    @State private var navSettledWidth: CGFloat = 280
+    @State private var navSettleTask: Task<Void, Never>?
+    /// The first report is committed without waiting: a restored split has to
+    /// be respected before the first frame, or the opening tabs sit under a
+    /// navigator wider than the bootstrap value.
+    @State private var navSettledOnce = false
     @State private var termW: Double = 400
     @State private var debugAreaH: Double = 200
     @State private var inspectorW: Double = 240
@@ -367,6 +390,18 @@ struct ContentView: View {
         engine.uiInspectorVisible && inspectorMode == .file
     }
 
+    /// The compact transport belongs in the trailing native toolbar only when
+    /// the full transport is not already visible in an editor pane.
+    private var showsCompactNowPlaying: Bool {
+        guard audioPlayer.engaged, !audioPlayer.sourcePath.isEmpty else { return false }
+        guard !engine.preview.open else { return true }
+        let source = URL(fileURLWithPath: audioPlayer.sourcePath).standardizedFileURL.path
+        return !engine.editorSplit.panes.contains {
+            $0.kind == .audio
+                && URL(fileURLWithPath: $0.path).standardizedFileURL.path == source
+        }
+    }
+
     /// Whether the unsplit island gets a minimap.
     ///
     /// The minimap is a picture of a text document's shape. A pane holding a
@@ -579,6 +614,35 @@ struct ContentView: View {
     /// has: it must be blurable and coverable, which a toolbar item is not.
     @ToolbarContentBuilder
     private var editorToolbar: some ToolbarContent {
+
+        if showsCompactNowPlaying {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { audioPlayer.skip(-10) } label: {
+                    Image(systemName: "gobackward.10")
+                }
+                .help("10초 뒤로")
+
+                Button { audioPlayer.toggle() } label: {
+                    Image(systemName: audioPlayer.playing ? "pause.fill" : "play.fill")
+                }
+                .help(audioPlayer.playing ? "일시정지" : "재생")
+
+                Button { audioPlayer.skip(10) } label: {
+                    Image(systemName: "goforward.10")
+                }
+                .help("10초 앞으로")
+
+                CompactNowPlayingIdentity(model: audioPlayer) {
+                    _ = engine.openPath(audioPlayer.sourcePath)
+                    focused = true
+                }
+
+                Button { audioPlayer.muted.toggle() } label: {
+                    Image(systemName: audioPlayer.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                }
+                .help(audioPlayer.muted ? "음소거 해제" : "음소거")
+            }
+        }
 
         // The focused viewer pane's controls, when there is one.
         //
@@ -914,6 +978,7 @@ struct ContentView: View {
                 applyWindowAppearance()
             }
         }
+        .modifier(AudioTabLifetimeModifier(engine: engine, player: audioPlayer))
         // Increase Contrast / Reduce Transparency change which appearance the
         // windows should carry, and this app pins that appearance rather than
         // inheriting it — so nothing else would notice. Same deferral as the
@@ -1075,6 +1140,30 @@ struct ContentView: View {
         engine.animatingPanels(body)
     }
 
+    /// Let the strip see a sidebar width only after the sidebar has stopped.
+    ///
+    /// Each report restarts the wait, so a 0.25s open/close — which publishes
+    /// a width every frame, and flips through the collapsed sentinel partway —
+    /// commits exactly once, at the end. A splitter drag likewise commits when
+    /// the pointer rests rather than on every pixel.
+    ///
+    /// 120ms: comfortably longer than a frame and shorter than any pause a
+    /// user would read as the strip failing to follow.
+    private func settleNavWidth(_ live: CGFloat) {
+        navSettleTask?.cancel()
+        guard navSettledOnce else {
+            navSettledOnce = true
+            navSettledWidth = live
+            return
+        }
+        guard abs(navSettledWidth - live) > 0.5 else { return }
+        navSettleTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard !Task.isCancelled else { return }
+            if abs(navSettledWidth - live) > 0.5 { navSettledWidth = live }
+        }
+    }
+
     private func syncNavFromCore() {
         if engine.chrome.scm.open {
             navMode = .scm
@@ -1200,6 +1289,7 @@ struct ContentView: View {
                 if live >= 240, abs(navW - Double(live)) > 0.5 {
                     navW = Double(live)
                 }
+                settleNavWidth(live)
             }
         }
     }
@@ -1686,7 +1776,16 @@ struct ContentView: View {
             tabs: engine.chrome.tabs,
             overflowCount: engine.chrome.tabsOverflow,
             palette: stripPalette,
-            leadingInset: ContentView.stripReserveLeading,
+            // The split view already reports its real AppKit column width. Use
+            // that edge instead of the old 296pt default, which was too wide for
+            // one window and underneath a resized navigator in another.
+            // The SETTLED width, never the live one — see `navSettledWidth`.
+            leadingInset: navSettledWidth > 1
+                ? navSettledWidth + ContentView.stripSidebarGap
+                : ContentView.stripReserveCollapsedLeading,
+            // Fallback only. TabStripHost reads the real visible NSToolbar item
+            // frames and stops before whichever audio/image/PDF run AppKit laid
+            // out; no control width is guessed here.
             trailingInset: ContentView.stripReserveTrailing,
             // The 48pt Swiss-grid band, dropped by the shared amount so the
             // chips sit on the same line as the trailing toolbar items.
@@ -1703,25 +1802,12 @@ struct ContentView: View {
         .allowsHitTesting(false)
     }
 
-    /// Window-space keep-outs for the strip. ONE constant, whatever the sidebar
-    /// is doing.
-    ///
-    /// This started as a step — 150 with the sidebar closed, 296 with it open —
-    /// on the measurement that the run's centre does not move when the keep-out
-    /// changes (0.00pt across eleven widths). That measurement is true, and it
-    /// is only true while the run FITS. An overflowing run fills its viewport,
-    /// so narrowing the viewport moves its leading edge by half the difference,
-    /// and toggling the sidebar with enough tabs open shifted the whole strip.
-    ///
-    /// So the keep-out does not depend on the sidebar at all. The cost is that
-    /// with the sidebar closed the strip does not use the leftmost 146pt, which
-    /// is invisible until the tabs overflow and is worth more than a strip that
-    /// moves. The alternative — a smaller constant — puts overflowing tabs
-    /// underneath the sidebar, which is the other complaint.
-    ///
-    /// 296 is the default navigator width plus the 16pt gap the strip has
-    /// always kept past its edge.
-    static let stripReserveLeading: CGFloat = 296
+    /// Window-space fallback keep-outs. An open navigator supplies its measured
+    /// boundary; a closed one still clears the traffic lights and fixed toggle.
+    static let stripReserveCollapsedLeading: CGFloat = 150
+    /// Small visual breath after the native sidebar divider — not another panel
+    /// width. Eight points matches the shell's compact titlebar rhythm.
+    static let stripSidebarGap: CGFloat = 8
     static let stripReserveTrailing: CGFloat = 150
 
     private var stripPalette: TabStripPalette {
@@ -5362,7 +5448,11 @@ struct ContentView: View {
                 } else if let only = engine.editorSplit.panes.first, only.kind.isViewer {
                     // Unsplit, and the document is not text — an image, a PDF,
                     // audio, or something with no text in it at all.
-                    PaneViewer(kind: only.kind, path: only.path, palette: viewerPalette)
+                    PaneViewer(
+                        kind: only.kind, path: only.path,
+                        tabId: only.tabStableId,
+                        palette: viewerPalette, audioPlayer: audioPlayer
+                    )
                 } else {
                     editorSurface(
                         lines: engine.editorLines.isEmpty ? engine.chrome.lines : engine.editorLines,
@@ -5576,7 +5666,11 @@ struct ContentView: View {
                 // The path bar stays: a viewer pane is still a document in a
                 // split, and the breadcrumb is how you know which one.
                 panePathBar(pane: pane)
-                PaneViewer(kind: pane.kind, path: pane.path, palette: viewerPalette)
+                PaneViewer(
+                    kind: pane.kind, path: pane.path,
+                    tabId: pane.tabStableId,
+                    palette: viewerPalette, audioPlayer: audioPlayer
+                )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 panePathBar(pane: pane)
@@ -7494,6 +7588,39 @@ private struct JumpBarSegmentButton: View {
     }
 }
 
+/// Keeps the window-owned player alive across pane replacement, but not across
+/// closing its owning document tab. Isolated from `ContentView.body` because
+/// that modifier chain is already near Swift's type-checking complexity limit.
+private struct AudioTabLifetimeModifier: ViewModifier {
+    let engine: EngineBridge
+    @ObservedObject var player: AudioPlayerModel
+
+    func body(content: Content) -> some View {
+        // Every route that can mutate the open-document set already republishes
+        // chrome: tab ×, Cmd-W, palette commands and project replacement alike.
+        // Checking the stable id here is both broader and safer than wiring the
+        // player to one particular close button implementation.
+        content.onReceive(engine.$chrome) { _ in
+            if player.sourceTabId == 0, !player.sourcePath.isEmpty,
+               let pane = engine.editorSplit.panes.first(where: {
+                   $0.kind == .audio && Self.sameFile($0.path, player.sourcePath)
+               })
+            {
+                player.adoptTabIdIfMissing(pane.tabStableId)
+            }
+            let id = player.sourceTabId
+            guard id != 0, !engine.tabIdIsOpen(id)
+            else { return }
+            player.close()
+        }
+    }
+
+    private static func sameFile(_ lhs: String, _ rhs: String) -> Bool {
+        URL(fileURLWithPath: lhs).standardizedFileURL.path
+            == URL(fileURLWithPath: rhs).standardizedFileURL.path
+    }
+}
+
 /// The two window bits that are the EDITOR's alone, applied to its own window.
 ///
 /// Full-size content is what lets the split view's sidebar rise THROUGH the
@@ -7847,19 +7974,24 @@ struct SplitColumnWidthReporter: NSViewRepresentable {
                     forName: NSSplitView.didResizeSubviewsNotification,
                     object: split,
                     queue: .main
-                ) { [weak self] _ in
-                    guard let self,
-                          let split = self.splitView,
-                          let first = split.arrangedSubviews.first
-                    else { return }
-                    // A collapsed pane keeps its old frame width, so the width
-                    // alone cannot say "the sidebar is shut". Ask the split
-                    // view — the tab strip centres on the window and needs the
-                    // sidebar's LIVE width, zero included.
-                    let collapsed = split.isSubviewCollapsed(first) || first.isHidden
-                    self.report?(collapsed ? 0 : Double(first.frame.width))
-                }
+                ) { [weak self] _ in self?.publishWidth() }
+                // A restored split does not necessarily resize after this
+                // observer attaches. Publish its laid-out width now; otherwise
+                // the titlebar can retain the 280pt bootstrap value forever and
+                // let the first tabs sit under a wider navigator.
+                publishWidth()
             }
+        }
+
+        private func publishWidth() {
+            guard let split = splitView,
+                  let first = split.arrangedSubviews.first
+            else { return }
+            // A collapsed pane keeps its old frame width, so the width alone
+            // cannot say "the sidebar is shut". Ask the split view and preserve
+            // zero as a real boundary state.
+            let collapsed = split.isSubviewCollapsed(first) || first.isHidden
+            report?(collapsed ? 0 : Double(first.frame.width))
         }
 
         deinit {

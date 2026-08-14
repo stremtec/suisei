@@ -38,6 +38,34 @@ enum TabChipBox {
     static let closeHitInset: CGFloat = 3
 }
 
+/// The window-space corridor available to the tab strip.
+///
+/// This is deliberately separate from `TabStripLayout`: the latter owns chip
+/// geometry and has been stable; this only resolves the two OUTER edges that
+/// AppKit gives the run.  Keeping the seam pure also lets the regression test
+/// cover sidebar and toolbar combinations without constructing an NSWindow.
+struct TabStripViewportGeometry: Equatable {
+    let x: CGFloat
+    let width: CGFloat
+
+    static func resolve(
+        contentMinX: CGFloat,
+        contentMaxX: CGFloat,
+        leadingInset: CGFloat,
+        trailingInset: CGFloat,
+        toolbarLeadingX: CGFloat?,
+        trailingRunReserve: CGFloat
+    ) -> Self? {
+        let left = contentMinX + max(0, leadingInset)
+        var right = contentMaxX - max(0, trailingInset)
+        if let toolbarLeadingX, toolbarLeadingX.isFinite {
+            right = min(right, toolbarLeadingX - max(0, trailingRunReserve))
+        }
+        guard right - left > 1 else { return nil }
+        return Self(x: left, width: right - left)
+    }
+}
+
 /// Where every tab chip is, computed rather than measured.
 ///
 /// The strip's geometry used to be four independent SwiftUI measurements —
@@ -100,6 +128,19 @@ struct TabStripLayout: Equatable {
         tabs: [(stableId: UInt64, group: UInt64)],
         viewportWidth: CGFloat,
         scrollOffset: CGFloat,
+        /// Where the run wants its centre, in VIEWPORT-local x.
+        ///
+        /// The window's centre, in practice — which is the whole point. The
+        /// viewport is the corridor between the sidebar and the toolbar and
+        /// therefore MOVES when either does; centring in it made the strip
+        /// slide with every sidebar toggle. Anchoring to the window and
+        /// clamping to the corridor separates the two jobs: the corridor says
+        /// where chips may be drawn, the anchor says where they sit, and only
+        /// a corridor too narrow to hold the run lets the first affect the
+        /// second.
+        ///
+        /// `nil` keeps the old behaviour — centred in the viewport.
+        preferredCentre: CGFloat? = nil,
         widthFor: (Int) -> CGFloat
     ) {
         var built: [Chip] = []
@@ -123,7 +164,12 @@ struct TabStripLayout: Equatable {
             let maxScroll = content - viewportWidth
             originX = -min(max(0, scrollOffset), maxScroll)
         } else {
-            originX = ((viewportWidth - content) / 2).rounded()
+            let centre = preferredCentre ?? viewportWidth / 2
+            // Clamped to the corridor, so the anchor can never push a chip
+            // under the sidebar or the toolbar. Both ends are reachable: the
+            // run fits, so `viewportWidth - content` is not negative.
+            let want = centre - content / 2
+            originX = min(max(0, want), viewportWidth - content).rounded()
         }
     }
 

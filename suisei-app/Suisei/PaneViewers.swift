@@ -24,7 +24,9 @@ import UniformTypeIdentifiers
 struct PaneViewer: View {
     let kind: PaneKind
     let path: String
+    let tabId: UInt64
     let palette: ViewerPalette
+    let audioPlayer: AudioPlayerModel
 
     var body: some View {
         switch kind {
@@ -33,7 +35,7 @@ struct PaneViewer: View {
             // total and a new kind is a compile error rather than a blank pane.
             Color.clear
         case .audio:
-            AudioViewer(path: path, palette: palette)
+            AudioViewer(path: path, tabId: tabId, palette: palette, model: audioPlayer)
         case .image:
             ImagePaneViewer(path: path, palette: palette)
         case .pdf:
