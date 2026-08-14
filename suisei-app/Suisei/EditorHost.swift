@@ -3550,11 +3550,25 @@ extension EditorCanvasView: NSTextInputClient {
         // English (one commit, one repaint). The composition only ever affects
         // the caret's own line (its suffix shifts); clearing the whole line
         // width also erases a longer previous composition when it shrinks.
+        //
+        // Both numbers below were wrong, and either one puts the dirty rect on
+        // the wrong rows — so the composing jamo is painted and never
+        // composited, which looks exactly like the key not registering.
+        //
+        // The ROW came from `chrome.cursorRow`, a snapshot the typing fast path
+        // deliberately never publishes: after any run of Latin typing it names
+        // wherever the caret was before that run. Pulled live now, like
+        // `revealCaret`.
+        //
+        // The Y came from `row * lineHeight`, which is only the row's position
+        // when nothing above it is expanded. `visualY` is the arithmetic the
+        // draw itself uses; a shown change or a live-reload insertion above the
+        // caret shifted every row below it and this rect stayed put.
         let lineH = EditorMetrics.lineHeight
-        let row = max(0, Int(engine?.chrome.cursorRow ?? 1) - 1)
+        let row = engine?.caretRowVCol().row ?? 0
         let band = wrapLines ? lineH * 6 : lineH * 2
         setNeedsDisplay(CGRect(
-            x: 0, y: max(0, CGFloat(row) * lineH - 1),
+            x: 0, y: max(0, visualY(row) - 1),
             width: bounds.width, height: band + 2
         ))
     }
