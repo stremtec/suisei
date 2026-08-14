@@ -212,6 +212,12 @@ pub struct App {
     /// Only the live document: a row number means nothing for a buffer that is
     /// not on screen, and background tabs are announced on their chips instead.
     pub live_rows: std::collections::HashMap<usize, crate::LiveKind>,
+    /// How many rows a removal took away, at the row that closed over them.
+    ///
+    /// A removal has nothing to mark — the lines are gone — so the mark points
+    /// at the line that moved up into the space. The face needs the SIZE of
+    /// that space to close it, and the mark alone cannot say it.
+    pub live_removed: u16,
     pub live_marked_at: Option<std::time::Instant>,
     /// Bumped whenever `live_rows` or `live_files` changes, so the face can
     /// pull only when there is something new rather than every frame.
@@ -588,6 +594,7 @@ impl Default for App {
             live_rows: std::collections::HashMap::new(),
             live_marked_at: None,
             live_gen: 0,
+            live_removed: 0,
             live_files: std::collections::HashMap::new(),
             tabs: TabStrip::new(),
             live_doc: FIRST_TAB_ID,
@@ -4173,6 +4180,7 @@ impl App {
             crate::LiveKind::Changed
         };
 
+        self.live_removed = 0;
         if new_mid == 0 {
             // Nothing arrived to mark. The row that closed over the gap is
             // where the reader should look, and it is the only place a
@@ -4180,10 +4188,16 @@ impl App {
             let row = head.min(new.len().saturating_sub(1));
             if !new.is_empty() {
                 self.live_rows.insert(row, crate::LiveKind::Removed);
+                self.live_removed = (old_mid - new_mid).min(u16::MAX as usize) as u16;
             }
         } else {
             for row in head..head + new_mid {
                 self.live_rows.insert(row, kind);
+            }
+            if old_mid > new_mid {
+                // Shrank without emptying: the band is still there, just
+                // shorter, and the rows below still have that much to travel.
+                self.live_removed = (old_mid - new_mid).min(u16::MAX as usize) as u16;
             }
         }
 

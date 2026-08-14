@@ -854,7 +854,9 @@ uint8_t suisei_engine_hover_text(const SuiseiEngine *ptr, char *out, uint32_t ca
 typedef struct SuiseiLiveMarkC {
   uint32_t row;
   uint8_t kind;
-  uint8_t _pad[3];
+  uint8_t _pad;
+  /* Rows a removal took away, on a REMOVED mark; 0 otherwise. */
+  uint16_t removed;
 } SuiseiLiveMarkC;
 
 /* Bumped whenever the marks change, including expiry — poll this, pull only

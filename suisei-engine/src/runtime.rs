@@ -4574,6 +4574,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A removal has nothing to mark, so it has to say how much went.
+    ///
+    /// The mark points at the line that closed over the gap; the count is the
+    /// size of the gap, and the face cannot work it out from the mark alone.
+    #[test]
+    fn a_removal_reports_how_many_lines_went() {
+        let dir = std::env::temp_dir().join(format!("suisei_live_rm_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("r.txt");
+        std::fs::write(&f, "keep\ngone1\ngone2\ngone3\ntail\n").unwrap();
+        let mut app = App::open_file(f.to_str().unwrap());
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&f, "keep\ntail\n").unwrap();
+        app.check_external_change();
+
+        assert_eq!(app.live_removed, 3, "three lines went");
+        assert_eq!(
+            app.live_rows.get(&1).copied(),
+            Some(suisei_core::LiveKind::Removed),
+            "the mark points at the line that closed over them: {:?}",
+            app.live_rows
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The project tree needs a per-FILE signal, and it has to cover the tabs
     /// the row marks cannot speak for.
     #[test]

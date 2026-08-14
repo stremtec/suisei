@@ -389,11 +389,28 @@ final class LiveMarks: ObservableObject {
     /// Handed to whichever canvas is showing the live document, once. The
     /// slide belongs to a view, not to this list — but only this list knows
     /// where it should start.
-    private(set) var pendingOpen: (below: Int, rows: Int)?
+    /// `rows` is signed: positive when lines arrived and the document has to
+    /// make room, negative when they left and it has to close over the space.
+    /// One value, because both are the same motion in opposite directions.
+    private(set) var pendingShift: (below: Int, rows: Int)?
 
-    func takePendingOpen() -> (below: Int, rows: Int)? {
-        defer { pendingOpen = nil }
-        return pendingOpen
+    func takePendingShift() -> (below: Int, rows: Int)? {
+        defer { pendingShift = nil }
+        return pendingShift
+    }
+
+    /// How much the document just grew or shrank, and when — for surfaces that
+    /// have to move in step with the editor but are not the editor. Expires on
+    /// its own; nothing consumes it.
+    private(set) var growth: (rows: Int, start: CFTimeInterval)?
+
+    static let shiftDuration: CFTimeInterval = 0.24
+
+    /// 0…1 through the current grow/shrink, 1 when none is running.
+    func growthProgress(now: CFTimeInterval = CACurrentMediaTime()) -> CGFloat {
+        guard let g = growth else { return 1 }
+        let t = min(1, max(0, (now - g.start) / Self.shiftDuration))
+        return CGFloat(1 - pow(1 - t, 3))
     }
 
     /// 0 when the row is not flashing. Eased out — it leaves quickly and the
@@ -431,21 +448,28 @@ final class LiveMarks: ObservableObject {
                 suisei_engine_live_marks(engine, $0.baseAddress, UInt32($0.count))
             }
             var nextRows: [UInt32: LiveKind] = [:]
+            var removedSpan: (row: Int, count: Int)?
             nextRows.reserveCapacity(Int(n))
             for i in 0..<Int(n) {
                 let m = marks[i]
                 nextRows[m.row] = LiveKind(raw: m.kind)
+                if m.removed > 0 { removedSpan = (Int(m.row), Int(m.removed)) }
                 if seenAt[m.row] == nil { seenAt[m.row] = now }
             }
-            // The contiguous run of ADDED rows, if this reload made the
-            // document longer. The canvas slides everything below it down.
+            // How the document changed length, and from where. Added rows are
+            // a contiguous run and the slide starts under them; a removal is
+            // one mark carrying how many lines went.
+            pendingShift = nil
             let added = nextRows.filter { $0.value == .added }.keys.sorted()
             if let first = added.first, let last = added.last,
                added.count == Int(last - first) + 1
             {
-                pendingOpen = (below: Int(last) + 1, rows: added.count)
-            } else {
-                pendingOpen = nil
+                pendingShift = (below: Int(last) + 1, rows: added.count)
+            } else if let gone = removedSpan {
+                pendingShift = (below: gone.row + 1, rows: -gone.count)
+            }
+            if let shift = pendingShift {
+                growth = (rows: shift.rows, start: now)
             }
             rows = nextRows
 
@@ -474,5 +498,6 @@ final class LiveMarks: ObservableObject {
         // decides when a flash is over, and its length is not core's.
         let cutoff = CACurrentMediaTime()
         seenAt = seenAt.filter { cutoff - $0.value < Self.flashDuration }
+        if let g = growth, cutoff - g.start >= Self.shiftDuration { growth = nil }
     }
 }

@@ -1624,7 +1624,8 @@ final class EditorCanvasView: NSView {
             // two are legible at once. The clip is what makes the new line
             // look revealed rather than superimposed.
             var clipped = false
-            if let o = liveOpening, baseRow >= o.below - o.rows, baseRow < o.below {
+            if let o = liveOpening, o.rows > 0,
+               baseRow >= o.below - o.rows, baseRow < o.below {
                 let top = visualY(o.below - o.rows)
                 let open = CGFloat(o.rows) * lineH * liveOpenProgress
                 cg.saveGState()
@@ -2456,8 +2457,8 @@ final class EditorCanvasView: NSView {
         // Claim the slide before anything is measured this pass, so the first
         // frame drawn is already the compressed one rather than the settled
         // one — starting a frame late is a visible jump followed by a slide.
-        if let open = engine?.live.takePendingOpen() {
-            noteLiveInsertion(below: open.below, rows: open.rows)
+        if let shift = engine?.live.takePendingShift() {
+            noteLiveShift(below: shift.below, rows: shift.rows)
         }
         guard engine?.live.isFlashing == true else { return }
         startLiveFlashTimer()
@@ -2665,6 +2666,9 @@ final class EditorCanvasView: NSView {
         // hit test. A second place that shifts rows would be a second place to
         // keep in step.
         if let o = liveOpening, bufferRow >= o.below {
+            // Signed: negative while lines arrive (the rows below start high
+            // and settle down), positive while they leave (the rows below
+            // start low and rise into the space). One term, both directions.
             h -= CGFloat(o.rows) * EditorMetrics.lineHeight * (1 - liveOpenProgress)
         }
         return h
@@ -2672,10 +2676,12 @@ final class EditorCanvasView: NSView {
 
     /// A live reload's inserted rows, still opening.
     ///
-    /// `below` is the first row that has to move down; `rows` is how far. Only
-    /// insertions: a removal's text is gone by the time the face hears about
-    /// it, so there is nothing left to draw in a closing gap, and the row that
-    /// closed over it gets the red flash instead.
+    /// `below` is the first row that has to travel; `rows` is how far, SIGNED.
+    /// Positive means lines arrived and the document opens for them; negative
+    /// means lines left and it closes over the space they were in. The closing
+    /// gap is drawn empty — the removed text is gone by the time the face
+    /// hears about it, and a gap that closes says "these went" without
+    /// pretending to still have them.
     private var liveOpening: (below: Int, rows: Int, start: CFTimeInterval)?
     private var liveOpenTimer: Timer?
     static let liveOpenDuration: CFTimeInterval = 0.24
@@ -2691,8 +2697,8 @@ final class EditorCanvasView: NSView {
     /// Driven by the row marks rather than by a line-count delta on its own:
     /// the marks say WHERE, and a slide anchored anywhere else would move the
     /// wrong half of the file.
-    func noteLiveInsertion(below: Int, rows: Int) {
-        guard rows > 0, rows < 400 else { return }
+    func noteLiveShift(below: Int, rows: Int) {
+        guard rows != 0, abs(rows) < 400 else { return }
         liveOpening = (below: below, rows: rows, start: CACurrentMediaTime())
         scrollView?.refitCanvas()
         needsDisplay = true

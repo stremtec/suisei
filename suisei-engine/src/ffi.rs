@@ -3428,7 +3428,11 @@ pub struct SuiseiLiveMarkC {
     pub row: u32,
     /// `suisei_core::LiveKind` — 0 changed, 1 added, 2 removed.
     pub kind: u8,
-    pub _pad: [u8; 3],
+    pub _pad: u8,
+    /// Rows this removal took away, on a `Removed` mark; 0 otherwise. The mark
+    /// says WHERE the lines were, and only this says how many, which is what
+    /// the closing gap has to be the size of.
+    pub removed: u16,
 }
 
 /// Bumped whenever the live-reload marks change, including when they expire.
@@ -3468,7 +3472,12 @@ pub extern "C" fn suisei_engine_live_marks(
         dst[n] = SuiseiLiveMarkC {
             row: row as u32,
             kind: kind as u8,
-            _pad: [0; 3],
+            _pad: 0,
+            removed: if kind == suisei_core::LiveKind::Removed {
+                app.live_removed
+            } else {
+                0
+            },
         };
         n += 1;
     }

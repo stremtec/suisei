@@ -6687,11 +6687,34 @@ struct MinimapStrip: View {
             ZStack(alignment: .topLeading) {
                 // Bars redraw ONLY when the document data changes — redrawing
                 // 2k rects on every scroll tick was the minimap stutter.
-                MinimapBars(
-                    data: data, accent: accent, fg: fg, isLight: isLight,
-                    rowH: rowHeight(data?.len.count ?? 1, stripHeight: geo.size.height)
-                )
-                .equatable()
+                // The map grows and shrinks WITH the editor.
+                //
+                // The bars are already the new document — the data refreshes
+                // on the reload — so what was missing was the motion, not the
+                // content: the column snapped to its new length while the
+                // rows beside it were still sliding. Scaled about the top,
+                // which is where a document grows from.
+                //
+                // A scale rather than interpolating the bar list: the bars are
+                // discrete and there is no half a row, so stretching the
+                // column is both the honest picture and the cheap one.
+                TimelineView(.animation(paused: live.growth == nil)) { _ in
+                    let p = live.growthProgress()
+                    let grew = CGFloat(live.growth?.rows ?? 0)
+                    let n = CGFloat(max(1, data?.len.count ?? 1))
+                    // Where the column started: this many rows fewer (or more,
+                    // for a removal) than it has now.
+                    let from = max(0.05, (n - grew) / n)
+                    MinimapBars(
+                        data: data, accent: accent, fg: fg, isLight: isLight,
+                        rowH: rowHeight(data?.len.count ?? 1, stripHeight: geo.size.height)
+                    )
+                    .equatable()
+                    .scaleEffect(
+                        x: 1, y: live.growth == nil ? 1 : from + (1 - from) * p,
+                        anchor: .top
+                    )
+                }
 
                 // Viewport indicator — a cheap offset move at frame rate,
                 // mapped over the RENDERED height (≠ strip height for small
