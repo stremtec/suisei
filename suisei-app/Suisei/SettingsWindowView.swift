@@ -13,6 +13,13 @@ struct SettingsWindowView: View {
     @State private var pageHistory: [PageID] = [.general]
     @State private var historyIndex = 0
     @State private var confirmSignOut = false
+    // Minimap. Face-side preferences, not Core rows: Core neither draws the
+    // strip nor knows it exists. They take effect on change, like every
+    // control in System Settings — the Apply bar below belongs to Core's
+    // config file and stays away unless a Core row is dirty.
+    @AppStorage("suisei.minimap") private var minimapEnabled = true
+    @AppStorage("suisei.minimap.allPanes") private var minimapAllPanes = false
+    @AppStorage("suisei.minimap.proportional") private var minimapProportional = false
 
     private static let sidebarWidth: CGFloat = 240
 
@@ -126,7 +133,7 @@ struct SettingsWindowView: View {
         ),
         Page(
             id: .editor, title: "Editor", symbol: "square.and.pencil",
-            searchTerms: "editing wrap line tab gpu clipboard undo", corePage: 1
+            searchTerms: "editing wrap line tab gpu clipboard undo minimap overview", corePage: 1
         ),
         Page(
             id: .languageServers, title: "Language Servers", symbol: "square.stack.3d.up",
@@ -672,6 +679,8 @@ struct SettingsWindowView: View {
             }
         }
 
+        minimapSection
+
         let advancedRows = presentedRows(on: .editor, advanced: true)
         if !advancedRows.isEmpty {
             Section {
@@ -692,6 +701,42 @@ struct SettingsWindowView: View {
             } footer: {
                 Text("These options affect terminal frontends. The native Mac editor does not require them.")
             }
+        }
+    }
+
+    /// The minimap's three questions, in the window that answers questions.
+    ///
+    /// Also in View ▸ Minimap, because that is where you reach for it mid-edit.
+    /// Both surfaces read and write the same `UserDefaults` keys, so neither is
+    /// a copy of the other's state — there is one answer and two ways to say it.
+    ///
+    /// The two shape controls are disabled rather than hidden while the minimap
+    /// is off: hiding them would make the section change height on a toggle,
+    /// and a setting you cannot find is worse than one you cannot currently
+    /// use.
+    @ViewBuilder private var minimapSection: some View {
+        Section {
+            Toggle("Show Minimap", isOn: $minimapEnabled)
+
+            Picker("Show In", selection: $minimapAllPanes) {
+                Text("Focused Pane Only").tag(false)
+                Text("All Panes").tag(true)
+            }
+            .disabled(!minimapEnabled)
+
+            Picker("Width", selection: $minimapProportional) {
+                Text("Fixed").tag(false)
+                Text("Proportional to Pane").tag(true)
+            }
+            .disabled(!minimapEnabled)
+        } header: {
+            Text("Minimap")
+        } footer: {
+            Text(
+                minimapProportional
+                    ? "The strip is 12% of its pane, between 44 and 120 points."
+                    : "The strip is 62 points wide in every pane."
+            )
         }
     }
 
