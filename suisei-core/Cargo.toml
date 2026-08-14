@@ -9,7 +9,6 @@ keywords = ["editor", "gui", "core", "headless"]
 
 [dependencies]
 unicode-width = "0.2"
-portable-pty = "0.8"
 image = { version = "0.25", default-features = false, features = ["gif", "png", "jpeg", "webp", "bmp"] }
 # 0.25, not 0.24: eight of the grammars below are generated with a newer
 # tree-sitter CLI and declare language ABI 15, which a 0.24 runtime refuses to
