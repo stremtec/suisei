@@ -2163,18 +2163,25 @@ final class EditorCanvasView: NSView {
             + EditorCanvasView.gitBarHoverGrowth * ease
         let r = w / 2   // a true capsule
 
-        // The swell is UNIFORM: the outline moves outward by the same amount
-        // in every direction, which is what the whole shape growing looks
-        // like. Widening alone reads as the bar being stretched sideways —
-        // the ends stay on exactly the rows they sat on, so only the middle
-        // appears to move. Half the width's growth is the per-side amount, so
-        // the hovered outline is the resting one offset by that everywhere.
+        // The swell is UNIFORM — the outline moves outward by the same amount
+        // in every direction, which is what a shape growing looks like.
+        // Widening alone reads as a sideways stretch: the ends stay on exactly
+        // the rows they sat on, so only the middle appears to move.
         //
-        // Only a capped end can extend. An end that runs off the band has no
-        // end to move; pushing it would just draw further into the clip.
-        let bulge = EditorCanvasView.gitBarHoverGrowth / 2 * ease
-        let top = topCap ? top - bulge : top
-        let bottom = bottomCap ? bottom + bulge : bottom
+        // The vertical half is an inset that OPENS rather than an overhang
+        // that grows. Bulging past the hunk's rows made the bar say something
+        // false about which lines changed, and it disagreed with the hover
+        // wash, which is exactly those rows — visible as soon as staging fills
+        // the bar in and the overhang is solid ink past the highlighted band.
+        // So the resting bar is held a little inside its rows and hover
+        // returns it to them: the same 1pt of travel per end, anchored to the
+        // truth instead of past it.
+        //
+        // Only a capped end moves. An end that runs off the band has no end to
+        // inset; the bar simply continues.
+        let inset = EditorCanvasView.gitBarHoverGrowth / 2 * (1 - ease)
+        let top = topCap ? top + inset : top
+        let bottom = bottomCap ? bottom - inset : bottom
 
         var out: [CGRect] = []
         let bodyTop = top + (topCap ? r : 0)
