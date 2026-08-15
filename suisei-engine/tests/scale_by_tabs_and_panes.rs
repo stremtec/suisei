@@ -81,7 +81,7 @@ fn band_ms(e: *mut SuiseiEngine, panes: usize, iters: usize) -> f64 {
     let t = Instant::now();
     for _ in 0..iters {
         for pane in 0..panes {
-            let ok = suisei_engine_editor_band(e, pane as u32, 0, 60, 0, &mut *band);
+            let ok = suisei_engine_editor_band(e, pane as u32, 0, 60, 0, 200, &mut *band);
             std::hint::black_box(ok);
         }
     }

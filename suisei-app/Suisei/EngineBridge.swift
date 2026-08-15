@@ -1252,18 +1252,7 @@ final class EngineBridge: ObservableObject {
         fontGeneration &+= 1
     }
 
-    /// Tell core how wide a two-cell glyph actually paints, so soft wrap
-    /// budgets CJK at what it draws rather than at what the cell model claims.
-    ///
-    /// The ratio is a property of the FALLBACK face macOS substitutes for the
-    /// glyphs JetBrains Mono has none of, so it can differ by size — pushed
-    /// from `reapplyEditorMetrics`, which is where every font change already
-    /// tells core its new metrics, and once at startup for the session that
-    /// never zooms.
-    func pushWideGlyphRatio() {
-        guard let engine else { return }
-        suisei_engine_set_wide_glyph_ratio(engine, EditorMetrics.wideGlyphRatio)
-    }
+
 
     func closeSettings() {
         guard chrome.settings.open else { return }
@@ -1300,7 +1289,6 @@ final class EngineBridge: ObservableObject {
         // flips the welcome rule, so Welcome yields to the restored editor.
         suisei_engine_restore_session(engine)
         pushSystemAppearance()
-        pushWideGlyphRatio()
         observeSystemAppearance()
         refreshChrome()
         checkRecovery()
@@ -1904,9 +1892,6 @@ final class EngineBridge: ObservableObject {
     /// After font zoom, force Core viewport recompute even if pixel size is unchanged.
     private func reapplyEditorMetrics() {
         guard let engine else { return }
-        // Every metric core needs, from one place. The wrap ratio is measured
-        // against the font, so it moves with the size.
-        pushWideGlyphRatio()
         let w = lastEditorSize.width
         let h = lastEditorSize.height
         guard w > 80, h > 80 else {
@@ -3156,7 +3141,7 @@ final class EngineBridge: ObservableObject {
         var band = SuiseiBandC()
         let ok = suisei_engine_editor_band(
             engine, UInt32(pane), UInt32(max(0, start)), UInt32(maxRows),
-            UInt16(clamping: wrapCols), &band
+            UInt16(clamping: wrapCols), EditorMetrics.wideGlyphRatio, &band
         )
         guard ok != 0 else { return [] }
         var out: [EditorLine] = []
@@ -3346,7 +3331,8 @@ final class EngineBridge: ObservableObject {
     func wrapTotalRows(pane: Int, cols: Int) -> Int {
         guard let engine else { return 1 }
         return Int(suisei_engine_wrap_total_rows(
-            engine, UInt32(max(0, pane)), UInt16(clamping: cols)
+            engine, UInt32(max(0, pane)), UInt16(clamping: cols),
+            EditorMetrics.wideGlyphRatio
         ))
     }
 
@@ -3354,7 +3340,8 @@ final class EngineBridge: ObservableObject {
     func wrapVisualOf(pane: Int, cols: Int, row: Int) -> Int {
         guard let engine else { return max(0, row) }
         return Int(suisei_engine_wrap_visual_of(
-            engine, UInt32(max(0, pane)), UInt16(clamping: cols), UInt32(max(0, row))
+            engine, UInt32(max(0, pane)), UInt16(clamping: cols),
+            EditorMetrics.wideGlyphRatio, UInt32(max(0, row))
         ))
     }
 
@@ -3362,7 +3349,8 @@ final class EngineBridge: ObservableObject {
     func wrapBufferAt(pane: Int, cols: Int, visualRow: Int) -> (row: Int, segment: Int) {
         guard let engine else { return (max(0, visualRow), 0) }
         let packed = suisei_engine_wrap_buffer_at(
-            engine, UInt32(max(0, pane)), UInt16(clamping: cols), UInt32(max(0, visualRow))
+            engine, UInt32(max(0, pane)), UInt16(clamping: cols),
+            EditorMetrics.wideGlyphRatio, UInt32(max(0, visualRow))
         )
         return (Int(packed >> 32), Int(packed & 0xFFFF_FFFF))
     }

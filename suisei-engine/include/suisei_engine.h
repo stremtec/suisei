@@ -233,26 +233,28 @@ typedef struct SuiseiBandC {
    decides it — only the face knows a pane's width in points, the cell width,
    the gutter and what overlays the right edge. A wrapped line arrives as
    several rows sharing one line_no, continuations flagged in git_sign & 0x80. */
+/* `wide_ratio` = how wide a "two-cell" glyph really paints, in hundredths of a
+   narrow cell. The editor draws with real advances, not on a grid, and with the
+   shipped font Hangul is 1.44 cells — budgeting it at 2 broke Korean lines a
+   quarter of a pane early. It rides beside `wrap_cols` because the two are one
+   fact (how this pane measures a row); as a pushed setting it had an ordering
+   question, and lost it. */
 uint8_t suisei_engine_editor_band(
     const SuiseiEngine *ptr, uint32_t pane, uint32_t start_row, uint32_t max_rows,
-    uint16_t wrap_cols, SuiseiBandC *out);
-
-/* How wide a "two-cell" glyph really paints, in hundredths of a narrow cell.
-   The editor draws with real advances, not on a grid, and with the shipped font
-   Hangul is 1.44 cells — budgeting it at 2 broke Korean lines a quarter of a
-   pane early. Only the face can measure the font it draws with. */
-void suisei_engine_set_wide_glyph_ratio(SuiseiEngine *ptr, uint16_t hundredths);
+    uint16_t wrap_cols, uint16_t wide_ratio, SuiseiBandC *out);
 
 /* Soft-wrap geometry for the same pane at the same columns. Cached per pane
    against the document version, so asking all three per frame builds nothing.
    With cols == 0 they answer as if each line were one row. */
 uint32_t suisei_engine_wrap_total_rows(const SuiseiEngine *ptr, uint32_t pane,
-                                       uint16_t cols);
+                                       uint16_t cols, uint16_t wide_ratio);
 uint32_t suisei_engine_wrap_visual_of(const SuiseiEngine *ptr, uint32_t pane,
-                                      uint16_t cols, uint32_t row);
+                                      uint16_t cols, uint16_t wide_ratio,
+                                      uint32_t row);
 /* Buffer row in the high 32 bits, segment within it in the low 32. */
 uint64_t suisei_engine_wrap_buffer_at(const SuiseiEngine *ptr, uint32_t pane,
-                                      uint16_t cols, uint32_t visual_row);
+                                      uint16_t cols, uint16_t wide_ratio,
+                                      uint32_t visual_row);
 
 void suisei_engine_split_resize(SuiseiEngine *e, uint32_t pane_a,
                                 uint32_t pane_b, float delta);

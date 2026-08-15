@@ -1505,6 +1505,7 @@ pub extern "C" fn suisei_engine_editor_band(
     start_row: u32,
     max_rows: u32,
     wrap_cols: u16,
+    wide_ratio: u16,
     out: *mut SuiseiBandC,
 ) -> u8 {
     if ptr.is_null() || out.is_null() {
@@ -1517,7 +1518,8 @@ pub extern "C" fn suisei_engine_editor_band(
     let o = unsafe { &mut *out };
     let rows = (max_rows as usize).min(SUISEI_BAND_MAX);
     let (lines, total) =
-        eng.0.editor_band(pane as usize, start_row as usize, rows, wrap_cols);
+        eng.0
+            .editor_band(pane as usize, start_row as usize, rows, wrap_cols, wide_ratio);
     o.start_row = start_row;
     o.doc_line_count = total;
     let n = lines.len().min(SUISEI_BAND_MAX);
@@ -1648,27 +1650,6 @@ fn write_minimap(o: &mut SuiseiMinimapC, buckets: Vec<(u8, u8, u8)>, total: u32)
 /// a line measures. The map is cached per pane against the document version, so
 /// asking three times a frame builds nothing.
 
-/// How wide a "two-cell" glyph really paints, in hundredths of a narrow cell.
-///
-/// The cell model says CJK is two cells, and in a terminal that is true because
-/// the terminal draws on a grid. The editor lays text out with real CoreText
-/// advances — which is why the caret crosses as a UTF-16 offset and not a cell
-/// column — and with the shipped font `한` advances 1.44 narrow cells. Wrapping
-/// at two budgeted 39% more width than a Hangul line paints, so a Korean
-/// paragraph broke with a quarter of the pane still empty.
-///
-/// Only the face can measure the font it draws with, so only the face can say.
-/// 200 (the terminal-true value) until it does.
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_set_wide_glyph_ratio(ptr: *mut SuiseiEngine, hundredths: u16) {
-    if ptr.is_null() || hundredths == 0 {
-        return;
-    }
-    unsafe {
-        (*ptr).0.app_mut().wide_glyph_ratio = hundredths;
-    }
-}
-
 /// Total visual rows — the document's height in rows, which is the scroll
 /// extent once the face multiplies by its line height.
 #[unsafe(no_mangle)]
@@ -1676,11 +1657,12 @@ pub extern "C" fn suisei_engine_wrap_total_rows(
     ptr: *const SuiseiEngine,
     pane: u32,
     cols: u16,
+    wide_ratio: u16,
 ) -> u32 {
     if ptr.is_null() {
         return 1;
     }
-    unsafe { &*ptr }.0.wrap_total_rows(pane as usize, cols)
+    unsafe { &*ptr }.0.wrap_total_rows(pane as usize, cols, wide_ratio)
 }
 
 /// First visual row of a buffer row.
@@ -1689,6 +1671,7 @@ pub extern "C" fn suisei_engine_wrap_visual_of(
     ptr: *const SuiseiEngine,
     pane: u32,
     cols: u16,
+    wide_ratio: u16,
     row: u32,
 ) -> u32 {
     if ptr.is_null() {
@@ -1696,7 +1679,7 @@ pub extern "C" fn suisei_engine_wrap_visual_of(
     }
     unsafe { &*ptr }
         .0
-        .wrap_visual_of(pane as usize, cols, row as usize)
+        .wrap_visual_of(pane as usize, cols, wide_ratio, row as usize)
 }
 
 /// Buffer row in the high 32 bits, segment within it in the low 32 — the
@@ -1707,12 +1690,16 @@ pub extern "C" fn suisei_engine_wrap_buffer_at(
     ptr: *const SuiseiEngine,
     pane: u32,
     cols: u16,
+    wide_ratio: u16,
     visual_row: u32,
 ) -> u64 {
     if ptr.is_null() {
         return 0;
     }
-    let (row, seg) = unsafe { &*ptr }.0.wrap_buffer_at(pane as usize, cols, visual_row);
+    let (row, seg) =
+        unsafe { &*ptr }
+            .0
+            .wrap_buffer_at(pane as usize, cols, wide_ratio, visual_row);
     ((row as u64) << 32) | (seg as u64 & 0xFFFF_FFFF)
 }
 

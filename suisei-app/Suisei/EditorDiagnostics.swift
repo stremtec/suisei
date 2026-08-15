@@ -36,6 +36,7 @@ enum EditorDiagnostics {
         gutter: CGFloat,
         rightInset: CGFloat,
         advance: CGFloat,
+        wideRatio: UInt16,
         cols: Int
     ) {
         guard wrap else { return }
@@ -44,7 +45,7 @@ enum EditorDiagnostics {
             """
             [suisei/wrap] pane=\(pane) clip=\(fmt(clipWidth)) \
             − gutter \(fmt(gutter)) − inset \(fmt(rightInset)) = \(fmt(usable))pt \
-            ÷ advance \(fmt(advance)) → \(cols) cols \
+            ÷ advance \(fmt(advance)) → \(cols) cols  wide=\(wideRatio) \
             (row paints \(fmt(CGFloat(cols) * advance))pt, \
             leaves \(fmt(usable - CGFloat(cols) * advance))pt)
             """

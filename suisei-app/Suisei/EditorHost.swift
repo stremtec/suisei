@@ -315,6 +315,7 @@ final class EditorScrollView: NSScrollView {
             gutter: EditorMetrics.gutter,
             rightInset: rightInset,
             advance: EditorMetrics.textAdvance,
+            wideRatio: EditorMetrics.wideGlyphRatio,
             cols: cols
         )
         canvas.setWrapCols(cols)

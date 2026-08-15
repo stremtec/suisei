@@ -1652,8 +1652,9 @@ impl Engine {
         start: usize,
         rows: usize,
         wrap_cols: u16,
+        wide_ratio: u16,
     ) -> (Vec<crate::compositor::EditorLineScene>, u32) {
-        crate::compositor::build_editor_band(&self.app, pane, start, rows, wrap_cols)
+        crate::compositor::build_editor_band(&self.app, pane, start, rows, wrap_cols, wide_ratio)
     }
 
     /// Which document a pane is showing, as a tab index.
@@ -1688,12 +1689,17 @@ impl Engine {
     /// One slot per pane — bounded by `MAX_PANES`, and a pane only ever asks
     /// about the document it shows. Building is O(document): the face asks
     /// three questions a frame, so this has to be a cache and not a function.
-    fn with_wrap_map<T>(&self, pane: usize, cols: u16, f: impl FnOnce(&WrapMap) -> T) -> T {
+    fn with_wrap_map<T>(
+        &self,
+        pane: usize,
+        cols: u16,
+        wide: u16,
+        f: impl FnOnce(&WrapMap) -> T,
+    ) -> T {
         let tab = self.tab_for_pane(pane);
         let buf = crate::compositor::buffer_for_tab(&self.app, tab);
         let version = buf.version();
         let tab_w = self.app.tab_width.max(1).min(u16::MAX as usize) as u16;
-        let wide = self.app.wide_glyph_ratio;
         let slot = pane.min(suisei_core::split::MAX_PANES.saturating_sub(1));
         let mut cache = self.wrap_maps.borrow_mut();
         if cache.len() <= slot {
@@ -1707,18 +1713,18 @@ impl Engine {
     }
 
     /// Total visual rows in a pane's document — the scroll extent.
-    pub fn wrap_total_rows(&self, pane: usize, cols: u16) -> u32 {
-        self.with_wrap_map(pane, cols, |m| m.total_rows())
+    pub fn wrap_total_rows(&self, pane: usize, cols: u16, wide: u16) -> u32 {
+        self.with_wrap_map(pane, cols, wide, |m| m.total_rows())
     }
 
     /// First visual row of a buffer row.
-    pub fn wrap_visual_of(&self, pane: usize, cols: u16, row: usize) -> u32 {
-        self.with_wrap_map(pane, cols, |m| m.visual_of(row))
+    pub fn wrap_visual_of(&self, pane: usize, cols: u16, wide: u16, row: usize) -> u32 {
+        self.with_wrap_map(pane, cols, wide, |m| m.visual_of(row))
     }
 
     /// Buffer row and segment at a visual row.
-    pub fn wrap_buffer_at(&self, pane: usize, cols: u16, visual: u32) -> (usize, u32) {
-        self.with_wrap_map(pane, cols, |m| m.buffer_at(visual))
+    pub fn wrap_buffer_at(&self, pane: usize, cols: u16, wide: u16, visual: u32) -> (usize, u32) {
+        self.with_wrap_map(pane, cols, wide, |m| m.buffer_at(visual))
     }
 
 
@@ -2685,7 +2691,7 @@ mod tests {
         // secondary first, then add the primary elsewhere.
         eng.app.caret_place(Position::new(1, 2)); // secondary on line 2 ("world")
         eng.app.caret_add(Position::new(0, 0)); // added → primary on line 1
-        let (lines, _) = eng.editor_band(0, 0, 20, 0);
+        let (lines, _) = eng.editor_band(0, 0, 20, 0, 200);
 
         let line2 = lines.iter().find(|l| l.line_no == 2).expect("row 2");
         let carets: Vec<u32> = line2
@@ -2717,7 +2723,7 @@ mod tests {
         let mut eng = eng_with_text("가나다x\nabc");
         eng.app.caret_place(Position::new(0, 3)); // secondary after 가나다 (3 wide glyphs)
         eng.app.caret_add(Position::new(1, 0)); // added → primary on "abc"
-        let (lines, _) = eng.editor_band(0, 0, 20, 0);
+        let (lines, _) = eng.editor_band(0, 0, 20, 0, 200);
         let cjk = lines.iter().find(|l| l.line_no == 1).expect("row 1");
         let start = cjk
             .spans

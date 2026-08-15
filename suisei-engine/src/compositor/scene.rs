@@ -418,6 +418,7 @@ pub fn build_editor_band(
     start: usize,
     rows: usize,
     wrap_cols: u16,
+    wide_ratio: u16,
 ) -> (Vec<EditorLineScene>, u32) {
     // A pane the desk does not have is not a request to be satisfied with some
     // other pane's document.
@@ -471,7 +472,7 @@ pub fn build_editor_band(
         0
     };
     let sel = if focused { app.selected_range() } else { None };
-    let lines = build_lines_at(app, tab, start, rows, Some(caret_vcol), sel, focused, wrap_cols);
+    let lines = build_lines_at(app, tab, start, rows, Some(caret_vcol), sel, focused, wrap_cols, wide_ratio);
     (lines, total)
 }
 
@@ -2209,7 +2210,13 @@ fn build_visible_lines_from_buffer(
         // The packed-lines path never wrapped and does not now: it feeds the
         // chrome snapshot, which the GUI does not render from.
         0,
+        scene_wide_default(),
     )
+}
+
+/// Ratio for the paths that do not wrap, where it cannot matter.
+pub(crate) fn scene_wide_default() -> u16 {
+    suisei_core::wrap::WIDE_TWO_CELLS
 }
 
 /// Rows `[band_start, band_start+rows)` — the shared line assembler.
@@ -2221,7 +2228,12 @@ fn build_lines_at(
     caret_vcol: Option<u32>,
     sel: Option<(Position, Position)>,
     use_live_syntax: bool,
+    // `wide_ratio`: how wide a two-cell glyph really paints, in hundredths of
+    // a narrow cell. The face's measurement, riding beside the width it
+    // applies to — the two are one fact ("how this pane measures a row"), and
+    // a pushed value has an ordering question that a parameter does not.
     wrap_cols: u16,
+    wide_ratio: u16,
 ) -> Vec<EditorLineScene> {
     let buf = buffer_for_tab(app, tab);
     let total = buf.line_count();
@@ -2395,7 +2407,7 @@ fn build_lines_at(
             0
         };
         let chunks = if wrap {
-            suisei_core::wrap::visual_chunks(&text, wrap_cols, app.wide_glyph_ratio)
+            suisei_core::wrap::visual_chunks(&text, wrap_cols, wide_ratio)
         } else {
             vec![(0u32, text.clone())]
         };
@@ -2831,7 +2843,7 @@ mod unicode_overlay_tests {
         app.search.input = "한글".into();
         app.recompute_search("한글", false);
         app.search.current = 1;
-        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0);
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200);
         let kinds: Vec<u8> = lines[0]
             .spans
             .iter()
@@ -2853,7 +2865,7 @@ mod unicode_overlay_tests {
         assert_eq!(app.search.pattern.as_deref(), Some("suisei"));
         assert_eq!(app.search.matches.len(), 2);
 
-        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0);
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200);
         assert!(
             lines[0]
                 .spans
