@@ -12,6 +12,9 @@ struct SettingsWindowView: View {
     /// Shortcuts' own filter. Separate from `searchText`, which filters the
     /// sidebar's pages — Xcode's Shortcuts pane has its own Filter field too.
     @State private var shortcutFilter = ""
+    /// Which syntax category the Themes page's editing row is pointed at.
+    /// A key, not an index — see `selectedToken`.
+    @State private var selectedTokenKey = "fg"
     @State private var selectedPageID: PageID = .general
     @State private var pageHistory: [PageID] = [.general]
     @State private var historyIndex = 0
@@ -711,18 +714,28 @@ struct SettingsWindowView: View {
     @ViewBuilder private var themeSections: some View {
         Section {
             themeSelector
-        } footer: {
-            Text("A theme pins one palette regardless of the colour scheme on General. Match Color Scheme follows macOS instead.")
         }
 
+        // Xcode's shape exactly: the categories are a SELECTABLE list, and one
+        // row underneath edits whichever is selected. Twenty rows each carrying
+        // their own well — which is what this was — turns a preview you read
+        // into a form you scan, and the preview is the part that tells you
+        // whether an edit worked.
         Section {
-            syntaxPreview
+            syntaxList
+            selectedTokenRow
         } header: {
             Text("Source Editor")
         } footer: {
-            if let worst = worstContrast {
+            if let ratio = selectedContrast, ratio < 3.0 {
                 Label(
-                    "\(worst.label) is hard to read on this background (\(contrastText(worst.ratio)) contrast). \(Self.readableFloorText)",
+                    "This colour is hard to read on the editor background. \(Self.readableFloorText)",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+            } else if let worst = worstContrast {
+                Label(
+                    "\(worst.label) is hard to read on this background (\(contrastText(worst.ratio))).",
                     systemImage: "exclamationmark.triangle.fill"
                 )
                 .foregroundStyle(.orange)
@@ -730,19 +743,9 @@ struct SettingsWindowView: View {
         }
 
         Section {
-            ForEach(inkTokens) { token in
-                themeTokenRow(token)
-            }
-        } header: {
-            Text("Syntax")
-        }
-
-        Section {
             ForEach(surfaceTokens) { token in
-                themeTokenRow(token)
+                surfaceRow(token)
             }
-        } header: {
-            Text("Surfaces")
         }
 
         if let highlight = rows(.highlightColor).first {
@@ -751,7 +754,7 @@ struct SettingsWindowView: View {
             } header: {
                 Text("Highlight")
             } footer: {
-                Text("Unlike the Accent swatch above, this also re-derives everything downstream of it — selection, search, and the text drawn on accent.")
+                Text("Unlike the Accent well above, this also re-derives everything downstream of it — selection, search, and the text drawn on accent.")
             }
         }
 
@@ -765,6 +768,112 @@ struct SettingsWindowView: View {
                 ? "No colours changed on this theme."
                 : "\(overrideCount) colour\(overrideCount == 1 ? "" : "s") changed. Edits are kept per theme, so switching themes does not carry them over.")
         }
+    }
+
+    /// The token the editing row below the list is currently pointed at.
+    ///
+    /// Stored by KEY, not by index: indices are Core's ABI and a future
+    /// appended token would move them, which would silently repoint a stored
+    /// selection at a different colour.
+    private var selectedToken: EngineBridge.ThemeTokenInfo? {
+        inkTokens.first { $0.key == selectedTokenKey } ?? inkTokens.first
+    }
+
+    private var selectedContrast: Double? {
+        selectedToken.flatMap(contrastAgainstEditorBackground)
+    }
+
+    /// The categories, painted in their own colours on the theme's own
+    /// background, and selectable.
+    ///
+    /// The selection band is the theme's `selection` colour rather than the
+    /// system's — the same thing Xcode does, and it means the list previews
+    /// one more colour for free.
+    private var syntaxList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(inkTokens) { token in
+                    let selected = token.key == selectedToken?.key
+                    Text(token.label)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.color(color(ofToken: token.key)))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(selected ? theme.color(theme.selection) : .clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { selectedTokenKey = token.key }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .frame(height: 190)
+        .background(theme.color(theme.editorBg))
+        .clipShape(RoundedRectangle(cornerRadius: Radius.row, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+        .padding(.vertical, 4)
+    }
+
+    /// The one row that edits whatever the list has selected.
+    ///
+    /// Xcode shows the font here. Suisei has no per-category font — the editor
+    /// font is one setting for the whole document — so the slot carries the
+    /// contrast reading instead, which is the number that actually decides
+    /// whether the colour you are about to pick is usable.
+    @ViewBuilder private var selectedTokenRow: some View {
+        if let token = selectedToken {
+            LabeledContent {
+                HStack(spacing: 10) {
+                    if let ratio = contrastAgainstEditorBackground(token) {
+                        Text(contrastText(ratio))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(ratio < 3.0 ? .orange : .secondary)
+                            .help("Contrast against the editor background. \(Self.readableFloorText)")
+                    }
+                    if isOverridden(token) {
+                        Button("Reset") {
+                            engine.settingsSetThemeToken(token.index, "default")
+                        }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                    }
+                    colorWell(for: token)
+                }
+            } label: {
+                Text(token.label)
+            }
+        }
+    }
+
+    private func surfaceRow(_ token: EngineBridge.ThemeTokenInfo) -> some View {
+        LabeledContent {
+            HStack(spacing: 10) {
+                if isOverridden(token) {
+                    Button("Reset") { engine.settingsSetThemeToken(token.index, "default") }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                }
+                colorWell(for: token)
+            }
+        } label: {
+            Text(token.label)
+        }
+    }
+
+    private func colorWell(for token: EngineBridge.ThemeTokenInfo) -> some View {
+        let packed = color(ofToken: token.key)
+        return CompactColorWell(
+            color: Binding(
+                get: { theme.color(packed) },
+                set: { engine.settingsSetThemeToken(token.index, hexString(for: $0)) }
+            ),
+            pill: true
+        )
+        .frame(width: 38, height: 20)
+        .help("Change \(token.label)")
     }
 
     private static let readableFloorText =
@@ -826,38 +935,6 @@ struct SettingsWindowView: View {
         engine.themeOverrideMask & (1 << UInt32(token.index)) != 0
     }
 
-    /// One colour, with a well to change it and — once changed — a way back.
-    ///
-    /// The Reset button appears only on rows the user has actually edited.
-    /// Showing it on all twenty would put a control next to every colour that
-    /// does nothing for nineteen of them.
-    private func themeTokenRow(_ token: EngineBridge.ThemeTokenInfo) -> some View {
-        let packed = color(ofToken: token.key)
-        let ratio = contrastAgainstEditorBackground(token)
-        return LabeledContent {
-            HStack(spacing: 8) {
-                if let ratio, ratio < 3.0 {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .help("\(contrastText(ratio)) contrast on the editor background. \(Self.readableFloorText)")
-                }
-                if isOverridden(token) {
-                    Button("Reset") { engine.settingsSetThemeToken(token.index, "default") }
-                        .buttonStyle(.borderless)
-                        .controlSize(.small)
-                }
-                CompactColorWell(color: Binding(
-                    get: { theme.color(packed) },
-                    set: { engine.settingsSetThemeToken(token.index, hexString(for: $0)) }
-                ))
-                .frame(width: 40, height: 20)
-                .help("Change \(token.label)")
-            }
-        } label: {
-            Text(token.label)
-        }
-    }
-
     /// How this token reads on the editor background — `nil` for the tokens
     /// that are not ink on it, where the number would mean nothing.
     private func contrastAgainstEditorBackground(
@@ -902,34 +979,6 @@ struct SettingsWindowView: View {
         return channel((packed >> 16) & 0xFF) * 0.2126
             + channel((packed >> 8) & 0xFF) * 0.7152
             + channel(packed & 0xFF) * 0.0722
-    }
-
-    /// Every category, painted in its own colour on the theme's own background
-    /// — Xcode's Source Editor list, and the thing that makes an edit legible
-    /// as you make it. A theme picker with no preview asks you to choose
-    /// fifteen palettes by name.
-    private var syntaxPreview: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 1) {
-                ForEach(inkTokens) { token in
-                    Text(token.label)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(theme.color(color(ofToken: token.key)))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 1.5)
-                }
-            }
-            .padding(.vertical, 6)
-        }
-        .frame(height: 180)
-        .background(theme.color(theme.editorBg))
-        .clipShape(RoundedRectangle(cornerRadius: Radius.row, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
-        )
-        .padding(.vertical, 4)
     }
 
     private var appearanceModeSelector: some View {
@@ -1779,13 +1828,17 @@ struct SettingsNavigationRow: View {
 /// macOS 26, which breaks a horizontal palette even when its host is framed.
 private struct CompactColorWell: NSViewRepresentable {
     @Binding var color: Color
+    /// Pill rather than circle. Xcode's Themes page uses wide rounded wells;
+    /// the accent strip on this page uses circles, because there it is one
+    /// swatch among nine and a circle reads as a choice in a row of choices.
+    var pill = false
 
     func makeCoordinator() -> Coordinator {
         Coordinator(color: $color)
     }
 
     func makeNSView(context: Context) -> CircularColorWellHost {
-        let host = CircularColorWellHost()
+        let host = CircularColorWellHost(pill: pill)
         let well = host.well
         well.supportsAlpha = false
         well.target = context.coordinator
@@ -1817,13 +1870,19 @@ private struct CompactColorWell: NSViewRepresentable {
 
 private final class CircularColorWellHost: NSView {
     let well = NSColorWell(style: .minimal)
+    private let pill: Bool
 
-    override var intrinsicContentSize: NSSize { NSSize(width: 22, height: 22) }
+    override var intrinsicContentSize: NSSize {
+        pill ? NSSize(width: 38, height: 20) : NSSize(width: 22, height: 22)
+    }
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    init(pill: Bool) {
+        self.pill = pill
+        super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 11
+        // The host does the clipping, so the shape is ours regardless of how
+        // AppKit chooses to draw a minimal well at this size.
+        layer?.cornerRadius = pill ? 10 : 11
         layer?.masksToBounds = true
         well.frame = bounds
         well.autoresizingMask = [.width, .height]
