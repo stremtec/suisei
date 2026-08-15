@@ -2709,6 +2709,13 @@ final class EditorCanvasView: NSView {
     /// 0 = no chip, 1 = fully drawn. Eased, and derived from the clock rather
     /// than stepped, so a dropped frame costs a frame and not a wrong size.
     private func breakpointPhase(_ line: EditorLine) -> CGFloat {
+        // A breakpoint belongs to the LINE, and the line's chip is on the row
+        // that carries its number. `bpAnim` is keyed by `lineNo`, which every
+        // segment of a wrapped line shares — so while the animation ran, all
+        // of them drew a chip and the numberless rows below appeared to blink
+        // one into existence too. Core already withholds `hasBreakpoint` from
+        // continuations; this is the same rule for the animating case.
+        if line.isWrapContinuation { return 0 }
         guard let a = bpAnim[line.lineNo] else {
             return line.hasBreakpoint ? 1 : 0
         }
@@ -3401,6 +3408,11 @@ final class EditorCanvasView: NSView {
         if p.x < EditorMetrics.gutter - EditorMetrics.gutterTextGap * 0.5 {
             // An inserted line has no buffer row and therefore no breakpoint.
             guard let row = bufferRow(atY: p.y) else { return }
+            // Neither does a wrapped line's continuation. Its gutter is empty
+            // BECAUSE it owns no line — clicking there set a breakpoint on the
+            // line above, from a row that shows no number to say so.
+            let rowPitch = max(1, EditorMetrics.lineHeight)
+            guard segmentOfVisual(Int(floor(p.y / rowPitch))) == 0 else { return }
             engine.toggleBreakpointLine(UInt32(row) + 1)
             return
         }
