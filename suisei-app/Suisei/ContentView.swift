@@ -5895,6 +5895,16 @@ struct ContentView: View {
                     palette: viewerPalette, audioPlayer: audioPlayer
                 )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // Clicking a viewer moves core's focus, the way clicking a
+                    // canvas or a shell already does. Without it the header
+                    // accent, the status bar and ⌘W all went on describing the
+                    // pane the user had just clicked away from.
+                    .overlay {
+                        PaneClickReporter {
+                            guard engine.editorSplit.focus != pane.id else { return }
+                            engine.focusPane(pane.id)
+                        }
+                    }
             } else {
                 panePathBar(pane: pane)
                 editorSurface(
@@ -5930,6 +5940,18 @@ struct ContentView: View {
         // it intercepted AppKit clicks).
     }
 
+    /// The glyph for a pane's header, by what the pane holds.
+    private func paneHeaderSymbol(_ kind: PaneKind) -> String {
+        switch kind {
+        case .text: return "doc.text.fill"
+        case .terminal: return "terminal.fill"
+        case .image: return "photo.fill"
+        case .pdf: return "doc.richtext.fill"
+        case .audio: return "waveform"
+        case .binary: return "doc.fill"
+        }
+    }
+
     /// Per-pane jump/path bar (like Xcode split editors).
     private func panePathBar(pane: EditorPaneSnap) -> some View {
         let bufferTab = engine.chrome.tabs.first(where: {
@@ -5938,7 +5960,10 @@ struct ContentView: View {
         let title = pane.title
         let dirty = pane.focused ? engine.chrome.dirty : (bufferTab?.dirty ?? false)
         return HStack(spacing: 6) {
-            Image(systemName: "doc.text.fill")
+            // The pane's own kind. Every pane's header claimed `doc.text.fill`,
+            // so a split of a PDF and a PNG showed two identical text-document
+            // glyphs — the row meant to tell you which pane you are in.
+            Image(systemName: paneHeaderSymbol(pane.kind))
                 .font(.system(size: 10))
                 .foregroundStyle(pane.focused ? accent : dim)
             Text("\(title)\(dirty ? " ●" : "")")

@@ -46,6 +46,59 @@ struct PaneViewer: View {
     }
 }
 
+/// Notices a click anywhere beneath it and takes nothing.
+///
+/// A text pane reports its own focus from `EditorCanvasView.mouseDown`, and
+/// `splitPaneBody` says so where the tap gesture used to be: a SwiftUI
+/// recognizer over an AppKit view delayed or stole the mouseDown, and caret
+/// clicks stopped landing. A terminal pane does the same from its own
+/// `mouseDown` override.
+///
+/// A viewer pane has no view of ours to hook. Its content is all AppKit and
+/// all of it needs its own events — the image scroller, PDFView's selection
+/// and links, the audio transport's buttons — so clicking one moved nothing,
+/// and in a split the focus stayed on the pane the user had just clicked away
+/// from: its header kept the accent, ⌘W closed its document, and the status
+/// bar went on describing it. That is the whole of "the focus concept is
+/// vague" — not a missing indicator, a focus that never moved for the
+/// indicator to follow.
+///
+/// So hook the box instead of the content. `hitTest` runs during event
+/// routing, before delivery, and returning nil declines the event entirely —
+/// the click carries on to whatever is underneath exactly as before.
+struct PaneClickReporter: NSViewRepresentable {
+    let onClick: () -> Void
+
+    func makeNSView(context: Context) -> ClickSniffer {
+        let view = ClickSniffer()
+        view.onClick = onClick
+        return view
+    }
+
+    func updateNSView(_ view: ClickSniffer, context: Context) {
+        view.onClick = onClick
+    }
+
+    final class ClickSniffer: NSView {
+        var onClick: (() -> Void)?
+        /// Hit testing runs several times for one press — the window walks the
+        /// hierarchy — and it also runs for tracking areas, cursor rects and
+        /// every frame of a drag. The event's own number is the only thing
+        /// that distinguishes "this press" from "this press again".
+        private var reported: Int = .min
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let event = NSApp.currentEvent, event.type == .leftMouseDown,
+                  event.eventNumber != reported,
+                  let superview, bounds.contains(convert(point, from: superview))
+            else { return nil }
+            reported = event.eventNumber
+            onClick?()
+            return nil
+        }
+    }
+}
+
 /// The colours a viewer needs, lifted out of `ContentView`'s theme so these
 /// views can be previewed and reasoned about on their own.
 struct ViewerPalette: Equatable {
