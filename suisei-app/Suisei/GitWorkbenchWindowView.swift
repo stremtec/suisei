@@ -440,6 +440,11 @@ struct GitWorkbenchWindowView: View {
     /// Blank space kept under the last sidebar row. Measured from the window,
     /// clamped so it is neither useless on a short one nor most of a tall one.
     @State private var sidebarHeight: CGFloat = 600
+    /// Blank space under the last file box. Most of a screenful, because the
+    /// point is to bring the END of the list into the middle of the pane
+    /// rather than to leave a comfortable margin at it.
+    private static let workspaceBottomRoom: CGFloat = 420
+
     private var sidebarBottomRoom: CGFloat {
         // Two thirds of the column. The first pass used 40% clamped to 360,
         // which is a comfortable margin — and a margin is not what this is for.
@@ -881,6 +886,14 @@ struct GitWorkbenchWindowView: View {
                         }
                         .padding(10)
                     }
+                    // Room under the LAST FILE BOX, in the scroll that stacks
+                    // them — not inside a box's own diff, which would give
+                    // every file a long empty tail. The last change is the one
+                    // you scrolled furthest to reach, and reading it off the
+                    // bottom edge of the window is reading it in the worst
+                    // place on screen; this is what lets it come up to the
+                    // middle of the pane.
+                    .contentMargins(.bottom, Self.workspaceBottomRoom, for: .scrollContent)
                     .onChange(of: selectedChangeID) { _, id in
                         guard let id else { return }
                         withAnimation(.easeOut(duration: 0.14)) {
@@ -1284,6 +1297,7 @@ struct GitWorkbenchWindowView: View {
                 }
                 .padding(10)
             }
+            .contentMargins(.bottom, Self.workspaceBottomRoom, for: .scrollContent)
         } else {
             ContentUnavailableView(
                 "Select a Commit",
@@ -1874,13 +1888,6 @@ private struct GitDiffTableView: NSViewRepresentable {
     let addInk: UInt32
     let delInk: UInt32
 
-    /// Blank space kept under the last row of a diff.
-    ///
-    /// Deliberately large. A diff is read top to bottom and then stops; what is
-    /// useful is being able to bring the END of it into the middle of the pane,
-    /// and that needs most of a screenful rather than a comfortable margin.
-    static let bottomRoom: CGFloat = 420
-
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -1891,24 +1898,7 @@ private struct GitDiffTableView: NSViewRepresentable {
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
         scroll.scrollerStyle = .overlay
-        // Room under the last hunk. Xcode leaves roughly a third of the pane
-        // empty below a diff, and the reason is not decoration: the last change
-        // in a file is the one you scrolled furthest to reach, and reading it
-        // off the very bottom edge of a window means reading it in the worst
-        // place on screen.
-        //
-        // `contentInsets` rather than a spacer row: a spacer is a row, so it
-        // takes a selection, a height calculation, and an index that has to be
-        // excluded from everything that walks the rows.
-        scroll.automaticallyAdjustsContentInsets = false
-        scroll.contentInsets = NSEdgeInsets(
-            top: 0, left: 0, bottom: GitDiffTableView.bottomRoom, right: 0
-        )
-        // The scroller should still run the full height; without this the
-        // overlay knob is inset by the same amount and floats above the floor.
-        scroll.scrollerInsets = NSEdgeInsets(
-            top: 0, left: 0, bottom: -GitDiffTableView.bottomRoom, right: 0
-        )
+
 
         let table = NSTableView(frame: .zero)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("diff"))
