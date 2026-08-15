@@ -80,9 +80,19 @@ fn token_keys_are_stable() {
         "cursor",
         "status_bg",
         "accent",
+        // Appended, not inserted. `current_line` reads as belonging beside
+        // `line_no` and `invisibles` beside the other ink, and neither may go
+        // there: the index is how the face addresses a token, so putting them
+        // in their "natural" place would repoint every index after it. This
+        // test is what caught exactly that.
+        "current_line",
+        "invisibles",
     ];
     let actual: Vec<&str> = ThemeToken::ALL.iter().map(|t| t.key()).collect();
-    assert_eq!(actual, expected, "token keys are written into user configs");
+    assert_eq!(
+        actual, expected,
+        "token keys AND their order are ABI — append, never insert"
+    );
 
     for key in expected {
         assert!(ThemeToken::from_key(key).is_some(), "{key} must round-trip");

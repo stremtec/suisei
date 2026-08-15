@@ -26,6 +26,11 @@ struct SettingsWindowView: View {
     @AppStorage("suisei.minimap") private var minimapEnabled = true
     @AppStorage("suisei.minimap.allPanes") private var minimapAllPanes = false
     @AppStorage("suisei.minimap.proportional") private var minimapProportional = false
+    /// Line spacing and caret shape, stored as their raw values so the enum can
+    /// gain a case without a defaults migration. `EditorMetrics` reads the same
+    /// keys — these bindings exist to redraw the window, not to own the value.
+    @AppStorage("suisei.lineSpacing") private var lineSpacing = "normal"
+    @AppStorage("suisei.cursorStyle") private var cursorStyle = "bar"
 
     private static let sidebarWidth: CGFloat = 240
 
@@ -742,6 +747,24 @@ struct SettingsWindowView: View {
             }
         }
 
+        // Xcode's two popups, in Xcode's place: between the editing row and the
+        // surface wells. Both are face-side preferences like the font size —
+        // Core neither measures a line nor draws a caret.
+        Section {
+            Picker("Line Spacing", selection: $lineSpacing) {
+                ForEach(EditorMetrics.LineSpacing.allCases, id: \.rawValue) { option in
+                    Text(option.label).tag(option.rawValue)
+                }
+            }
+            Picker("Cursor Style", selection: $cursorStyle) {
+                ForEach(EditorMetrics.CursorStyle.allCases, id: \.rawValue) { option in
+                    Text(option.label).tag(option.rawValue)
+                }
+            }
+        }
+        .onChange(of: lineSpacing) { _, _ in engine.relayoutEditors() }
+        .onChange(of: cursorStyle) { _, _ in engine.relayoutEditors() }
+
         Section {
             ForEach(surfaceTokens) { token in
                 surfaceRow(token)
@@ -879,20 +902,53 @@ struct SettingsWindowView: View {
     private static let readableFloorText =
         "3:1 is the readable floor for code; 4.5:1 is the standard for body text."
 
-    /// Core's token table, split the way the page groups it. `isEditorInk` is
-    /// not published, so the split is by key — the keys are ABI and the surface
-    /// ones are the short, closed list.
-    private static let surfaceKeys: Set<String> = [
-        "editor_bg", "selection_bg", "cursor", "status_bg", "accent",
+    /// Display order, which is NOT Core's order.
+    ///
+    /// Core's token indices are ABI, so a colour added later goes on the end of
+    /// its enum even when it reads as belonging in the middle — `current_line`
+    /// next to `line_no`, `invisibles` among the ink. Sorting for the eye is
+    /// this side's job, and keeping the two orders separate is what lets Core
+    /// append without the page rearranging itself.
+    ///
+    /// Any key Core grows that is not named here still appears, at the end of
+    /// the ink list: a new colour must never be invisible just because this
+    /// list was not updated.
+    private static let inkOrder: [String] = [
+        "fg", "comment", "string", "number", "keyword", "type_name", "function",
+        "macro_name", "namespace", "parameter", "property", "constant",
+        "operator", "punctuation", "line_no", "invisibles",
+    ]
+
+    private static let surfaceOrder: [String] = [
+        "editor_bg", "current_line", "selection_bg", "cursor", "status_bg", "accent",
     ]
 
     private var inkTokens: [EngineBridge.ThemeTokenInfo] {
-        EngineBridge.themeTokens.filter { !Self.surfaceKeys.contains($0.key) }
+        ordered(Self.inkOrder, fallbackForUnknown: true)
     }
 
     private var surfaceTokens: [EngineBridge.ThemeTokenInfo] {
-        EngineBridge.themeTokens.filter { Self.surfaceKeys.contains($0.key) }
+        ordered(Self.surfaceOrder, fallbackForUnknown: false)
     }
+
+    private func ordered(
+        _ keys: [String],
+        fallbackForUnknown: Bool
+    ) -> [EngineBridge.ThemeTokenInfo] {
+        let rank = Dictionary(uniqueKeysWithValues: keys.enumerated().map { ($1, $0) })
+        var listed = EngineBridge.themeTokens
+            .filter { rank[$0.key] != nil }
+            .sorted { rank[$0.key]! < rank[$1.key]! }
+        if fallbackForUnknown {
+            let known = Set(Self.inkOrder).union(Self.surfaceOrder)
+            listed += EngineBridge.themeTokens.filter { !known.contains($0.key) }
+        }
+        return listed
+    }
+
+    /// Surfaces are not ink on the editor background, so a contrast reading
+    /// against it would mean nothing for them.
+    private static let surfaceKeys: Set<String> = Set(surfaceOrder)
 
     /// The live colour of a token, from the snapshot the editor is painting
     /// with. Core owns the names and the order; this is the one mapping the
@@ -914,6 +970,8 @@ struct SettingsWindowView: View {
         case "operator": theme.operatorColor
         case "punctuation": theme.punctuation
         case "line_no": theme.dim
+        case "current_line": theme.currentLine
+        case "invisibles": theme.invisibles
         case "editor_bg": theme.editorBg
         case "selection_bg": theme.selection
         case "cursor": theme.caret

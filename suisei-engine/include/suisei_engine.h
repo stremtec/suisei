@@ -516,6 +516,8 @@ typedef struct SuiseiThemeSnapshot {
   uint32_t editor_bg;
   uint32_t fg;
   uint32_t dim;
+  uint32_t current_line;
+  uint32_t invisibles;
   uint32_t accent;
   uint32_t selection;
   uint32_t caret;

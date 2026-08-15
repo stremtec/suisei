@@ -493,10 +493,15 @@ struct ContentView: View {
         return minimapWidth(paneWidth: editorAreaSize.width * pane.rect.width)
     }
     private var gutterFg: Color { isLightTheme ? Color.black.opacity(0.32) : dim.opacity(0.9) }
-    /// Xcode-level current-line wash — barely visible, not a gray slab.
-    private var cursorLineBg: Color {
-        isLightTheme ? Color.black.opacity(0.035) : Color.white.opacity(0.055)
-    }
+    /// The theme's own current-line wash.
+    ///
+    /// This band was already being drawn; its colour was a hard-coded black or
+    /// white at 3.5%/5.5%, so every one of the fifteen palettes got the same
+    /// grey wash and the theme had no say. Core carries `current_line` now, so
+    /// the palette decides and the Themes page can edit it — the same shape as
+    /// `relative_number` and the wrap ratio before it: the fact existed and had
+    /// never crossed the ABI.
+    private var cursorLineBg: Color { theme.color(theme.currentLine) }
     private var selBg: Color {
         theme.color(theme.selection).opacity(isLightTheme ? 0.45 : 0.55)
     }

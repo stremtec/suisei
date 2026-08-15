@@ -55,6 +55,10 @@ pub struct Theme {
     pub operator: Rgba,
     pub punctuation: Rgba,
     pub line_no: Rgba,
+    /// Wash behind the row the caret is on.
+    pub current_line: Rgba,
+    /// Tabs and trailing spaces, when they are shown.
+    pub invisibles: Rgba,
     pub editor_bg: Rgba,
     pub status_bg: Rgba,
     pub status_fg: Rgba,
@@ -140,6 +144,8 @@ pub static LIGHT: Theme = Theme {
     operator: rgb(48, 54, 61),
     punctuation: rgb(106, 115, 125),
     line_no: rgb(143, 151, 160),
+    current_line: rgb(235, 236, 237),
+    invisibles: rgb(192, 197, 202),
     editor_bg: rgb(252, 253, 254),
     status_bg: rgb(243, 246, 249),
     status_fg: rgb(75, 82, 90),
@@ -221,6 +227,8 @@ pub static DARK: Theme = Theme {
     operator: rgb(233, 233, 233),
     punctuation: rgb(144, 144, 144),
     line_no: rgb(96, 96, 96),
+    current_line: rgb(43, 43, 41),
+    invisibles: rgb(65, 64, 64),
     editor_bg: rgb(27, 26, 24),
     status_bg: rgb(18, 17, 16),
     status_fg: rgb(164, 164, 164),
@@ -293,6 +301,8 @@ pub static OCEAN: Theme = Theme {
     operator: rgb(180, 190, 200),
     punctuation: rgb(120, 130, 150),
     line_no: rgb(82, 92, 114),
+    current_line: rgb(30, 32, 42),
+    invisibles: rgb(52, 58, 74),
     editor_bg: rgb(15, 17, 26),
     status_bg: rgb(10, 12, 20),
     status_fg: rgb(180, 190, 200),
@@ -355,6 +365,8 @@ pub static MONOKAI: Theme = Theme {
     operator: rgb(249, 38, 114),
     punctuation: rgb(117, 113, 94),
     line_no: rgb(80, 80, 70),
+    current_line: rgb(56, 57, 51),
+    invisibles: rgb(62, 62, 54),
     editor_bg: rgb(39, 40, 34),
     status_bg: rgb(30, 31, 26),
     status_fg: rgb(200, 200, 195),
@@ -417,6 +429,8 @@ pub static NORD: Theme = Theme {
     operator: rgb(129, 161, 193),
     punctuation: rgb(76, 86, 106),
     line_no: rgb(76, 86, 106),
+    current_line: rgb(60, 66, 78),
+    invisibles: rgb(62, 71, 87),
     editor_bg: rgb(46, 52, 64),
     status_bg: rgb(36, 41, 51),
     status_fg: rgb(200, 207, 218),
@@ -479,6 +493,8 @@ pub static SOLARIZED: Theme = Theme {
     operator: rgb(38, 139, 210),
     punctuation: rgb(88, 110, 117),
     line_no: rgb(50, 75, 85),
+    current_line: rgb(10, 51, 62),
+    invisibles: rgb(28, 61, 71),
     editor_bg: rgb(0, 43, 54),
     status_bg: rgb(0, 35, 44),
     status_fg: rgb(120, 135, 138),
@@ -541,6 +557,8 @@ pub static GRUVBOX: Theme = Theme {
     operator: rgb(254, 128, 25),
     punctuation: rgb(146, 131, 116),
     line_no: rgb(80, 73, 64),
+    current_line: rgb(56, 54, 51),
+    invisibles: rgb(62, 58, 53),
     editor_bg: rgb(40, 40, 40),
     status_bg: rgb(32, 32, 32),
     status_fg: rgb(220, 205, 165),
@@ -603,6 +621,8 @@ pub static EVERFOREST: Theme = Theme {
     operator: rgb(131, 180, 175),
     punctuation: rgb(134, 140, 122),
     line_no: rgb(75, 84, 68),
+    current_line: rgb(53, 58, 54),
+    invisibles: rgb(59, 67, 57),
     editor_bg: rgb(39, 46, 44),
     status_bg: rgb(31, 37, 35),
     status_fg: rgb(200, 188, 160),
@@ -665,6 +685,8 @@ pub static SAKURA: Theme = Theme {
     operator: rgb(190, 60, 100),
     punctuation: rgb(200, 180, 190),
     line_no: rgb(200, 170, 185),
+    current_line: rgb(239, 222, 229),
+    invisibles: rgb(225, 202, 212),
     editor_bg: rgb(255, 240, 245),
     status_bg: rgb(255, 225, 235),
     status_fg: rgb(60, 20, 40),
@@ -727,6 +749,8 @@ pub static NEWSPAPER: Theme = Theme {
     operator: rgb(125, 130, 172),
     punctuation: rgb(190, 185, 195),
     line_no: rgb(200, 195, 200),
+    current_line: rgb(245, 234, 224),
+    invisibles: rgb(225, 217, 213),
     editor_bg: rgb(255, 243, 229),
     status_bg: rgb(254, 249, 244),
     status_fg: rgb(125, 130, 172),
@@ -789,6 +813,8 @@ pub static MONO: Theme = Theme {
     operator: rgb(0, 0, 0),
     punctuation: rgb(150, 150, 150),
     line_no: rgb(190, 190, 190),
+    current_line: rgb(237, 237, 237),
+    invisibles: rgb(219, 219, 219),
     editor_bg: rgb(255, 255, 255),
     status_bg: rgb(245, 245, 245),
     status_fg: rgb(30, 30, 30),
@@ -853,6 +879,8 @@ pub static MONO_DARK: Theme = Theme {
     operator: rgb(255, 255, 255),
     punctuation: rgb(120, 120, 120),
     line_no: rgb(70, 70, 70),
+    current_line: rgb(37, 37, 37),
+    invisibles: rgb(48, 48, 48),
     editor_bg: rgb(20, 20, 20),
     status_bg: rgb(28, 28, 28),
     status_fg: rgb(230, 230, 230),
@@ -935,6 +963,11 @@ pub enum ThemeToken {
     Cursor,
     StatusBg,
     Accent,
+    // Appended. The order of this enum is ABI — the face addresses a token
+    // by index — so a new colour goes on the END even when it belongs
+    // elsewhere in a list. Display order is the face's business.
+    CurrentLine,
+    Invisibles,
 }
 
 impl ThemeToken {
@@ -959,6 +992,8 @@ impl ThemeToken {
         Self::Cursor,
         Self::StatusBg,
         Self::Accent,
+        Self::CurrentLine,
+        Self::Invisibles,
     ];
 
     /// Key written into `~/.suisei.toml`. Stable — renaming one orphans a
@@ -985,6 +1020,8 @@ impl ThemeToken {
             Self::Cursor => "cursor",
             Self::StatusBg => "status_bg",
             Self::Accent => "accent",
+            Self::CurrentLine => "current_line",
+            Self::Invisibles => "invisibles",
         }
     }
 
@@ -1010,6 +1047,8 @@ impl ThemeToken {
             Self::Cursor => "Cursor",
             Self::StatusBg => "Status Bar",
             Self::Accent => "Accent",
+            Self::CurrentLine => "Current Line",
+            Self::Invisibles => "Invisibles",
         }
     }
 
@@ -1038,6 +1077,7 @@ impl ThemeToken {
                 | Self::Operator
                 | Self::Punctuation
                 | Self::LineNo
+                | Self::Invisibles
         )
     }
 
@@ -1063,6 +1103,8 @@ impl ThemeToken {
             Self::Cursor => theme.cursor,
             Self::StatusBg => theme.status_bg,
             Self::Accent => theme.accent,
+            Self::CurrentLine => theme.current_line,
+            Self::Invisibles => theme.invisibles,
         }
     }
 
@@ -1096,6 +1138,8 @@ impl ThemeToken {
             Self::Cursor => theme.cursor = color,
             Self::StatusBg => theme.status_bg = color,
             Self::Accent => theme.accent = color,
+            Self::CurrentLine => theme.current_line = color,
+            Self::Invisibles => theme.invisibles = color,
         }
     }
 }

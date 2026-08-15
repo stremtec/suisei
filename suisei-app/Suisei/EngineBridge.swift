@@ -681,6 +681,10 @@ struct ThemeSnap: Equatable {
     var editorBg: UInt32
     var fg: UInt32
     var dim: UInt32
+    /// Wash behind the row the caret is on.
+    var currentLine: UInt32
+    /// Tabs and trailing spaces, when Show Invisibles is on.
+    var invisibles: UInt32
     var accent: UInt32
     var selection: UInt32
     var caret: UInt32
@@ -701,7 +705,8 @@ struct ThemeSnap: Equatable {
 
     static let empty = ThemeSnap(
         name: "ocean",
-        editorBg: 0x0F111A, fg: 0xC8D2DC, dim: 0x525C72, accent: 0x6BB8C4,
+        editorBg: 0x0F111A, fg: 0xC8D2DC, dim: 0x525C72,
+        currentLine: 0x161825, invisibles: 0x333A49, accent: 0x6BB8C4,
         selection: 0x2A3A55, caret: 0xC8E08C, statusBg: 0x0A0C14,
         keyword: 0x00DCFF, string: 0x96E6B4, comment: 0x606C7A,
         number: 0xFFB482, typeName: 0x64C8FF, function: 0xFFDC78,
@@ -819,7 +824,94 @@ enum EditorMetrics {
     static let defaultFontSize: CGFloat = 14
     static let minFontSize: CGFloat = 10
     static let maxFontSize: CGFloat = 28
-    static let linePad: CGFloat = 4
+    /// Half the air above and below a line of code.
+    ///
+    /// `lineHeight` is `fontSize + linePad * 2`, and every renderer, the
+    /// minimap, the gutter and the wrap arithmetic read `lineHeight` — so this
+    /// one number is the whole of line spacing. It scales with the font rather
+    /// than being a fixed point count, or zooming in would tighten the page.
+    static var linePad: CGFloat {
+        lineSpacing.pad * (fontSize / defaultFontSize)
+    }
+
+    /// How much air a line of code sits in. Xcode's Themes page calls this
+    /// Line Spacing and offers three; so does this.
+    enum LineSpacing: String, CaseIterable {
+        case tight
+        case normal
+        case relaxed
+
+        var pad: CGFloat {
+            switch self {
+            case .tight: 2
+            case .normal: 4
+            case .relaxed: 7
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .tight: "Tight"
+            case .normal: "Normal Spacing"
+            case .relaxed: "Relaxed"
+            }
+        }
+    }
+
+    static var lineSpacing: LineSpacing {
+        LineSpacing(rawValue: UserDefaults.standard.string(forKey: "suisei.lineSpacing") ?? "")
+            ?? .normal
+    }
+
+    /// The shape the caret is drawn in.
+    ///
+    /// A GUI editor's caret was a hard-coded 2pt bar in both renderers. Block
+    /// and underline are the two other shapes people actually ask for, and
+    /// both are the same rect with different arithmetic.
+    enum CursorStyle: String, CaseIterable {
+        case bar
+        case block
+        case underline
+
+        var label: String {
+            switch self {
+            case .bar: "Vertical Bar Cursor"
+            case .block: "Block Cursor"
+            case .underline: "Underline Cursor"
+            }
+        }
+    }
+
+    static var cursorStyle: CursorStyle {
+        CursorStyle(rawValue: UserDefaults.standard.string(forKey: "suisei.cursorStyle") ?? "")
+            ?? .bar
+    }
+
+    /// The caret's rect, given where the text sits and how wide a cell is.
+    ///
+    /// Both renderers used to build this inline, identically, and a shape
+    /// option would have had to be added to both — so it lives here once.
+    /// `advance` is the width of the glyph under the caret, which only the
+    /// block and underline shapes need.
+    static func caretRect(
+        x: CGFloat,
+        capTop: CGFloat,
+        descBottom: CGFloat,
+        advance: CGFloat
+    ) -> CGRect {
+        let top = (capTop - 1).rounded()
+        let height = (descBottom - capTop + 2).rounded()
+        let width = max(cellWidth, advance)
+        switch cursorStyle {
+        case .bar:
+            return CGRect(x: x, y: top, width: 2, height: height)
+        case .block:
+            return CGRect(x: x, y: top, width: width, height: height)
+        case .underline:
+            let thickness = max(2, (fontSize / 8).rounded())
+            return CGRect(x: x, y: top + height - thickness, width: width, height: thickness)
+        }
+    }
     /// Space between trailing line number and code (Cursor/VS Code–like air gap).
     static let gutterTextGap: CGFloat = 12
     /// Width of the gutter's change bar.
@@ -1891,6 +1983,18 @@ final class EngineBridge: ObservableObject {
 
     func resetFontZoom() {
         EditorMetrics.resetFont()
+        fontGeneration &+= 1
+        reapplyEditorMetrics()
+    }
+
+    /// Something that changes the editor's geometry or paint has been set from
+    /// outside the editor — line spacing, caret shape.
+    ///
+    /// Line spacing moves `lineHeight`, which changes how many rows fit, so
+    /// Core has to be told: the same path zoom already uses. Caret shape only
+    /// repaints, but taking the cheap-and-correct route for both keeps one
+    /// answer to "the metrics moved".
+    func relayoutEditors() {
         fontGeneration &+= 1
         reapplyEditorMetrics()
     }
@@ -5781,6 +5885,8 @@ final class EngineBridge: ObservableObject {
             editorBg: snap.editor_bg,
             fg: snap.fg,
             dim: snap.dim,
+            currentLine: snap.current_line,
+            invisibles: snap.invisibles,
             accent: snap.accent,
             selection: snap.selection,
             caret: snap.caret,

@@ -2125,6 +2125,8 @@ pub struct SuiseiThemeSnapshot {
     pub editor_bg: u32,
     pub fg: u32,
     pub dim: u32,
+    pub current_line: u32,
+    pub invisibles: u32,
     pub accent: u32,
     pub selection: u32,
     pub caret: u32,
@@ -2212,6 +2214,8 @@ pub extern "C" fn suisei_engine_theme(
     o.editor_bg = t.editor_bg;
     o.fg = t.fg;
     o.dim = t.dim;
+    o.current_line = t.current_line;
+    o.invisibles = t.invisibles;
     o.accent = t.accent;
     o.selection = t.selection;
     o.caret = t.caret;

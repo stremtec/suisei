@@ -1718,11 +1718,12 @@ final class EditorCanvasView: NSView {
                 let baseline = textY + font.ascender
                 let capTop = baseline - font.capHeight
                 let descBottom = baseline - font.descender
-                let caretRect = CGRect(
+                let caretRect = EditorMetrics.caretRect(
                     x: caretX,
-                    y: (capTop - 1).rounded(),
-                    width: 2,
-                    height: (descBottom - capTop + 2).rounded()
+                    capTop: capTop,
+                    descBottom: descBottom,
+                    advance: CTLineGetOffsetForStringIndex(displayCT, CFIndex(caretIndex + 1), nil)
+                        - (caretX - gutter)
                 )
                 lastCaretRect = caretRect
                 if let win = window,
@@ -2014,11 +2015,12 @@ final class EditorCanvasView: NSView {
                 let baseline = textY + font.ascender
                 let capTop = baseline - font.capHeight
                 let descBottom = baseline - font.descender
-                let caretRect = CGRect(
+                let caretRect = EditorMetrics.caretRect(
                     x: caretX,
-                    y: (capTop - 1).rounded(),
-                    width: 2,
-                    height: (descBottom - capTop + 2).rounded()
+                    capTop: capTop,
+                    descBottom: descBottom,
+                    advance: CTLineGetOffsetForStringIndex(displayCT, CFIndex(caretIndex + 1), nil)
+                        - (caretX - gutter)
                 )
                 // Remember it for `firstRect(forCharacterRange:)` — the input
                 // method places its candidate window against this.
