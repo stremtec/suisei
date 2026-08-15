@@ -1636,6 +1636,12 @@ struct GitWorkbenchWindowView: View {
                 _ = expandedChangeIDs.insert(row.id)
             }
             selectedChangeID = row.id
+            // Take a copy NOW if Core happens to be holding this file's diff.
+            // Opening the next card replaces it, and by then this one has no
+            // way back to rows it was already displaying.
+            if worktreeDiffCache[row.id] == nil, diffTitleMatches(row.path) {
+                worktreeDiffCache[row.id] = makeDiffRows(diffLines)
+            }
             if sidebarSelection == .change(row.id) {
                 requestWorktreeDiff(row)
             } else {
@@ -1668,15 +1674,46 @@ struct GitWorkbenchWindowView: View {
         DispatchQueue.main.async { cachePendingDiffIfReady() }
     }
 
+    /// Keep whatever diff Core is currently holding, for whoever it belongs to.
+    ///
+    /// Core holds ONE diff at a time — `model.special` carries a single
+    /// `diff · path` block — and `worktreeDiffRows` falls back to it whenever
+    /// the path matches. That fallback is why a card can be open and showing
+    /// rows it never stored: open a second file, Core replaces the block, and
+    /// the first card is suddenly displaying nothing. "Two files, only the
+    /// first one opens" is that.
+    ///
+    /// Caching was tied to `pendingDiffTargets`, i.e. only to a file whose diff
+    /// this view had explicitly asked for. A diff that arrives for any other
+    /// reason was rendered and dropped. So the rule is now simply: if the diff
+    /// on hand belongs to a card that is OPEN, that card keeps it.
     private func cachePendingDiffIfReady() {
-        guard let index = pendingDiffTargets.lastIndex(where: { diffTitleMatches($0.path) }) else {
-            return
+        guard diffTitle != nil else { return }
+        var rows: [DiffRow]?
+        func made() -> [DiffRow] {
+            if let rows { return rows }
+            let r = makeDiffRows(diffLines)
+            rows = r
+            return r
         }
-        let target = pendingDiffTargets.remove(at: index)
-        let rows = makeDiffRows(diffLines)
-        switch target {
-        case .worktree(let id, _): worktreeDiffCache[id] = rows
-        case .commit(let id, _): commitDiffCache[id] = rows
+
+        if let index = pendingDiffTargets.lastIndex(where: { diffTitleMatches($0.path) }) {
+            switch pendingDiffTargets.remove(at: index) {
+            case .worktree(let id, _): worktreeDiffCache[id] = made()
+            case .commit(let id, _): commitDiffCache[id] = made()
+            }
+        }
+
+        // …and for anything already on screen, asked for or not.
+        for row in model.worktree
+        where expandedChangeIDs.contains(row.id)
+            && worktreeDiffCache[row.id] == nil
+            && diffTitleMatches(row.path) {
+            worktreeDiffCache[row.id] = made()
+        }
+        for file in model.commitFiles
+        where commitDiffCache[file.id] == nil && diffTitleMatches(file.path) {
+            commitDiffCache[file.id] = made()
         }
     }
 

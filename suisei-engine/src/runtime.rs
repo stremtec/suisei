@@ -7,28 +7,70 @@ use suisei_core::key::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::compositor::{FrameDiff, ShellState, compose};
 
-/// Ticks between post-edit `textDocument/didChange` syncs. The tick is 50 ms,
-/// so this coalesces a typing run into one full-text notification every 150 ms
-/// — `App::sync_lsp_document` is version-gated, so an idle frame costs nothing
-/// and only a changed buffer pays the O(file) join.
-const LSP_SYNC_TICKS: u32 = 3;
+// Background work is scheduled in MILLISECONDS, not in ticks.
+//
+// Every one of these was a tick count with a comment reading "at the 50 ms
+// tick", and the tick has not been 50 ms for some time — the frame timer runs
+// up to 120 Hz. Counting frames meant the LSP sync fired every 25 ms instead of
+// 150, and the external-file check and the daemon report every 167 ms instead
+// of a second: six times the intended rate for work whose whole justification
+// was that it is infrequent. The constants were not wrong; the unit was.
+//
+// `tick(dt_ms)` was taking the elapsed time and discarding it. It accumulates
+// it now, so these intervals mean what they say at any frame rate — and the
+// same numbers keep working when the timer changes again.
 
-/// Ticks between dirty-flag re-checks (~1 s at the 50 ms tick). `App::modified`
-/// is exact for clean → dirty but was a latch the other way, so a buffer put
-/// back to its on-disk text stayed marked dirty; this re-derives it. Costs one
-/// hash, and only while dirty and only when the text moved.
-const DIRTY_RECHECK_TICKS: u32 = 20;
+/// Between post-edit `textDocument/didChange` syncs. Coalesces a typing run
+/// into one full-text notification; `App::sync_lsp_document` is version-gated,
+/// so an idle interval costs nothing and only a changed buffer pays the
+/// O(file) join.
+const LSP_SYNC_MS: u32 = 150;
 
-/// Ticks between external-file checks (~1 s). Metadata polling is intentionally
+/// Between dirty-flag re-checks. `App::modified` is exact for clean → dirty but
+/// was a latch the other way, so a buffer put back to its on-disk text stayed
+/// marked dirty; this re-derives it. Costs one hash, and only while dirty and
+/// only when the text moved.
+const DIRTY_RECHECK_MS: u32 = 1_000;
+
+/// Between external-file checks. Metadata polling is intentionally
 /// low-frequency, and only a transition (changed/recreated/deleted) advances a
 /// frame, so an idle editor still does no paint work.
-const EXTERNAL_FILE_CHECK_TICKS: u32 = 20;
+const EXTERNAL_FILE_CHECK_MS: u32 = 1_000;
 
-/// Ticks between daemon status reports. At the 50 ms tick this is ~1 s, which
-/// bounds the cost of building the status (`project_root` walks the filesystem)
-/// while still feeling live in the menu bar. The reporter itself then skips
-/// anything unchanged — see `daemon_report::ReportGate`.
-const DAEMON_REPORT_TICKS: u32 = 20;
+/// Between outline rebuilds after the buffer settles. Typing keeps the light
+/// path and never rebuilds it.
+const OUTLINE_REFRESH_MS: u32 = 600;
+
+/// Between daemon status reports. Bounds the cost of building the status
+/// (`project_root` walks the filesystem) while still feeling live in the menu
+/// bar. The reporter then skips anything unchanged — see
+/// `daemon_report::ReportGate`.
+const DAEMON_REPORT_MS: u32 = 1_000;
+
+/// A schedule that fires on elapsed time rather than on frames.
+#[derive(Debug, Default, Clone, Copy)]
+struct Every {
+    accumulated: u32,
+}
+
+impl Every {
+    /// Advance by `dt_ms` and report whether `period_ms` has passed.
+    ///
+    /// The remainder is KEPT rather than reset to zero: dropping it would make
+    /// every interval round up to a whole frame, which at 120 Hz is an 8 ms
+    /// error per fire and a visible drift over a session. A single fire per
+    /// call even when several periods elapsed — this is polling, and doing the
+    /// same poll three times because the app was suspended achieves nothing.
+    fn due(&mut self, dt_ms: u32, period_ms: u32) -> bool {
+        self.accumulated = self.accumulated.saturating_add(dt_ms.max(1));
+        if self.accumulated >= period_ms {
+            self.accumulated %= period_ms.max(1);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// One indent level, inserted by Tab and by auto-indent on Enter.
 const INDENT: &str = "    ";
@@ -88,6 +130,11 @@ pub struct Engine {
     outline_cache_path: Option<std::path::PathBuf>,
     /// Tick counter for low-frequency idle work (outline refresh).
     tick_count: u32,
+    every_outline: Every,
+    every_external: Every,
+    every_lsp_sync: Every,
+    every_dirty: Every,
+    every_report: Every,
     /// Missing paths across all open document tabs. The active document owns
     /// the close/preserve policy in `App::check_external_change`; this cache is
     /// what lets inactive tabs acquire/clear their warning glyph without
@@ -202,6 +249,11 @@ impl Engine {
             outline_cache_ver: u64::MAX,
             outline_cache_path: None,
             tick_count: 0,
+            every_outline: Every::default(),
+            every_external: Every::default(),
+            every_lsp_sync: Every::default(),
+            every_dirty: Every::default(),
+            every_report: Every::default(),
             missing_tab_ids: std::collections::HashSet::new(),
             wrap_maps: std::cell::RefCell::new(Vec::new()),
             journal: crate::journal::Journal::new(),
@@ -685,7 +737,7 @@ impl Engine {
     }
 
     /// Drain PTY / git side-effects. Returns current `frame_gen` (bumped only when recomposed).
-    pub fn tick(&mut self, _dt_ms: u32) -> u64 {
+    pub fn tick(&mut self, dt_ms: u32) -> u64 {
         // Drain PTY / background side-effects (same idea as TUI main loop).
         let mut need_full = false;
         // Idle outline refresh: typing keeps the light path (never rebuilds the
@@ -700,11 +752,13 @@ impl Engine {
                 self.shell.dirty = true;
             }
         }
-        if self.tick_count % 12 == 0 && self.outline_cache_ver != self.app.buffer.version() {
+        if self.every_outline.due(dt_ms, OUTLINE_REFRESH_MS)
+            && self.outline_cache_ver != self.app.buffer.version()
+        {
             self.shell.dirty = true;
             need_full = true;
         }
-        if self.tick_count % EXTERNAL_FILE_CHECK_TICKS == 0 {
+        if self.every_external.due(dt_ms, EXTERNAL_FILE_CHECK_MS) {
             let before = (
                 self.app.current_buffer_id(),
                 self.app.buffer.version(),
@@ -767,7 +821,7 @@ impl Engine {
         // and permanently idle. Post-edit didChange goes first (throttled, so a
         // typing run coalesces into one full-text notification), then the drain,
         // so a request issued this frame answers against the current document.
-        if self.tick_count % LSP_SYNC_TICKS == 0 {
+        if self.every_lsp_sync.due(dt_ms, LSP_SYNC_MS) {
             self.app.sync_lsp_document();
         }
         let lang = self.app.poll_language_services();
@@ -777,14 +831,14 @@ impl Engine {
         }
         // Correct a dirty flag that latched when it should not have. Cheap by
         // construction — see `App::recheck_modified`.
-        if self.tick_count % DIRTY_RECHECK_TICKS == 0 && self.app.recheck_modified() {
+        if self.every_dirty.due(dt_ms, DIRTY_RECHECK_MS) && self.app.recheck_modified() {
             self.shell.dirty = true;
             need_full = true;
         }
         // Tell the daemon what we are doing. Nothing else can: the daemon owns
         // no language server, so without this push the menu-bar agent draws
         // "none" for every field forever. Never blocks the tick.
-        if self.tick_count % DAEMON_REPORT_TICKS == 0 && self.reporter.is_some() {
+        if self.every_report.due(dt_ms, DAEMON_REPORT_MS) && self.reporter.is_some() {
             let status = self.daemon_status();
             if let Some(r) = self.reporter.as_mut() {
                 r.offer(status);
@@ -4239,9 +4293,7 @@ mod tests {
             "the latch is up and nothing has corrected it"
         );
 
-        for _ in 0..DIRTY_RECHECK_TICKS {
-            eng.tick(50);
-        }
+        eng.tick(DIRTY_RECHECK_MS);
         assert!(
             !eng.app.modified,
             "the tick must re-derive it from the text"
@@ -4326,9 +4378,7 @@ mod tests {
         }
         // Backspace at column 0 of row 0 deletes nothing.
         eng.dispatch_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        for _ in 0..DIRTY_RECHECK_TICKS {
-            eng.tick(50);
-        }
+        eng.tick(DIRTY_RECHECK_MS);
         assert_eq!(eng.app.buffer.text(), "hello");
         assert!(
             !eng.app.modified,
@@ -4359,9 +4409,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&f, "after\n").unwrap();
 
-        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
-            eng.tick(8);
-        }
+        eng.tick(EXTERNAL_FILE_CHECK_MS);
 
         assert_eq!(
             eng.app.buffer.text(),
@@ -4390,9 +4438,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         // Only the middle moves; the first and last lines are untouched.
         std::fs::write(&f, "one\nTWO\nTHREE\nfour\n").unwrap();
-        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
-            eng.tick(8);
-        }
+        eng.tick(EXTERNAL_FILE_CHECK_MS);
 
         let marked = &eng.app.live_rows;
         assert!(
@@ -4477,9 +4523,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&a, "a2\n").unwrap();
-        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
-            eng.tick(8);
-        }
+        eng.tick(EXTERNAL_FILE_CHECK_MS);
 
         assert!(
             eng.app.live_files.keys().any(|p| p.ends_with("a.txt")),
@@ -4518,9 +4562,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&a, "a-after\n").unwrap();
 
-        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
-            eng.tick(8);
-        }
+        eng.tick(EXTERNAL_FILE_CHECK_MS);
 
         let tab_a = eng
             .app
@@ -4559,9 +4601,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&a, "a-after\n").unwrap();
 
-        for _ in 0..=EXTERNAL_FILE_CHECK_TICKS {
-            eng.tick(8);
-        }
+        eng.tick(EXTERNAL_FILE_CHECK_MS);
 
         let tab_a = eng
             .app
@@ -4633,9 +4673,7 @@ mod tests {
         std::fs::remove_file(&f).unwrap();
         let before = eng.frame_gen;
 
-        for _ in 0..EXTERNAL_FILE_CHECK_TICKS {
-            eng.tick(50);
-        }
+        eng.tick(EXTERNAL_FILE_CHECK_MS);
 
         assert!(eng.app.file_deleted);
         assert!(eng.app.modified);
@@ -4656,9 +4694,8 @@ mod tests {
         eng.recompose();
         std::fs::remove_file(&f).unwrap();
 
-        for _ in 0..(EXTERNAL_FILE_CHECK_TICKS * 2) {
-            eng.tick(50);
-        }
+        eng.tick(EXTERNAL_FILE_CHECK_MS);
+        eng.tick(EXTERNAL_FILE_CHECK_MS);
 
         assert!(eng.app.filename.is_none());
         assert_eq!(eng.app.buffer.text(), "");
@@ -4736,9 +4773,9 @@ mod tests {
         eng.app.push_undo();
         eng.app.buffer.insert_char('!');
 
-        for _ in 0..(DIRTY_RECHECK_TICKS * 3) {
-            eng.tick(50);
-        }
+        eng.tick(DIRTY_RECHECK_MS);
+        eng.tick(DIRTY_RECHECK_MS);
+        eng.tick(DIRTY_RECHECK_MS);
         assert!(eng.app.modified);
     }
 
@@ -4851,9 +4888,7 @@ mod tests {
         // sheet. The sync is version-gated, not `modified`-gated, so clearing
         // the dirty flag keeps this test out of that directory.
         eng.app.modified = false;
-        for _ in 0..LSP_SYNC_TICKS {
-            eng.tick(50);
-        }
+        eng.tick(LSP_SYNC_MS);
         assert!(
             eng.app.lsp_document_synced(),
             "the tick must send the post-edit didChange"
@@ -5269,6 +5304,46 @@ mod tests {
             !eng.app.message.contains("Preview"),
             "closed preview must not leave stale status text"
         );
+    }
+
+    /// A schedule fires on elapsed time, not on how often the frame timer runs.
+    ///
+    /// The whole defect this replaced: these were tick counts written against a
+    /// 50 ms tick, and the timer went to 120 Hz. The external-file check and
+    /// the daemon report then ran every 167 ms instead of every second — six
+    /// times the rate, for work whose entire justification is that it is
+    /// infrequent. Counting frames cannot express "once a second", so the test
+    /// asks the only question that matters: does the rate survive a change of
+    /// frame rate?
+    #[test]
+    fn a_schedule_measures_time_not_frames() {
+        let period = 1_000;
+
+        // 125 frames of 8 ms — one second at 120 Hz.
+        let mut fast = Every::default();
+        let fast_fires = (0..125).filter(|_| fast.due(8, period)).count();
+
+        // 20 Hz for the same second.
+        let mut slow = Every::default();
+        let slow_fires = (0..20).filter(|_| slow.due(50, period)).count();
+
+        assert_eq!(fast_fires, 1, "120 Hz must not fire six times a second");
+        assert_eq!(slow_fires, 1);
+        assert_eq!(fast_fires, slow_fires, "the rate is the same at both");
+
+        // The remainder carries. Dropping it would round every interval up to a
+        // whole frame — 8 ms of drift per fire at 120 Hz, which compounds over
+        // a session.
+        let mut drifting = Every::default();
+        let over_ten_seconds = (0..1_250).filter(|_| drifting.due(8, period)).count();
+        assert_eq!(over_ten_seconds, 10, "ten seconds is ten fires, not nine");
+
+        // A long stall is one poll, not a backlog of them: doing the same
+        // metadata check three times because the app was suspended achieves
+        // nothing.
+        let mut stalled = Every::default();
+        assert!(stalled.due(5_000, period));
+        assert!(!stalled.due(1, period));
     }
 
     #[test]
