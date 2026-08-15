@@ -13,7 +13,7 @@
       페인별 미니맵으로 고침. ee03e05
 }
 
-⚠️ 2. Account 기능 완성{
+✅ 2. Account 기능 완성{
     현재는 너무 불안정함. gh를 제대로 찾지 못함.
 
     → gh 는 멀쩡했고 Suisei 가 못 봤음. Finder 에서 띄운 앱은 Finder 의 PATH
@@ -101,7 +101,7 @@
     → 엔터 후 줄번호까지 돌아오게. 4db88f0
 }
 
-⚠️ 7. 한글 IME 가 여전히 뭔가 불안정함.{
+✅ 7. 한글 IME 가 여전히 뭔가 불안정함.{
     분명 난 스페이스를 쳤는데 바로 쳐지지 않고 두번은 쳐야 되는 이슈, 백스페이스도 동일.
 
     → setMarkedText 의 dirty rect 가 두 군데서 틀렸음(stale 캐럿 행 + 확장을
@@ -145,7 +145,7 @@
       그건 설정임.
 }
 
-⚠️ 11. 깃 워크벤치 에니메이션 끊김 등 이슈 개선 {
+✅ 11. 깃 워크벤치 에니메이션 끊김 등 이슈 개선 {
     제목과 같음.
 
     → 사이드바 열림 애니메이션의 "중간에 툭" 은 해결. 세 번 틀리고 네 번째에
@@ -552,6 +552,41 @@
   · 좌표는 화면 픽셀이 아니라 문서 기준 (byte_offset + affinity + at_revision).
   · 편집 채널과 presence 채널 분리, 큐 우선순위 edit > control > presence.
   · 불변식: 키 입력은 GitHub·인터넷·서버 ACK 를 절대 기다리지 않는다.
+
+---
+**상용 IDE에는 있는데 Suisei엔 없는 것** (2026-08-16, 코드 읽으며 확인)
+
+grep 으로 확인한 것만 적음. 순서는 '값어치 대비 싼 것' 순.
+
+☐ 줄 주석 토글 (⌘/)
+    highlight.rs 가 언어별로 line_comment: Option<&'static str> 을 이미 갖고
+    있음(`//`, `#`, …). 그리고 그 파일 밖에서는 아무도 안 읽음 — 토글 명령이
+    없음. 이번 세션 내내 나온 그 패턴("core 가 가진 사실이 아무 데도 안 건너감")
+    의 최신 사례고, 재료가 다 있어서 제일 쌈.
+
+☐ 현재 파일 안에서 찾아 바꾸기
+    search.rs 의 공개 API 전체가 begin/finish/cancel/step/cycle/collect —
+    replace 가 없음. 반면 workspace_search.rs 에는 replace / replace_focus 가
+    있음. 즉 프로젝트 전체 치환은 되는데 지금 보고 있는 파일은 안 됨. 거꾸로임.
+
+☐ 에디터 캔버스에 접근성이 전혀 없음
+    EditorHost.swift 에 NSAccessibility 참조 0건. Welcome/Settings/Account 에는
+    있는데 정작 앱의 본체인 캔버스에는 없음 → VoiceOver 에 문서가 통째로 안 보임.
+    상용 제품이면 법적 요구사항이기도 하고, 미룰수록 비싸짐.
+
+☐ 프로젝트별 설정
+    ~/.suisei.toml 전역 하나뿐. tab_width 나 포매터를 팀과 공유할 방법이 없음.
+    project.suiseiprj 가 이미 있으니 자리는 마련돼 있음.
+
+☐ 단축키 변경
+    Shortcuts 페이지는 목록으로 다시 짰지만 읽기 전용. 바꿀 수단이 없음.
+
+☐ Run / Build 통합
+    cargo run/test/build 를 띄우는 게 없음. DAP 가 미완이라 디버그도 없음.
+    Rust 에디터에서 이건 큼.
+
+☐ 열 선택(블록 선택)
+    없음. 멀티커서는 있음.
 
 ---
 **알려진 것, 안 고침**
