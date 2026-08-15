@@ -76,6 +76,7 @@ typedef struct SuiseiEditorLineC {
 #define SUISEI_PANE_PDF 3
 #define SUISEI_PANE_AUDIO 4
 #define SUISEI_PANE_BINARY 5
+#define SUISEI_PANE_MODEL 6
 
 /* One split pane: slice into the packed lines[] array. */
 typedef struct SuiseiPaneC {
@@ -1027,3 +1028,64 @@ void suisei_engine_recovery_discard(SuiseiEngine *ptr, uint32_t idx);
 #endif
 
 #endif /* SUISEI_ENGINE_H */
+
+/* ── Debugger (DAP) ───────────────────────────────────────────────────────
+   suisei-core's DAP client is a complete debugger and none of it crossed this
+   boundary until now: the TUI drove it directly, and the Mac app could reach
+   the breakpoint store and nothing else. One snapshot for what the panel
+   draws, gated on a fingerprint — memsetting a hundred kilobytes to discover
+   nothing changed is a cost with nothing on the other side of it. */
+
+#define SUISEI_MAX_DAP_THREADS 16
+#define SUISEI_MAX_DAP_FRAMES 48
+#define SUISEI_MAX_DAP_VARS 160
+#define SUISEI_MAX_DAP_CONSOLE 200
+#define SUISEI_DAP_LINE 240
+
+typedef struct SuiseiDapSnapshot {
+  uint8_t state; /* 0 idle, 1 starting, 2 running, 3 stopped, 4 ending */
+  uint8_t open;
+  uint8_t session;
+  uint8_t has_location;
+  char adapter[64];
+  char status[240];
+  char stopped_reason[64];
+  uint32_t thread_count;
+  int64_t current_thread;
+  int64_t thread_ids[SUISEI_MAX_DAP_THREADS];
+  char thread_names[SUISEI_MAX_DAP_THREADS][64];
+  uint32_t frame_count;
+  uint32_t selected_frame;
+  char frame_names[SUISEI_MAX_DAP_FRAMES][128];
+  char frame_paths[SUISEI_MAX_DAP_FRAMES][SUISEI_PATH_CAP];
+  uint32_t frame_lines[SUISEI_MAX_DAP_FRAMES]; /* 0-based */
+  uint32_t var_count;
+  char var_names[SUISEI_MAX_DAP_VARS][96];
+  char var_values[SUISEI_MAX_DAP_VARS][160];
+  char var_types[SUISEI_MAX_DAP_VARS][64];
+  uint8_t var_depth[SUISEI_MAX_DAP_VARS];
+  uint8_t var_expandable[SUISEI_MAX_DAP_VARS];
+  uint8_t var_expanded[SUISEI_MAX_DAP_VARS];
+  uint8_t var_is_scope[SUISEI_MAX_DAP_VARS];
+  /* The newest SUISEI_MAX_DAP_CONSOLE lines; console_total is the true length,
+     so a face can say what it is not showing. */
+  uint32_t console_count;
+  uint32_t console_total;
+  char console[SUISEI_MAX_DAP_CONSOLE][SUISEI_DAP_LINE];
+  char current_path[SUISEI_PATH_CAP];
+  uint32_t current_line; /* 0-based */
+} SuiseiDapSnapshot;
+
+uint64_t suisei_engine_dap_fingerprint(const SuiseiEngine *ptr);
+uint8_t suisei_engine_dap(const SuiseiEngine *ptr, SuiseiDapSnapshot *out);
+uint32_t suisei_engine_dap_configs(const SuiseiEngine *ptr, char *out_names,
+                                   uint32_t name_cap, uint32_t max);
+/* 0 start/continue, 1 pause, 2 step over, 3 step into, 4 step out, 5 stop,
+   6 restart, 7 clear breakpoints. */
+void suisei_engine_dap_command(SuiseiEngine *ptr, uint32_t verb);
+void suisei_engine_dap_launch(SuiseiEngine *ptr, const char *name);
+void suisei_engine_dap_attach(SuiseiEngine *ptr, const char *spec);
+void suisei_engine_dap_evaluate(SuiseiEngine *ptr, const char *expr);
+void suisei_engine_dap_select_frame(SuiseiEngine *ptr, uint32_t index);
+void suisei_engine_dap_toggle_var(SuiseiEngine *ptr, uint32_t index);
+void suisei_engine_dap_set_panel(SuiseiEngine *ptr, uint8_t open);

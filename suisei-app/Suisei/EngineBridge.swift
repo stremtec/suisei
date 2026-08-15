@@ -1295,6 +1295,8 @@ final class EngineBridge: ObservableObject {
     @Published private(set) var hoverPending = false
     /// The language server attached to the current document, or "" for none.
     @Published private(set) var lspServerName = ""
+    /// The debugger, as the panel draws it.
+    @Published var dap = DapSnap.empty
     private var hoverPoll: DispatchWorkItem?
     /// Discards results from a superseded query — the user types faster than a
     /// project grep finishes, and out-of-order replies would otherwise win.
@@ -1362,6 +1364,8 @@ final class EngineBridge: ObservableObject {
     /// Independent Core generation for the structured workbench model.
     private var gitWbGeneration = UInt64.max
     private var githubAccountGeneration = UInt64.max
+    /// Cheap identity of the debugger's state — see `refreshDapIfNeeded`.
+    var dapFingerprint = UInt64.max
     private var softwareUpdateGeneration = UInt64.max
     private var keyMonitor: Any?
     /// Debounced catch-up refresh scheduled by the typing fast path.
@@ -1676,6 +1680,7 @@ final class EngineBridge: ObservableObject {
             // copy when Git state did not change.
             self.refreshGitWorkbenchIfNeeded()
             self.refreshGitHubAccountIfNeeded()
+            self.refreshDapIfNeeded()
             self.refreshSoftwareUpdateIfNeeded()
             // Never publish SwiftUI editor updates mid-gesture — the canvas
             // already merges paint windows itself; publishing re-enters
@@ -6480,4 +6485,260 @@ private func readCString(at base: UnsafeRawPointer, offset: Int, cap: Int) -> St
     let n = bytes.firstIndex(of: 0) ?? cap
     if n == 0 { return "" }
     return String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)
+}
+
+// MARK: - Debugger (DAP)
+
+/// What the debug panel draws.
+///
+/// Core's DAP client is a complete debugger — launch, attach, step, evaluate,
+/// conditional breakpoints, `.vscode/launch.json` — and until now not one of
+/// those crossed the ABI. The TUI drove it directly; this face could reach the
+/// breakpoint store and nothing else, so the debugger existed and could not be
+/// used.
+struct DapSnap: Equatable {
+    enum State: UInt8 {
+        case idle = 0, starting = 1, running = 2, stopped = 3, ending = 4
+
+        /// Sentence-case, because it is shown as a word and not a log level.
+        var label: String {
+            switch self {
+            case .idle: return "Not running"
+            case .starting: return "Starting…"
+            case .running: return "Running"
+            case .stopped: return "Paused"
+            case .ending: return "Stopping…"
+            }
+        }
+
+        init(raw: UInt8) { self = State(rawValue: raw) ?? .idle }
+    }
+
+    var state: State = .idle
+    var open = false
+    var session = false
+    var adapter = ""
+    var status = ""
+    var stoppedReason = ""
+    var threads: [DapThread] = []
+    var currentThread: Int64 = 0
+    var frames: [DapFrame] = []
+    var selectedFrame = 0
+    var variables: [DapVariable] = []
+    var console: [String] = []
+    /// Core keeps 400 lines and the snapshot carries the newest 200. Held so
+    /// the panel can say what it is not showing rather than imply the session
+    /// began where its scrollback does.
+    var consoleTotal = 0
+    var currentPath = ""
+    var currentLine: UInt32 = 0
+    var hasLocation = false
+
+    static let empty = DapSnap()
+}
+
+struct DapThread: Equatable, Identifiable {
+    var id: Int64
+    var name: String
+}
+
+struct DapFrame: Equatable, Identifiable {
+    var id: Int
+    var name: String
+    var path: String
+    /// 0-based, as core stores it. The face adds one where it shows it.
+    var line: UInt32
+}
+
+struct DapVariable: Equatable, Identifiable {
+    var id: Int
+    var name: String
+    var value: String
+    var type: String
+    var depth: Int
+    var expandable: Bool
+    var expanded: Bool
+    var isScope: Bool
+}
+
+/// The verbs `suisei_engine_dap_command` takes. Spelled out here rather than
+/// passed as bare integers at each call site.
+enum DapCommand: UInt32 {
+    case startOrContinue = 0
+    case pause = 1
+    case stepOver = 2
+    case stepInto = 3
+    case stepOut = 4
+    case stop = 5
+    case restart = 6
+    case clearBreakpoints = 7
+}
+
+extension EngineBridge {
+    /// Pull the debugger's state only when it changed.
+    ///
+    /// The snapshot is about a hundred kilobytes; the fingerprint is a `u64`.
+    /// The same trade `refreshGitWorkbenchIfNeeded` and the diagnostics
+    /// fingerprint make, for the same reason.
+    func refreshDapIfNeeded() {
+        guard let engine else { return }
+        let fingerprint = suisei_engine_dap_fingerprint(engine)
+        guard fingerprint != dapFingerprint else { return }
+        dapFingerprint = fingerprint
+        dap = loadDap(engine)
+    }
+
+    private func loadDap(_ engine: OpaquePointer) -> DapSnap {
+        var snap = SuiseiDapSnapshot()
+        guard suisei_engine_dap(engine, &snap) != 0 else { return .empty }
+
+        var out = DapSnap()
+        out.state = DapSnap.State(raw: snap.state)
+        out.open = snap.open != 0
+        out.session = snap.session != 0
+        out.adapter = cStringField(snap.adapter)
+        out.status = cStringField(snap.status)
+        out.stoppedReason = cStringField(snap.stopped_reason)
+        out.currentThread = snap.current_thread
+        out.consoleTotal = Int(snap.console_total)
+        out.currentPath = cStringField(snap.current_path)
+        out.currentLine = snap.current_line
+        out.hasLocation = snap.has_location != 0
+        out.selectedFrame = Int(snap.selected_frame)
+
+        func field(_ raw: UnsafeRawBufferPointer, _ i: Int, _ cap: Int) -> String {
+            String(cString: raw.baseAddress!
+                .advanced(by: i * cap)
+                .assumingMemoryBound(to: CChar.self))
+        }
+
+        withUnsafeBytes(of: snap.thread_names) { names in
+            withUnsafeBytes(of: snap.thread_ids) { ids in
+                let idList = ids.bindMemory(to: Int64.self)
+                for i in 0..<min(Int(snap.thread_count), Int(SUISEI_MAX_DAP_THREADS)) {
+                    out.threads.append(DapThread(id: idList[i], name: field(names, i, 64)))
+                }
+            }
+        }
+
+        withUnsafeBytes(of: snap.frame_names) { names in
+        withUnsafeBytes(of: snap.frame_paths) { paths in
+            withUnsafeBytes(of: snap.frame_lines) { lines in
+                let lineList = lines.bindMemory(to: UInt32.self)
+                for i in 0..<min(Int(snap.frame_count), Int(SUISEI_MAX_DAP_FRAMES)) {
+                    out.frames.append(DapFrame(
+                        id: i,
+                        name: field(names, i, 128),
+                        path: field(paths, i, Int(SUISEI_PATH_CAP)),
+                        line: lineList[i]
+                    ))
+                }
+            }
+        }
+        }
+
+        withUnsafeBytes(of: snap.var_names) { names in
+        withUnsafeBytes(of: snap.var_values) { values in
+        withUnsafeBytes(of: snap.var_types) { types in
+        withUnsafeBytes(of: snap.var_depth) { depth in
+        withUnsafeBytes(of: snap.var_expandable) { expandable in
+        withUnsafeBytes(of: snap.var_expanded) { expanded in
+            withUnsafeBytes(of: snap.var_is_scope) { scopes in
+                for i in 0..<min(Int(snap.var_count), Int(SUISEI_MAX_DAP_VARS)) {
+                    out.variables.append(DapVariable(
+                        id: i,
+                        name: field(names, i, 96),
+                        value: field(values, i, 160),
+                        type: field(types, i, 64),
+                        depth: Int(depth[i]),
+                        expandable: expandable[i] != 0,
+                        expanded: expanded[i] != 0,
+                        isScope: scopes[i] != 0
+                    ))
+                }
+            }
+        }
+        }
+        }
+        }
+        }
+        }
+
+        withUnsafeBytes(of: snap.console) { raw in
+            for i in 0..<min(Int(snap.console_count), Int(SUISEI_MAX_DAP_CONSOLE)) {
+                out.console.append(field(raw, i, Int(SUISEI_DAP_LINE)))
+            }
+        }
+        return out
+    }
+
+    // MARK: Controls
+
+    func dapCommand(_ verb: DapCommand) {
+        guard let engine else { return }
+        suisei_engine_dap_command(engine, verb.rawValue)
+        refreshChrome()
+        refreshDapIfNeeded()
+    }
+
+    /// Run a launch configuration by name, or the first one when `name` is nil.
+    func dapLaunch(_ name: String? = nil) {
+        guard let engine else { return }
+        if let name {
+            name.withCString { suisei_engine_dap_launch(engine, $0) }
+        } else {
+            suisei_engine_dap_launch(engine, nil)
+        }
+        refreshChrome()
+        refreshDapIfNeeded()
+    }
+
+    /// `pid:1234` or `port:5678` — core's own spelling, so the field the user
+    /// types into and the parser agree without a translation step.
+    func dapAttach(_ spec: String) {
+        guard let engine, !spec.isEmpty else { return }
+        spec.withCString { suisei_engine_dap_attach(engine, $0) }
+        refreshChrome()
+        refreshDapIfNeeded()
+    }
+
+    func dapEvaluate(_ expression: String) {
+        guard let engine, !expression.isEmpty else { return }
+        expression.withCString { suisei_engine_dap_evaluate(engine, $0) }
+        refreshDapIfNeeded()
+    }
+
+    func dapSelectFrame(_ index: Int) {
+        guard let engine else { return }
+        suisei_engine_dap_select_frame(engine, UInt32(max(0, index)))
+        refreshDapIfNeeded()
+    }
+
+    func dapToggleVariable(_ index: Int) {
+        guard let engine else { return }
+        suisei_engine_dap_toggle_var(engine, UInt32(max(0, index)))
+        refreshDapIfNeeded()
+    }
+
+    func dapSetPanel(_ open: Bool) {
+        guard let engine else { return }
+        suisei_engine_dap_set_panel(engine, open ? 1 : 0)
+        refreshDapIfNeeded()
+    }
+
+    /// Launch configurations near the open file. Read on demand: the file
+    /// changes when the user edits it, not when the debugger does anything.
+    func dapConfigurations() -> [String] {
+        guard let engine else { return [] }
+        let cap = 96
+        let max = 24
+        var buffer = [CChar](repeating: 0, count: cap * max)
+        let n = suisei_engine_dap_configs(engine, &buffer, UInt32(cap), UInt32(max))
+        guard n > 0 else { return [] }
+        return (0..<Int(n)).compactMap { i in
+            buffer.withUnsafeBufferPointer { raw in
+                String(cString: raw.baseAddress!.advanced(by: i * cap))
+            }
+        }
+    }
 }

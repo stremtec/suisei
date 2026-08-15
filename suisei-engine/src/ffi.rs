@@ -4512,3 +4512,342 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+// ─── Debugger (DAP) ────────────────────────────────────────────────────────
+//
+// `suisei-core`'s DAP client is a complete debugger — launch, attach by pid or
+// port, step, pause, restart, evaluate, conditional breakpoints, logpoints,
+// persisted breakpoints, `.vscode/launch.json` — in 2,995 lines. Not one of
+// them ever crossed this boundary. The TUI drove it directly; the Mac app,
+// which is now the only face, could reach the breakpoint store and nothing
+// else, so the debugger existed and could not be used.
+//
+// One snapshot for everything the panel draws, gated on a fingerprint. The
+// struct is large by the standards of this file, and the reason it is not
+// pulled per frame is the same one `suisei_engine_diagnostics_fingerprint`
+// gives: memsetting a hundred kilobytes to discover nothing changed is a cost
+// with nothing on the other side of it.
+
+pub const SUISEI_MAX_DAP_THREADS: usize = 16;
+pub const SUISEI_MAX_DAP_FRAMES: usize = 48;
+pub const SUISEI_MAX_DAP_VARS: usize = 160;
+pub const SUISEI_MAX_DAP_CONSOLE: usize = 200;
+pub const SUISEI_MAX_DAP_CONFIGS: usize = 24;
+pub const SUISEI_DAP_LINE: usize = 240;
+
+#[repr(C)]
+pub struct SuiseiDapSnapshot {
+    /// `DapState` — 0 idle, 1 starting, 2 running, 3 stopped, 4 ending.
+    pub state: u8,
+    /// The debug panel is open (independent of whether a session is live).
+    pub open: u8,
+    /// A session exists: anything but idle.
+    pub session: u8,
+    /// A stopped location is known, so the editor has somewhere to jump.
+    pub has_location: u8,
+    pub adapter: [c_char; 64],
+    /// The hard error, the soft hint, or the reason it stopped — whichever the
+    /// user most needs, resolved here rather than by three fields the face
+    /// would have to prioritise itself.
+    pub status: [c_char; 240],
+    pub stopped_reason: [c_char; 64],
+
+    pub thread_count: u32,
+    pub current_thread: i64,
+    pub thread_ids: [i64; SUISEI_MAX_DAP_THREADS],
+    pub thread_names: [[c_char; 64]; SUISEI_MAX_DAP_THREADS],
+
+    pub frame_count: u32,
+    pub selected_frame: u32,
+    pub frame_names: [[c_char; 128]; SUISEI_MAX_DAP_FRAMES],
+    pub frame_paths: [[c_char; SUISEI_PATH_CAP]; SUISEI_MAX_DAP_FRAMES],
+    /// 0-based, as core stores them.
+    pub frame_lines: [u32; SUISEI_MAX_DAP_FRAMES],
+
+    pub var_count: u32,
+    pub var_names: [[c_char; 96]; SUISEI_MAX_DAP_VARS],
+    pub var_values: [[c_char; 160]; SUISEI_MAX_DAP_VARS],
+    pub var_types: [[c_char; 64]; SUISEI_MAX_DAP_VARS],
+    pub var_depth: [u8; SUISEI_MAX_DAP_VARS],
+    pub var_expandable: [u8; SUISEI_MAX_DAP_VARS],
+    pub var_expanded: [u8; SUISEI_MAX_DAP_VARS],
+    pub var_is_scope: [u8; SUISEI_MAX_DAP_VARS],
+
+    /// The tail of the console. `console_total` is the true length, so a face
+    /// can say what it is not showing rather than imply there is no more.
+    pub console_count: u32,
+    pub console_total: u32,
+    pub console: [[c_char; SUISEI_DAP_LINE]; SUISEI_MAX_DAP_CONSOLE],
+
+    pub current_path: [c_char; SUISEI_PATH_CAP],
+    /// 0-based.
+    pub current_line: u32,
+}
+
+/// Cheap identity of everything `suisei_engine_dap` would copy.
+///
+/// Not a hash of the payload — that would cost the copy it exists to avoid.
+/// The counts, the selection and the location are what change when the
+/// debugger does anything, and the console length moves on every line of
+/// output.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_fingerprint(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let dap = &unsafe { &*ptr }.0.app().dap;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    };
+    mix(dap.state as u64);
+    mix(u64::from(dap.panel_open));
+    mix(dap.stack.len() as u64);
+    mix(dap.vars.len() as u64);
+    mix(dap.console.len() as u64);
+    mix(dap.threads.len() as u64);
+    mix(dap.selected_frame as u64);
+    mix(dap.current_line.unwrap_or(usize::MAX) as u64);
+    mix(dap.thread_id.unwrap_or(i64::MIN) as u64);
+    // Expansion changes the tree without changing its length.
+    for node in dap.vars.iter().take(SUISEI_MAX_DAP_VARS) {
+        mix(u64::from(node.expanded));
+    }
+    // A message can change while every count stays put.
+    for text in [
+        dap.error.as_deref(),
+        dap.soft_error.as_deref(),
+        dap.stopped_reason.as_deref(),
+        dap.current_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        mix(text.len() as u64);
+        mix(u64::from(text.as_bytes().first().copied().unwrap_or(0)));
+    }
+    h
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap(ptr: *const SuiseiEngine, out: *mut SuiseiDapSnapshot) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let eng = unsafe { &*ptr };
+    let dap = &eng.0.app().dap;
+    unsafe {
+        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiDapSnapshot>());
+    }
+    let o = unsafe { &mut *out };
+
+    o.state = dap.state as u8;
+    o.open = u8::from(dap.panel_open);
+    o.session = u8::from(dap.is_session());
+    write_cstr(&mut o.adapter, &dap.adapter_name);
+    // One line, chosen here. A hard error outranks a hint, and a hint outranks
+    // "we are stopped because of X" — the face should not have to know that
+    // order to show one sentence.
+    let status = dap
+        .error
+        .as_deref()
+        .or(dap.soft_error.as_deref())
+        .or(dap.stopped_reason.as_deref())
+        .unwrap_or("");
+    write_cstr(&mut o.status, status);
+    write_cstr(&mut o.stopped_reason, dap.stopped_reason.as_deref().unwrap_or(""));
+
+    o.current_thread = dap.thread_id.unwrap_or(0);
+    let tn = dap.threads.len().min(SUISEI_MAX_DAP_THREADS);
+    o.thread_count = tn as u32;
+    for (i, (id, name)) in dap.threads.iter().take(tn).enumerate() {
+        o.thread_ids[i] = *id;
+        write_cstr(&mut o.thread_names[i], name);
+    }
+
+    let fn_ = dap.stack.len().min(SUISEI_MAX_DAP_FRAMES);
+    o.frame_count = fn_ as u32;
+    o.selected_frame = dap.selected_frame.min(fn_.saturating_sub(1)) as u32;
+    for (i, frame) in dap.stack.iter().take(fn_).enumerate() {
+        write_cstr(&mut o.frame_names[i], &frame.name);
+        write_cstr(&mut o.frame_paths[i], &frame.path);
+        o.frame_lines[i] = frame.line as u32;
+    }
+
+    let vn = dap.vars.len().min(SUISEI_MAX_DAP_VARS);
+    o.var_count = vn as u32;
+    for (i, node) in dap.vars.iter().take(vn).enumerate() {
+        write_cstr(&mut o.var_names[i], &node.name);
+        write_cstr(&mut o.var_values[i], &node.value);
+        write_cstr(&mut o.var_types[i], &node.typ);
+        o.var_depth[i] = node.depth.min(255) as u8;
+        o.var_expandable[i] = u8::from(node.var_ref > 0);
+        o.var_expanded[i] = u8::from(node.expanded);
+        o.var_is_scope[i] = u8::from(node.is_scope);
+    }
+
+    // The TAIL, because a console is read from the bottom. Core keeps 400 and
+    // this carries the newest 200; `console_total` says so rather than letting
+    // the face imply the session began where its scrollback does.
+    o.console_total = dap.console.len() as u32;
+    let skip = dap.console.len().saturating_sub(SUISEI_MAX_DAP_CONSOLE);
+    let cn = dap.console.len() - skip;
+    o.console_count = cn as u32;
+    for (i, line) in dap.console.iter().skip(skip).enumerate() {
+        write_cstr(&mut o.console[i], line);
+    }
+
+    if let (Some(path), Some(line)) = (dap.current_path.as_deref(), dap.current_line) {
+        write_cstr(&mut o.current_path, path);
+        o.current_line = line as u32;
+        o.has_location = 1;
+    }
+    1
+}
+
+/// Launch configurations found near `hint` (`.vscode/launch.json`).
+///
+/// Read on demand rather than carried in the snapshot: the file changes when
+/// the user edits it, not when the debugger does anything, and a face asks for
+/// this when it opens a menu.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_configs(
+    ptr: *const SuiseiEngine,
+    out_names: *mut c_char,
+    name_cap: u32,
+    max: u32,
+) -> u32 {
+    if ptr.is_null() || out_names.is_null() || name_cap == 0 || max == 0 {
+        return 0;
+    }
+    let eng = unsafe { &*ptr };
+    let hint = eng.0.app().filename.clone();
+    let configs = suisei_core::dap::load_launch_configs(hint.as_deref());
+    let n = configs.len().min(max as usize);
+    for (i, config) in configs.iter().take(n).enumerate() {
+        let dst = unsafe {
+            std::slice::from_raw_parts_mut(
+                out_names.add(i * name_cap as usize),
+                name_cap as usize,
+            )
+        };
+        write_cstr(dst, &config.name);
+    }
+    n as u32
+}
+
+/// One verb the debug panel's buttons send.
+///
+/// A single entry point rather than eleven exports: they take no arguments,
+/// they are all "do this to the session", and eleven near-identical `extern`
+/// functions is eleven places for a null check to be forgotten.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_command(ptr: *mut SuiseiEngine, verb: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    let app = unsafe { (*ptr).0.app_mut() };
+    match verb {
+        0 => app.dap_start_or_continue(),
+        1 => app.dap_pause(),
+        2 => app.dap_step_over(),
+        3 => app.dap_step_into(),
+        4 => app.dap_step_out(),
+        5 => app.dap_stop(),
+        6 => {
+            if let Err(e) = app.dap.restart() {
+                app.dap.log(e);
+            }
+        }
+        7 => app.dap.clear_breakpoints(),
+        _ => return,
+    }
+    unsafe { (*ptr).0.recompose() };
+}
+
+/// Run a named launch configuration, or the first one when `name` is empty.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_launch(ptr: *mut SuiseiEngine, name: *const c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    let named = if name.is_null() {
+        None
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(name) }.to_str().ok().filter(|s| !s.is_empty())
+    };
+    unsafe {
+        (*ptr).0.app_mut().dap_launch_config(named);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Attach to a running process — `pid:1234` or `port:5678`, core's own spelling.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_attach(ptr: *mut SuiseiEngine, spec: *const c_char) {
+    if ptr.is_null() || spec.is_null() {
+        return;
+    }
+    let Ok(spec) = unsafe { std::ffi::CStr::from_ptr(spec) }.to_str() else {
+        return;
+    };
+    unsafe {
+        (*ptr).0.app_mut().dap_attach(spec);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Evaluate an expression in the selected frame; the answer lands in the
+/// console, which is where the user is already looking.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_evaluate(ptr: *mut SuiseiEngine, expr: *const c_char) {
+    if ptr.is_null() || expr.is_null() {
+        return;
+    }
+    let Ok(expr) = unsafe { std::ffi::CStr::from_ptr(expr) }.to_str() else {
+        return;
+    };
+    unsafe {
+        (*ptr).0.app_mut().dap_evaluate(expr);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Select a stack frame. Core re-reads that frame's variables, which is the
+/// point of selecting one.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_select_frame(ptr: *mut SuiseiEngine, index: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().dap.select_frame(index as usize);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Expand or collapse a variable row.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_toggle_var(ptr: *mut SuiseiEngine, index: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().dap.toggle_var_at(index as usize);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Show or hide the debug panel. Core owns the flag because the breakpoint
+/// gutter and the TUI layout both read it.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_set_panel(ptr: *mut SuiseiEngine, open: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().dap.panel_open = open != 0;
+        (*ptr).0.recompose();
+    }
+}
