@@ -1597,6 +1597,32 @@ pub extern "C" fn suisei_engine_minimap(ptr: *const SuiseiEngine, out: *mut Suis
     }
     let o = unsafe { &mut *out };
     let (buckets, total) = eng.0.minimap(SUISEI_MINIMAP_MAX);
+    write_minimap(o, buckets, total)
+}
+
+/// The minimap of the document in pane `idx`.
+///
+/// `suisei_engine_minimap` answers for the live document, which is the focused
+/// pane's. With a strip in every pane that made every strip the focused file.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_minimap_for_pane(
+    ptr: *const SuiseiEngine,
+    idx: u32,
+    out: *mut SuiseiMinimapC,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let eng = unsafe { &*ptr };
+    unsafe {
+        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiMinimapC>());
+    }
+    let o = unsafe { &mut *out };
+    let (buckets, total) = eng.0.minimap_of_pane(idx as usize, SUISEI_MINIMAP_MAX);
+    write_minimap(o, buckets, total)
+}
+
+fn write_minimap(o: &mut SuiseiMinimapC, buckets: Vec<(u8, u8, u8)>, total: u32) -> u8 {
     o.total_lines = total;
     let n = buckets.len().min(SUISEI_MINIMAP_MAX);
     o.buckets = n as u32;

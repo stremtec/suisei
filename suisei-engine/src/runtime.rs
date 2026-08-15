@@ -1719,7 +1719,38 @@ impl Engine {
     /// Buckets ≤ `max_buckets`; each = (indent_cols, len_cols, flags) of the
     /// longest line in the bucket. flags: 1 = git-changed in bucket.
     pub fn minimap(&self, max_buckets: usize) -> (Vec<(u8, u8, u8)>, u32) {
-        let total = self.app.buffer.line_count();
+        self.minimap_of(&self.app.buffer, true, max_buckets)
+    }
+
+    /// The minimap of whatever document one pane is showing.
+    ///
+    /// [`Self::minimap`] answers for `App::buffer` — the LIVE document. That is
+    /// right for the focused pane and wrong for every other one, which nothing
+    /// noticed while only the focused pane drew a strip: turn the minimap on in
+    /// all panes and every pane drew the focused file.
+    pub fn minimap_of_pane(&self, pane: usize, max_buckets: usize) -> (Vec<(u8, u8, u8)>, u32) {
+        let Some(buf_id) = self.app.split.panes.get(pane).map(|p| p.buffer) else {
+            return (Vec::new(), 0);
+        };
+        let Some(tab) = self.app.tabs.buffers.iter().position(|t| t.id == buf_id) else {
+            return (Vec::new(), 0);
+        };
+        let live = tab == self.app.current_buffer();
+        let buffer = crate::compositor::buffer_for_tab(&self.app, tab);
+        self.minimap_of(buffer, live, max_buckets)
+    }
+
+    /// `git_signs` only for the live document. `App::git` is the diff of the
+    /// document being edited, so painting its change marks onto another pane's
+    /// minimap would mark that file's lines with a different file's edits —
+    /// worse than the blank column an unfocused pane gets instead.
+    fn minimap_of(
+        &self,
+        buffer: &suisei_core::buffer::Buffer,
+        git_signs: bool,
+        max_buckets: usize,
+    ) -> (Vec<(u8, u8, u8)>, u32) {
+        let total = buffer.line_count();
         if total == 0 || max_buckets == 0 {
             return (Vec::new(), 0);
         }
@@ -1732,14 +1763,14 @@ impl Engine {
             let mut best_indent = 0usize;
             let mut flags = 0u8;
             for row in i..end {
-                let line = self.app.buffer.line(row);
+                let line = buffer.line(row);
                 let trimmed = line.trim_start();
                 let len = line.chars().count();
                 if len > best_len {
                     best_len = len;
                     best_indent = line.len() - trimmed.len();
                 }
-                if flags == 0 && self.app.git.sign_at(row).is_some() {
+                if flags == 0 && git_signs && self.app.git.sign_at(row).is_some() {
                     flags = 1;
                 }
             }

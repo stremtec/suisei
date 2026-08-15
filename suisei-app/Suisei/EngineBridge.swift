@@ -3181,21 +3181,29 @@ final class EngineBridge: ObservableObject {
         var flags: [UInt8]
     }
 
-    private var minimapCacheVersion: UInt64 = .max
-    private var minimapCacheTabIndex: Int = -1
-    private var minimapCache: MinimapData?
+    /// One entry per pane, plus the unsplit editor at `-1`.
+    ///
+    /// Keyed by the pane rather than shared, because the answer differs per
+    /// pane: two panes showing two files have two overviews. It was one entry
+    /// and one `suisei_engine_minimap` call, which answers for the LIVE
+    /// document — with a strip in every pane, every strip drew the focused
+    /// file. The pane you were not in showed the file you were in.
+    private struct MinimapCacheKey: Hashable {
+        var pane: Int
+        var tab: UInt64
+        var version: UInt64
+    }
+    private var minimapCache: [Int: (key: MinimapCacheKey, data: MinimapData)] = [:]
 
-    /// Downsampled document overview (cached per buffer version).
-    func minimapData() -> MinimapData? {
+    /// Downsampled overview of the document in `pane`, cached per buffer
+    /// version. `pane` of `-1` is the unsplit editor.
+    func minimapData(pane: Int = -1) -> MinimapData? {
         guard let engine else { return nil }
-        let focusedTab = editorSplit.panes.indices.contains(editorSplit.focus)
-            ? editorSplit.panes[editorSplit.focus].tabIndex
-            : chrome.tabs.first(where: \.active)?.id ?? -1
-        if chrome.bufferVersion == minimapCacheVersion,
-           focusedTab == minimapCacheTabIndex,
-           let cached = minimapCache {
-            return cached
-        }
+        let tabId = pane >= 0 && editorSplit.panes.indices.contains(pane)
+            ? editorSplit.panes[pane].tabStableId
+            : (chrome.tabs.first(where: \.active)?.stableId ?? 0)
+        let key = MinimapCacheKey(pane: pane, tab: tabId, version: chrome.bufferVersion)
+        if let hit = minimapCache[pane], hit.key == key { return hit.data }
         let t0 = DispatchTime.now().uptimeNanoseconds
         defer {
             PerfProbe.record(
@@ -3204,7 +3212,10 @@ final class EngineBridge: ObservableObject {
             )
         }
         var snap = SuiseiMinimapC()
-        guard suisei_engine_minimap(engine, &snap) != 0 else { return nil }
+        let ok = pane >= 0
+            ? suisei_engine_minimap_for_pane(engine, UInt32(pane), &snap)
+            : suisei_engine_minimap(engine, &snap)
+        guard ok != 0 else { return nil }
         let n = Int(snap.buckets)
         var indent = [UInt8](repeating: 0, count: n)
         var len = [UInt8](repeating: 0, count: n)
@@ -3224,9 +3235,7 @@ final class EngineBridge: ObservableObject {
             len: len,
             flags: flags
         )
-        minimapCacheVersion = chrome.bufferVersion
-        minimapCacheTabIndex = focusedTab
-        minimapCache = data
+        minimapCache[pane] = (key, data)
         return data
     }
 

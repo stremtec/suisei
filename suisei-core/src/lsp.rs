@@ -3343,7 +3343,7 @@ mod tests {
         }
         // Smoke: spawn RA, send our init, expect a result (not disconnect).
         use std::io::{Read, Write};
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         use std::time::Duration;
         let mut child = crate::exec::tool("rust-analyzer")
             .stdin(Stdio::piped())

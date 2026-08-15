@@ -260,6 +260,10 @@ typedef struct SuiseiMinimapC {
 } SuiseiMinimapC;
 
 uint8_t suisei_engine_minimap(const SuiseiEngine *ptr, SuiseiMinimapC *out);
+/* Same, for the document in one pane. The call above answers for the live
+   document — right for the focused pane, wrong for every other one. */
+uint8_t suisei_engine_minimap_for_pane(const SuiseiEngine *ptr, uint32_t idx,
+                                       SuiseiMinimapC *out);
 void suisei_engine_click(
     SuiseiEngine *ptr, uint32_t buffer_row, uint32_t visual_col, uint8_t select_word);
 void suisei_engine_drag(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t visual_col);

@@ -314,7 +314,14 @@ final class EditorScrollView: NSScrollView {
     /// Minimap / palette "reveal line" requests (focused pane only).
     @objc private func externalScrollRequest(_ note: Notification) {
         guard let line = note.userInfo?["line"] as? Int else { return }
-        if let engine, engine.editorSplit.isSplit, paneIndex != engine.editorSplit.focus {
+        // A minimap names the pane it belongs to, because with a strip in every
+        // pane the sender is no longer necessarily the focused one. Everything
+        // else — outline, goto, a search hit — names no pane and means the
+        // pane the user is in.
+        if let target = note.userInfo?["pane"] as? Int, target >= 0 {
+            guard target == paneIndex else { return }
+        } else if let engine, engine.editorSplit.isSplit,
+                  paneIndex != engine.editorSplit.focus {
             return
         }
         scrollToLineAnimated(line, center: true)

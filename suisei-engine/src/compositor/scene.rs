@@ -2162,7 +2162,7 @@ fn build_editor_surfaces(
     (focused_lines, focus as u8, panes)
 }
 
-fn buffer_for_tab(app: &App, tab: usize) -> &suisei_core::buffer::Buffer {
+pub(crate) fn buffer_for_tab(app: &App, tab: usize) -> &suisei_core::buffer::Buffer {
     if tab == app.current_buffer() {
         &app.buffer
     } else if let Some(t) = app.tabs.buffers.get(tab) {

@@ -5710,6 +5710,7 @@ struct ContentView: View {
                     if minimapEnabled, pane.focused || minimapAllPanes {
                         MinimapStrip(
                             engine: engine,
+                            paneIndex: pane.id,
                             accent: accent,
                             fg: fg,
                             bg: editorBg,
@@ -6668,6 +6669,16 @@ struct MinimapStrip: View {
     /// Observed separately, like everywhere else these small objects are used:
     /// a reload landing must not republish the shell to reach the minimap.
     @ObservedObject private var live = EngineBridge.shared.live
+    /// Per-pane scroll, for the viewport box. The notification feed below only
+    /// speaks for the focused pane.
+    @ObservedObject private var tick = EngineBridge.shared.editorTick
+    /// Which pane this strip summarises; `-1` is the unsplit editor.
+    ///
+    /// Everything here used to be the LIVE document's — the bars, the viewport
+    /// box, the jump target — which is correct while only the focused pane has
+    /// a strip and wrong the moment they all do: pane A drew pane B's file,
+    /// with pane B's scroll position boxed on it.
+    var paneIndex: Int = -1
     var accent: Color
     var fg: Color
     var bg: Color
@@ -6685,9 +6696,15 @@ struct MinimapStrip: View {
         min(Self.maxRowHeight, stripHeight / CGFloat(max(1, n)))
     }
 
+    /// Whether this strip belongs to the pane holding the keyboard. The
+    /// unsplit editor is one pane and always does.
+    private var isFocusedPane: Bool {
+        paneIndex < 0 || paneIndex == engine.editorSplit.focus
+    }
+
     var body: some View {
         GeometryReader { geo in
-            let data = engine.minimapData()
+            let data = engine.minimapData(pane: paneIndex)
             ZStack(alignment: .topLeading) {
                 // Bars redraw ONLY when the document data changes — redrawing
                 // 2k rects on every scroll tick was the minimap stutter.
@@ -6729,7 +6746,13 @@ struct MinimapStrip: View {
                     let mapH = CGFloat(n) * rowH
                     let total = CGFloat(data.totalLines)
                     let visRows = geo.size.height / max(1, EditorMetrics.lineHeight)
-                    let line = liveScrollLine >= 0 ? liveScrollLine : Int(engine.chrome.scroll)
+                    // The live feed is posted only by the focused pane's clip,
+                    // so an unfocused strip reads its own pane's scroll from
+                    // the per-keystroke store instead of inheriting a position
+                    // from the pane the user is actually in.
+                    let line = isFocusedPane
+                        ? (liveScrollLine >= 0 ? liveScrollLine : Int(engine.chrome.scroll))
+                        : Int(tick.tick(for: paneIndex).scroll)
                     let h = min(mapH, max(18, visRows / total * mapH))
                     let y0 = max(0, min(CGFloat(line) / total * mapH, mapH - h))
                     RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
@@ -6783,9 +6806,8 @@ struct MinimapStrip: View {
                     }
             )
             .onReceive(NotificationCenter.default.publisher(for: .suiseiEditorScrolled)) { note in
-                if let line = note.userInfo?["line"] as? Int {
-                    liveScrollLine = line
-                }
+                guard isFocusedPane, let line = note.userInfo?["line"] as? Int else { return }
+                liveScrollLine = line
             }
             // NO chrome.scroll sync here: on an outline jump core updates its
             // scroll to the DESTINATION first, which snapped the indicator to
@@ -6896,10 +6918,16 @@ struct MinimapStrip: View {
         let mapH = max(1, CGFloat(data.len.count) * rowH)
         let frac = max(0, min(1, y / mapH))
         let line = Int(frac * CGFloat(data.totalLines))
+        // Focus first when the strip belongs to another pane. Only the focused
+        // pane reports its clip position back to core, so scrolling an
+        // unfocused one would leave core's idea of that document's scroll
+        // behind — and the next structural update would snap it back. Focusing
+        // is also what the click means: you pointed at that file.
+        if !isFocusedPane { engine.focusPane(paneIndex) }
         NotificationCenter.default.post(
             name: .suiseiScrollToLine,
             object: nil,
-            userInfo: ["line": line]
+            userInfo: ["line": line, "pane": paneIndex]
         )
     }
 }
