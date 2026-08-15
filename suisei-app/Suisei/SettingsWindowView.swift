@@ -91,7 +91,7 @@ struct SettingsWindowView: View {
         case accountProfile
         case accountSecurity
         case general
-        case appearance
+        case themes
         case editor
         case languageServers
         case sourceControl
@@ -147,11 +147,13 @@ struct SettingsWindowView: View {
         ),
         Page(
             id: .general, title: "General", symbol: "gearshape",
-            searchTerms: "overview about version build release notes", corePage: 1
+            searchTerms:
+                "about version build appearance light dark automatic glass clipboard undo",
+            corePage: 1
         ),
         Page(
-            id: .appearance, title: "Appearance", symbol: "paintbrush",
-            searchTerms: "theme light dark auto color accent highlight glass", corePage: 1
+            id: .themes, title: "Themes", symbol: "paintpalette",
+            searchTerms: "theme palette syntax colour color accent highlight preview", corePage: 1
         ),
         Page(
             id: .editor, title: "Editor", symbol: "square.and.pencil",
@@ -561,7 +563,7 @@ struct SettingsWindowView: View {
                     Form {
                         switch selectedPageID {
                         case .general: generalSections
-                        case .appearance: appearanceSections
+                        case .themes: themeSections
                         case .editor: editorSections
                         case .languageServers: languageServerSections
                         case .sourceControl: sourceControlSections
@@ -629,14 +631,17 @@ struct SettingsWindowView: View {
 
     // MARK: General
 
-    /// General is About plus the way out to Software Update — nothing else.
+    /// General: how the app looks and behaves, the way Xcode's General does.
     ///
-    /// It used to open with its own copy of the Color Scheme tiles (Appearance
-    /// had the same three tiles, and the Liquid Glass row that belongs beside
-    /// them), and then list Tab Width, Line Numbers and Line Wrapping under
-    /// "Editor Defaults" while a page named Editor sat below it in the sidebar.
-    /// Those rows named their page in Core; this page presents no Core rows at
-    /// all now, which `general_is_not_a_junk_drawer` keeps true.
+    /// It leads with the Appearance tiles — that is the first thing on Xcode's
+    /// General — then the app's own behaviour. It does **not** carry Software
+    /// Update: that has its own sidebar destination, and a row here would be
+    /// the same question answered twice. Xcode does not put updates in
+    /// Settings at all.
+    ///
+    /// What it used to hold: a duplicate of Appearance's colour-scheme tiles,
+    /// then Tab Width, Line Numbers and Line Wrapping under "Editor Defaults"
+    /// while a page named Editor sat below it in the sidebar.
     @ViewBuilder private var generalSections: some View {
         Section {
             HStack(spacing: 14) {
@@ -660,43 +665,61 @@ struct SettingsWindowView: View {
         }
 
         Section {
-            SettingsNavigationRow(
-                symbol: "arrow.triangle.2.circlepath",
-                tint: Color(nsColor: .systemGray),
-                title: "Software Update",
-                value: updateSummary
-            ) { navigate(to: .softwareUpdate) }
-
-            Button("Release Notes…") { engine.openSoftwareUpdateNotes() }
-        }
-    }
-
-    /// What General says next to Software Update without opening it.
-    private var updateSummary: String {
-        let store = EngineBridge.shared.softwareUpdate
-        if store.snap.available { return "Update Available" }
-        return rows(.updateCheck).first?.valueIndex == 0 ? "Manual" : "Automatic"
-    }
-
-
-    @ViewBuilder private var appearanceSections: some View {
-        Section {
             appearanceModeSelector
             glassStyleSelector
         } header: {
             Text("Appearance")
         } footer: {
-            Text("Automatic follows macOS. Liquid Glass changes floating editor controls without changing syntax colours.")
+            Text("Automatic follows macOS. A theme pins one palette regardless — see Themes.")
+        }
+
+        // Core's remaining General groups, minus the one drawn above. The
+        // Appearance rows are Segmented controls in Core, and rendering them
+        // generically here would put a second, plainer copy of the tiles
+        // underneath the tiles.
+        ForEach(presentedGroups(on: .general).filter { $0.title != "Appearance" }) { group in
+            Section(group.title) {
+                ForEach(group.rows) { row in
+                    settingControl(row)
+                }
+            }
+        }
+    }
+
+
+    /// Themes, shaped like Xcode's: the picker, then what it does to code, then
+    /// the surfaces it paints, then the one thing you may override.
+    ///
+    /// Xcode's page lets you edit every category. Suisei's cannot, on purpose —
+    /// `theme::with_highlight` says why: "Syntax colours and surfaces stay
+    /// authored as a coherent Light or Dark palette. Allowing each of those
+    /// colours to drift independently recreates the low-contrast theme
+    /// combinations this layer exists to prevent." So the categories are shown
+    /// and not offered, and the accent is offered because it is the one
+    /// override the palette layer accepts.
+    @ViewBuilder private var themeSections: some View {
+        Section {
+            themeSelector
+        } footer: {
+            Text("A theme pins one palette regardless of the colour scheme on General. Match Color Scheme follows macOS instead.")
         }
 
         Section {
-            themeSelector
-            themePreviewCard
-            themeSwatches
+            syntaxPreview
         } header: {
-            Text("Theme")
+            Text("Source Editor")
+        }
+
+        Section {
+            ForEach(Self.surfaceTokens, id: \.name) { token in
+                LabeledContent(token.name) {
+                    swatch(token.color(theme))
+                }
+            }
+        } header: {
+            Text("Surfaces")
         } footer: {
-            Text("A theme pins one palette regardless of the colour scheme above. Match Color Scheme follows macOS instead.")
+            Text("Syntax and surface colours come with the theme. Only the accent below can be changed — a palette whose colours drift apart independently is how unreadable themes are made.")
         }
 
         if let highlight = rows(.highlightColor).first {
@@ -708,6 +731,76 @@ struct SettingsWindowView: View {
                 Text("Default follows the selected palette. Any other accent changes selections, focus, links, and active controls.")
             }
         }
+    }
+
+    private struct ThemeToken {
+        let name: String
+        let color: (ThemeSnap) -> UInt32
+    }
+
+    /// The categories Xcode lists, named for what they are here.
+    private static let syntaxTokens: [ThemeToken] = [
+        ThemeToken(name: "Plain Text", color: \.fg),
+        ThemeToken(name: "Comments", color: \.comment),
+        ThemeToken(name: "Strings", color: \.string),
+        ThemeToken(name: "Numbers", color: \.number),
+        ThemeToken(name: "Keywords", color: \.keyword),
+        ThemeToken(name: "Type Names", color: \.typeName),
+        ThemeToken(name: "Function Names", color: \.function),
+        ThemeToken(name: "Macros", color: \.macroName),
+        ThemeToken(name: "Namespaces", color: \.namespace),
+        ThemeToken(name: "Parameters", color: \.parameter),
+        ThemeToken(name: "Properties", color: \.property),
+        ThemeToken(name: "Constants", color: \.constant),
+        ThemeToken(name: "Operators", color: \.operatorColor),
+        ThemeToken(name: "Punctuation", color: \.punctuation),
+        ThemeToken(name: "Dimmed Text", color: \.dim),
+    ]
+
+    private static let surfaceTokens: [ThemeToken] = [
+        ThemeToken(name: "Editor Background", color: \.editorBg),
+        ThemeToken(name: "Selection", color: \.selection),
+        ThemeToken(name: "Cursor", color: \.caret),
+        ThemeToken(name: "Status Bar", color: \.statusBg),
+    ]
+
+    /// Every category, painted in its own colour on the theme's own background
+    /// — Xcode's Source Editor list. A theme picker with no preview asks you to
+    /// choose fifteen palettes by name.
+    private var syntaxPreview: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(Self.syntaxTokens, id: \.name) { token in
+                    Text(token.name)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.color(token.color(theme)))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 1.5)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .frame(height: 180)
+        .background(theme.color(theme.editorBg))
+        .clipShape(RoundedRectangle(cornerRadius: Radius.row, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+        .padding(.vertical, 4)
+    }
+
+    /// A read-only colour chip, shaped like the colour wells beside it so the
+    /// page reads as one thing — but deliberately not a control.
+    private func swatch(_ packed: UInt32) -> some View {
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .fill(theme.color(packed))
+            .frame(width: 40, height: 20)
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
+            )
     }
 
     private var appearanceModeSelector: some View {
@@ -855,12 +948,10 @@ struct SettingsWindowView: View {
 
     /// The palette catalogue, which had no control at all.
     ///
-    /// Core ships fifteen themes and a `SettingRow::Theme(i)` for each, and the
-    /// Appearance page rendered none of them — it hand-built its two sections
-    /// and never called `presentedGroups(on: .appearance)`. `themePreviewCard`
-    /// and `themeSwatches` were written to sit under this picker and had no
-    /// caller either. So the catalogue was reachable only by hand-editing
-    /// `~/.suisei.toml`.
+    /// Core ships fifteen themes and a `SettingRow::Theme(i)` for each, and no
+    /// page rendered any of them — Appearance hand-built its two sections and
+    /// never asked Core for its rows. The catalogue was reachable only by
+    /// hand-editing `~/.suisei.toml`.
     ///
     /// `light` and `dark` are left out on purpose: `config.theme` is ONE field
     /// holding either `system`, one of those two, or a catalogue name, so the
@@ -900,68 +991,6 @@ struct SettingsWindowView: View {
         raw.split(separator: "_")
             .map { $0.prefix(1).uppercased() + $0.dropFirst() }
             .joined(separator: " ")
-    }
-
-    /// Live swatch strip of the active theme (bg / fg / accent / syntax hues).
-    private var themePreviewCard: some View {
-        Group {
-            RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
-                .fill(theme.color(theme.editorBg))
-                .overlay(
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 4) {
-                            Text("func").foregroundStyle(theme.color(theme.keyword))
-                            Text("render()").foregroundStyle(theme.color(theme.function))
-                        }
-                        HStack(spacing: 4) {
-                            Text("let").foregroundStyle(theme.color(theme.keyword))
-                            Text("title =").foregroundStyle(theme.color(theme.fg))
-                            Text("\"suisei\"").foregroundStyle(theme.color(theme.string))
-                        }
-                        HStack(spacing: 4) {
-                            Text("// comet engine").foregroundStyle(theme.color(theme.comment))
-                        }
-                    }
-                    .font(.system(size: 11, design: .monospaced))
-                    .padding(10),
-                    alignment: .topLeading
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
-                )
-                .frame(height: 76)
-
-        }
-        .padding(.vertical, 4)
-    }
-
-    /// Swatches, on their own line under the sample.
-    ///
-    /// They used to be a right-hand column beside it, which squeezed four
-    /// 9-point labels into whatever width the sample left over — the labels
-    /// ended up jammed against the window edge and too small to read. Laid out
-    /// horizontally they get the full width and a legible size, and the code
-    /// sample gets the whole card.
-    private var themeSwatches: some View {
-        HStack(spacing: 16) {
-            ForEach(
-                [("Accent", theme.accent), ("Text", theme.fg),
-                 ("Selection", theme.selection), ("Caret", theme.caret)],
-                id: \.0
-            ) { name, packed in
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(theme.color(packed))
-                        .frame(width: 10, height: 10)
-                        .overlay(Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
-                    Text(name)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 0)
-        }
     }
 
     private var accentPresets: [AccentPreset] {

@@ -139,13 +139,11 @@ fn editor_settings_are_on_the_editor_page() {
         SettingRow::TabWidth,
         SettingRow::RelativeNumber,
         SettingRow::WrapLines,
-        SettingRow::UndoCaching,
-        SettingRow::ClipboardSync,
     ] {
         assert_eq!(
             row.presentation().page,
             SettingSurfacePage::Editor,
-            "{row:?} decides how the editor treats text, so it belongs on Editor"
+            "{row:?} decides how the editor draws text, so it belongs on Editor"
         );
     }
 
@@ -156,19 +154,70 @@ fn editor_settings_are_on_the_editor_page() {
     );
 }
 
-/// General presents no Core rows: it is the app's About/landing page, and the
-/// face builds it. Anything else there would be a setting whose real home is
-/// one of the named pages.
+/// General holds how the APP looks and behaves — and nothing that another page
+/// is named after.
+///
+/// Xcode's General leads with the Appearance tiles and continues into the
+/// app's own behaviour; its palette lives on a page called Themes, and its
+/// updates are not in Settings at all. General had the reverse of that: three
+/// editor-display menus, a duplicate of Appearance's colour-scheme tiles, and
+/// Check for Updates.
 #[test]
-fn general_is_not_a_junk_drawer() {
+fn general_holds_app_behaviour_only() {
+    for row in [
+        SettingRow::AppearanceMode,
+        SettingRow::GlassStyle,
+        SettingRow::UndoCaching,
+        SettingRow::ClipboardSync,
+    ] {
+        assert_eq!(
+            row.presentation().page,
+            SettingSurfacePage::General,
+            "{row:?} is about the app itself"
+        );
+    }
+
     let general: Vec<_> = rows()
         .into_iter()
         .filter(|row| row.presentation().page == SettingSurfacePage::General)
         .collect();
+    for banned in [
+        SettingRow::UpdateCheck,
+        SettingRow::TabWidth,
+        SettingRow::RelativeNumber,
+        SettingRow::WrapLines,
+        SettingRow::HighlightColor,
+    ] {
+        assert!(
+            !general.contains(&banned),
+            "{banned:?} has a page named after it — General must not answer for it too"
+        );
+    }
     assert!(
-        general.is_empty(),
-        "these rows fell back to General instead of naming their page: {general:?}"
+        !general.iter().any(|r| matches!(r, SettingRow::Theme(_))),
+        "the palette catalogue belongs to Themes"
     );
+}
+
+/// The palette has its own page, the way Xcode's does.
+#[test]
+fn the_palette_catalogue_has_its_own_page() {
+    assert_eq!(
+        SettingRow::HighlightColor.presentation().page,
+        SettingSurfacePage::Themes
+    );
+    let themes: Vec<_> = rows()
+        .into_iter()
+        .filter(|row| matches!(row, SettingRow::Theme(_)))
+        .collect();
+    assert!(!themes.is_empty(), "there is at least one theme to choose");
+    for row in themes {
+        assert_eq!(
+            row.presentation().page,
+            SettingSurfacePage::Themes,
+            "{row:?} must be reachable from the Themes page"
+        );
+    }
 }
 
 /// One page owns the update question.
@@ -185,7 +234,7 @@ fn update_checking_is_owned_by_software_update() {
 #[test]
 fn appearance_has_one_constrained_customisation() {
     let row = SettingRow::HighlightColor.presentation();
-    assert_eq!(row.page, SettingSurfacePage::Appearance);
+    assert_eq!(row.page, SettingSurfacePage::Themes);
     assert_eq!(row.control, SettingControl::Color);
 
     let mut panel = SettingsPanel::new();

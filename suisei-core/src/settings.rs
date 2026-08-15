@@ -707,11 +707,15 @@ pub enum SettingSurfacePage {
     /// switch must not, because operating it does nothing.
     None,
     General,
+    /// Retired destination. Its two halves went where Xcode keeps them: the
+    /// colour scheme is app appearance and lives on General, the palette is a
+    /// theme and has its own page. Kept so the ABI number is never reused.
     Appearance,
     Editor,
     LanguageServers,
     SourceControl,
     SoftwareUpdate,
+    Themes,
 }
 
 impl SettingSurfacePage {
@@ -724,6 +728,7 @@ impl SettingSurfacePage {
             Self::LanguageServers => 4,
             Self::SourceControl => 5,
             Self::SoftwareUpdate => 6,
+            Self::Themes => 7,
         }
     }
 }
@@ -820,21 +825,24 @@ impl SettingRow {
     pub fn presentation(self) -> SettingPresentation {
         use SettingControl::{Action, Color, Menu, None, Segmented, Toggle};
         use SettingSurfacePage::{
-            Appearance, Editor, LanguageServers, SoftwareUpdate, SourceControl,
+            Editor, General, LanguageServers, SoftwareUpdate, SourceControl, Themes,
         };
 
         match self {
             Self::ThemeHeader => SettingPresentation {
-                page: Appearance,
-                group: "Appearance",
+                page: Themes,
+                group: "Theme",
                 control: None,
-                label: "Appearance",
+                label: "Theme",
                 detail: "",
                 options: "",
                 advanced: false,
             },
+            // Appearance is how the APP looks, and Xcode keeps it on General
+            // next to the rest of the app's behaviour. The palette is a
+            // different question with its own page.
             Self::AppearanceMode => SettingPresentation {
-                page: Appearance,
+                page: General,
                 group: "Appearance",
                 control: Segmented,
                 label: "Color Scheme",
@@ -843,7 +851,7 @@ impl SettingRow {
                 advanced: false,
             },
             Self::GlassStyle => SettingPresentation {
-                page: Appearance,
+                page: General,
                 group: "Appearance",
                 control: Segmented,
                 label: "Liquid Glass",
@@ -852,7 +860,7 @@ impl SettingRow {
                 advanced: false,
             },
             Self::Theme(_) => SettingPresentation {
-                page: Appearance,
+                page: Themes,
                 group: "Theme",
                 control: Menu,
                 label: "Theme",
@@ -861,8 +869,8 @@ impl SettingRow {
                 advanced: false,
             },
             Self::HighlightColor => SettingPresentation {
-                page: Appearance,
-                group: "Theme",
+                page: Themes,
+                group: "Accent",
                 control: Color,
                 label: "Highlight Color",
                 detail: "Used for selections, focus, links, and active controls.",
@@ -922,9 +930,12 @@ impl SettingRow {
                 options: "No Wrapping|Wrap to Window",
                 advanced: false,
             },
+            // App behaviour, not text display: one is about what survives
+            // closing a file, the other about sharing with other Mac apps.
+            // Editor is for how the editor draws text.
             Self::UndoCaching => SettingPresentation {
-                page: Editor,
-                group: "Editing",
+                page: General,
+                group: "Behavior",
                 control: Toggle,
                 label: "Keep Undo History",
                 detail: "Preserve undo history after a file is closed.",
@@ -932,8 +943,8 @@ impl SettingRow {
                 advanced: false,
             },
             Self::ClipboardSync => SettingPresentation {
-                page: Editor,
-                group: "Editing",
+                page: General,
+                group: "Behavior",
                 control: Toggle,
                 label: "Use System Clipboard",
                 detail: "Share copy and paste operations with other Mac apps.",

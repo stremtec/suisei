@@ -623,11 +623,14 @@ enum SettingSurfacePage: UInt32 {
     /// the feature behind it is gone but its config key must still load.
     case none = 0
     case general = 1
+    /// Retired. Its two halves went where Xcode keeps them — colour scheme on
+    /// General, palette on its own page. Never reuse the number.
     case appearance = 2
     case editor = 3
     case languageServers = 4
     case sourceControl = 5
     case softwareUpdate = 6
+    case themes = 7
 }
 
 enum SettingControlKind: UInt32 {
