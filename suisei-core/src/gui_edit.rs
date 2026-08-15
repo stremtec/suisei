@@ -964,6 +964,63 @@ mod tests {
         assert_eq!(app.buffer.text(), "bcd");
     }
 
+    /// Auto-indent carries the line's indent DOWN. It must not also leave it
+    /// behind on the text that moved.
+    ///
+    /// `after` — everything past the caret — already contains whatever leading
+    /// whitespace the caret has not passed. Prefixing the indent on top of that
+    /// counted it twice: Enter at column 0 of an indented line produced an
+    /// empty line and a line indented twice over, and every Enter inside an
+    /// indent grew it again. Reported as "새로운 줄인데 맨 앞에 한 칸이 빈다";
+    /// the space was real, and the editor put it there.
+    #[test]
+    fn enter_inside_an_indent_does_not_duplicate_it() {
+        // At column 0: the whole line moves down unchanged.
+        let mut app = app_with("  abc");
+        app.caret_place(Position::new(0, 0));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(0), "");
+        assert_eq!(app.buffer.line(1), "  abc", "indent not doubled");
+
+        // Halfway through the indent: the whitespace is split, not multiplied.
+        let mut app = app_with("  abc");
+        app.caret_place(Position::new(0, 1));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(0), " ");
+        assert_eq!(app.buffer.line(1), " abc");
+
+        // A line that is only whitespace, split in the middle: still two
+        // spaces in total, not four.
+        let mut app = app_with("    ");
+        app.caret_place(Position::new(0, 2));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(0), "  ");
+        assert_eq!(app.buffer.line(1), "  ");
+    }
+
+    /// And past the indent it still does its job — that is the whole point.
+    #[test]
+    fn enter_past_the_indent_carries_it_down() {
+        let mut app = app_with("  abc");
+        app.caret_place(Position::new(0, 5));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(1), "  ", "new line starts at the indent");
+        assert_eq!(app.buffer.cursor().col, 2, "caret after it");
+
+        // Splitting after the indent keeps the tail at the indent.
+        let mut app = app_with("  abcdef");
+        app.caret_place(Position::new(0, 5));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(0), "  abc");
+        assert_eq!(app.buffer.line(1), "  def");
+
+        // An opener still adds one unit on top.
+        let mut app = app_with("  if x {");
+        app.caret_place(Position::new(0, 8));
+        app.gui_insert_newline("  ");
+        assert_eq!(app.buffer.line(1), "    ", "indent + one unit");
+    }
+
     #[test]
     fn newline_splits_the_line() {
         let mut app = app_with("abcd");

@@ -416,7 +416,28 @@ impl Buffer {
     pub fn insert_newline_smart(&mut self, indent_unit: &str) {
         self.touch();
         let row = self.cursor.row;
-        let base = self.leading_indent(row);
+        // The indent to carry down — and NOT when the caret is still inside it.
+        //
+        // `after` is everything past the caret, so splitting a line inside its
+        // leading whitespace puts the rest of that whitespace in `after`.
+        // Prefixing `base` on top of it counted the same indent twice: Enter at
+        // column 0 of "␣␣abc" produced an empty line and "␣␣␣␣abc", and every
+        // Enter inside an indent grew it again. That is the reported "새로운
+        // 줄인데 맨 앞에 한 칸이 빈다" — the space was real and the editor put
+        // it there.
+        //
+        // Past the indent, carrying it is the whole point of auto-indent, so
+        // that is exactly where it applies.
+        let indent_end = self
+            .line(row)
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .count();
+        let base = if self.cursor.col >= indent_end {
+            self.leading_indent(row)
+        } else {
+            String::new()
+        };
 
         let line = &mut self.lines[row];
         let byte_idx = char_to_byte(self.cursor.col, line);
