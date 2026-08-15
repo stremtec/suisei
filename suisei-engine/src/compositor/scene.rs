@@ -302,6 +302,10 @@ pub struct ScmGraphRowScene {
     pub short: String,
     pub subject: String,
     pub when: String,
+    /// `HEAD -> main, origin/main`, when the commit carries any.
+    pub refs: String,
+    /// Lane colour index from the graph walker, so a branch keeps one hue.
+    pub color: u8,
     pub selected: bool,
 }
 
@@ -1451,8 +1455,14 @@ fn build_scm(app: &App) -> ScmScene {
             ScmGraphRowScene {
                 strip,
                 short: row.short.clone(),
-                subject: row.subject.chars().take(56).collect(),
+                // Was truncated to 56 characters HERE, in the compositor, so
+                // the face could not have shown more even with room for it.
+                // Truncation is a layout decision and belongs where the width
+                // is known.
+                subject: row.subject.clone(),
                 when: row.when.clone(),
+                refs: row.refs.clone(),
+                color: row.color,
                 selected: i == app.scm.graph_selected,
             }
         })

@@ -450,7 +450,15 @@ struct ScmEntryItem: Equatable, Identifiable {
 
 struct ScmGraphItem: Equatable, Identifiable {
     var id: Int
+    /// The pre-joined string Core also sends. Kept because the git-graph strip
+    /// (`| * |`) only reads as a graph in a monospaced run, and the parts below
+    /// cannot reconstruct it.
     var line: String
+    var shortHash: String
+    var subject: String
+    var when: String
+    var refs: String
+    var color: UInt8
     var selected: Bool
 }
 
@@ -5605,17 +5613,37 @@ final class EngineBridge: ObservableObject {
         var graph: [ScmGraphItem] = []
         let gn = Int(snap.graph_count)
         withUnsafeBytes(of: snap.graph_lines) { gRaw in
+        withUnsafeBytes(of: snap.graph_short) { shRaw in
+        withUnsafeBytes(of: snap.graph_subject) { subRaw in
+        withUnsafeBytes(of: snap.graph_when) { whenRaw in
+        withUnsafeBytes(of: snap.graph_refs) { refsRaw in
+        withUnsafeBytes(of: snap.graph_color) { colorRaw in
             withUnsafeBytes(of: snap.graph_selected) { selRaw in
                 let gCap = Int(SUISEI_GRAPH_LINE)
+                func field(_ raw: UnsafeRawBufferPointer, _ i: Int, _ cap: Int) -> String {
+                    String(cString: raw.baseAddress!
+                        .advanced(by: i * cap)
+                        .assumingMemoryBound(to: CChar.self))
+                }
                 for i in 0..<min(gn, Int(SUISEI_MAX_SCM_GRAPH)) {
                     let gb = gRaw.baseAddress!.advanced(by: i * gCap)
                     graph.append(ScmGraphItem(
                         id: i,
                         line: String(cString: gb.assumingMemoryBound(to: CChar.self)),
+                        shortHash: field(shRaw, i, 16),
+                        subject: field(subRaw, i, 160),
+                        when: field(whenRaw, i, 32),
+                        refs: field(refsRaw, i, 96),
+                        color: colorRaw[i],
                         selected: selRaw[i] != 0
                     ))
                 }
             }
+        }
+        }
+        }
+        }
+        }
         }
         return ScmSnap(
             open: true,

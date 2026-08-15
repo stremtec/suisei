@@ -2671,12 +2671,9 @@ struct ContentView: View {
                             .padding(.top, 12)
                             .padding(.bottom, 4)
                         ForEach(engine.chrome.scm.graph) { g in
-                            Text(g.line)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(g.selected ? accent : fg.opacity(0.88))
-                                .lineLimit(1)
+                            scmHistoryRow(g)
                                 .padding(.horizontal, 10)
-                                .padding(.vertical, 2)
+                                .padding(.vertical, 4)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(
                                     RoundedRectangle(cornerRadius: 4, style: .continuous)
@@ -2707,6 +2704,71 @@ struct ContentView: View {
                 Rectangle().fill(theme.separator).frame(height: 1)
             }
         }
+    }
+
+    /// One commit, laid out instead of printed.
+    ///
+    /// It was `Text(g.line)` — the string Core pre-joins as
+    /// `"{strip} {short}  {subject}  {when}"` — set in 10pt monospace, one line,
+    /// 2pt of padding. That is a log dump wearing a sidebar, and it could not
+    /// have been anything else: the FFI flattened the commit into that string
+    /// and the face had nothing else to work with. Core has carried `short`,
+    /// `subject`, `when`, `refs` and a lane colour the whole time.
+    ///
+    /// The graph strip is deliberately NOT drawn here. It only reads as a graph
+    /// when every row is monospaced and aligned, and a 240pt navigator cannot
+    /// give it that and the subject too — the workbench window is where a graph
+    /// belongs. What this column is for is "what landed recently", which is the
+    /// subject, and enough identity to act on it.
+    private func scmHistoryRow(_ g: ScmGraphItem) -> some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(scmLaneColor(g.color))
+                .frame(width: 6, height: 6)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(g.subject.isEmpty ? g.line : g.subject)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(g.selected ? accentForeground : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                HStack(spacing: 5) {
+                    Text(g.shortHash)
+                        .font(.system(size: 9.5, design: .monospaced))
+                    if !g.when.isEmpty {
+                        Text(g.when).font(.system(size: 9.5))
+                    }
+                    if !g.refs.isEmpty {
+                        Text(g.refs)
+                            .font(.system(size: 9))
+                            .lineLimit(1)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule().fill(accent.opacity(g.selected ? 0.30 : 0.16))
+                            )
+                    }
+                }
+                .foregroundStyle(
+                    g.selected ? accentForeground.opacity(0.75) : Color.secondary
+                )
+                .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The graph walker's lane colour, so a branch keeps one hue down the
+    /// column. Falls back to the accent for an index we do not have a hue for.
+    private func scmLaneColor(_ index: UInt8) -> Color {
+        let lanes: [Color] = [
+            accent,
+            theme.successColor,
+            theme.warningColor,
+            theme.dangerColor,
+            theme.color(theme.macroName),
+            theme.color(theme.typeName),
+        ]
+        return lanes[Int(index) % lanes.count]
     }
 
     /// `M`, `A`, `D`… in a chip whose colour says staged or not.

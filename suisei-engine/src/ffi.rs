@@ -2516,6 +2516,16 @@ pub struct SuiseiScmSnapshot {
     pub paths: [[c_char; SUISEI_SCM_PATH]; SUISEI_MAX_SCM],
     pub graph_selected: [u8; SUISEI_MAX_SCM_GRAPH],
     pub graph_lines: [[c_char; SUISEI_GRAPH_LINE]; SUISEI_MAX_SCM_GRAPH],
+    /// The commit, in parts. `graph_lines` above is the same data joined into
+    /// one pre-formatted string, and the face printed it verbatim in monospace
+    /// because that is all it could do with it — Core has had `short`,
+    /// `subject`, `when` and `refs` as separate fields the whole time.
+    pub graph_short: [[c_char; 16]; SUISEI_MAX_SCM_GRAPH],
+    pub graph_subject: [[c_char; 160]; SUISEI_MAX_SCM_GRAPH],
+    pub graph_when: [[c_char; 32]; SUISEI_MAX_SCM_GRAPH],
+    pub graph_refs: [[c_char; 96]; SUISEI_MAX_SCM_GRAPH],
+    /// Lane colour index from the graph walker, so branches keep their hue.
+    pub graph_color: [u8; SUISEI_MAX_SCM_GRAPH],
 }
 
 #[repr(C)]
@@ -2631,6 +2641,11 @@ pub extern "C" fn suisei_engine_scm(ptr: *const SuiseiEngine, out: *mut SuiseiSc
         o.graph_selected[gi] = u8::from(g.selected);
         let line = format!("{} {}  {}  {}", g.strip, g.short, g.subject, g.when);
         write_cstr(&mut o.graph_lines[gi], &line);
+        write_cstr(&mut o.graph_short[gi], &g.short);
+        write_cstr(&mut o.graph_subject[gi], &g.subject);
+        write_cstr(&mut o.graph_when[gi], &g.when);
+        write_cstr(&mut o.graph_refs[gi], &g.refs);
+        o.graph_color[gi] = g.color;
     }
     1
 }

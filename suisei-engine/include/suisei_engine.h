@@ -695,6 +695,13 @@ typedef struct SuiseiScmSnapshot {
   /* graph rows */
   uint8_t graph_selected[SUISEI_MAX_SCM_GRAPH];
   char graph_lines[SUISEI_MAX_SCM_GRAPH][SUISEI_GRAPH_LINE];
+  /* The commit in parts. graph_lines above is the same data joined; the face
+     could only print that verbatim, which is why the history read as a dump. */
+  char graph_short[SUISEI_MAX_SCM_GRAPH][16];
+  char graph_subject[SUISEI_MAX_SCM_GRAPH][160];
+  char graph_when[SUISEI_MAX_SCM_GRAPH][32];
+  char graph_refs[SUISEI_MAX_SCM_GRAPH][96];
+  uint8_t graph_color[SUISEI_MAX_SCM_GRAPH];
   /* staged packed first [0..staged_count), then changes */
 } SuiseiScmSnapshot;
 

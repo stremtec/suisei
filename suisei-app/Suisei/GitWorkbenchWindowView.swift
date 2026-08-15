@@ -1475,7 +1475,13 @@ struct GitWorkbenchWindowView: View {
             }
             .buttonStyle(.plain)
 
+            // The gap between the title and the actions used to be dead: the
+            // only two targets in this row were a 12pt chevron and the title
+            // itself, so a click anywhere in the middle of a file's header —
+            // most of its width — did nothing. A header row is one control.
             Spacer(minLength: 8)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: toggle)
 
             if let insertions, insertions > 0 {
                 Text("+\(insertions)")
