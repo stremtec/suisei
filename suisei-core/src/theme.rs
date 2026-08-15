@@ -116,8 +116,8 @@ pub struct Theme {
 }
 
 static THEMES: &[Theme] = &[
-    LIGHT, DARK, OCEAN, MONOKAI, NORD, SOLARIZED, GRUVBOX, EVERFOREST, SAKURA, NEWSPAPER, MONO,
-    MONO_DARK,
+    LIGHT, DARK, CATPPUCCIN, OCEAN, MONOKAI, NORD, SOLARIZED, GRUVBOX, EVERFOREST, SAKURA,
+    NEWSPAPER, MONO, MONO_DARK,
 ];
 
 // ── LIGHT — production default, quiet neutral canvas + Suisei blue ──
@@ -344,6 +344,80 @@ pub static OCEAN: Theme = Theme {
     git_add_bg: rgb(20, 40, 28),
     git_del_bg: rgb(45, 22, 24),
     git_hunk: rgb(100, 180, 255),
+};
+
+// ── CATPPUCCIN — Mocha, from the published palette ──
+//
+// The named colours are Catppuccin Mocha as specified, not eyeballed:
+//   base #1E1E2E  mantle #181825  crust #11111B  surface0 #313244
+//   surface1 #45475A  overlay0 #6C7086  text #CDD6F4  subtext0 #A6ADC8
+//   rosewater #F5E0DC  flamingo #F2CDCD  pink #F5C2E7  mauve #CBA6F7
+//   red #F38BA8  peach #FAB387  yellow #F9E2AF  green #A6E3A1
+//   teal #94E2D5  sky #89DCEB  sapphire #74C7EC  blue #89B4FA
+//   lavender #B4BEFE
+// Role assignment follows the upstream syntax mapping: mauve for keywords,
+// green for strings, peach for numbers, yellow for types, blue for functions.
+pub static CATPPUCCIN: Theme = Theme {
+    name: "catppuccin",
+    bg: rgb(24, 24, 37),
+    fg: rgb(205, 214, 244),
+    keyword: rgb(203, 166, 247),
+    string: rgb(166, 227, 161),
+    comment: rgb(108, 112, 134),
+    number: rgb(250, 179, 135),
+    type_name: rgb(249, 226, 175),
+    function: rgb(137, 180, 250),
+    macro_name: rgb(245, 194, 231),
+    namespace: rgb(180, 190, 254),
+    parameter: rgb(235, 160, 172),
+    property: rgb(148, 226, 213),
+    constant: rgb(250, 179, 135),
+    operator: rgb(137, 220, 235),
+    punctuation: rgb(147, 153, 178),
+    line_no: rgb(88, 91, 112),
+    current_line: rgb(35, 36, 51),
+    invisibles: rgb(58, 60, 78),
+    editor_bg: rgb(30, 30, 46),
+    status_bg: rgb(24, 24, 37),
+    status_fg: rgb(166, 173, 200),
+    border: rgb(69, 71, 90),
+    selection_bg: rgb(69, 71, 90),
+    search_bg: rgb(87, 82, 104),
+    mode_xlc: rgb(137, 180, 250),
+    completion_bg: rgb(24, 24, 37),
+    completion_selected: rgb(137, 180, 250),
+    completion_border: rgb(69, 71, 90),
+    explorer_bg: rgb(24, 24, 37),
+    explorer_fg: rgb(186, 194, 222),
+    explorer_dir: rgb(137, 180, 250),
+    explorer_selected: rgb(49, 50, 68),
+    terminal_bg: rgb(17, 17, 27),
+    terminal_fg: rgb(205, 214, 244),
+    terminal_prompt: rgb(166, 227, 161),
+    xlc_bg: rgb(24, 24, 37),
+    xlc_fg: rgb(166, 173, 200),
+    xlc_prompt: rgb(166, 227, 161),
+    xlc_border: rgb(137, 180, 250),
+    cursor: rgb(245, 224, 220),
+    accent: rgb(203, 166, 247),
+    accent_fg: rgb(17, 17, 27),
+    muted: rgb(127, 132, 156),
+    success: rgb(166, 227, 161),
+    warning: rgb(249, 226, 175),
+    error: rgb(243, 139, 168),
+    panel_bg: rgb(24, 24, 37),
+    panel_border: rgb(69, 71, 90),
+    panel_sel_bg: rgb(49, 50, 68),
+    panel_sel_fg: rgb(205, 214, 244),
+    mode_git: rgb(166, 227, 161),
+    mode_term: rgb(148, 226, 213),
+    mode_preview: rgb(180, 190, 254),
+    mode_settings: rgb(203, 166, 247),
+    mode_search: rgb(249, 226, 175),
+    mode_find: rgb(137, 180, 250),
+    git_add_bg: rgb(32, 45, 40),
+    git_del_bg: rgb(52, 34, 42),
+    git_hunk: rgb(137, 180, 250),
 };
 
 // ── MONOKAI ──
@@ -1189,9 +1263,34 @@ pub fn with_overrides(
 /// reached the file yet, and folding that into `cfg.theme` would make a light/
 /// dark switch silently revert an unsaved theme choice.
 pub fn effective(name: &str, cfg: &crate::config::Config, system_is_dark: bool) -> Theme {
-    let base = resolve(name, system_is_dark);
+    let (base_name, key) = override_target(name, cfg, system_is_dark);
+    let base = resolve(&base_name, system_is_dark);
     let tinted = with_highlight(base, &cfg.highlight_color);
-    with_overrides(&tinted, cfg.theme_overrides.get(base.name))
+    with_overrides(&tinted, cfg.theme_overrides.get(&key))
+}
+
+/// Which palette a theme is built on, and which override table belongs to it.
+///
+/// For a built-in, both are the resolved palette's name. For a user-made theme,
+/// the base is whatever it was saved from and the table is the theme's OWN
+/// name — that separation is what lets you edit "Midnight" without touching the
+/// Catppuccin it started from.
+///
+/// Public because the settings panel and the face both need to name the table
+/// they are writing into, and each deriving it independently is how the two
+/// would drift.
+pub fn override_target(
+    name: &str,
+    cfg: &crate::config::Config,
+    system_is_dark: bool,
+) -> (String, String) {
+    match cfg.custom_themes.get(name) {
+        Some(base) => (base.clone(), name.to_string()),
+        None => {
+            let resolved = resolve(name, system_is_dark).name.to_string();
+            (resolved.clone(), resolved)
+        }
+    }
 }
 
 /// WCAG relative-contrast ratio, 1.0 (identical) to 21.0 (black on white).

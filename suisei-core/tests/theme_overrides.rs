@@ -320,6 +320,146 @@ fn the_panel_resets_a_whole_palette() {
     );
 }
 
+/// Saving MOVES the edits. The point of "Save as New Theme" is that the palette
+/// you started from goes back to how its author made it, and your version lives
+/// beside it — leaving the edits on both would give you two identical themes
+/// and no way to see the original again.
+#[test]
+fn saving_a_theme_takes_the_edits_with_it() {
+    let mut panel = SettingsPanel::new();
+    panel.draft.theme = "catppuccin".into();
+    panel.set_theme_token("catppuccin", ThemeToken::Keyword, "#FF0000");
+
+    assert_eq!(panel.save_theme_as("Midnight", "catppuccin").as_deref(), Some("Midnight"));
+    assert_eq!(panel.draft.custom_themes["Midnight"], "catppuccin");
+    assert_eq!(panel.draft.theme, "Midnight", "the new theme becomes current");
+    assert_eq!(panel.theme_override_count("catppuccin"), 0, "the base is clean again");
+    assert_eq!(
+        panel.draft.theme_overrides["Midnight"]["keyword"], "#FF0000",
+        "the edits went with the new theme"
+    );
+
+    // And it resolves: base palette, then its own edits.
+    let painted = theme::effective("Midnight", &panel.draft, true);
+    assert_eq!(painted.keyword.r, 0xFF);
+    assert_eq!(
+        painted.string,
+        theme::resolve("catppuccin", true).string,
+        "everything unedited still comes from the base"
+    );
+}
+
+/// Editing a custom theme must not reach the palette it came from.
+#[test]
+fn a_custom_theme_edits_on_its_own() {
+    let mut panel = SettingsPanel::new();
+    panel.draft.theme = "ocean".into();
+    panel.set_theme_token("ocean", ThemeToken::Keyword, "#FF0000");
+    panel.save_theme_as("Mine", "ocean").unwrap();
+
+    panel.set_theme_token("Mine", ThemeToken::Comment, "#00FF00");
+    assert_eq!(panel.theme_override_count("Mine"), 2);
+    assert_eq!(panel.theme_override_count("ocean"), 0);
+
+    assert_eq!(
+        theme::effective("ocean", &panel.draft, true).comment,
+        theme::resolve("ocean", true).comment,
+        "the base palette is untouched"
+    );
+}
+
+/// A base must be a built-in. Saving a custom theme from another custom theme
+/// would build a chain, and deleting a link in the middle would orphan
+/// everything after it.
+///
+/// Saving FROM a user-made theme also copies rather than moves: that theme is
+/// yours, and making a second version must not empty the first.
+#[test]
+fn a_custom_theme_never_bases_on_another_custom_theme() {
+    let mut panel = SettingsPanel::new();
+    panel.set_theme_token("nord", ThemeToken::Keyword, "#111111");
+    panel.save_theme_as("First", "nord").unwrap();
+    panel.set_theme_token("First", ThemeToken::Comment, "#222222");
+    panel.save_theme_as("Second", "First").unwrap();
+
+    assert_eq!(
+        panel.draft.custom_themes["Second"], "nord",
+        "the chain is flattened to the built-in at its root"
+    );
+    assert_eq!(
+        panel.theme_override_count("First"),
+        2,
+        "saving from a user-made theme copies; it must not empty the original"
+    );
+    assert_eq!(panel.theme_override_count("Second"), 2);
+}
+
+/// A second theme by the same name — in any capitalisation — is refused.
+#[test]
+fn a_saved_theme_name_is_taken_once() {
+    let mut panel = SettingsPanel::new();
+    panel.set_theme_token("nord", ThemeToken::Keyword, "#111111");
+    assert!(panel.save_theme_as("Midnight", "nord").is_some());
+    panel.set_theme_token("nord", ThemeToken::Keyword, "#222222");
+    assert_eq!(
+        panel.save_theme_as("midnight", "nord"),
+        None,
+        "two themes differing only in case are two nobody can tell apart"
+    );
+}
+
+/// Names that would shadow a built-in, or name nothing at all, are refused.
+#[test]
+fn a_saved_theme_cannot_shadow_a_built_in() {
+    let mut panel = SettingsPanel::new();
+    panel.set_theme_token("ocean", ThemeToken::Keyword, "#111111");
+    for bad in ["", "   ", "ocean", "Dark", "CATPPUCCIN"] {
+        assert_eq!(panel.save_theme_as(bad, "ocean"), None, "{bad:?} must be refused");
+    }
+    assert!(panel.draft.custom_themes.is_empty());
+}
+
+/// Deleting the theme in use must leave `theme` naming something that resolves.
+#[test]
+fn deleting_the_theme_in_use_falls_back_to_its_base() {
+    let mut panel = SettingsPanel::new();
+    panel.set_theme_token("gruvbox", ThemeToken::Keyword, "#111111");
+    panel.save_theme_as("Warm", "gruvbox").unwrap();
+    assert_eq!(panel.draft.theme, "Warm");
+
+    assert_eq!(panel.delete_custom_theme("Warm"), SettingsAction::ApplyTheme);
+    assert_eq!(panel.draft.theme, "gruvbox");
+    assert!(!panel.draft.theme_overrides.contains_key("Warm"));
+    assert_eq!(
+        panel.delete_custom_theme("Warm"),
+        SettingsAction::None,
+        "deleting nothing is not a change"
+    );
+}
+
+/// Catppuccin is a real, findable palette — not just a name in a list.
+#[test]
+fn catppuccin_is_in_the_catalogue() {
+    let t = theme::find("catppuccin").expect("catppuccin is a built-in");
+    // The published Mocha base and text, so a typo in the table fails here
+    // rather than looking merely "a bit off" on screen.
+    assert_eq!(
+        (t.editor_bg.r, t.editor_bg.g, t.editor_bg.b),
+        (0x1E, 0x1E, 0x2E),
+        "base #1E1E2E"
+    );
+    assert_eq!((t.fg.r, t.fg.g, t.fg.b), (0xCD, 0xD6, 0xF4), "text #CDD6F4");
+    assert_eq!(
+        (t.keyword.r, t.keyword.g, t.keyword.b),
+        (0xCB, 0xA6, 0xF7),
+        "mauve #CBA6F7 for keywords"
+    );
+    assert!(
+        theme::contrast_ratio(t.fg, t.editor_bg) >= 4.5,
+        "a palette shipped by us passes the bar our own editor warns by"
+    );
+}
+
 /// Garbage from the face is refused rather than stored.
 #[test]
 fn the_panel_refuses_a_value_that_is_not_a_colour() {

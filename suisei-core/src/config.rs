@@ -24,6 +24,14 @@ pub struct Config {
     /// `BTreeMap` rather than `HashMap`: this is written back to a file a human
     /// reads and diffs, and iteration order has to be the same every save.
     pub theme_overrides: BTreeMap<String, BTreeMap<String, String>>,
+    /// User-made themes: display name → the built-in palette it started from.
+    ///
+    /// A custom theme is deliberately NOT a copy of sixty colours. It is a base
+    /// plus the edits already recorded in `theme_overrides` under its own name,
+    /// which means "Save as New Theme" is a rename of an override table and
+    /// costs nothing, and a built-in palette that improves in a later release
+    /// improves under every custom theme derived from it.
+    pub custom_themes: BTreeMap<String, String>,
     /// Spaces per tab / indent
     pub tab_width: usize,
     /// Mirror yanks to system clipboard (unnamedplus-style)
@@ -60,6 +68,7 @@ impl Default for Config {
             glass_style: "clear".into(),
             highlight_color: "default".into(),
             theme_overrides: BTreeMap::new(),
+            custom_themes: BTreeMap::new(),
             tab_width: 4,
             clipboard_sync: true,
             relative_number: false,
@@ -250,6 +259,16 @@ pub fn load() -> Config {
             "lsp_enabled" | "lsp" => {
                 cfg.lsp_enabled = matches!(v, "true" | "1" | "yes" | "on");
             }
+            // `theme.custom.<name> = "<base palette>"`. Matched before the
+            // generic `theme.` arm below, which would otherwise read `custom`
+            // as a palette name and `<name>` as a token.
+            k if k.starts_with("theme.custom.") => {
+                let name = k["theme.custom.".len()..].trim().to_string();
+                let base = v.trim().to_lowercase();
+                if !name.is_empty() && crate::theme::find(&base).is_some() {
+                    cfg.custom_themes.insert(name, base);
+                }
+            }
             // `theme.<palette>.<token> = "#RRGGBB"`. Same dotted shape as the
             // LSP block below, so the file stays one flat list of keys.
             k if k.starts_with("theme.") => {
@@ -311,6 +330,12 @@ pub fn save(cfg: &Config) {
     );
     // Written only when there is something to write: an empty section in every
     // config file is noise in a file people open by hand.
+    if !cfg.custom_themes.is_empty() {
+        content.push_str("\n# Themes you made (name = the palette it started from)\n");
+        for (name, base) in &cfg.custom_themes {
+            content.push_str(&format!("theme.custom.{name} = \"{base}\"\n"));
+        }
+    }
     if !cfg.theme_overrides.is_empty() {
         content.push_str("\n# Theme colour edits (omit a token to keep the palette's own)\n");
         for (palette, tokens) in &cfg.theme_overrides {

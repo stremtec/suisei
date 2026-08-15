@@ -1355,7 +1355,12 @@ impl SettingsPanel {
         token: crate::theme::ThemeToken,
         value: &str,
     ) -> SettingsAction {
-        let palette = palette.trim().to_lowercase();
+        // Taken verbatim: this IS the key `theme::override_target` returned.
+        // It used to be lowercased here, which was right for built-ins (whose
+        // names are lowercase) and silently wrong for a user-made theme called
+        // "Midnight" — the edit went into a second table called "midnight"
+        // that nothing ever read.
+        let palette = palette.trim().to_string();
         if palette.is_empty() {
             return SettingsAction::None;
         }
@@ -1405,9 +1410,100 @@ impl SettingsPanel {
         SettingsAction::ApplyTheme
     }
 
+    /// Keep the current palette's edits as a theme of its own.
+    ///
+    /// Whether the edits move or are copied depends on what you saved FROM, and
+    /// the rule is the one that leaves you with what you meant:
+    ///
+    /// * from a **built-in** the edits MOVE, so the shipped palette goes back
+    ///   to how its author made it. Leaving them behind would hand you two
+    ///   identical themes and no way to see the original again.
+    /// * from a **user-made** theme they are COPIED, because that theme is
+    ///   yours and saving a second version must not empty the first.
+    ///
+    /// `from_palette` is the override key currently in use — what
+    /// [`crate::theme::override_target`] returned — not a display name.
+    ///
+    /// Returns the stored name, or `None` if the name is blank, would shadow a
+    /// built-in, or is already taken.
+    pub fn save_theme_as(&mut self, name: &str, from_palette: &str) -> Option<String> {
+        let name = name.trim();
+        let from = from_palette.trim();
+        if name.is_empty() || crate::theme::find(name).is_some() {
+            return None;
+        }
+        // Case-insensitive, because two themes differing only in capitalisation
+        // are two themes nobody can tell apart in a menu.
+        if self
+            .draft
+            .custom_themes
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case(name))
+        {
+            return None;
+        }
+
+        // A base is always a built-in. Saving one custom theme from another
+        // would build a chain, and deleting a link in the middle would orphan
+        // everything after it — so the chain is flattened to its root here.
+        let derived = self.draft.custom_themes.get(from).cloned();
+        let base = derived.clone().unwrap_or_else(|| from.to_string());
+        if crate::theme::find(&base).is_none() {
+            return None;
+        }
+
+        let edits = if derived.is_some() {
+            self.draft.theme_overrides.get(from).cloned().unwrap_or_default()
+        } else {
+            self.draft.theme_overrides.remove(from).unwrap_or_default()
+        };
+        if !edits.is_empty() {
+            self.draft.theme_overrides.insert(name.to_string(), edits);
+        }
+        self.draft.custom_themes.insert(name.to_string(), base);
+        self.draft.theme = name.to_string();
+        self.status = Some(format!("Saved theme “{name}”"));
+        self.dirty = true;
+        Some(name.to_string())
+    }
+
+    /// Remove a user-made theme and its colours.
+    ///
+    /// If it is the theme in use, fall back to the palette it was built on —
+    /// leaving `theme` pointing at a name nothing resolves would silently drop
+    /// the editor to light/dark on the next launch.
+    pub fn delete_custom_theme(&mut self, name: &str) -> SettingsAction {
+        let name = name.trim();
+        let Some(base) = self.draft.custom_themes.remove(name) else {
+            return SettingsAction::None;
+        };
+        self.draft.theme_overrides.remove(name);
+        if self.draft.theme == name {
+            self.draft.theme = base;
+        }
+        self.status = Some(format!("Deleted theme “{name}”"));
+        self.dirty = true;
+        SettingsAction::ApplyTheme
+    }
+
+    /// Choose any theme by name — built-in or user-made.
+    pub fn select_theme(&mut self, name: &str) -> SettingsAction {
+        let name = name.trim();
+        let known = crate::theme::find(name).is_some()
+            || self.draft.custom_themes.contains_key(name)
+            || matches!(name, "system");
+        if !known || self.draft.theme == name {
+            return SettingsAction::None;
+        }
+        self.draft.theme = name.to_string();
+        self.status = Some(format!("Theme → {name}"));
+        self.dirty = true;
+        SettingsAction::ApplyTheme
+    }
+
     /// Drop every edit made to one palette.
     pub fn reset_theme_tokens(&mut self, palette: &str) -> SettingsAction {
-        let palette = palette.trim().to_lowercase();
+        let palette = palette.trim().to_string();
         if self.draft.theme_overrides.remove(&palette).is_none() {
             return SettingsAction::None;
         }
@@ -1420,7 +1516,7 @@ impl SettingsPanel {
     pub fn theme_override_count(&self, palette: &str) -> usize {
         self.draft
             .theme_overrides
-            .get(&palette.trim().to_lowercase())
+            .get(palette.trim())
             .map_or(0, std::collections::BTreeMap::len)
     }
 
