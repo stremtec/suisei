@@ -151,36 +151,62 @@ struct QuickHelpCard: View {
 /// of exactly that: what a function is, where one may be written, and four
 /// worked examples.
 ///
-/// Three kinds of block, because three is what a hover answer contains.
-/// Anything cleverer would be a markdown engine, and the one thing this has to
-/// get right is that code looks like code.
+/// Blocks, not a markdown engine: headings, paragraphs, list items, fenced
+/// code and rules are what a hover answer is made of, and the rest of the
+/// spelling (links, `code`, **bold**) is inline and belongs to
+/// `AttributedString(markdown:)`.
 struct QuickHelpBody: View {
     let markdown: String
-    /// The name already shown as the card's title, if there is one.
+    /// The name the card is about.
     ///
-    /// A hover answer opens with a fenced block holding the declaration, and
-    /// for a keyword that declaration is the keyword: `pub` appeared as the
-    /// title and again immediately below it in a code box. Passed in so the
-    /// leading block can be dropped when it says nothing the title has not —
-    /// and kept when it is a real signature, which is the part of a function's
-    /// answer worth reading first.
+    /// Two jobs. The leading fenced block is dropped when it says nothing this
+    /// has not — a hover answer opens with the declaration, and for a keyword
+    /// the declaration IS the keyword, so `pub` was the title and then `pub`
+    /// again in a box under it. And every other mention of it, in prose or in
+    /// a sample, is marked: the answer is about this word, and in four
+    /// paragraphs of prose about functions the reader should be able to find
+    /// `fn` without reading for it.
     var titled: String = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 9) {
             ForEach(Array(visibleBlocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .rule:
                     Divider()
+
+                case .heading(let level, let text):
+                    Text(text)
+                        .font(QuickHelpFonts.heading(level))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 2)
+
                 case .prose(let text):
                     Text(text)
                         .font(QuickHelpFonts.body)
-                        // Paragraphs of running text need air between lines;
-                        // 11pt on default leading is a wall.
+                        // Running text needs air between lines; a monospaced
+                        // face on default leading is a wall.
                         .lineSpacing(2.5)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
+
+                case .bullet(let text):
+                    // A hanging indent, so a wrapped item stays inside its own
+                    // bullet rather than starting again at the margin.
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("•").font(QuickHelpFonts.body).foregroundStyle(.secondary)
+                        Text(text)
+                            .font(QuickHelpFonts.body)
+                            .lineSpacing(2.5)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.leading, 2)
+
                 case .code(let source):
                     // Scrolls rather than wraps: a wrapped line of code reads
                     // as a different program.
@@ -203,8 +229,10 @@ struct QuickHelpBody: View {
     }
 
     enum Block {
+        case heading(level: Int, AttributedString)
         case prose(AttributedString)
-        case code(String)
+        case bullet(AttributedString)
+        case code(AttributedString)
         case rule
     }
 
@@ -216,107 +244,116 @@ struct QuickHelpBody: View {
     /// that followed it goes too — a divider under nothing is a line across an
     /// empty card.
     private var visibleBlocks: [Block] {
-        var blocks = Self.blocks(in: markdown)
+        var blocks = Self.blocks(in: markdown, naming: titled)
         let name = titled.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, case .code(let first)? = blocks.first,
-              first.trimmingCharacters(in: .whitespacesAndNewlines) == name
+              String(first.characters).trimmingCharacters(in: .whitespacesAndNewlines) == name
         else { return blocks }
         blocks.removeFirst()
         if case .rule? = blocks.first { blocks.removeFirst() }
         return blocks
     }
 
-    /// Set the `code` spans inside a sentence in the editor's own face.
-    ///
-    /// Markdown parsing marks them but chooses no font, so a `fn` written as
-    /// code in the middle of a paragraph arrived indistinguishable from the
-    /// words around it — the backticks had been resolved away and nothing took
-    /// their place. Ranges are collected before the edit: mutating an
-    /// `AttributedString` invalidates the run iteration that produced them.
-    private static func codeSpansInMono(_ input: AttributedString) -> AttributedString {
-        var out = input
-        let spans = out.runs.compactMap { run -> Range<AttributedString.Index>? in
-            run.inlinePresentationIntent?.contains(.code) == true ? run.range : nil
-        }
-        for span in spans {
-            out[span].font = QuickHelpFonts.inlineCode
-        }
-        return out
+    // MARK: - Parsing
+
+    /// `#`…`######` and the text after it, or nil.
+    private static func headingParts(_ line: String) -> (Int, String)? {
+        let hashes = line.prefix { $0 == "#" }
+        guard (1...6).contains(hashes.count) else { return nil }
+        let rest = line.dropFirst(hashes.count)
+        guard rest.first == " " else { return nil }
+        return (hashes.count, rest.trimmingCharacters(in: .whitespaces))
     }
 
-    /// A line that has to start a line of its own: a list item, a heading, a
-    /// quote. Everything else in a paragraph is a soft wrap. See `unwrap`.
-    private static func startsItsOwnLine(_ line: Substring) -> Bool {
-        let t = line.drop { $0 == " " }
-        if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("+ ") { return true }
-        if t.hasPrefix("#") || t.hasPrefix(">") || t.hasPrefix("|") { return true }
-        // `1. ` and friends.
-        let digits = t.prefix { $0.isNumber }
-        return !digits.isEmpty && t.dropFirst(digits.count).hasPrefix(". ")
-    }
-
-    /// Undo the server's hard wrap.
-    ///
-    /// A language server writes its markdown wrapped for a terminal —
-    /// rust-analyzer's is broken at about 95 columns — and markdown says a
-    /// single newline inside a paragraph is a SOFT break. Preserving them, as
-    /// this did, made the text wrap twice: once at the server's column and
-    /// again at the card's width, which is where "Functions are the primary
-    /// way code is executed within Rust. / Function blocks, usually just /
-    /// called functions, can be defined…" comes from. The ragged short lines
-    /// are the whole of why it read badly.
-    ///
-    /// Blank lines still separate paragraphs, and a list item or heading keeps
-    /// its own line — those newlines are the author's, not the wrapper's.
-    private static func unwrap(_ paragraph: String) -> String {
-        var out: [String] = []
-        for line in paragraph.split(separator: "\n", omittingEmptySubsequences: false) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { continue }
-            if out.isEmpty || startsItsOwnLine(line) {
-                out.append(trimmed)
-            } else {
-                out[out.count - 1] += " " + trimmed
-            }
+    /// The text of a list item, or nil. Ordered and unordered both: what the
+    /// marker was does not survive into a bulleted row.
+    private static func bulletBody(_ line: String) -> String? {
+        for marker in ["- ", "* ", "+ "] where line.hasPrefix(marker) {
+            return String(line.dropFirst(marker.count))
         }
-        return out.joined(separator: "\n")
+        let digits = line.prefix { $0.isNumber }
+        if !digits.isEmpty, line.dropFirst(digits.count).hasPrefix(". ") {
+            return String(line.dropFirst(digits.count + 2))
+        }
+        return nil
     }
 
     /// Split an LSP hover answer into blocks.
     ///
-    /// Fences first, because everything inside one is literal — a `---` or a
-    /// `*` in a code sample is code, not a rule and not emphasis. Prose runs
-    /// go through `AttributedString(markdown:)`, which resolves the inline
-    /// spelling (links, `code`, **bold**) that the raw text was showing.
+    /// Fences first, because everything inside one is literal — a `#` or a `*`
+    /// in a code sample is code, not a heading and not emphasis.
     ///
-    /// One `.prose` per PARAGRAPH rather than per run, so the space between
-    /// paragraphs is the layout's to set and not a blank line inside a string.
-    static func blocks(in markdown: String) -> [Block] {
+    /// Lines inside a paragraph are JOINED. A language server writes its
+    /// markdown wrapped for a terminal (rust-analyzer's is broken at about 95
+    /// columns) and markdown says a single newline inside a paragraph is a
+    /// soft break; keeping them made the text wrap twice, once at the server's
+    /// column and again at the card's width. A heading or a list item starts
+    /// its own line because that newline is the author's, not the wrapper's.
+    static func blocks(in markdown: String, naming symbol: String = "") -> [Block] {
         var out: [Block] = []
-        var prose: [Substring] = []
-        var code: [Substring] = []
+        var prose: [String] = []
+        var code: [String] = []
         var inFence = false
 
-        func flushProse() {
-            let text = prose.joined(separator: "\n")
-            prose.removeAll()
-            for paragraph in text.components(separatedBy: "\n\n") {
-                let body = unwrap(paragraph)
-                guard !body.isEmpty else { continue }
-                let parsed = try? AttributedString(
-                    markdown: body,
-                    options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-                )
-                out.append(.prose(codeSpansInMono(parsed ?? AttributedString(body))))
-            }
+        func inline(_ text: String) -> AttributedString {
+            let parsed = (try? AttributedString(
+                markdown: text,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            )) ?? AttributedString(text)
+            return marked(symbol, in: codeSpansInMono(parsed))
         }
 
-        for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+        func flushProse() {
+            let lines = prose
+            prose.removeAll()
+            var paragraph: [String] = []
+            func endParagraph() {
+                let body = paragraph.joined(separator: " ")
+                paragraph.removeAll()
+                if !body.isEmpty { out.append(.prose(inline(body))) }
+            }
+            var i = 0
+            while i < lines.count {
+                let line = lines[i].trimmingCharacters(in: .whitespaces)
+                if line.isEmpty {
+                    endParagraph()
+                    i += 1
+                } else if let (level, text) = headingParts(line) {
+                    endParagraph()
+                    out.append(.heading(level: level, inline(text)))
+                    i += 1
+                } else if let item = bulletBody(line) {
+                    endParagraph()
+                    // A wrapped item belongs to the item, not to the next one.
+                    var body = item
+                    var j = i + 1
+                    while j < lines.count {
+                        let next = lines[j].trimmingCharacters(in: .whitespaces)
+                        if next.isEmpty || headingParts(next) != nil || bulletBody(next) != nil {
+                            break
+                        }
+                        body += " " + next
+                        j += 1
+                    }
+                    out.append(.bullet(inline(body)))
+                    i = j
+                } else {
+                    paragraph.append(line)
+                    i += 1
+                }
+            }
+            endParagraph()
+        }
+
+        for raw in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
             if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
                 if inFence {
                     let source = code.joined(separator: "\n")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !source.isEmpty { out.append(.code(source)) }
+                    if !source.isEmpty {
+                        out.append(.code(marked(symbol, in: AttributedString(source))))
+                    }
                     code.removeAll()
                 } else {
                     flushProse()
@@ -339,9 +376,69 @@ struct QuickHelpBody: View {
         // An unterminated fence is still code — the cap that bounds hover text
         // can land in the middle of one.
         if inFence, !code.isEmpty {
-            out.append(.code(code.joined(separator: "\n")))
+            out.append(.code(marked(symbol, in: AttributedString(code.joined(separator: "\n")))))
         }
         flushProse()
+        return out
+    }
+
+    // MARK: - Inline styling
+
+    /// Set the `code` spans inside a sentence in the editor's own face.
+    ///
+    /// Markdown parsing marks them but chooses no font, so a `fn` written as
+    /// code in the middle of a paragraph arrived indistinguishable from the
+    /// words around it — the backticks had been resolved away and nothing took
+    /// their place. Ranges are collected before the edit: mutating an
+    /// `AttributedString` invalidates the run iteration that produced them.
+    private static func codeSpansInMono(_ input: AttributedString) -> AttributedString {
+        var out = input
+        let spans = out.runs.compactMap { run -> Range<AttributedString.Index>? in
+            run.inlinePresentationIntent?.contains(.code) == true ? run.range : nil
+        }
+        for span in spans {
+            out[span].font = QuickHelpFonts.inlineCode
+        }
+        return out
+    }
+
+    /// Mark every mention of the word the card is about.
+    ///
+    /// The editor's bracket-match yellow, which is already what Suisei means by
+    /// "this one, here" — the same fill and the same black ink as the flash on
+    /// a matching brace and the chip behind a breakpoint. One yellow in both
+    /// themes, for the reason `bracketYellow` gives.
+    ///
+    /// Whole words only. Marking every `fn` inside `fn_name` would light up the
+    /// sample rather than point into it, and the point is that the eye lands on
+    /// the thing being explained.
+    private static func marked(_ symbol: String, in input: AttributedString) -> AttributedString {
+        let name = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return input }
+        var out = input
+        let text = String(out.characters)
+        var ranges: [Range<AttributedString.Index>] = []
+        var from = text.startIndex
+        while let found = text.range(of: name, range: from..<text.endIndex) {
+            from = found.upperBound
+            let before = found.lowerBound == text.startIndex
+                ? nil : text[text.index(before: found.lowerBound)]
+            let after = found.upperBound == text.endIndex ? nil : text[found.upperBound]
+            func isWord(_ c: Character?) -> Bool {
+                guard let c else { return false }
+                return c.isLetter || c.isNumber || c == "_"
+            }
+            guard !isWord(before), !isWord(after) else { continue }
+            if let lower = AttributedString.Index(found.lowerBound, within: out),
+               let upper = AttributedString.Index(found.upperBound, within: out)
+            {
+                ranges.append(lower..<upper)
+            }
+        }
+        for range in ranges {
+            out[range].backgroundColor = QuickHelpFonts.markFill
+            out[range].foregroundColor = .black
+        }
         return out
     }
 }
@@ -356,28 +453,21 @@ private struct QuickHelpHeightKey: PreferenceKey {
 
 /// The card's faces.
 ///
-/// JetBrains Mono for everything that IS code — the signature, the samples,
-/// and the inline spans inside a sentence — because those have to line up and
-/// because a `fn` in the middle of prose should look like the `fn` in the
-/// editor behind the card.
-///
-/// Running prose is the system text face. It was JetBrains Mono too, and that
-/// is half of why the explanation read badly: a monospace face gives every
-/// letter the same width, which is what makes columns line up and what takes
-/// word shapes away from a reader. It is the right tool for four lines of
-/// sample and the wrong one for four paragraphs about them. Xcode's Quick
-/// Help, and every documentation viewer, splits it the same way.
+/// JetBrains Mono throughout, which is what was asked for and what the editor
+/// behind the card is set in. It was moved to the system face once, on the
+/// theory that a monospaced paragraph is hard to read — but the actual
+/// complaint was the double wrap (see `blocks(in:naming:)`), and with the
+/// paragraphs unwrapped and given line spacing the mono reads fine and belongs
+/// here.
 ///
 /// Milker for the name, which is the one thing on the card that is a heading
-/// rather than text.
+/// rather than text. `WelcomeView` says Milker "carries A–Z/a–z only", which
+/// would have made any name with an underscore a patchwork of two faces;
+/// checked against the font's own character set instead — letters, digits, `_`
+/// and signature punctuation are all in it, so `looks_binary` sets in one
+/// face.
 ///
-/// `WelcomeView` says Milker "carries A–Z/a–z only", which would have made a
-/// title a patchwork the moment a name had an underscore in it. Checked
-/// against the font's own character set rather than taken on trust: letters,
-/// digits, `_`, and the punctuation a signature uses are all in it. So
-/// `looks_binary` and `godddddd` set in one face, not two.
-///
-/// Resolved once and cached — `NSFont(name:)` is a lookup, and this is read
+/// Resolved once and cached: `NSFont(name:)` is a lookup, and these are read
 /// for every block of every card.
 enum QuickHelpFonts {
     static let title: Font = {
@@ -392,11 +482,24 @@ enum QuickHelpFonts {
         return .system(size: 19, weight: .semibold, design: .rounded)
     }()
 
-    /// Running text. Proportional — see the type comment.
-    static let body = Font.system(size: 12)
-    /// A `code` span inside a sentence, sized to sit on the prose's baseline
-    /// without standing off it: JetBrains Mono runs large for its point size.
-    static let inlineCode = Font(EditorMetrics.monospaced(11, weight: .regular))
+    /// Running text.
+    static let body = Font(EditorMetrics.monospaced(11, weight: .regular))
     /// Samples, a shade smaller so a wide line fits before it has to scroll.
     static let code = Font(EditorMetrics.monospaced(10.5, weight: .regular))
+    /// A `code` span inside a sentence — the same size as the prose it sits in.
+    static let inlineCode = Font(EditorMetrics.monospaced(11, weight: .medium))
+
+    /// `#` through `######`. Three steps, because a hover answer never nests
+    /// deeper than that in practice and a heading that is the same size as the
+    /// paragraph under it is not a heading.
+    static func heading(_ level: Int) -> Font {
+        switch level {
+        case 1: return Font(EditorMetrics.monospaced(14, weight: .bold))
+        case 2: return Font(EditorMetrics.monospaced(12.5, weight: .bold))
+        default: return Font(EditorMetrics.monospaced(11.5, weight: .semibold))
+        }
+    }
+
+    /// The editor's bracket-match yellow. See `QuickHelpBody.marked(_:in:)`.
+    static let markFill = Color(EditorCanvasView.bracketYellow)
 }
