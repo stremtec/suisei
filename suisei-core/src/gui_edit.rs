@@ -349,6 +349,18 @@ impl App {
 
     /// Insert a smart-indented newline at every caret (Return).
     pub fn gui_insert_newline(&mut self, indent_unit: &str) {
+        // Asked once, of the document — not per caret, and not of the buffer,
+        // which has no idea what file it is.
+        //
+        // A file with no extension, or one no grammar claims, gets the indent:
+        // an unknown file is more likely to be code than not, and the failure
+        // is asymmetric — a missing indent in code is retyped every line, a
+        // stray one in prose is deleted once.
+        let auto_indent = self
+            .file_extension()
+            .and_then(|e| crate::lang::Lang::from_ext(&e))
+            .map(|l| l.auto_indents())
+            .unwrap_or(true);
         self.push_undo();
         self.edit_run = crate::app::EditRun::None;
         let mut heads = vec![Position::zero(); self.sel.len()];
@@ -361,7 +373,7 @@ impl App {
                 s.start()
             };
             self.buffer.cursor = at;
-            self.buffer.insert_newline_smart(indent_unit);
+            self.buffer.insert_newline_smart(indent_unit, auto_indent);
             heads[i] = self.buffer.cursor;
         }
         let primary = self.sel.primary_index();
@@ -1019,6 +1031,66 @@ mod tests {
         app.caret_place(Position::new(0, 8));
         app.gui_insert_newline("  ");
         assert_eq!(app.buffer.line(1), "    ", "indent + one unit");
+    }
+
+    /// Auto-indent is a CODE affordance, and asks the language.
+    ///
+    /// README.md line 10 is a wrapped Markdown bullet's continuation, indented
+    /// two spaces to keep it under the bullet. Enter at its end used to hand
+    /// you those two spaces on a line that is a new thought — reported as
+    /// "엔터하면 라인 앞에 탭처럼 스페이스가 하나 생김".
+    #[test]
+    fn markdown_does_not_carry_an_indent_down() {
+        let line = "  final development snapshot (e.g. `2026dev`) when the ";
+
+        let mut app = app_with(line);
+        app.filename = Some(std::path::PathBuf::from("/tmp/README.md"));
+        let end = app.buffer.line(0).chars().count();
+        app.caret_place(Position::new(0, end));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(1), "", "prose starts at column 1");
+
+        // The same text in a code file still does.
+        let mut app = app_with(line);
+        app.filename = Some(std::path::PathBuf::from("/tmp/a.rs"));
+        app.caret_place(Position::new(0, end));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(1), "  ", "code keeps its depth");
+    }
+
+    /// An opener is a block in code and a sentence in prose, so the bonus
+    /// answers to the same question the indent does.
+    #[test]
+    fn markdown_does_not_open_a_block_on_a_colon() {
+        let mut app = app_with("Options:");
+        app.filename = Some(std::path::PathBuf::from("/tmp/notes.md"));
+        app.caret_place(Position::new(0, 8));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(1), "");
+
+        let mut app = app_with("def f():");
+        app.filename = Some(std::path::PathBuf::from("/tmp/a.py"));
+        app.caret_place(Position::new(0, 8));
+        app.gui_insert_newline("    ");
+        assert_eq!(app.buffer.line(1), "    ", "python opens a block");
+    }
+
+    /// A file nothing claims gets the indent. An unknown file is more likely
+    /// code than not, and the failure is asymmetric: a missing indent in code
+    /// is retyped every line, a stray one in prose is deleted once.
+    #[test]
+    fn an_unknown_file_still_indents() {
+        let mut app = app_with("  x");
+        app.filename = Some(std::path::PathBuf::from("/tmp/thing.wat"));
+        app.caret_place(Position::new(0, 3));
+        app.gui_insert_newline("  ");
+        assert_eq!(app.buffer.line(1), "  ");
+
+        let mut app = app_with("  x");
+        app.filename = None;
+        app.caret_place(Position::new(0, 3));
+        app.gui_insert_newline("  ");
+        assert_eq!(app.buffer.line(1), "  ");
     }
 
     #[test]

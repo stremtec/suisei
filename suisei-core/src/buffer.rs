@@ -413,7 +413,7 @@ impl Buffer {
     /// from the text BEFORE the caret, and an opener immediately followed by
     /// its closer expands to three lines with the closer back at the original
     /// indent, which is what Xcode and VS Code do.
-    pub fn insert_newline_smart(&mut self, indent_unit: &str) {
+    pub fn insert_newline_smart(&mut self, indent_unit: &str, auto_indent: bool) {
         self.touch();
         let row = self.cursor.row;
         // The indent to carry down — and NOT when the caret is still inside it.
@@ -433,7 +433,7 @@ impl Buffer {
             .chars()
             .take_while(|c| c.is_whitespace())
             .count();
-        let base = if self.cursor.col >= indent_end {
+        let base = if auto_indent && self.cursor.col >= indent_end {
             self.leading_indent(row)
         } else {
             String::new()
@@ -444,12 +444,16 @@ impl Buffer {
         let after: String = line.drain(byte_idx..).collect();
         let before_trimmed = self.lines[row].trim_end().to_string();
 
-        let opens = before_trimmed.ends_with('{')
+        // The opener bonus is the same affordance as the indent itself, so it
+        // answers to the same question. In prose a line ending in `:` is a
+        // sentence, not a block.
+        let opens = auto_indent
+            && (before_trimmed.ends_with('{')
             || before_trimmed.ends_with('[')
             || before_trimmed.ends_with('(')
             || before_trimmed.ends_with(':')
             || before_trimmed.ends_with("=>")
-            || before_trimmed.ends_with("->");
+            || before_trimmed.ends_with("->"));
         let tail = after.trim_start();
         let closes_immediately =
             tail.starts_with('}') || tail.starts_with(']') || tail.starts_with(')');
@@ -1472,7 +1476,7 @@ mod tests {
         let mut b = Buffer::from_string("fn main() {}");
         // caret between { and }
         b.cursor = Position::new(0, 11);
-        b.insert_newline_smart("    ");
+        b.insert_newline_smart("    ", true);
         assert_eq!(b.line(0), "fn main() {");
         assert_eq!(b.line(1), "    ");
         assert_eq!(b.line(2), "}");
@@ -1487,7 +1491,7 @@ mod tests {
     fn enter_after_an_opener_indents_one_level() {
         let mut b = Buffer::from_string("    if x {");
         b.cursor = Position::new(0, 10);
-        b.insert_newline_smart("    ");
+        b.insert_newline_smart("    ", true);
         assert_eq!(b.line(1), "        ");
         assert_eq!(b.cursor(), Position::new(1, 8));
     }
@@ -1498,7 +1502,7 @@ mod tests {
         // looked at the line end and wrongly indented.
         let mut b = Buffer::from_string("let a = 1; foo {");
         b.cursor = Position::new(0, 10);
-        b.insert_newline_smart("    ");
+        b.insert_newline_smart("    ", true);
         assert_eq!(b.line(0), "let a = 1;");
         assert_eq!(b.line(1), " foo {");
         assert_eq!(b.cursor(), Position::new(1, 0), "no extra indent");
@@ -1508,7 +1512,7 @@ mod tests {
     fn enter_keeps_plain_indentation() {
         let mut b = Buffer::from_string("        value");
         b.cursor = Position::new(0, 13);
-        b.insert_newline_smart("    ");
+        b.insert_newline_smart("    ", true);
         assert_eq!(b.line(1), "        ");
         assert_eq!(b.cursor(), Position::new(1, 8));
     }

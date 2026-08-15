@@ -365,6 +365,26 @@ impl Lang {
         (lang, query)
     }
 
+    /// Whether Enter should carry the current line's indentation down.
+    ///
+    /// Auto-indent is a CODE affordance. In a language with nesting, the line
+    /// you are starting almost always belongs at the depth of the one you just
+    /// left, and typing the indent by hand every time is the thing the editor
+    /// is for.
+    ///
+    /// In prose it is the opposite. A wrapped Markdown bullet's continuation is
+    /// indented two spaces to keep it under the bullet — press Enter at its end
+    /// and you get two spaces you did not ask for, on a line that is a new
+    /// thought rather than more of the same one. Reported against README.md
+    /// line 10, which is exactly that shape.
+    ///
+    /// Markup that nests structurally — HTML, XML — keeps it: their indent
+    /// means depth, the same as code. Markdown's does not; it means "this is
+    /// still the previous bullet".
+    pub fn auto_indents(self) -> bool {
+        !matches!(self, Lang::Markdown)
+    }
+
     /// How `scope.rs` should walk this language's tree, if it can.
     ///
     /// `None` is a statement, not a gap: a language returns it when lexical
