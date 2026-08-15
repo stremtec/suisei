@@ -400,43 +400,52 @@ struct GitWorkbenchWindowView: View {
         .help("Source Control Actions")
     }
 
+    /// The List owns the column; the mode rail is a bar pinned above it.
+    ///
+    /// This was `VStack { rail; Divider; List }`, and `SUISEI_DIAG=sidebar`
+    /// showed what that costs. Opening the sidebar produced, in one millisecond
+    /// and one layout transaction:
+    ///
+    ///     w=280.0 y=52.0 safeTop=44.0 row1=103.0
+    ///     w=280.0 y=44.0 safeTop=44.0 row1=103.0
+    ///     w=280.0 y=52.0 safeTop=44.0 row1=103.0
+    ///
+    /// The width never moved. `safeTop` never moved. The first row never moved.
+    /// Only the container's origin, by exactly the 8pt between it and the
+    /// titlebar — computed one way, then the other, then back. Rendered inside
+    /// an animation, that correction is the pop.
+    ///
+    /// The cause is ownership. A non-scrolling rail stacked above the List
+    /// leaves two candidates for who the column's top safe area belongs to, and
+    /// SwiftUI settled it differently on consecutive passes. `safeAreaBar`
+    /// removes the question: the List is the column, and the rail is a bar
+    /// inside its safe area. It is what the Settings sidebar already does, and
+    /// the reason its search field does not do this.
+    ///
+    /// The `Divider` goes with it. `scrollEdgeEffectStyle(.soft)` is the native
+    /// version of that line and it does not leave a seam.
     private var sidebar: some View {
-        VStack(spacing: 0) {
+        List(selection: $sidebarSelection) {
+            if sourceMode == .changes {
+                changesOutline
+            } else {
+                repositoriesOutline
+            }
+        }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .contentMargins(.top, 4, for: .scrollContent)
+        // Every row is one line. `lineLimit` propagates through the
+        // environment, so setting it here means a row added later cannot
+        // reintroduce wrapping by omission — and a two-line label in a column
+        // whose width animates is a height change waiting to happen. A macOS
+        // source list truncates; it does not wrap.
+        .lineLimit(1)
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .safeAreaBar(edge: .top, spacing: 0) {
             sourceModeRail
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
-
-            Divider()
-
-            List(selection: $sidebarSelection) {
-                if sourceMode == .changes {
-                    changesOutline
-                } else {
-                    repositoriesOutline
-                }
-            }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-            .contentMargins(.top, 4, for: .scrollContent)
-            // Every row is one line. This is the jump when the sidebar OPENS.
-            //
-            // `lineLimit` propagates through the environment, and without it
-            // the labels that had none — "Uncommitted Changes", "Stashed
-            // Changes", "Recent Locations", the repository's own name, a remote
-            // name — wrapped to two lines at a narrow width. A collapse/expand
-            // sweeps the width continuously, so partway through it crosses the
-            // point where those unwrap, every row below them loses a line's
-            // height at once, and the whole list snaps upward mid-animation.
-            //
-            // Not a stutter, and not the pill: a genuine relayout, at whatever
-            // width the longest label happens to fit. Which is also why it
-            // showed on opening rather than on closing — the unwrap is the
-            // direction that REMOVES height.
-            //
-            // Set once here rather than per row, so a row added later cannot
-            // reintroduce it by omission. A macOS source list truncates; it
-            // does not wrap.
-            .lineLimit(1)
         }
         .navigationSplitViewColumnWidth(
             min: 280,
