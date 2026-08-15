@@ -1496,7 +1496,7 @@ struct ContentView: View {
             }
             .clipShape(shape)
             .overlay(shape.strokeBorder(theme.separator, lineWidth: 1))
-            .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.10 : 0.42), radius: 9, y: 2)
+            .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.13 : 0.34), radius: 5, y: 1)
             .padding(.vertical, ContentView.panelGap)
             .padding(.trailing, ContentView.panelGap)
     }
@@ -1732,7 +1732,7 @@ struct ContentView: View {
                         )
                     )
                     // Separated from the tree by depth, not a hairline.
-                    .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.13 : 0.48), radius: 6, y: 2)
+                    .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.14 : 0.36), radius: 4, y: 1)
             }
         }
         .frame(height: NavStrip.iconH + NavStrip.inset * 2)
@@ -4348,7 +4348,7 @@ struct ContentView: View {
             Capsule(style: .continuous)
                 .strokeBorder(fg.opacity(0.08), lineWidth: 0.5)
         )
-        .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.11 : 0.40), radius: 8, y: 3)
+        .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.12 : 0.32), radius: 6, y: 2)
         .padding(.top, 8)
         .padding(.trailing, 12)
     }
