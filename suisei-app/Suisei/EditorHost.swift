@@ -3896,13 +3896,48 @@ extension EditorCanvasView: NSTextInputClient {
     /// Editing intent, already resolved by AppKit from the key event. Selectors
     /// we have not mapped to a semantic core command yet fall through to the
     /// existing NSEvent path, so nothing regresses during the migration.
+    /// Commands that REMOVE text.
+    ///
+    /// An input method commits text; it never deletes any. So a commit cannot
+    /// stand in for one of these, however much it "handled" the key.
+    private static let deletionCommands: Set<Selector> = [
+        #selector(NSStandardKeyBindingResponding.deleteBackward(_:)),
+        #selector(NSStandardKeyBindingResponding.deleteForward(_:)),
+        #selector(NSStandardKeyBindingResponding.deleteWordBackward(_:)),
+        #selector(NSStandardKeyBindingResponding.deleteWordForward(_:)),
+        #selector(NSStandardKeyBindingResponding.deleteToBeginningOfLine(_:)),
+        #selector(NSStandardKeyBindingResponding.deleteToEndOfLine(_:)),
+        #selector(NSStandardKeyBindingResponding.deleteToBeginningOfParagraph(_:)),
+        #selector(NSStandardKeyBindingResponding.deleteToEndOfParagraph(_:)),
+    ]
+
     override func doCommand(by selector: Selector) {
         EditorDiagnostics.reportIME(
             "doCommand", "\(selector) handled=\(inputHandledKey)", marked: markedText
         )
-        // The input method already turned this key into text or composition;
-        // replaying the raw event would apply it a second time.
-        if inputHandledKey { return }
+        // `inputHandledKey` means the input method turned this key into TEXT,
+        // and the guard exists so the key's raw meaning is not applied on top —
+        // Enter confirming a candidate must not also insert a newline.
+        //
+        // It was applied to every command, including the ones that delete.
+        // Backspace on a live composition, traced with `SUISEI_DIAG=ime`:
+        //
+        //     keyDown code=51        marked="ㅇ"
+        //     setMarkedText ㅇ       marked="ㅇ"
+        //     insertText ㅇ          marked="ㅇ"   ← commits the jamo
+        //     doCommand deleteBackward: handled=true
+        //
+        // The Korean input method commits the composing jamo and THEN asks for
+        // the delete, and both were wanted: the commit makes the jamo real, the
+        // delete takes a character away. Swallowing the delete left the press
+        // doing nothing you could see — the character it removed was the one it
+        // had just made real — so it took two presses to remove one. That is
+        // the reported "백스페이스를 두 번 눌러야 지워짐".
+        //
+        // Deletions only, because that is what the trace shows. A move after a
+        // commit is the same shape and may well have the same bug, but nobody
+        // has reproduced it and `SUISEI_DIAG=ime` is how they would.
+        if inputHandledKey, !Self.deletionCommands.contains(selector) { return }
         if !markedText.isEmpty {
             // Navigation/Return after composition applies after the composed
             // text, never underneath a floating marked string.
