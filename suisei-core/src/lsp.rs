@@ -12,7 +12,10 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+// No `Command` here on purpose: this module must build its child through
+// `exec::tool`, and an import of the bare constructor is how it stopped doing
+// that. See `start_with_text`.
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
@@ -38,6 +41,9 @@ pub struct LspClient {
     pub diagnostics_revision: u64,
     pub server_running: bool,
     pub server_name: String,
+    /// The program `exec::tool` resolved for `server_name` — absolute when the
+    /// binary was found on the augmented search list. See `start_with_text`.
+    pub server_path: String,
     pub server_lang: String,
     pub initialized: bool,
     pending_didopen: Option<(String, String, String)>, // path, lang, escaped text
@@ -216,6 +222,7 @@ impl Default for LspClient {
             diagnostics_revision: 0,
             server_running: false,
             server_name: String::new(),
+            server_path: String::new(),
             server_lang: String::new(),
             initialized: false,
             pending_didopen: None,
@@ -293,7 +300,30 @@ impl LspClient {
         let abs_root = abs_path(root);
         let root = find_project_root(&abs_root, &abs_file);
 
-        let mut child = match Command::new(parts[0])
+        // Through `exec::tool`, which is the whole point of the gate above.
+        //
+        // `command_exists` asks `exec::is_available` — the augmented search
+        // list, the one that still has Homebrew in it when the app was
+        // launched from Finder. This spawned with a bare `Command::new`, which
+        // resolves against the INHERITED `PATH`, and Finder's is
+        // `/usr/bin:/bin:/usr/sbin:/sbin`. So on every Finder launch the gate
+        // said rust-analyzer was installed and the spawn said no such file:
+        // `server_running` stayed false, and every LSP feature — hover,
+        // diagnostics, semantic tokens, inlay hints, rename — resolved empty
+        // with no visible reason.
+        //
+        // `command_exists`'s own comment already promised this: "asked of the
+        // same search list `exec::tool` will spawn from, so 'installed' and
+        // 'spawnable' cannot disagree". It could not keep that promise from
+        // the other side of the call.
+        let mut spawn = crate::exec::tool(parts[0]);
+        // What `exec::tool` actually resolved. Recorded because it is the only
+        // observable difference between resolving through the augmented search
+        // list and resolving through the child's `PATH`, and therefore the only
+        // thing a test in an ordinary shell can check — the failure itself only
+        // reproduces in a Finder-launched environment.
+        let program = spawn.get_program().to_string_lossy().to_string();
+        let mut child = match spawn
             .args(&parts[1..])
             .current_dir(&root)
             .stdin(Stdio::piped())
@@ -330,6 +360,7 @@ impl LspClient {
         self.rx = Some(rx);
         self._child = Some(child);
         self.server_name = parts[0].to_string();
+        self.server_path = program;
         self.current_uri = path_to_uri(&abs_file);
         self.root_uri = path_to_uri(&root);
         self.doc_version = 1;
@@ -3458,5 +3489,63 @@ mod tests {
         let body = r#"{"jsonrpc":"2.0","id":1,"result":{"data":[0,0,2,15,0,0,3,4,12,0]}}"#;
         let d = parse_semantic_data(body);
         assert_eq!(d, vec![0, 0, 2, 15, 0, 0, 3, 4, 12, 0]);
+    }
+}
+
+#[cfg(test)]
+mod spawn_path_tests {
+    use super::*;
+
+    /// "Installed" and "spawnable" must be the same question.
+    ///
+    /// `command_exists` asks `exec::is_available`, which searches the
+    /// augmented list — the one that still has Homebrew in it when the app was
+    /// launched from Finder. The spawn used a bare `Command::new`, which
+    /// resolves against the child's inherited `PATH`, and Finder's is
+    /// `/usr/bin:/bin:/usr/sbin:/sbin`. Every Finder launch therefore passed
+    /// the gate and failed the spawn: `server_running` stayed false and every
+    /// LSP feature resolved empty with nothing on screen to say why.
+    ///
+    /// The failure only reproduces in that environment, so what is checked
+    /// here is the thing that makes it impossible — that the program actually
+    /// handed to the OS is ABSOLUTE, and therefore not the child's `PATH` to
+    /// resolve. Running the ignored `rust_analyzer_indexes_only_once_polled`
+    /// through a stripped `PATH` reproduces the original directly:
+    ///
+    /// ```text
+    /// cargo test -p suisei-core --lib --no-run
+    /// env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    ///   target/debug/deps/suisei_core-* rust_analyzer -- --ignored
+    /// ```
+    #[test]
+    fn the_server_is_spawned_by_absolute_path() {
+        // `cat` rather than a language server: this is about resolution, not
+        // about LSP, and `cat` with a piped stdin waits quietly to be killed.
+        if !command_exists("cat") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("suisei-spawn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("probe.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let mut lsp = LspClient::new();
+        lsp.start(
+            "cat",
+            &dir.display().to_string(),
+            &file.display().to_string(),
+        );
+        let path = lsp.server_path.clone();
+        let spawned = lsp.stdin.is_some();
+        let error = lsp.error.clone();
+        lsp.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(spawned, "a binary the gate accepted must spawn: {error:?}");
+        assert!(
+            std::path::Path::new(&path).is_absolute(),
+            "spawned `{path}` by name, so the child's PATH decides whether it \
+             resolves — which is the bug this guards"
+        );
     }
 }

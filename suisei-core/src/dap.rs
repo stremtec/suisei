@@ -18,7 +18,11 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+// No `Command` here on purpose: every adapter is spawned through `exec::tool`,
+// so a binary the `command_exists` gate accepted is one the OS can actually
+// find. An import of the bare constructor is how the LSP client stopped doing
+// that — see `lsp::LspClient::start_with_text`.
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -646,7 +650,7 @@ impl DapClient {
             }
         }
 
-        let mut child = Command::new(&adapter_cmd)
+        let mut child = crate::exec::tool(&adapter_cmd)
             .args(&adapter_args)
             .current_dir(&cwd)
             .stdin(Stdio::piped())
@@ -789,7 +793,7 @@ impl DapClient {
             .find(|c| command_exists(c))
             .ok_or_else(|| install_hint("rust"))?;
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let mut child = Command::new(adapter)
+        let mut child = crate::exec::tool(adapter)
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -879,7 +883,7 @@ impl DapClient {
                 } else {
                     return Err(install_hint("python"));
                 };
-                let mut child = Command::new(py)
+                let mut child = crate::exec::tool(py)
                     .args(["-m", "debugpy.adapter"])
                     .current_dir(&cwd)
                     .stdin(Stdio::piped())
@@ -932,7 +936,7 @@ impl DapClient {
                             "No attach adapter. Use `:DapAttach pid <n>` or python/node port attach",
                         )
                     })?;
-                let mut child = Command::new(adapter)
+                let mut child = crate::exec::tool(adapter)
                     .current_dir(&cwd)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
@@ -1042,7 +1046,7 @@ impl DapClient {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         // Common flags: --server=PORT  or  just PORT
-        let mut child = Command::new(&adapter_cmd)
+        let mut child = crate::exec::tool(&adapter_cmd)
             .args([format!("--server={port}")])
             .current_dir(&workdir)
             .stdin(Stdio::null())
@@ -1050,7 +1054,7 @@ impl DapClient {
             .stderr(Stdio::piped())
             .spawn()
             .or_else(|_| {
-                Command::new(&adapter_cmd)
+                crate::exec::tool(&adapter_cmd)
                     .arg(port.to_string())
                     .current_dir(&workdir)
                     .stdin(Stdio::null())
