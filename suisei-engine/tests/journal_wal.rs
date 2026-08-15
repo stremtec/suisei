@@ -25,6 +25,9 @@ fn wal_write_and_scan() {
     journal.on_tick(path, || text.clone(), 1, 5, 3, 10, true);
     // Second tick: delta = 99, pending_bytes = 99*64 = 6336 > 4096 → flush.
     journal.on_tick(path, || text.clone(), 100, 5, 3, 10, true);
+    // The write left the tick — the fsync happens on the WAL thread. Nothing
+    // on the tick path waits for it; a test that looks at the directory does.
+    journal.drain();
 
     // Find the WAL file.
     let wal_files: Vec<_> = std::fs::read_dir(&dir)
@@ -64,6 +67,7 @@ fn wal_saved_removes_entry() {
 
     // Save: should remove the journal entry.
     journal.on_saved(path);
+    journal.drain();
 
     // WAL file should be gone.
     let wal_count = std::fs::read_dir(&dir)
@@ -166,6 +170,7 @@ fn clean_buffer_not_journaled() {
         0,
         false,
     );
+    journal.drain();
 
     let wal_count = std::fs::read_dir(&dir)
         .unwrap()
@@ -184,6 +189,7 @@ fn untitled_not_journaled() {
 
     // Empty path → no WAL write.
     journal.on_tick("", || "unsaved text".to_string(), 1, 0, 0, 0, true);
+    journal.drain();
 
     let wal_count = std::fs::read_dir(&dir)
         .unwrap()
@@ -191,6 +197,64 @@ fn untitled_not_journaled() {
         .filter(|e| e.path().extension().map(|x| x == "wal").unwrap_or(false))
         .count();
     assert_eq!(wal_count, 0, "untitled buffer not journaled");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Saving cancels a flush that has not reached the disk.
+///
+/// The risk the writer thread introduces. Deleting the WAL on the tick while a
+/// write for the same file was still queued would let that write land
+/// afterwards, and the next launch would offer to recover a file the user had
+/// already saved. Both go through the queue, where a job for a path replaces
+/// the pending one — so the save wins by construction rather than by timing.
+#[test]
+fn a_save_cancels_a_flush_that_has_not_landed() {
+    let dir = tmp_dir("cancel");
+    let mut journal = Journal::with_dir(dir.clone());
+    let path = "/tmp/raced_file.rs";
+    // Big enough that the write is not instantaneous.
+    let text = "fn main() { let x = 1; }\n".repeat(20_000);
+
+    journal.on_tick(path, || text.clone(), 1, 0, 0, 0, true);
+    journal.on_tick(path, || text.clone(), 100, 0, 0, 0, true);
+    // No drain: the write is deliberately still in the queue.
+    journal.on_saved(path);
+    journal.drain();
+
+    let wal_count = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().map(|x| x == "wal").unwrap_or(false))
+        .count();
+    assert_eq!(wal_count, 0, "the save must win over the queued flush");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Quitting does not throw away a snapshot the tick already handed over.
+///
+/// Closing the queue drains it before the writer exits, and `Drop` joins. A
+/// dirty buffer at quit is exactly when this matters.
+#[test]
+fn dropping_the_journal_finishes_what_was_queued() {
+    let dir = tmp_dir("shutdown");
+    let path = "/tmp/quit_while_dirty.rs";
+    {
+        let mut journal = Journal::with_dir(dir.clone());
+        journal.on_tick(path, || "work in progress".to_string(), 1, 0, 0, 0, true);
+        journal.on_tick(path, || "work in progress".to_string(), 100, 0, 0, 0, true);
+        // No drain — the drop has to do it.
+    }
+
+    let recovered = Journal::with_dir(dir.clone());
+    assert!(
+        recovered
+            .pending_recovery()
+            .iter()
+            .any(|e| e.file_path == path && e.text.contains("work in progress")),
+        "a queued snapshot survives the quit"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
