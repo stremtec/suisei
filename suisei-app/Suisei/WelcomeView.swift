@@ -103,14 +103,8 @@ struct WelcomeView: View {
                             actionsColumn
                                 .frame(width: Self.controlWidth)
 
-                            // A hairline rather than a change of material, so
-                            // the left of this window still reads as one panel
-                            // with two jobs.
                             recentsColumn
                                 .frame(width: Self.recentsWidth)
-                                .overlay(alignment: .leading) {
-                                    Rectangle().fill(hairline).frame(width: 1)
-                                }
                         }
                         .frame(maxHeight: .infinity, alignment: .top)
                     }
@@ -234,6 +228,10 @@ struct WelcomeView: View {
     ///
     /// Type-only lockup — Milker. It carries A–Z/a–z only, so the version and
     /// legal lines stay on the system face.
+    /// The wordmark band across the top of both left columns.
+    ///
+    /// Type-only lockup — Milker. It carries A–Z/a–z only, so the version and
+    /// legal lines stay on the system face.
     private var brandHeader: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Suisei")
@@ -242,10 +240,10 @@ struct WelcomeView: View {
                 .lineLimit(1)
             VStack(alignment: .leading, spacing: 3) {
                 Text("© 2025–2026 Stemtec. All rights reserved.")
-                    .font(.system(size: 10, weight: .regular, design: .default))
+                    .font(.system(size: 10, weight: .regular))
                     .foregroundStyle(muted.opacity(0.90))
                 Text("Suisei 2026dev · Legal Information")
-                    .font(.system(size: 10, weight: .regular, design: .default))
+                    .font(.system(size: 10, weight: .regular))
                     .foregroundStyle(muted.opacity(0.75))
             }
             .padding(.top, 8)
@@ -253,23 +251,26 @@ struct WelcomeView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.leading, 26)
         .padding(.trailing, 20)
-        .padding(.top, 34)
-        .padding(.bottom, 26)
+        .padding(.top, 30)
+        .padding(.bottom, 16)
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : 6)
     }
 
-    /// The launch actions, sitting on the floor of their column.
+    /// The launch actions, centred in what is left below the wordmark.
     ///
-    /// They used to be directly under the wordmark with everything below them
-    /// empty. Bottom-aligned they close the column, and the space the window
-    /// gained reads as air around the mark rather than as a gap nobody filled.
+    /// Two positions were tried and both left one large hole. Directly under
+    /// the wordmark emptied the bottom of the column; on the floor emptied its
+    /// middle. Four buttons simply do not fill 320pt, so the honest move is to
+    /// stop pretending they do and split the leftover in two — a gap above and
+    /// a gap below, each about half the size, which reads as breathing room
+    /// instead of as a place where something is missing.
     private var actionsColumn: some View {
         // The actions wait behind the boot sequence; the loading line occupies
         // the same region until `ready`, then the actions rise into place. Both
         // live in one ZStack so the reveal is a cross-fade in a fixed
         // footprint, not a layout jump.
-        ZStack(alignment: .bottom) {
+        ZStack {
             bootLoadingView
                 .opacity(ready ? 0 : 1)
                 .allowsHitTesting(!ready)
@@ -279,20 +280,40 @@ struct WelcomeView: View {
                 .offset(y: ready ? 0 : 10)
                 .allowsHitTesting(ready)
         }
-        .frame(maxHeight: .infinity, alignment: .bottom)
+        .frame(maxHeight: .infinity)
         .padding(.bottom, 26)
         .animation(.smooth(duration: 0.55), value: ready)
     }
 
     /// The recents column, revealed on the same beat as the actions.
     ///
+    /// Separated from the actions by being a SURFACE, not by a rule. A hairline
+    /// down the middle ran from the wordmark to the floor and cut the panel in
+    /// half — it drew the strongest line in the window across its emptiest
+    /// part. An inset card says the same thing by occupying its own space: it
+    /// reads as a thing sitting on the rail rather than as a border between two
+    /// halves, and it stops short of every edge so nothing reaches the bottom
+    /// but the content.
+    ///
     /// It reads `ready` itself rather than being handed it, because it no
     /// longer shares a ZStack with the boot line — the loading state belongs to
-    /// the rail, and a second spinner over here would say the same thing twice.
+    /// the actions column, and a second spinner here would say the same thing
+    /// twice.
     private var recentsColumn: some View {
         recentsSection
-            .padding(.top, 4)
-            .frame(maxHeight: .infinity, alignment: .top)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+            )
+            .padding(.leading, 4)
+            .padding(.trailing, 22)
+            .padding(.bottom, 26)
             .opacity(ready ? 1 : 0)
             .offset(y: ready ? 0 : 10)
             .allowsHitTesting(ready)
@@ -302,9 +323,10 @@ struct WelcomeView: View {
     /// Launch actions — revealed once boot is `ready`.
     ///
     /// No `maxHeight: .infinity` here. The stack sizes to its four buttons and
-    /// the column's `alignment: .bottom` puts it on the floor; filling the
-    /// height and top-aligning inside would pin them back under the wordmark,
-    /// which is what this layout change was undoing.
+    /// the column centres it; filling the height and top-aligning inside would
+    /// pin them back under the wordmark, which is what this layout change was
+    /// undoing. It read as a working build and looked untouched — the kind of
+    /// modifier that survives a rewrite because nothing fails.
     private var launchActions: some View {
         VStack(spacing: 8) {
             // A project first: it is the thing this window is for, and until
@@ -470,14 +492,14 @@ struct WelcomeView: View {
             Text("Recents")
                 .font(.system(size: 11, weight: .semibold, design: .default))
                 .foregroundStyle(muted)
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 16)
                 .padding(.bottom, 8)
 
             if recents.isEmpty {
                 Text("No Recent Projects")
                     .font(.system(size: 12, weight: .regular))
                     .foregroundStyle(muted.opacity(0.75))
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 16)
                     .padding(.top, 4)
             } else {
                 ScrollView {
@@ -542,8 +564,8 @@ struct WelcomeView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 16)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 4)
                 }
             }
         }
