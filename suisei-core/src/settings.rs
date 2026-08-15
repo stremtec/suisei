@@ -1340,6 +1340,90 @@ impl SettingsPanel {
         self.apply_row_value(row, option)
     }
 
+    /// Set — or clear — one colour of the palette currently being shown.
+    ///
+    /// `value` empty or `"default"` removes the override, which is how a token
+    /// goes back to what the theme author chose. `palette` is the RESOLVED
+    /// theme name, so the caller has already decided whether `system` means
+    /// light or dark; this layer must not guess that.
+    ///
+    /// Removing the last override for a palette drops the whole entry, so the
+    /// config file does not accumulate empty tables for themes you tried once.
+    pub fn set_theme_token(
+        &mut self,
+        palette: &str,
+        token: crate::theme::ThemeToken,
+        value: &str,
+    ) -> SettingsAction {
+        let palette = palette.trim().to_lowercase();
+        if palette.is_empty() {
+            return SettingsAction::None;
+        }
+        let value = value.trim();
+        let clearing = value.is_empty() || value.eq_ignore_ascii_case("default");
+
+        let normalized = if clearing {
+            None
+        } else {
+            let hex = value.strip_prefix('#').unwrap_or(value);
+            if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return SettingsAction::None;
+            }
+            Some(format!("#{}", hex.to_ascii_uppercase()))
+        };
+
+        let current = self
+            .draft
+            .theme_overrides
+            .get(&palette)
+            .and_then(|t| t.get(token.key()))
+            .cloned();
+        if current == normalized {
+            return SettingsAction::None;
+        }
+
+        match normalized {
+            Some(hex) => {
+                self.draft
+                    .theme_overrides
+                    .entry(palette)
+                    .or_default()
+                    .insert(token.key().to_string(), hex.clone());
+                self.status = Some(format!("{} = {hex}", token.label()));
+            }
+            None => {
+                if let Some(tokens) = self.draft.theme_overrides.get_mut(&palette) {
+                    tokens.remove(token.key());
+                    if tokens.is_empty() {
+                        self.draft.theme_overrides.remove(&palette);
+                    }
+                }
+                self.status = Some(format!("{} → theme default", token.label()));
+            }
+        }
+        self.dirty = true;
+        SettingsAction::ApplyTheme
+    }
+
+    /// Drop every edit made to one palette.
+    pub fn reset_theme_tokens(&mut self, palette: &str) -> SettingsAction {
+        let palette = palette.trim().to_lowercase();
+        if self.draft.theme_overrides.remove(&palette).is_none() {
+            return SettingsAction::None;
+        }
+        self.status = Some(format!("{palette} → theme defaults"));
+        self.dirty = true;
+        SettingsAction::ApplyTheme
+    }
+
+    /// How many colours the user has changed on this palette.
+    pub fn theme_override_count(&self, palette: &str) -> usize {
+        self.draft
+            .theme_overrides
+            .get(&palette.trim().to_lowercase())
+            .map_or(0, std::collections::BTreeMap::len)
+    }
+
     /// Set the arbitrary sRGB value carried by the native color well.
     pub fn set_highlight_color(&mut self, value: &str) -> SettingsAction {
         let value = value.trim();

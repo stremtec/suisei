@@ -1,6 +1,6 @@
 //! User config at `~/.suisei.toml` (simple line-oriented, no extra deps).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -14,6 +14,16 @@ pub struct Config {
     /// Optional six-digit sRGB override for selection/accent highlights.
     /// `"default"` keeps the palette's own carefully tuned highlight.
     pub highlight_color: String,
+    /// Per-theme, per-token colour edits.
+    ///
+    /// Outer key = the RESOLVED theme's name (`dark`, `ocean`, …), so edits to
+    /// Ocean do not follow you into Monokai and `theme = "system"` writes under
+    /// whichever palette you were actually looking at. Inner key =
+    /// [`crate::theme::ThemeToken::key`]. Value = `#RRGGBB`.
+    ///
+    /// `BTreeMap` rather than `HashMap`: this is written back to a file a human
+    /// reads and diffs, and iteration order has to be the same every save.
+    pub theme_overrides: BTreeMap<String, BTreeMap<String, String>>,
     /// Spaces per tab / indent
     pub tab_width: usize,
     /// Mirror yanks to system clipboard (unnamedplus-style)
@@ -49,6 +59,7 @@ impl Default for Config {
             theme: "system".into(),
             glass_style: "clear".into(),
             highlight_color: "default".into(),
+            theme_overrides: BTreeMap::new(),
             tab_width: 4,
             clipboard_sync: true,
             relative_number: false,
@@ -239,6 +250,30 @@ pub fn load() -> Config {
             "lsp_enabled" | "lsp" => {
                 cfg.lsp_enabled = matches!(v, "true" | "1" | "yes" | "on");
             }
+            // `theme.<palette>.<token> = "#RRGGBB"`. Same dotted shape as the
+            // LSP block below, so the file stays one flat list of keys.
+            k if k.starts_with("theme.") => {
+                let rest = &k["theme.".len()..];
+                let Some((palette, token)) = rest.split_once('.') else {
+                    continue;
+                };
+                let palette = palette.trim().to_lowercase();
+                let token = token.trim().to_lowercase();
+                // Only tokens Core actually has, and only real colours. A
+                // typo in a hand-edited file is dropped, not stored and then
+                // written back as though Suisei believed it.
+                if palette.is_empty()
+                    || crate::theme::ThemeToken::from_key(&token).is_none()
+                    || crate::theme::parse_hex(v).is_none()
+                {
+                    continue;
+                }
+                let hex = v.strip_prefix('#').unwrap_or(v);
+                cfg.theme_overrides
+                    .entry(palette)
+                    .or_default()
+                    .insert(token, format!("#{}", hex.to_ascii_uppercase()));
+            }
             k if k.starts_with("lsp.") => {
                 let lang = k.trim_start_matches("lsp.").trim().to_lowercase();
                 if !lang.is_empty() {
@@ -274,6 +309,16 @@ pub fn save(cfg: &Config) {
         if cfg.key_hints { "true" } else { "false" },
         if cfg.lsp_enabled { "true" } else { "false" },
     );
+    // Written only when there is something to write: an empty section in every
+    // config file is noise in a file people open by hand.
+    if !cfg.theme_overrides.is_empty() {
+        content.push_str("\n# Theme colour edits (omit a token to keep the palette's own)\n");
+        for (palette, tokens) in &cfg.theme_overrides {
+            for (token, hex) in tokens {
+                content.push_str(&format!("theme.{palette}.{token} = \"{hex}\"\n"));
+            }
+        }
+    }
     content.push_str("\n# LSP servers (empty / off = disabled; omit = built-in default)\n");
     // Save known catalog keys first (stable order), then any extras
     let mut seen = std::collections::HashSet::new();

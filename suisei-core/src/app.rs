@@ -840,10 +840,7 @@ impl App {
         }
         self.theme_pref = cfg.theme.clone();
         self.glass_style = cfg.glass_style.clone();
-        self.theme = theme::with_highlight(
-            theme::resolve(&cfg.theme, self.system_is_dark),
-            &cfg.highlight_color,
-        );
+        self.theme = theme::effective(&cfg.theme, &cfg, self.system_is_dark);
     }
 
     /// `:status` — toggle the live CPU/MEM/GPU readout in the status line.
@@ -867,10 +864,7 @@ impl App {
         }
         self.system_is_dark = is_dark;
         let cfg = config::load();
-        self.theme = crate::theme::with_highlight(
-            crate::theme::resolve(&self.theme_pref, is_dark),
-            &cfg.highlight_color,
-        );
+        self.theme = crate::theme::effective(&self.theme_pref, &cfg, is_dark);
     }
 
     /// Status-line note. Replaces the XLC console the vim `:` command line
@@ -1923,10 +1917,7 @@ impl App {
         }
         self.theme_pref = cfg.theme.clone();
         self.glass_style = cfg.glass_style.clone();
-        self.theme = theme::with_highlight(
-            theme::resolve(&cfg.theme, self.system_is_dark),
-            &cfg.highlight_color,
-        );
+        self.theme = theme::effective(&cfg.theme, &cfg, self.system_is_dark);
         // Restart LSP for current file with new server map
         self.lsp_restart_for_current();
     }
@@ -3155,7 +3146,7 @@ impl App {
                 let name = &id[6..];
                 if let Some(t) = theme::find(name) {
                     let cfg = config::load();
-                    self.theme = theme::with_highlight(t, &cfg.highlight_color);
+                    self.theme = theme::effective(t.name, &cfg, self.system_is_dark);
                     config::save_theme(t.name);
                     self.message = format!("Theme: {}", t.name);
                 }

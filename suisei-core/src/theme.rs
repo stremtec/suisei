@@ -908,13 +908,273 @@ pub fn resolve(name: &str, system_is_dark: bool) -> &'static Theme {
     find(name).unwrap_or(if system_is_dark { &DARK } else { &LIGHT })
 }
 
-/// Apply the one supported palette override: the interaction/highlight hue.
+/// One addressable colour of a theme.
 ///
-/// Syntax colours and surfaces stay authored as a coherent Light or Dark
-/// palette. Allowing each of those colours to drift independently recreates
-/// the low-contrast theme combinations this layer exists to prevent. The
-/// chosen hue is therefore used directly for controls and softly mixed into
+/// These are exactly the twenty the face already draws in its Themes preview,
+/// so "what you can see" and "what you can change" are the same list. The
+/// enum's ORDER is ABI — the face addresses a token by index. Append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeToken {
+    Fg,
+    Comment,
+    StringLit,
+    Number,
+    Keyword,
+    TypeName,
+    Function,
+    MacroName,
+    Namespace,
+    Parameter,
+    Property,
+    Constant,
+    Operator,
+    Punctuation,
+    LineNo,
+    EditorBg,
+    SelectionBg,
+    Cursor,
+    StatusBg,
+    Accent,
+}
+
+impl ThemeToken {
+    pub const ALL: &'static [ThemeToken] = &[
+        Self::Fg,
+        Self::Comment,
+        Self::StringLit,
+        Self::Number,
+        Self::Keyword,
+        Self::TypeName,
+        Self::Function,
+        Self::MacroName,
+        Self::Namespace,
+        Self::Parameter,
+        Self::Property,
+        Self::Constant,
+        Self::Operator,
+        Self::Punctuation,
+        Self::LineNo,
+        Self::EditorBg,
+        Self::SelectionBg,
+        Self::Cursor,
+        Self::StatusBg,
+        Self::Accent,
+    ];
+
+    /// Key written into `~/.suisei.toml`. Stable — renaming one orphans a
+    /// user's saved colour.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Fg => "fg",
+            Self::Comment => "comment",
+            Self::StringLit => "string",
+            Self::Number => "number",
+            Self::Keyword => "keyword",
+            Self::TypeName => "type_name",
+            Self::Function => "function",
+            Self::MacroName => "macro_name",
+            Self::Namespace => "namespace",
+            Self::Parameter => "parameter",
+            Self::Property => "property",
+            Self::Constant => "constant",
+            Self::Operator => "operator",
+            Self::Punctuation => "punctuation",
+            Self::LineNo => "line_no",
+            Self::EditorBg => "editor_bg",
+            Self::SelectionBg => "selection_bg",
+            Self::Cursor => "cursor",
+            Self::StatusBg => "status_bg",
+            Self::Accent => "accent",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fg => "Plain Text",
+            Self::Comment => "Comments",
+            Self::StringLit => "Strings",
+            Self::Number => "Numbers",
+            Self::Keyword => "Keywords",
+            Self::TypeName => "Type Names",
+            Self::Function => "Function Names",
+            Self::MacroName => "Macros",
+            Self::Namespace => "Namespaces",
+            Self::Parameter => "Parameters",
+            Self::Property => "Properties",
+            Self::Constant => "Constants",
+            Self::Operator => "Operators",
+            Self::Punctuation => "Punctuation",
+            Self::LineNo => "Line Numbers",
+            Self::EditorBg => "Editor Background",
+            Self::SelectionBg => "Selection",
+            Self::Cursor => "Cursor",
+            Self::StatusBg => "Status Bar",
+            Self::Accent => "Accent",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|t| t.key() == key)
+    }
+
+    /// Ink painted onto the editor background. These are the ones whose
+    /// contrast against `EditorBg` decides whether code is readable, so they
+    /// are the ones worth warning about.
+    pub const fn is_editor_ink(self) -> bool {
+        matches!(
+            self,
+            Self::Fg
+                | Self::Comment
+                | Self::StringLit
+                | Self::Number
+                | Self::Keyword
+                | Self::TypeName
+                | Self::Function
+                | Self::MacroName
+                | Self::Namespace
+                | Self::Parameter
+                | Self::Property
+                | Self::Constant
+                | Self::Operator
+                | Self::Punctuation
+                | Self::LineNo
+        )
+    }
+
+    pub fn get(self, theme: &Theme) -> Rgba {
+        match self {
+            Self::Fg => theme.fg,
+            Self::Comment => theme.comment,
+            Self::StringLit => theme.string,
+            Self::Number => theme.number,
+            Self::Keyword => theme.keyword,
+            Self::TypeName => theme.type_name,
+            Self::Function => theme.function,
+            Self::MacroName => theme.macro_name,
+            Self::Namespace => theme.namespace,
+            Self::Parameter => theme.parameter,
+            Self::Property => theme.property,
+            Self::Constant => theme.constant,
+            Self::Operator => theme.operator,
+            Self::Punctuation => theme.punctuation,
+            Self::LineNo => theme.line_no,
+            Self::EditorBg => theme.editor_bg,
+            Self::SelectionBg => theme.selection_bg,
+            Self::Cursor => theme.cursor,
+            Self::StatusBg => theme.status_bg,
+            Self::Accent => theme.accent,
+        }
+    }
+
+    fn set(self, theme: &mut Theme, color: Rgba) {
+        // Alpha is kept from the authored colour: several surfaces composite
+        // over what is behind them (that is why `Rgba` has alpha at all), and
+        // a colour well hands back an opaque value. Taking its alpha would
+        // turn a translucent selection into a solid slab.
+        let color = Rgba {
+            a: self.get(theme).a,
+            ..color
+        };
+        match self {
+            Self::Fg => theme.fg = color,
+            Self::Comment => theme.comment = color,
+            Self::StringLit => theme.string = color,
+            Self::Number => theme.number = color,
+            Self::Keyword => theme.keyword = color,
+            Self::TypeName => theme.type_name = color,
+            Self::Function => theme.function = color,
+            Self::MacroName => theme.macro_name = color,
+            Self::Namespace => theme.namespace = color,
+            Self::Parameter => theme.parameter = color,
+            Self::Property => theme.property = color,
+            Self::Constant => theme.constant = color,
+            Self::Operator => theme.operator = color,
+            Self::Punctuation => theme.punctuation = color,
+            Self::LineNo => theme.line_no = color,
+            Self::EditorBg => theme.editor_bg = color,
+            Self::SelectionBg => theme.selection_bg = color,
+            Self::Cursor => theme.cursor = color,
+            Self::StatusBg => theme.status_bg = color,
+            Self::Accent => theme.accent = color,
+        }
+    }
+}
+
+/// Lay the user's per-token edits over an already-tinted palette.
+///
+/// Applied LAST, and each override sets exactly one field. That is the
+/// difference between this and [`with_highlight`]: the highlight preference
+/// means "make the accent this and re-derive everything downstream of it"
+/// (selection, search, panel selection, hunk markers, the text drawn on
+/// accent), whereas an override of [`ThemeToken::Accent`] means "this exact
+/// colour, leave the rest alone". Both are useful and they are not the same
+/// request, so both exist.
+///
+/// Unknown keys and malformed values are skipped rather than rejected — a
+/// hand-edited config with one bad line still loads the other nineteen.
+pub fn with_overrides(
+    base: &Theme,
+    overrides: Option<&std::collections::BTreeMap<String, String>>,
+) -> Theme {
+    let Some(overrides) = overrides else {
+        return *base;
+    };
+    let mut theme = *base;
+    for (key, value) in overrides {
+        let (Some(token), Some(color)) = (ThemeToken::from_key(key), parse_hex(value)) else {
+            continue;
+        };
+        token.set(&mut theme, color);
+    }
+    theme
+}
+
+/// The palette the editor actually paints with.
+///
+/// One function, because there are four places that needed the answer and each
+/// was spelling out `with_highlight(resolve(…), …)` by hand — a third step
+/// would have had to be added in four places and would have been forgotten in
+/// at least one.
+///
+/// Overrides are keyed by the RESOLVED theme's name, not by the requested one.
+/// With `theme = "system"` that means edits land under `light` or `dark` — the
+/// palette you were actually looking at when you made them.
+///
+/// `name` is passed rather than read from `cfg` because one caller
+/// (`apply_system_appearance`) has an in-session preference that may not have
+/// reached the file yet, and folding that into `cfg.theme` would make a light/
+/// dark switch silently revert an unsaved theme choice.
+pub fn effective(name: &str, cfg: &crate::config::Config, system_is_dark: bool) -> Theme {
+    let base = resolve(name, system_is_dark);
+    let tinted = with_highlight(base, &cfg.highlight_color);
+    with_overrides(&tinted, cfg.theme_overrides.get(base.name))
+}
+
+/// WCAG relative-contrast ratio, 1.0 (identical) to 21.0 (black on white).
+///
+/// This is the whole reason per-token editing is safe to offer. The palette
+/// layer used to refuse the edits outright, on the grounds that letting each
+/// colour drift independently is how unreadable themes get made. That reason
+/// was sound and the conclusion was too strong: the fix for "you can make this
+/// unreadable" is to say so, not to take the control away. 4.5 is WCAG AA for
+/// body text; 3.0 is the large-text floor and a reasonable warning line for
+/// syntax ink.
+pub fn contrast_ratio(a: Rgba, b: Rgba) -> f32 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Parse `#RRGGBB` (or bare `RRGGBB`). `default`/empty means "no override".
+pub fn parse_hex(value: &str) -> Option<Rgba> {
+    parse_hex_rgb(value)
+}
+
+/// Apply the one *derived* palette override: the interaction/highlight hue.
+///
+/// The chosen hue is used directly for controls and softly mixed into
 /// selection/search surfaces; `default` leaves the authored palette intact.
+/// For setting a single colour and nothing else, see [`with_overrides`].
 pub fn with_highlight(base: &Theme, preference: &str) -> Theme {
     let Some(highlight) = parse_hex_rgb(preference) else {
         return *base;
