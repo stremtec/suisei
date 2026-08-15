@@ -29,6 +29,14 @@ struct QuickHelpCard: View {
     /// is an answer.
     let symbol: String
 
+    /// How tall the rendered answer actually is. See `body(for:)`.
+    @State private var measured: CGFloat = 0
+
+    /// Past this the card scrolls. A keyword guide runs to a couple of
+    /// thousand characters, and a popover that grows to hold all of it is a
+    /// window wearing a tail.
+    private static let maxBodyHeight: CGFloat = 460
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
@@ -62,8 +70,22 @@ struct QuickHelpCard: View {
                 QuickHelpBody(markdown: text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: QuickHelpHeightKey.self, value: geo.size.height
+                            )
+                        }
+                    )
             }
-            .frame(maxHeight: 420)
+            .onPreferenceChange(QuickHelpHeightKey.self) { measured = $0 }
+            // Measured, not flexible. A `ScrollView` has no ideal height, and
+            // an NSPopover sizes itself from what its content says it wants —
+            // so the card collapsed to about one paragraph and the rest of the
+            // answer was scrollable but invisible. It grows to the answer and
+            // stops at a few hundred points, which is where a card stops being
+            // a card.
+            .frame(height: min(max(measured, 44), Self.maxBodyHeight))
         } else if engine.hoverPending {
             // A spinner rather than an empty box: the wait is a round trip to
             // another process and the user has no other way to know that.
@@ -231,5 +253,13 @@ struct QuickHelpBody: View {
         }
         flushProse()
         return out
+    }
+}
+
+/// The rendered answer's height, so the card can be as tall as its content.
+private struct QuickHelpHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }

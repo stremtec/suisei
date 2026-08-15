@@ -3784,9 +3784,16 @@ final class EditorCanvasView: NSView {
         // Transient: it goes away on the next click anywhere, like every other
         // informational popover on the system. It has nothing to confirm.
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
+        let host = NSHostingController(
             rootView: QuickHelpCard(engine: engine, symbol: contextMenuSymbol)
         )
+        // The card opens on the click and fills in when the server answers, so
+        // its size is not known when the popover appears — it starts as one
+        // line of "Looking up…" and becomes a page. Without this the popover
+        // keeps whichever size it was born at, and the answer arrives inside a
+        // box built for the spinner.
+        host.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = host
         // A point has no edges to hang off, so the anchor is a two-point box
         // around the click. Bigger and the card visibly floats away from the
         // word it is about.
