@@ -227,12 +227,11 @@ struct WelcomeView: View {
 
     /// The wordmark band across the top of both left columns.
     ///
-    /// Type-only lockup — Milker. It carries A–Z/a–z only, so the version and
-    /// legal lines stay on the system face.
-    /// The wordmark band across the top of both left columns.
-    ///
-    /// Type-only lockup — Milker. It carries A–Z/a–z only, so the version and
-    /// legal lines stay on the system face.
+    /// Type-only lockup — Milker. The version and legal lines stay on the
+    /// system face because they are running text, not a mark; Milker's own
+    /// coverage is wider than this comment used to claim (letters, digits,
+    /// `_` and signature punctuation are all in it, checked against the
+    /// font's character set).
     private var brandHeader: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Suisei")

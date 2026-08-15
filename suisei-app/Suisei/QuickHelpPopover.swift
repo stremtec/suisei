@@ -39,19 +39,20 @@ struct QuickHelpCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "info.circle.fill")
                     .font(.system(size: 11))
                     .foregroundStyle(.tint)
                 Text(symbol.isEmpty ? "Quick Help" : symbol)
-                    .font(.system(size: 12, weight: .semibold, design: symbol.isEmpty ? .default : .monospaced))
+                    .font(QuickHelpFonts.title)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.6)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
             .padding(.top, 10)
-            .padding(.bottom, 8)
+            .padding(.bottom, 9)
 
             Divider()
 
@@ -67,7 +68,7 @@ struct QuickHelpCard: View {
     private func body(for text: String) -> some View {
         if !text.isEmpty {
             ScrollView {
-                QuickHelpBody(markdown: text)
+                QuickHelpBody(markdown: text, titled: symbol)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .background(
@@ -155,16 +156,25 @@ struct QuickHelpCard: View {
 /// get right is that code looks like code.
 struct QuickHelpBody: View {
     let markdown: String
+    /// The name already shown as the card's title, if there is one.
+    ///
+    /// A hover answer opens with a fenced block holding the declaration, and
+    /// for a keyword that declaration is the keyword: `pub` appeared as the
+    /// title and again immediately below it in a code box. Passed in so the
+    /// leading block can be dropped when it says nothing the title has not —
+    /// and kept when it is a real signature, which is the part of a function's
+    /// answer worth reading first.
+    var titled: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(Self.blocks(in: markdown).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(visibleBlocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .rule:
                     Divider()
                 case .prose(let text):
                     Text(text)
-                        .font(.system(size: 11))
+                        .font(QuickHelpFonts.body)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -173,7 +183,7 @@ struct QuickHelpBody: View {
                     // as a different program.
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(source)
-                            .font(.system(size: 10.5, design: .monospaced))
+                            .font(QuickHelpFonts.code)
                             .textSelection(.enabled)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 6)
@@ -193,6 +203,24 @@ struct QuickHelpBody: View {
         case prose(AttributedString)
         case code(String)
         case rule
+    }
+
+    /// The blocks minus the leading one the title already says.
+    ///
+    /// Only the FIRST block, and only when it is code that reads as the title:
+    /// a later fence with the same text would be a worked example, and an
+    /// example that happens to be one word long is still an example. The rule
+    /// that followed it goes too — a divider under nothing is a line across an
+    /// empty card.
+    private var visibleBlocks: [Block] {
+        var blocks = Self.blocks(in: markdown)
+        let name = titled.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, case .code(let first)? = blocks.first,
+              first.trimmingCharacters(in: .whitespacesAndNewlines) == name
+        else { return blocks }
+        blocks.removeFirst()
+        if case .rule? = blocks.first { blocks.removeFirst() }
+        return blocks
     }
 
     /// Split an LSP hover answer into blocks.
@@ -262,4 +290,38 @@ private struct QuickHelpHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
+}
+
+/// The card's faces.
+///
+/// JetBrains Mono for everything the server said, title included in spirit:
+/// this is an editor, the answer is about code, and the code samples inside it
+/// have to line up. Milker for the name itself, which is the one thing on the
+/// card that is a heading rather than text.
+///
+/// `WelcomeView` says Milker "carries A–Z/a–z only", which would have made a
+/// title a patchwork the moment a name had an underscore in it. Checked
+/// against the font's own character set rather than taken on trust: letters,
+/// digits, `_`, and the punctuation a signature uses are all in it. So
+/// `looks_binary` and `godddddd` set in one face, not two.
+///
+/// Resolved once and cached — `NSFont(name:)` is a lookup, and this is read
+/// for every block of every card.
+enum QuickHelpFonts {
+    static let title: Font = {
+        WelcomeFonts.registerIfNeeded()
+        // PostScript name from the OTF, family name as the fallback — the same
+        // pair the Welcome wordmark asks for.
+        if let face = NSFont(name: "MilkerRegular", size: 22)
+            ?? NSFont(name: "Milker", size: 22)
+        {
+            return Font(face)
+        }
+        return .system(size: 19, weight: .semibold, design: .rounded)
+    }()
+
+    /// Prose. Monospaced on purpose — see the type comment.
+    static let body = Font(EditorMetrics.monospaced(11, weight: .regular))
+    /// Samples, a shade smaller so a wide line fits before it has to scroll.
+    static let code = Font(EditorMetrics.monospaced(10.5, weight: .regular))
 }
