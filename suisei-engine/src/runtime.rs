@@ -982,8 +982,10 @@ impl Engine {
         if needs && !pending {
             let text = self.app.buffer.text();
             let ext = self.app.file_extension();
-            // A full channel means the worker already holds a request; the
-            // next recompose retries once it drains. `try_send` never blocks.
+            // The lane always takes a live snapshot — it replaces the older
+            // one waiting there, which nobody wanted parsed. The `if` stays
+            // because a lane with no workers refuses everything, and recording
+            // a request nobody holds would stop us re-asking forever.
             if self
                 .syntax_worker
                 .request(suisei_core::syntax_worker::SyntaxRequest::Parse {

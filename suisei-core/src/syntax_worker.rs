@@ -1,8 +1,8 @@
 //! Background syntax parsing — tree-sitter runs HERE, off the keystroke path
 //! (A1-6).
 //!
-//! The engine ships a text snapshot per buffer version (`try_send` — it never
-//! blocks on a slow parse); the worker coalesces a typing burst to its newest
+//! The engine ships a text snapshot per buffer version (into a slot — it never
+//! blocks on a slow parse); the lane coalesces a typing burst to its newest
 //! snapshot, parses incrementally through its own [`SyntaxEngine`], and sends
 //! highlight tokens back as a [`SyntaxFrame`]. The paint path adopts the
 //! newest frame that still matches the live document and keeps painting stale
@@ -14,15 +14,19 @@
 
 use crate::lang::Lang;
 use crate::syntax::{HlToken, SyntaxEngine};
+use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex};
 
-/// Work for the syntax worker. A burst coalesces: every `Parse` but the
-/// newest is dropped unparsed; every `Prewarm` is honoured.
+/// Work for the syntax worker.
+///
+/// A burst coalesces: every `Parse` but the newest is dropped unparsed. Every
+/// `Prewarm` is honoured up to the lane's bound and refused past it — see
+/// [`Lane`] for why those two are not the same rule.
 pub enum SyntaxRequest {
     /// Parse `text` (a snapshot of the live document) and highlight `window`.
     Parse {
@@ -81,10 +85,141 @@ pub enum SyntaxFrame {
     Cached { count: usize },
 }
 
-/// Handle to the worker thread. Dropping it closes the request channel,
-/// which is what tells the worker to exit.
+/// How many speculative parses one lane will hold.
+///
+/// The same bound the lane used to have for everything. It stays where it is
+/// because it is a memory bound — the indexer hands over whole file texts —
+/// and the live parse no longer competes for it.
+const PREWARM_DEPTH: usize = 4;
+
+/// What a lane had to say when asked for work.
+enum Taken {
+    Work(SyntaxRequest),
+    /// Nothing queued. Only ever returned to a caller that said not to block.
+    Idle,
+    /// The engine is gone.
+    Closed,
+}
+
+/// One lane's pending work — a priority queue, not a queue.
+///
+/// It was `sync_channel(4)`: four slots shared by the live document and by the
+/// project indexer's speculative parses. A queue answers "what arrived first",
+/// and that is the wrong question in exactly the case that hurt — the indexer
+/// fills a lane, the user types, and `try_send` refuses the one request
+/// somebody is waiting on. Measured 1.4 s behind a 2.4 MB prewarm set.
+///
+/// The live snapshot gets a slot of its own that cannot be refused, and an
+/// older snapshot of the same document is overwritten rather than queued: it
+/// is not partial work, it is wrong work. The worker already coalesced those
+/// away after arrival; this does it before, where a full queue can no longer
+/// refuse the newest one.
+///
+/// Speculative work keeps the bound and keeps being refused when full. That is
+/// backpressure doing its job — nobody is waiting on it — and it is only a bug
+/// when the live parse shares the bound.
+struct Lane {
+    parse: Option<SyntaxRequest>,
+    prewarm: VecDeque<SyntaxRequest>,
+    warm: bool,
+    closed: bool,
+}
+
+struct LaneQueue {
+    work: Mutex<Lane>,
+    ready: Condvar,
+}
+
+impl LaneQueue {
+    fn new() -> Self {
+        Self {
+            work: Mutex::new(Lane {
+                parse: None,
+                prewarm: VecDeque::with_capacity(PREWARM_DEPTH),
+                warm: false,
+                closed: false,
+            }),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// Queue one request. Never blocks on the worker — the lock is held for a
+    /// move and released, never across a parse.
+    ///
+    /// False means the request was not taken, which can now only happen to a
+    /// `Prewarm`.
+    fn push(&self, req: SyntaxRequest) -> bool {
+        let mut lane = self.work.lock().unwrap_or_else(|e| e.into_inner());
+        if lane.closed {
+            return false;
+        }
+        let accepted = match req {
+            SyntaxRequest::Parse { .. } => {
+                lane.parse = Some(req);
+                true
+            }
+            SyntaxRequest::Prewarm { .. } => {
+                if lane.prewarm.len() >= PREWARM_DEPTH {
+                    false
+                } else {
+                    lane.prewarm.push_back(req);
+                    true
+                }
+            }
+            SyntaxRequest::WarmGrammars => {
+                lane.warm = true;
+                true
+            }
+        };
+        drop(lane);
+        if accepted {
+            self.ready.notify_one();
+        }
+        accepted
+    }
+
+    /// One unit of work, live parse first.
+    ///
+    /// One unit, not the whole batch. Draining every queued prewarm before
+    /// looking at the parse slot again would put the live document back behind
+    /// the same 2.4 MB of speculative work the slot exists to get it out from
+    /// under — the wait would be bounded by the queue instead of by the
+    /// channel, which is the same wait. A parse that arrives mid-sweep now
+    /// waits for at most the one prewarm already in flight.
+    fn take(&self, block: bool) -> Taken {
+        let mut lane = self.work.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if lane.closed {
+                return Taken::Closed;
+            }
+            if let Some(req) = lane.parse.take() {
+                return Taken::Work(req);
+            }
+            if let Some(req) = lane.prewarm.pop_front() {
+                return Taken::Work(req);
+            }
+            if lane.warm {
+                lane.warm = false;
+                return Taken::Work(SyntaxRequest::WarmGrammars);
+            }
+            if !block {
+                return Taken::Idle;
+            }
+            lane = self.ready.wait(lane).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Tell the worker to exit and wake it if it is waiting.
+    fn close(&self) {
+        self.work.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        self.ready.notify_all();
+    }
+}
+
+/// Handle to the worker threads. Dropping it closes every lane, which is what
+/// tells the workers to exit.
 pub struct SyntaxWorker {
-    tx: Vec<SyncSender<SyntaxRequest>>,
+    lanes: Vec<Arc<LaneQueue>>,
     rx: Receiver<SyntaxFrame>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
@@ -102,44 +237,46 @@ impl SyntaxWorker {
                 .map(|_| AtomicUsize::new(0))
                 .collect::<Vec<_>>(),
         );
-        let mut tx = Vec::with_capacity(worker_count);
+        let mut lanes = Vec::with_capacity(worker_count);
         let mut threads = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
-            // Bounded per lane: `try_send` never stalls the keystroke path, and
-            // a busy language cannot fill every other language's queue.
-            let (lane_tx, lane_rx): (SyncSender<SyntaxRequest>, Receiver<SyntaxRequest>) =
-                std::sync::mpsc::sync_channel(4);
+            // Bounded per lane: pushing never stalls the keystroke path, and a
+            // busy language cannot fill every other language's queue.
+            let lane = Arc::new(LaneQueue::new());
+            let mine = Arc::clone(&lane);
             let out = frame_tx.clone();
             let counts = Arc::clone(&cache_counts);
             let thread = std::thread::Builder::new()
                 .name(format!("suisei-syntax-{index}"))
-                .spawn(move || worker_loop(index, lane_rx, out, counts))
+                .spawn(move || worker_loop(index, mine, out, counts))
                 .expect("syntax worker thread");
-            tx.push(lane_tx);
+            lanes.push(lane);
             threads.push(thread);
         }
         Self {
-            tx,
+            lanes,
             rx: frame_rx,
             threads,
         }
     }
 
-    /// Queue work without ever blocking. False when the channel is full —
-    /// the worker already holds older requests, and the caller retries on the
-    /// next recompose.
+    /// Queue work without ever blocking.
+    ///
+    /// A live `Parse` is always accepted — it replaces the older snapshot of
+    /// the same document, which nobody wanted parsed anyway. False now means
+    /// only that a lane's speculative queue is full, and the caller may retry.
     pub fn request(&self, req: SyntaxRequest) -> bool {
-        if self.tx.is_empty() {
+        if self.lanes.is_empty() {
             return false;
         }
         match &req {
             // Eagerly compiling every grammar in every lane multiplies memory
             // by the CPU count. One lane owns the boot warm; other lanes become
             // warm naturally as project prewarms are distributed to them.
-            SyntaxRequest::WarmGrammars => self.tx[0].try_send(req).is_ok(),
+            SyntaxRequest::WarmGrammars => self.lanes[0].push(req),
             SyntaxRequest::Parse { path, .. } | SyntaxRequest::Prewarm { path, .. } => {
-                let lane = lane_for(path, self.tx.len());
-                self.tx[lane].try_send(req).is_ok()
+                let lane = lane_for(path, self.lanes.len());
+                self.lanes[lane].push(req)
             }
         }
     }
@@ -147,7 +284,7 @@ impl SyntaxWorker {
     /// Number of independent parser lanes. Exposed for diagnostics and tests;
     /// one document still stays on exactly one lane for incremental correctness.
     pub fn worker_count(&self) -> usize {
-        self.tx.len()
+        self.lanes.len()
     }
 
     /// Finished frames, drained with `try_recv` at every recompose and tick.
@@ -158,8 +295,11 @@ impl SyntaxWorker {
 
 impl Drop for SyntaxWorker {
     fn drop(&mut self) {
-        // Close every lane FIRST, then join: `recv` fails and each worker exits.
-        self.tx.clear();
+        // Close every lane FIRST, then join: each worker's next `take` — or the
+        // wait it is parked in — answers `Closed` and it returns.
+        for lane in &self.lanes {
+            lane.close();
+        }
         for h in self.threads.drain(..) {
             let _ = h.join();
         }
@@ -187,7 +327,7 @@ fn lane_for(path: &str, lanes: usize) -> usize {
 
 fn worker_loop(
     index: usize,
-    rx: Receiver<SyntaxRequest>,
+    lane: Arc<LaneQueue>,
     out: Sender<SyntaxFrame>,
     cache_counts: Arc<Vec<AtomicUsize>>,
 ) {
@@ -202,92 +342,70 @@ fn worker_loop(
     loop {
         // Only block when there is no warming left to do; otherwise take what
         // is waiting and fall through to build one grammar.
-        let first = if to_warm.is_empty() {
-            match rx.recv() {
-                Ok(req) => Some(req),
-                Err(_) => return, // request channel closed — the engine is gone
+        let req = match lane.take(to_warm.is_empty()) {
+            Taken::Closed => return, // the engine is gone
+            Taken::Idle => {
+                // Idle: spend the turn on the next grammar.
+                if let Some(lang) = to_warm.pop() {
+                    engine.warm_one(lang);
+                }
+                continue;
             }
-        } else {
-            match rx.try_recv() {
-                Ok(req) => Some(req),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-            }
+            Taken::Work(req) => req,
         };
-        let Some(first) = first else {
-            // Idle: spend the turn on the next grammar.
-            if let Some(lang) = to_warm.pop() {
-                engine.warm_one(lang);
+        match req {
+            // Queue the warm-up rather than doing it here. A Parse that arrives
+            // while this is queued builds the one grammar it needs lazily —
+            // which is the only grammar that can make the first paint late —
+            // and the other twenty-eight are built on later idle turns.
+            SyntaxRequest::WarmGrammars => {
+                if to_warm.is_empty() {
+                    to_warm = Lang::ALL.to_vec();
+                }
+                continue;
             }
-            continue;
-        };
-        // Coalesce the burst: a keystroke queues one snapshot per edit, and
-        // only the newest is worth parsing. Prewarms are all honoured.
-        let mut prewarms: Vec<SyntaxRequest> = Vec::new();
-        let mut parse: Option<SyntaxRequest> = None;
-        let mut warm = false;
-        match first {
-            r @ SyntaxRequest::Parse { .. } => parse = Some(r),
-            r @ SyntaxRequest::Prewarm { .. } => prewarms.push(r),
-            SyntaxRequest::WarmGrammars => warm = true,
-        }
-        while let Ok(more) = rx.try_recv() {
-            match more {
-                r @ SyntaxRequest::Parse { .. } => parse = Some(r),
-                r @ SyntaxRequest::Prewarm { .. } => prewarms.push(r),
-                SyntaxRequest::WarmGrammars => warm = true,
-            }
-        }
-        // Queue the warm-up rather than doing it here. A Parse coalesced into
-        // this same burst builds the one grammar it needs lazily — which is
-        // the only grammar that can make the first paint late — and the other
-        // twenty-eight are built on later idle turns.
-        if warm && to_warm.is_empty() {
-            to_warm = Lang::ALL.to_vec();
-        }
-        let mut cached = false;
-        for req in prewarms {
-            if let SyntaxRequest::Prewarm { path, ext, text } = req {
+            SyntaxRequest::Prewarm { path, ext, text } => {
                 engine.prewarm(&path, &text, ext.as_deref());
-                cached = true;
             }
-        }
-        if let Some(SyntaxRequest::Parse {
-            path,
-            ext,
-            text,
-            version,
-            window,
-        }) = parse
-        {
-            // Path-aware: adopts a pre-warmed tree on file switches and parks
-            // the outgoing one, exactly like the old in-thread path did.
-            engine.parse_path(&path, &text, ext.as_deref(), Some(window.clone()));
-            cached = true;
-            // The tree is cloned rather than moved: this engine keeps its own
-            // for the next incremental reparse.
-            let tree = engine.live_tree().map(|(t, _)| t.clone());
-            let globals = match (
-                engine.live_tree(),
-                crate::scope::ScopeLang::from_ext(engine.live_ext()),
-            ) {
-                (Some((t, txt)), Some(lang)) => crate::scope::collect_global_symbols(t, txt, lang),
-                _ => Vec::new(),
-            };
-            let _ = out.send(SyntaxFrame::Tokens {
-                tokens: engine.tokens.clone(),
-                active: engine.active,
-                globals,
+            SyntaxRequest::Parse {
                 path,
+                ext,
+                text,
                 version,
                 window,
-                tree,
-                ext: ext.clone().unwrap_or_default(),
-                text,
-            });
+            } => {
+                // Path-aware: adopts a pre-warmed tree on file switches and
+                // parks the outgoing one, exactly like the old in-thread path.
+                engine.parse_path(&path, &text, ext.as_deref(), Some(window.clone()));
+                // The tree is cloned rather than moved: this engine keeps its
+                // own for the next incremental reparse.
+                let tree = engine.live_tree().map(|(t, _)| t.clone());
+                let globals = match (
+                    engine.live_tree(),
+                    crate::scope::ScopeLang::from_ext(engine.live_ext()),
+                ) {
+                    (Some((t, txt)), Some(lang)) => {
+                        crate::scope::collect_global_symbols(t, txt, lang)
+                    }
+                    _ => Vec::new(),
+                };
+                let _ = out.send(SyntaxFrame::Tokens {
+                    tokens: engine.tokens.clone(),
+                    active: engine.active,
+                    globals,
+                    path,
+                    version,
+                    window,
+                    tree,
+                    ext: ext.clone().unwrap_or_default(),
+                    text,
+                });
+            }
         }
-        if cached {
-            cache_counts[index].store(engine.cached_count(), Ordering::Relaxed);
+        // One unit of work per turn now, so this would report the same total
+        // over and over during an indexing sweep. Only a change is news.
+        let count = engine.cached_count();
+        if cache_counts[index].swap(count, Ordering::Relaxed) != count {
             let _ = out.send(SyntaxFrame::Cached {
                 count: cache_counts
                     .iter()
@@ -385,6 +503,106 @@ mod tests {
             seen.windows(2).all(|w| w[0] < w[1]),
             "answers arrive in order: {seen:?}"
         );
+    }
+
+    /// A live snapshot is never refused, however full the lane is.
+    ///
+    /// The lane is exercised directly rather than through a running worker:
+    /// the property is about the producer side, and a thread that drains
+    /// would make "full" a race. Under `sync_channel(4)` the fifth push here
+    /// was the one the user was waiting on, and it failed.
+    #[test]
+    fn a_full_lane_still_takes_the_live_snapshot() {
+        let lane = LaneQueue::new();
+        for i in 0..PREWARM_DEPTH {
+            assert!(
+                lane.push(SyntaxRequest::Prewarm {
+                    path: format!("/tmp/p{i}.rs"),
+                    ext: Some("rs".into()),
+                    text: "fn a() {}\n".into(),
+                }),
+                "prewarm {i} should fit"
+            );
+        }
+        assert!(
+            !lane.push(SyntaxRequest::Prewarm {
+                path: "/tmp/overflow.rs".into(),
+                ext: Some("rs".into()),
+                text: "fn a() {}\n".into(),
+            }),
+            "speculative work keeps its bound"
+        );
+        assert!(
+            lane.push(SyntaxRequest::Parse {
+                path: "/tmp/live.rs".into(),
+                ext: Some("rs".into()),
+                text: "fn live() {}\n".into(),
+                version: 1,
+                window: 0..100,
+            }),
+            "the live snapshot has a slot of its own"
+        );
+        // And it comes out FIRST, ahead of four prewarms already waiting.
+        match lane.take(false) {
+            Taken::Work(SyntaxRequest::Parse { version, .. }) => assert_eq!(version, 1),
+            _ => panic!("the live parse must be served before speculative work"),
+        }
+    }
+
+    /// An older snapshot of the same document is not partial work.
+    #[test]
+    fn a_newer_snapshot_replaces_the_one_waiting() {
+        let lane = LaneQueue::new();
+        for version in 1..=9u64 {
+            assert!(lane.push(SyntaxRequest::Parse {
+                path: "/tmp/live.rs".into(),
+                ext: Some("rs".into()),
+                text: format!("fn v{version}() {{}}\n"),
+                version,
+                window: 0..100,
+            }));
+        }
+        match lane.take(false) {
+            Taken::Work(SyntaxRequest::Parse { version, .. }) => assert_eq!(version, 9),
+            _ => panic!("expected the newest snapshot"),
+        }
+        assert!(
+            matches!(lane.take(false), Taken::Idle),
+            "the older eight were replaced, not queued"
+        );
+    }
+
+    /// A parse queued mid-sweep waits for one prewarm, not for the sweep.
+    ///
+    /// This is the shape of the 1.4 s stall: the worker used to drain the whole
+    /// channel into a batch and run every prewarm in it before looking again.
+    #[test]
+    fn a_parse_cuts_into_a_prewarm_sweep() {
+        let lane = LaneQueue::new();
+        for i in 0..PREWARM_DEPTH {
+            lane.push(SyntaxRequest::Prewarm {
+                path: format!("/tmp/p{i}.rs"),
+                ext: Some("rs".into()),
+                text: "fn a() {}\n".into(),
+            });
+        }
+        // The worker takes one prewarm...
+        assert!(matches!(
+            lane.take(false),
+            Taken::Work(SyntaxRequest::Prewarm { .. })
+        ));
+        // ...and while it is parsing it, the user types.
+        lane.push(SyntaxRequest::Parse {
+            path: "/tmp/live.rs".into(),
+            ext: Some("rs".into()),
+            text: "fn live() {}\n".into(),
+            version: 3,
+            window: 0..100,
+        });
+        match lane.take(false) {
+            Taken::Work(SyntaxRequest::Parse { version, .. }) => assert_eq!(version, 3),
+            _ => panic!("the live parse waits for the prewarm in flight, not for the sweep"),
+        }
     }
 
     #[test]
