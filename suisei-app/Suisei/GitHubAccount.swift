@@ -79,8 +79,25 @@ final class GitHubAccountStore: ObservableObject {
             avatar = cached
             return
         }
-        avatarTask = URLSession.shared.dataTask(with: sized) { [weak self] data, _, _ in
-            guard let self, let data, let image = NSImage(data: data) else { return }
+        avatarTask = URLSession.shared.dataTask(with: sized) { [weak self] data, _, error in
+            guard let self else { return }
+            guard let data, let image = NSImage(data: data) else {
+                // Forget which URL we were loading, so the next publish or a
+                // press of Refresh tries again. Without this a single dropped
+                // request meant no portrait until the app was restarted: the
+                // guard at the top of `loadAvatar` would keep answering "we
+                // are already on that one".
+                //
+                // Except when WE cancelled it — a newer URL is already in
+                // flight and resetting here would let this one's failure
+                // undo it.
+                let cancelled = (error as? URLError)?.code == .cancelled
+                DispatchQueue.main.async {
+                    guard !cancelled, self.avatarURL == urlString else { return }
+                    self.avatarURL = ""
+                }
+                return
+            }
             GitHubAvatarCache.store(image, for: sized)
             DispatchQueue.main.async {
                 guard self.avatarURL == urlString else { return }
@@ -111,12 +128,41 @@ private enum GitHubAvatarCache {
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let dir = base.appendingPathComponent("Suisei/avatars", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Sweep what the per-process hash left behind. Those files are named
+        // after a number that will never be computed again, so nothing will
+        // ever read them — one per launch, for as many launches as the account
+        // page has been opened. Everything this cache writes now ends in .png,
+        // so anything that does not is from the old scheme.
+        if let old = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil
+        ) {
+            for file in old where file.pathExtension != "png" {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
         return dir
     }()
 
+    /// The cache file for a URL, by a hash that is the same next launch.
+    ///
+    /// This was `String(url.absoluteString.hashValue)`. Swift seeds `Hasher`
+    /// randomly per process, so the name changed every time the app started:
+    /// the disk cache could never hit across launches, every launch re-fetched
+    /// the portrait over the network, and every launch left another file
+    /// behind that nothing would ever look for again. A cache that grows
+    /// without bound and never answers is worse than no cache — it is the cost
+    /// of one with none of the benefit.
+    ///
+    /// FNV-1a, spelled out, because the requirement is exactly that it not
+    /// change: any hash the standard library might reseed or re-tune is the
+    /// same bug written more nicely.
     private static func file(for url: URL) -> URL {
-        let name = String(url.absoluteString.hashValue)
-        return folder.appendingPathComponent(name)
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in url.absoluteString.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100_0000_01b3
+        }
+        return folder.appendingPathComponent(String(format: "%016llx.png", hash))
     }
 
     static func image(for url: URL) -> NSImage? {
@@ -126,8 +172,14 @@ private enum GitHubAvatarCache {
     }
 
     static func store(_ image: NSImage, for url: URL) {
-        guard let tiff = image.tiffRepresentation else { return }
-        try? tiff.write(to: file(for: url), options: .atomic)
+        // PNG, not TIFF. A 240px portrait is about 230 KB uncompressed and
+        // about 20 KB as PNG, and this is a file written once and read on
+        // every launch thereafter.
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:])
+        else { return }
+        try? png.write(to: file(for: url), options: .atomic)
     }
 }
 
