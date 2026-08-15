@@ -418,6 +418,25 @@ struct GitWorkbenchWindowView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
             .contentMargins(.top, 4, for: .scrollContent)
+            // Every row is one line. This is the jump when the sidebar OPENS.
+            //
+            // `lineLimit` propagates through the environment, and without it
+            // the labels that had none — "Uncommitted Changes", "Stashed
+            // Changes", "Recent Locations", the repository's own name, a remote
+            // name — wrapped to two lines at a narrow width. A collapse/expand
+            // sweeps the width continuously, so partway through it crosses the
+            // point where those unwrap, every row below them loses a line's
+            // height at once, and the whole list snaps upward mid-animation.
+            //
+            // Not a stutter, and not the pill: a genuine relayout, at whatever
+            // width the longest label happens to fit. Which is also why it
+            // showed on opening rather than on closing — the unwrap is the
+            // direction that REMOVES height.
+            //
+            // Set once here rather than per row, so a row added later cannot
+            // reintroduce it by omission. A macOS source list truncates; it
+            // does not wrap.
+            .lineLimit(1)
         }
         .navigationSplitViewColumnWidth(
             min: 280,
