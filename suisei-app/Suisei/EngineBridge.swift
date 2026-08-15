@@ -4693,6 +4693,70 @@ final class EngineBridge: ObservableObject {
             }
     }()
 
+    /// One entry in the theme picker.
+    struct ThemeChoice: Identifiable, Equatable {
+        let name: String
+        let label: String
+        let isCustom: Bool
+        var id: String { name }
+    }
+
+    /// Built-ins then the user's own, from Core.
+    ///
+    /// Not cached, unlike the token table: a theme can be saved or deleted
+    /// while the window is open, and a stale list would offer a theme that no
+    /// longer exists or hide one just made.
+    var themeCatalogue: [ThemeChoice] {
+        guard let engine else { return [] }
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard suisei_engine_theme_catalogue(engine, &buffer, buffer.count) != 0 else { return [] }
+        return String(cString: buffer)
+            .split(separator: "\n")
+            .compactMap { line in
+                let parts = line.split(separator: "|", maxSplits: 2)
+                guard parts.count == 3 else { return nil }
+                return ThemeChoice(
+                    name: String(parts[0]),
+                    label: String(parts[1]),
+                    isCustom: parts[2] == "1"
+                )
+            }
+    }
+
+    /// The theme in use, as named in the config.
+    var selectedTheme: String {
+        guard let engine else { return "system" }
+        var buffer = [CChar](repeating: 0, count: 256)
+        guard suisei_engine_selected_theme(engine, &buffer, buffer.count) != 0 else { return "system" }
+        return String(cString: buffer)
+    }
+
+    func settingsSelectTheme(_ name: String) {
+        guard let engine else { return }
+        name.withCString { suisei_engine_settings_select_theme(engine, $0) }
+        refreshChrome()
+    }
+
+    /// Keep the current palette's edits as a theme of its own. Returns the
+    /// stored name, or `nil` when Core refused it — blank, already taken, or
+    /// shadowing a built-in.
+    @discardableResult
+    func settingsSaveThemeAs(_ name: String) -> String? {
+        guard let engine else { return nil }
+        var buffer = [CChar](repeating: 0, count: 256)
+        let ok = name.withCString {
+            suisei_engine_settings_save_theme_as(engine, $0, &buffer, buffer.count)
+        }
+        refreshChrome()
+        return ok != 0 ? String(cString: buffer) : nil
+    }
+
+    func settingsDeleteTheme(_ name: String) {
+        guard let engine else { return }
+        name.withCString { suisei_engine_settings_delete_theme(engine, $0) }
+        refreshChrome()
+    }
+
     /// Bit per token index: the user has changed that colour on the palette
     /// currently being edited.
     var themeOverrideMask: UInt32 {

@@ -15,6 +15,10 @@ struct SettingsWindowView: View {
     /// Which syntax category the Themes page's editing row is pointed at.
     /// A key, not an index — see `selectedToken`.
     @State private var selectedTokenKey = "fg"
+    @State private var savingTheme = false
+    @State private var newThemeName = ""
+    @State private var saveThemeError = ""
+    @State private var themeToDelete: String?
     @State private var selectedPageID: PageID = .general
     @State private var pageHistory: [PageID] = [.general]
     @State private var historyIndex = 0
@@ -80,14 +84,19 @@ struct SettingsWindowView: View {
         }
     }
 
-    /// The catalogue theme pinned right now, when it is not one the Color
-    /// Scheme tiles already answer for.
+    /// The theme pinned right now, when it is not one the Color Scheme tiles
+    /// already answer for.
+    ///
+    /// Asked of Core rather than recovered by looking for the `●` Core writes
+    /// into a row's label. That marker only exists for catalogue rows, so with
+    /// a user-made theme selected nothing was marked, this returned nil, and a
+    /// Color Scheme tile lit up claiming to follow macOS.
     private var pinnedThemeName: String? {
-        guard let marked = rows(.theme).first(where: { $0.label.contains("●") }) else {
+        let current = engine.selectedTheme
+        if current.isEmpty || current == "system" || current == "light" || current == "dark" {
             return nil
         }
-        let name = clean(marked.label)
-        return (name == "light" || name == "dark") ? nil : name
+        return current
     }
 
     private var glassStyle: String {
@@ -781,16 +790,7 @@ struct SettingsWindowView: View {
             }
         }
 
-        Section {
-            Button("Reset \(themeDisplayName(activePaletteName)) to Its Original Colours") {
-                engine.settingsResetThemeTokens()
-            }
-            .disabled(engine.themeOverrideMask == 0)
-        } footer: {
-            Text(overrideCount == 0
-                ? "No colours changed on this theme."
-                : "\(overrideCount) colour\(overrideCount == 1 ? "" : "s") changed. Edits are kept per theme, so switching themes does not carry them over.")
-        }
+        themeManagementSection
     }
 
     /// The token the editing row below the list is currently pointed at.
@@ -1195,30 +1195,105 @@ struct SettingsWindowView: View {
     /// would be two controls silently overwriting each other. "Match Color
     /// Scheme" hands the field back to the tiles.
     private var themeSelector: some View {
-        let themeRows = rows(.theme).filter {
-            let name = clean($0.label)
-            return name != "light" && name != "dark"
+        let catalogue = engine.themeCatalogue
+        let builtIns = catalogue.filter {
+            !$0.isCustom && $0.name != "light" && $0.name != "dark"
         }
-        return Picker("Theme", selection: Binding<Int>(
-            get: { themeRows.first(where: { $0.label.contains("●") })?.id ?? -1 },
-            set: { id in
-                if id < 0 {
-                    if let mode = rows(.appearanceMode).first {
-                        engine.settingsSetValue(mode.id, value: 0)
-                    }
-                } else {
-                    // Core ignores the option for a Theme row — selecting the
-                    // row IS the choice (`apply_row_value` reads the index the
-                    // row carries).
-                    engine.settingsSetValue(id, value: 0)
+        let customs = catalogue.filter(\.isCustom)
+        return Picker("Theme", selection: Binding<String>(
+            get: { engine.selectedTheme },
+            set: { engine.settingsSelectTheme($0) }
+        )) {
+            Text("Match Color Scheme").tag("system")
+            if !customs.isEmpty {
+                Divider()
+                ForEach(customs) { choice in
+                    Text(choice.label).tag(choice.name)
                 }
             }
-        )) {
-            Text("Match Color Scheme").tag(-1)
             Divider()
-            ForEach(themeRows) { row in
-                Text(themeDisplayName(clean(row.label))).tag(row.id)
+            ForEach(builtIns) { choice in
+                Text(themeDisplayName(choice.label)).tag(choice.name)
             }
+        }
+    }
+
+    /// The theme in use is one the user made, so it can be deleted.
+    private var selectedCustomTheme: EngineBridge.ThemeChoice? {
+        let current = engine.selectedTheme
+        return engine.themeCatalogue.first { $0.isCustom && $0.name == current }
+    }
+
+    /// Save-as and delete.
+    ///
+    /// Save-as is offered only once something has been changed: with no edits
+    /// it would make a theme identical to the one it came from, under a second
+    /// name, which is a way to accumulate duplicates and not a feature.
+    @ViewBuilder private var themeManagementSection: some View {
+        Section {
+            Button("Save as New Theme…") { beginSaveTheme() }
+                .disabled(engine.themeOverrideMask == 0)
+
+            Button("Reset \(themeDisplayName(activePaletteName)) to Its Original Colours") {
+                engine.settingsResetThemeTokens()
+            }
+            .disabled(engine.themeOverrideMask == 0)
+
+            if let custom = selectedCustomTheme {
+                Button("Delete “\(custom.label)”", role: .destructive) {
+                    themeToDelete = custom.name
+                }
+            }
+        } footer: {
+            Text(saveThemeFooter)
+        }
+        .alert("Save as New Theme", isPresented: $savingTheme) {
+            TextField("Name", text: $newThemeName)
+            Button("Save") { commitSaveTheme() }
+                .disabled(newThemeName.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(saveThemeError.isEmpty
+                ? "Your changes are kept under this name. \(themeDisplayName(activePaletteName)) goes back to its original colours."
+                : saveThemeError)
+        }
+        .confirmationDialog(
+            "Delete “\(themeToDelete ?? "")”?",
+            isPresented: Binding(get: { themeToDelete != nil }, set: { if !$0 { themeToDelete = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let name = themeToDelete { engine.settingsDeleteTheme(name) }
+                themeToDelete = nil
+            }
+            Button("Cancel", role: .cancel) { themeToDelete = nil }
+        } message: {
+            Text("Its colours are removed. The palette it was built on is unaffected.")
+        }
+    }
+
+    private var saveThemeFooter: String {
+        if overrideCount == 0 {
+            return "No colours changed on this theme."
+        }
+        let plural = overrideCount == 1 ? "" : "s"
+        return "\(overrideCount) colour\(plural) changed. Edits are kept per theme, so switching themes does not carry them over."
+    }
+
+    private func beginSaveTheme() {
+        saveThemeError = ""
+        newThemeName = "\(themeDisplayName(activePaletteName)) Copy"
+        savingTheme = true
+    }
+
+    /// Core owns the refusal — blank, already taken, or shadowing a built-in.
+    /// Re-opening the sheet with the reason beats a silent no-op.
+    private func commitSaveTheme() {
+        if engine.settingsSaveThemeAs(newThemeName) == nil {
+            saveThemeError = "That name is already taken, or belongs to a built-in theme."
+            savingTheme = true
+        } else {
+            saveThemeError = ""
         }
     }
 

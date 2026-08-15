@@ -557,6 +557,18 @@ void suisei_engine_settings_save(SuiseiEngine *ptr);
  * Setting an empty value or "default" clears the edit and restores the
  * theme's own colour.                                                       */
 uint8_t suisei_engine_theme_tokens(char *out, size_t cap);
+
+/* Themes. `suisei_engine_theme_catalogue` writes "name|Label|isCustom" one per
+ * line: built-ins in catalogue order, then the user's own. Save-as returns 0
+ * and an empty `out` when the name is blank, already taken, or shadows a
+ * built-in. Built-ins cannot be deleted; deleting the theme in use falls back
+ * to the palette it was built on.                                            */
+uint8_t suisei_engine_theme_catalogue(const SuiseiEngine *ptr, char *out, size_t cap);
+uint8_t suisei_engine_selected_theme(const SuiseiEngine *ptr, char *out, size_t cap);
+void suisei_engine_settings_select_theme(SuiseiEngine *ptr, const char *name);
+uint8_t suisei_engine_settings_save_theme_as(SuiseiEngine *ptr, const char *name,
+                                             char *out, size_t cap);
+void suisei_engine_settings_delete_theme(SuiseiEngine *ptr, const char *name);
 uint32_t suisei_engine_theme_override_mask(const SuiseiEngine *ptr);
 void suisei_engine_settings_set_theme_token(SuiseiEngine *ptr, uint32_t index,
                                             const char *value);

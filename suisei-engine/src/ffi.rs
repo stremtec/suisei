@@ -2328,6 +2328,85 @@ pub extern "C" fn suisei_engine_settings_set_theme_token(
     }
 }
 
+/// Every choosable theme, as `name|Label|isCustom` one per line.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_theme_catalogue(
+    ptr: *const SuiseiEngine,
+    out: *mut c_char,
+    cap: usize,
+) -> u8 {
+    if ptr.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let list = unsafe { (*ptr).0.theme_catalogue() };
+    unsafe { write_cstr_raw(out, cap, &list) };
+    1
+}
+
+/// The theme in use, as named in the config.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_selected_theme(
+    ptr: *const SuiseiEngine,
+    out: *mut c_char,
+    cap: usize,
+) -> u8 {
+    if ptr.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let name = unsafe { (*ptr).0.selected_theme() };
+    unsafe { write_cstr_raw(out, cap, &name) };
+    1
+}
+
+/// Choose a theme by name — built-in or user-made.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_settings_select_theme(
+    ptr: *mut SuiseiEngine,
+    name: *const c_char,
+) {
+    if ptr.is_null() || name.is_null() {
+        return;
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    unsafe {
+        (*ptr).0.settings_select_theme(&name);
+    }
+}
+
+/// Keep the current palette's edits as a theme of its own. Writes the stored
+/// name into `out`; an empty result means the name was refused (blank, already
+/// taken, or shadowing a built-in).
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_settings_save_theme_as(
+    ptr: *mut SuiseiEngine,
+    name: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+) -> u8 {
+    if ptr.is_null() || name.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
+    let saved = unsafe { (*ptr).0.settings_save_theme_as(&name) };
+    unsafe { write_cstr_raw(out, cap, &saved) };
+    u8::from(!saved.is_empty())
+}
+
+/// Delete a user-made theme. Built-ins are not deletable and are ignored.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_settings_delete_theme(
+    ptr: *mut SuiseiEngine,
+    name: *const c_char,
+) {
+    if ptr.is_null() || name.is_null() {
+        return;
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    unsafe {
+        (*ptr).0.settings_delete_theme(&name);
+    }
+}
+
 /// Put every colour of the current palette back to the theme's own.
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_settings_reset_theme_tokens(ptr: *mut SuiseiEngine) {

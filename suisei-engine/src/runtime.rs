@@ -2174,9 +2174,77 @@ impl Engine {
     /// light or dark palette actually on screen, and only this layer knows
     /// which — the face cannot see `system_is_dark`.
     fn editing_palette(&self) -> String {
-        suisei_core::theme::resolve(&self.app.settings.draft.theme, self.app.system_is_dark)
-            .name
-            .to_string()
+        suisei_core::theme::override_target(
+            &self.app.settings.draft.theme,
+            &self.app.settings.draft,
+            self.app.system_is_dark,
+        )
+        .1
+    }
+
+    /// Every theme that can be chosen, as `name|Label|isCustom` per line.
+    ///
+    /// Built-ins first in catalogue order, then the user's own alphabetically.
+    /// One call because the face rebuilds its picker from this on each redraw
+    /// and per-item chatter across the ABI would be silly for a dozen strings.
+    pub fn theme_catalogue(&self) -> String {
+        let mut out = String::new();
+        for t in suisei_core::theme::all_themes() {
+            out.push_str(&format!("{}|{}|0\n", t.name, t.name));
+        }
+        for (name, _base) in &self.app.settings.draft.custom_themes {
+            out.push_str(&format!("{name}|{name}|1\n"));
+        }
+        out
+    }
+
+    /// The theme in use, as it is named in the config — a built-in's lowercase
+    /// name, a user-made theme's display name, or `system`.
+    pub fn selected_theme(&self) -> String {
+        self.app.settings.draft.theme.clone()
+    }
+
+    pub fn settings_select_theme(&mut self, name: &str) {
+        use suisei_core::settings::SettingsAction;
+        if !self.app.settings.visible() {
+            return;
+        }
+        if self.app.settings.select_theme(name) == SettingsAction::ApplyTheme {
+            self.app.apply_settings_draft();
+            self.app.save_settings();
+            self.recompose();
+        }
+    }
+
+    /// Keep the current palette's edits as a theme of its own. Returns the
+    /// stored name, or empty when the name was refused.
+    pub fn settings_save_theme_as(&mut self, name: &str) -> String {
+        if !self.app.settings.visible() {
+            return String::new();
+        }
+        let from = self.editing_palette();
+        let Some(saved) = self.app.settings.save_theme_as(name, &from) else {
+            return String::new();
+        };
+        self.app.apply_settings_draft();
+        // Saved immediately, unlike a colour drag: this is a deliberate,
+        // one-shot act with a name attached, and losing it to a crash before
+        // the debounce fired would lose work the user just named.
+        self.app.save_settings();
+        self.recompose();
+        saved
+    }
+
+    pub fn settings_delete_theme(&mut self, name: &str) {
+        use suisei_core::settings::SettingsAction;
+        if !self.app.settings.visible() {
+            return;
+        }
+        if self.app.settings.delete_custom_theme(name) == SettingsAction::ApplyTheme {
+            self.app.apply_settings_draft();
+            self.app.save_settings();
+            self.recompose();
+        }
     }
 
     /// Set or clear one colour of the palette being shown.
