@@ -1623,7 +1623,7 @@ struct ContentView: View {
                                 engine.uiNavVisible = true
                                 applyNavMode(mode)
                             }
-                            focused = true
+                            reclaimEditorFocus()
                         } label: {
                             navStripIcon(
                                 mode.systemImage,
@@ -1696,7 +1696,7 @@ struct ContentView: View {
                                 applyNavMode(target)
                             }
                             pillDragCommitting = false
-                            focused = true
+                            reclaimEditorFocus()
                             withAnimation(NavStrip.settle) {
                                 selectionProgress = 1
                             } completion: {
@@ -2050,6 +2050,20 @@ struct ContentView: View {
             if engine.chrome.scm.open { engine.closeScm() }
             engine.refreshBreakpoints()
         }
+    }
+
+    /// Put the keyboard back in the editor shell after a navigator click —
+    /// unless a shell has it.
+    ///
+    /// `focused` drives the root container, which is not itself focusable, so
+    /// SwiftUI hands the keyboard to the first field it can find (the
+    /// navigator's Filter). Doing that to a window with a running terminal
+    /// reads as the terminal going dead: it is on screen, it has a caret, and
+    /// it receives nothing. Switching navigator modes is a statement about
+    /// which list is shown, not about who owns the keyboard.
+    private func reclaimEditorFocus() {
+        guard !engine.terminalOwnsKeys else { return }
+        focused = true
     }
 
     /// Show/hide the Debug Area. The session-spawning half lives on the engine
@@ -3018,12 +3032,18 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    /// The "Open Terminal · ⌃T" prompt, when the debug area is up with no shell.
+    ///
+    /// Through `setDebugArea` rather than around it. This used to open the dock
+    /// by hand — `uiDebugVisible` plus a toggle — which skipped the two things
+    /// that make an opened shell typable: core's own focus, and stripping the
+    /// keyboard from whatever field had it. Then it set `focused = true`, and
+    /// the root container `focused` drives is not itself focusable, so SwiftUI
+    /// handed the keyboard to the first field it could find — the navigator's
+    /// Filter. Exactly the bug the tap handler below documents, still live at
+    /// this one call site.
     private func openDebugTerminal() {
-        engine.uiDebugVisible = true
-        if !engine.chrome.terminal.open {
-            engine.toggleTerminalDock()
-        }
-        focused = true
+        engine.setDebugArea(true)
     }
 
     /// Terminal body (Debug strip) — the selected shell, drawn by SwiftTerm.

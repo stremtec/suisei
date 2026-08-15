@@ -451,6 +451,10 @@ final class TerminalSessions: ObservableObject {
 final class TerminalHostView: NSView {
     override var isFlipped: Bool { true }
 
+    /// A terminal that should take the keyboard as soon as this box is in a
+    /// window. See `claimKeyboard`.
+    private weak var awaitingKeyboard: PaneTerminalView?
+
     /// Put `term` in this box, taking it off whatever box had it.
     ///
     /// Returns true when it actually moved, so the caller can decide about
@@ -473,13 +477,35 @@ final class TerminalHostView: NSView {
     /// Deferred: this runs inside a SwiftUI view update, and the window may not
     /// even have the view yet. Re-checked on arrival because by then the layout
     /// may have moved on.
+    ///
+    /// **A missed claim has to be remembered, not dropped.** The caller asks
+    /// once, at mount, and `mount` returns false ever after — so a claim that
+    /// finds no window has no second chance from above. That is not a corner:
+    /// the debug area opens inside `withAnimation`, and the first
+    /// `updateNSView` of a transition runs while the representable's view is
+    /// still off the window. The shell then sat there running, visible, and
+    /// unfocused, with every keystroke going wherever the keyboard already was
+    /// — the bug read as "the terminal from the sidebar cannot be typed into",
+    /// and clicking it fixed it, which is what made it look intermittent.
     func claimKeyboard(for term: PaneTerminalView) {
         DispatchQueue.main.async { [weak self, weak term] in
-            guard let self, let term, term.superview === self,
-                  let window = term.window, window.firstResponder !== term
-            else { return }
+            guard let self, let term, term.superview === self else { return }
+            guard let window = term.window else {
+                // Not on screen yet. `viewDidMoveToWindow` finishes this.
+                self.awaitingKeyboard = term
+                return
+            }
+            guard window.firstResponder !== term else { return }
             window.makeFirstResponder(term)
         }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let term = awaitingKeyboard, term.superview === self,
+              let window else { return }
+        awaitingKeyboard = nil
+        if window.firstResponder !== term { window.makeFirstResponder(term) }
     }
 
     /// Give up the terminal without ending it.
@@ -562,7 +588,20 @@ struct TerminalDockSurface: NSViewRepresentable {
         ) else { return }
         let term = session.view
         term.onFocus = { [weak engine] in engine?.focusTerminal(true) }
-        guard host.mount(term) else { return }
+        guard host.mount(term) else {
+            // Already mounted, so this is not an arrival — but core may say the
+            // terminal is focused while no view holds the keyboard at all.
+            // `setDebugArea` clears a stale field's focus a tenth of a second
+            // after opening, and a claim that landed before that got wiped by
+            // it. Taking the keyboard from *nobody* is safe; taking it from a
+            // view that has it is not, which is why this asks.
+            if engine.focus == .terminal,
+               let window = term.window, window.firstResponder === window
+            {
+                window.makeFirstResponder(term)
+            }
+            return
+        }
         // Unlike a pane, the dock only ever appears because the user asked for
         // it — ⌃T, the Debug-area button, or a chip — so it always takes the
         // keyboard on arrival.
