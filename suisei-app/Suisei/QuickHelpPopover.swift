@@ -49,21 +49,21 @@ struct QuickHelpCard: View {
 
             body(for: engine.hoverText)
         }
-        .frame(width: 360)
+        // Wide enough for a worked example. A language server's answer for a
+        // keyword carries code, and code that wraps every third token has
+        // stopped being a sample.
+        .frame(width: 460)
     }
 
     @ViewBuilder
     private func body(for text: String) -> some View {
         if !text.isEmpty {
             ScrollView {
-                Text(text)
-                    .font(.system(size: 11))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                QuickHelpBody(markdown: text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
             }
-            .frame(maxHeight: 260)
+            .frame(maxHeight: 420)
         } else if engine.hoverPending {
             // A spinner rather than an empty box: the wait is a round trip to
             // another process and the user has no other way to know that.
@@ -115,5 +115,121 @@ struct QuickHelpCard: View {
             return "No language server is attached to this file."
         }
         return "\(server) had nothing for this position — it may not have this file in its project."
+    }
+}
+
+/// A language server's answer, rendered.
+///
+/// It arrives as **markdown**, and it was being printed with a plain `Text`.
+/// For a symbol that is one line of signature nobody noticed; for a keyword it
+/// is a guide, and a guide shown as raw markup is not a guide — the user saw
+/// literal ```` ```rust ```` fences, a bare `---`, and `[impl](https://…)`
+/// where a link should be. rust-analyzer's answer for `fn` is 1,834 characters
+/// of exactly that: what a function is, where one may be written, and four
+/// worked examples.
+///
+/// Three kinds of block, because three is what a hover answer contains.
+/// Anything cleverer would be a markdown engine, and the one thing this has to
+/// get right is that code looks like code.
+struct QuickHelpBody: View {
+    let markdown: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(Self.blocks(in: markdown).enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .rule:
+                    Divider()
+                case .prose(let text):
+                    Text(text)
+                        .font(.system(size: 11))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .code(let source):
+                    // Scrolls rather than wraps: a wrapped line of code reads
+                    // as a different program.
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(source)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                    }
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.primary.opacity(0.055))
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    enum Block {
+        case prose(AttributedString)
+        case code(String)
+        case rule
+    }
+
+    /// Split an LSP hover answer into blocks.
+    ///
+    /// Fences first, because everything inside one is literal — a `---` or a
+    /// `*` in a code sample is code, not a rule and not emphasis. Prose runs
+    /// go through `AttributedString(markdown:)`, which resolves the inline
+    /// spelling (links, `code`, **bold**) that the raw text was showing.
+    /// `.inlineOnlyPreservingWhitespace` because paragraph parsing would
+    /// collapse the line breaks the server put there on purpose.
+    static func blocks(in markdown: String) -> [Block] {
+        var out: [Block] = []
+        var prose: [Substring] = []
+        var code: [Substring] = []
+        var inFence = false
+
+        func flushProse() {
+            let text = prose.joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            prose.removeAll()
+            guard !text.isEmpty else { return }
+            let parsed = try? AttributedString(
+                markdown: text,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            )
+            out.append(.prose(parsed ?? AttributedString(text)))
+        }
+
+        for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                if inFence {
+                    let source = code.joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !source.isEmpty { out.append(.code(source)) }
+                    code.removeAll()
+                } else {
+                    flushProse()
+                }
+                inFence.toggle()
+                continue
+            }
+            if inFence {
+                code.append(line)
+                continue
+            }
+            let bare = line.trimmingCharacters(in: .whitespaces)
+            if bare == "---" || bare == "***" || bare == "___" {
+                flushProse()
+                out.append(.rule)
+                continue
+            }
+            prose.append(line)
+        }
+        // An unterminated fence is still code — the cap that bounds hover text
+        // can land in the middle of one.
+        if inFence, !code.isEmpty {
+            out.append(.code(code.joined(separator: "\n")))
+        }
+        flushProse()
+        return out
     }
 }

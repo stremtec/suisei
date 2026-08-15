@@ -922,7 +922,10 @@ uint8_t suisei_engine_references(const SuiseiEngine *ptr,
                                  SuiseiReferencesSnapshot *out);
 
 /* Quick Help inspector — LSP hover. Asynchronous: request, then poll. */
-#define SUISEI_HOVER_TEXT 4096
+/* Room for a keyword guide, not a tooltip. HOVER_CHARS caps at 4,000
+   CHARACTERS and this is BYTES; 16 KiB covers 4,000 of up to four bytes each,
+   so a Korean or Japanese doc comment arrives whole. */
+#define SUISEI_HOVER_TEXT 16384
 
 /* 1 when a language server is attached; writes its name into `out` when `out`
    and `cap` are given. Lets a surface tell "no server for this language" from

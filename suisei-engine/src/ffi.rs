@@ -3519,7 +3519,13 @@ pub extern "C" fn suisei_engine_references(
 // one, so the face can ask and then poll without blocking a frame on the LSP.
 // ---------------------------------------------------------------------------
 
-pub const SUISEI_HOVER_TEXT: usize = 4096;
+/// Room for a keyword guide, not a tooltip.
+///
+/// `HOVER_CHARS` caps at 4,000 CHARACTERS and this buffer is BYTES, so the two
+/// are only the same for ASCII. 16 KiB covers 4,000 characters of anything up
+/// to four bytes each, which means a Korean or Japanese doc comment arrives
+/// whole rather than cut by a limit nobody set on purpose.
+pub const SUISEI_HOVER_TEXT: usize = 16384;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_request_hover(ptr: *mut SuiseiEngine) {

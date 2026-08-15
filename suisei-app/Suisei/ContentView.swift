@@ -5220,11 +5220,11 @@ struct ContentView: View {
                 )
             } else {
                 ScrollView {
-                    Text(engine.hoverText)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.primary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    // The same renderer as the popover. This printed the raw
+                    // markdown too — fences, rules and link syntax — which
+                    // nobody noticed while the only answers reaching it were
+                    // one-line signatures.
+                    QuickHelpBody(markdown: engine.hoverText)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                 }

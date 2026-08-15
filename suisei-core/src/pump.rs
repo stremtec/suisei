@@ -42,8 +42,21 @@ impl PumpChange {
     }
 }
 
-/// Cap on hover text handed to the face, matching the TUI's popup budget.
-const HOVER_CHARS: usize = 800;
+/// Cap on hover text handed to the face.
+///
+/// Was 800, "matching the TUI's popup budget" — a budget belonging to a face
+/// that no longer exists (the workspace is core, engine and daemon; the Mac
+/// app is the only face, and its card scrolls). What a language server sends
+/// for a keyword is a guide, not a tooltip: rust-analyzer's answer for `fn` is
+/// 1,834 characters — what a function is, where one may be written, and four
+/// worked examples. At 800 it arrived cut off mid-sentence with every example
+/// gone, which is the half that answers "how do I use it".
+///
+/// Still bounded, because a doc comment can be arbitrarily long and this
+/// crosses a fixed-size ABI buffer (`SUISEI_HOVER_TEXT`). Kept comfortably
+/// under it so multi-byte text cannot overflow: the truncation there is by
+/// bytes, and this one is by characters.
+const HOVER_CHARS: usize = 4000;
 
 impl App {
     /// Drain the language services and apply whatever arrived. Call once per
@@ -243,8 +256,9 @@ mod tests {
         assert!(change.chrome);
     }
 
-    /// Hover popups are size-bounded; a 4k-line doc comment must not be handed
-    /// to the face whole.
+    /// Hover text is size-bounded; a 4k-line doc comment must not be handed to
+    /// the face whole. Bounded, not short: rust-analyzer's guide for the `fn`
+    /// keyword is 1,834 characters and has to arrive with its examples.
     #[test]
     fn hover_text_is_capped() {
         let mut app = App::new();
