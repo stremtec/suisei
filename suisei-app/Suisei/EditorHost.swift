@@ -34,6 +34,8 @@ struct EditorHost: NSViewRepresentable {
     /// what is visible includes the band underneath it: `scrollToVisible`
     /// happily declared a caret "shown" while the minimap was covering it.
     var rightInset: CGFloat = 0
+    /// Gutter counts from the caret rather than from 1.
+    var relativeNumber: Bool = false
 
     /// Last resolved palette, keyed by the SwiftUI colours it came from.
     ///
@@ -147,6 +149,7 @@ struct EditorHost: NSViewRepresentable {
         view.apply(
             hScroll: tick.hscroll,
             wrapLines: wrapLines,
+            relativeNumber: relativeNumber,
             docScroll: tick.scroll,
             docLineCount: tick.docLineCount,
             contentGen: editorTick.gen,
@@ -283,14 +286,23 @@ final class EditorScrollView: NSScrollView {
         // scrolled to its own end.
         let count = max(1, Int(lastDocLineCount)) + canvas.extraVisualRows
         let docH = max(bounds.height, CGFloat(count) * lineH + 8)
-        var docW = max(bounds.width, 1)
-        if !lastWrap {
-            // The engine owns the extent. The old budget was
-            // `max(400, hScroll + 160)` — a width that GREW WITH THE SCROLL
-            // POSITION, so every pan to the right made the document wider and
-            // the pan could never reach an end.
-            docW = max(docW, CGFloat(lastContentCols) * cell + EditorMetrics.gutter + 32)
-        }
+        // The engine owns the extent. The old budget was
+        // `max(400, hScroll + 160)` — a width that GREW WITH THE SCROLL
+        // POSITION, so every pan to the right made the document wider and the
+        // pan could never reach an end.
+        //
+        // Not conditional on `lastWrap` any more, because nothing wraps. The
+        // band protocol has a place for it — `EditorLine.isWrapContinuation`,
+        // bit 0x80 of `git_sign` — and the draw below honours it, but no
+        // producer anywhere in core or the engine ever sets that bit. So with
+        // "Wrap Lines" on, the document was sized to the viewport, there was
+        // nowhere to scroll, and the part of a long line past the right edge
+        // was not wrapped OR reachable: it was gone. Sizing to the content
+        // always means the text is at worst somewhere you can scroll to.
+        let docW = max(
+            max(bounds.width, 1),
+            CGFloat(lastContentCols) * cell + EditorMetrics.gutter + 32
+        )
         let newSize = NSSize(width: docW, height: docH)
         guard abs(canvas.frame.width - newSize.width) > 0.5
             || abs(canvas.frame.height - newSize.height) > 0.5
@@ -339,6 +351,7 @@ final class EditorScrollView: NSScrollView {
     func apply(
         hScroll: UInt32,
         wrapLines: Bool,
+        relativeNumber: Bool,
         docScroll: UInt32,
         docLineCount: UInt32,
         contentGen: UInt64,
@@ -370,8 +383,11 @@ final class EditorScrollView: NSScrollView {
             win.makeFirstResponder(canvas)
         }
 
-        hasHorizontalScroller = !wrapLines
-        horizontalScrollElasticity = wrapLines ? .none : .allowed
+        // Both unconditional, for the reason in `fitCanvasToBounds`: until
+        // something wraps, taking the horizontal scroller away only takes the
+        // text away with it.
+        hasHorizontalScroller = true
+        horizontalScrollElasticity = .allowed
 
         let docChanged = docLineCount != lastDocLineCount || wrapLines != lastWrap
         lastDocLineCount = docLineCount
@@ -401,6 +417,7 @@ final class EditorScrollView: NSScrollView {
             showFocusRing: showFocusRing,
             colors: colors,
             wrapLines: wrapLines,
+            relativeNumber: relativeNumber,
             docLineCount: docLineCount
         )
 
@@ -450,12 +467,12 @@ final class EditorScrollView: NSScrollView {
                 revealCaret()
             default: // restore — place the saved tab position exactly, at once.
                 if coreLine != clipLine {
-                    setClipTo(line: coreLine, hCols: wrapLines ? 0 : Int(hScroll))
+                    setClipTo(line: coreLine, hCols: Int(hScroll))
                 }
             }
             engine?.clearScrollIntent()
         } else if docChanged {
-            setClipTo(line: coreLine, hCols: wrapLines ? 0 : Int(hScroll))
+            setClipTo(line: coreLine, hCols: Int(hScroll))
         }
     }
 
@@ -521,13 +538,22 @@ final class EditorScrollView: NSScrollView {
         // so the scroll view counts the band under it as visible and would
         // stop scrolling with the caret hidden behind the thumbnail.
         //
-        // Half a line up and two columns left, unchanged: behind the caret
-        // there is nothing you are about to need, only what you can already
-        // read.
+        // LEFT to the very edge once the caret is near the start of a line.
+        // Press Enter at the end of a long line that had you scrolled right and
+        // the caret lands in column 0 — but two columns of lead is satisfied by
+        // a clip still parked mid-gutter, so the view stopped with the line
+        // numbers half cut off. Within a few columns of the text's start there
+        // is nothing to the left worth keeping off screen, so ask for x = 0 and
+        // get the whole gutter back.
+        //
+        // Otherwise two columns of lead: behind the caret there is nothing you
+        // are about to need, only what you can already read.
+        let nearLineStart = x <= EditorMetrics.gutter + cell * 4
+        let left = nearLineStart ? 0 : max(0, x - cell * 2)
         let rect = CGRect(
-            x: max(0, x - cell * 2),
+            x: left,
             y: y - lineH * 0.5,
-            width: cell * 2 + rightInset + cell * 4,
+            width: (x - left) + rightInset + cell * 4,
             height: lineH * 2.5
         )
         canvas.scrollToVisible(rect)
@@ -602,9 +628,7 @@ final class EditorScrollView: NSScrollView {
         let lineH = max(1, EditorMetrics.lineHeight)
         let cell = max(1, EditorMetrics.cellWidth)
         let v0 = max(0, Int(floor(documentVisibleRect.minY / lineH)))
-        let hCols = canvas.wrapLines
-            ? 0
-            : max(0, Int(floor(documentVisibleRect.minX / cell)))
+        let hCols = max(0, Int(floor(documentVisibleRect.minX / cell)))
         lastHCols = hCols
         if engine?.editorSplit.isSplit != true || paneIndex == engine?.editorSplit.focus {
             engine?.scrollSync(line: UInt32(v0), hscroll: UInt32(hCols))
@@ -794,6 +818,8 @@ final class EditorCanvasView: NSView {
     var paneIndex: Int = 0
 
     private(set) var wrapLines: Bool = true
+    /// Gutter counts from the caret line instead of from 1.
+    private(set) var relativeNumber: Bool = false
     /// Inline preview of the selected completion, drawn after the caret.
     /// Empty whenever the popup is closed or this pane is not the focused one.
     var ghostSuffix: String = "" {
@@ -1149,6 +1175,7 @@ final class EditorCanvasView: NSView {
         showFocusRing: Bool,
         colors: Colors,
         wrapLines: Bool,
+        relativeNumber: Bool,
         docLineCount: UInt32
     ) {
         var repaint = false
@@ -1169,6 +1196,13 @@ final class EditorCanvasView: NSView {
         self.showFocusRing = showFocusRing
         self.colors = colors
         self.wrapLines = wrapLines
+        // Every number in the gutter changes when this flips, and again on
+        // every caret move while it is on — the cached CTLines are keyed by the
+        // number they draw, so they stay valid; only the repaint is needed.
+        if self.relativeNumber != relativeNumber {
+            self.relativeNumber = relativeNumber
+            repaint = true
+        }
         self.docLineCount = max(1, docLineCount)
         let fontSize = EditorMetrics.fontSize
         if fontSize != Self.sharedFontSize {
@@ -1274,6 +1308,27 @@ final class EditorCanvasView: NSView {
         let colorGen: UInt64
     }
     private let gutterCache = LRUCache<GutterKey, (line: CTLine, width: CGFloat)>(capacity: 4000)
+
+    /// What the gutter prints for a row.
+    ///
+    /// Absolute unless relative numbering is on, and then still absolute on the
+    /// caret's own row: that is where you are, and "0" is not an answer to
+    /// where you are. Every other row shows its distance, which is the number
+    /// you would type after a motion.
+    private func gutterNumber(for line: EditorLine) -> UInt32 {
+        guard relativeNumber, !line.isCursor else { return line.lineNo }
+        let caret = caretLineNo
+        guard caret > 0 else { return line.lineNo }
+        return UInt32(abs(Int(line.lineNo) - Int(caret)))
+    }
+
+    /// 1-based caret row. Pulled live for the same reason the reveal is: the
+    /// typing fast path publishes no chrome, and a gutter counting from a stale
+    /// caret would be off by the length of the run you just typed.
+    private var caretLineNo: UInt32 {
+        guard relativeNumber, let engine else { return 0 }
+        return UInt32(engine.caretRowVCol().row + 1)
+    }
 
     private func gutterLine(
         _ number: UInt32, isCursor: Bool, font: NSFont,
@@ -1428,7 +1483,7 @@ final class EditorCanvasView: NSView {
                 renderer.addRect(
                     Self.breakpointChip(
                         atY: y, lineH: lineH,
-                        numberWidth: gutterNumberWidth(line.lineNo, font: font),
+                        numberWidth: gutterNumberWidth(gutterNumber(for: line), font: font),
                         phase: bpPhase
                     ),
                     colors.breakpoint.withAlphaComponent(bpPhase)
@@ -1441,7 +1496,9 @@ final class EditorCanvasView: NSView {
                     resident: renderer.atlas.residentCount
                 )
             }
-            let gutterEntry = gutterLine(line.lineNo, isCursor: line.isCursor, font: font)
+            let gutterEntry = gutterLine(
+                gutterNumber(for: line), isCursor: line.isCursor, font: font
+            )
             guard renderer.addLine(
                 gutterEntry.line,
                 origin: CGPoint(x: max(4, gutter - gap - gutterEntry.width), y: y + (lineH - fontSize) * 0.5 - 1 + ascent),
@@ -1731,7 +1788,7 @@ final class EditorCanvasView: NSView {
 
             PerfProbe.measure("    gutter number") {
                 let ln = gutterLine(
-                    line.lineNo, isCursor: line.isCursor, font: font,
+                    gutterNumber(for: line), isCursor: line.isCursor, font: font,
                     onBreakpoint: breakpointPhase(line) > 0.5
                 )
                 let phase = breakpointPhase(line)
@@ -3559,9 +3616,7 @@ extension EditorScrollView {
         let lineH = max(1, EditorMetrics.lineHeight)
         let cell = max(1, EditorMetrics.cellWidth)
         let v0 = max(0, Int(floor(documentVisibleRect.minY / lineH)))
-        let hCols = canvas.wrapLines
-            ? 0
-            : max(0, Int(floor(documentVisibleRect.minX / cell)))
+        let hCols = max(0, Int(floor(documentVisibleRect.minX / cell)))
         if engine?.editorSplit.isSplit != true || paneIndex == engine?.editorSplit.focus {
             engine?.scrollSync(line: UInt32(v0), hscroll: UInt32(hCols))
         }

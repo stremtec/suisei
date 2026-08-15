@@ -119,7 +119,9 @@ pub struct SuiseiChromeSnapshot {
     pub scroll_frac: f32,
     pub hscroll: u32,
     pub wrap_lines: u8,
-    pub _pad_h0: u8,
+    /// Gutter counts from the caret. Was `_pad_h0` — the same trick
+    /// `SuiseiPaneC::kind` played on its pad byte, so no offset moves.
+    pub relative_number: u8,
     pub _pad_h1: u8,
     pub _pad_h2: u8,
     pub buffer_version: u64,
@@ -564,7 +566,7 @@ pub extern "C" fn suisei_engine_chrome(
     o.scroll_frac = chrome.scroll_frac;
     o.hscroll = chrome.hscroll;
     o.wrap_lines = chrome.wrap_lines;
-    o._pad_h0 = 0;
+    o.relative_number = chrome.relative_number;
     o._pad_h1 = 0;
     o._pad_h2 = 0;
     o.buffer_version = chrome.buffer_version;

@@ -338,6 +338,13 @@ pub struct ChromeScene {
     pub hscroll: u32,
     /// Soft-wrap flag (face disables trackpad H-scroll when true).
     pub wrap_lines: u8,
+    /// Gutter shows distance from the caret rather than absolute numbers.
+    ///
+    /// `Config::relative_number` has existed on both sides of this boundary
+    /// for as long as the setting has, and never crossed it: the switch wrote
+    /// the config file and the gutter went on drawing absolute numbers,
+    /// because nothing ever told the face.
+    pub relative_number: u8,
     pub buffer_version: u64,
     pub branch: String,
     pub tabs: Vec<TabScene>,
@@ -529,6 +536,7 @@ pub fn patch_chrome_editor_scroll(app: &App, frame_gen: u64, chrome: &mut Chrome
     chrome.scroll_frac = app.scroll_frac;
     chrome.hscroll = app.hscroll as u32;
     chrome.wrap_lines = u8::from(app.wrap_lines);
+    chrome.relative_number = u8::from(app.relative_number);
     chrome.buffer_version = app.buffer.version();
     chrome.lines = lines;
     chrome.pane0_kind = app
@@ -654,6 +662,7 @@ pub fn compose(app: &App, frame_gen: u64, outline: &[OutlineItemScene]) -> Frame
             scroll_frac: app.scroll_frac,
             hscroll: app.hscroll as u32,
             wrap_lines: u8::from(app.wrap_lines),
+            relative_number: u8::from(app.relative_number),
             buffer_version: app.buffer.version(),
             branch: branch_name(app),
             tabs,

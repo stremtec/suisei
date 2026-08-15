@@ -120,7 +120,8 @@ typedef struct SuiseiChromeSnapshot {
   float scroll_frac; /* sub-line residual (−1,1); smooth GUI paint */
   uint32_t hscroll;  /* visual cols; wrap_lines=0 */
   uint8_t wrap_lines;
-  uint8_t _pad_h0;
+  /* Gutter counts from the caret instead of from 1. Was _pad_h0. */
+  uint8_t relative_number;
   uint8_t _pad_h1;
   uint8_t _pad_h2;
   uint64_t buffer_version;

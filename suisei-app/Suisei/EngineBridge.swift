@@ -1003,6 +1003,10 @@ final class EngineBridge: ObservableObject {
     /// Horizontal pan (visual columns) when wrap is off.
     @Published private(set) var editorHScroll: UInt32 = 0
     @Published private(set) var wrapLines: Bool = true
+    /// Gutter counts from the caret. Published beside `wrapLines` because it is
+    /// the same kind of fact — a per-window editor mode the canvas paints from,
+    /// not per-pane state.
+    @Published private(set) var relativeNumber: Bool = false
     /// Pretty preview (Ctrl/Cmd+Shift+V).
     @Published private(set) var preview: PreviewSnap = .empty
     /// Bumped on font zoom so SwiftUI rebuilds line metrics / paint.
@@ -4592,6 +4596,8 @@ final class EngineBridge: ObservableObject {
                 if snap.hscroll != editorHScroll { editorHScroll = snap.hscroll }
                 let wrap = snap.wrap_lines != 0
                 if wrap != wrapLines { wrapLines = wrap }
+                let rel = snap.relative_number != 0
+                if rel != relativeNumber { relativeNumber = rel }
                 if linesDiffer { editorLines = lines }
                 if split != editorSplit { editorSplit = split }
             }
@@ -4959,6 +4965,8 @@ final class EngineBridge: ObservableObject {
             if snap.hscroll != editorHScroll { editorHScroll = snap.hscroll }
             let wrap = snap.wrap_lines != 0
             if wrap != wrapLines { wrapLines = wrap }
+            let rel = snap.relative_number != 0
+            if rel != relativeNumber { relativeNumber = rel }
         }
         // Which panels are actually open — ONE u32, answered out of the last
         // composed frame.

@@ -5919,7 +5919,8 @@ struct ContentView: View {
             rightInset: pane.map(minimapInset(for:))
                 ?? (islandShowsMinimap
                     ? minimapWidth(paneWidth: editorAreaSize.width)
-                    : 0)
+                    : 0),
+            relativeNumber: engine.relativeNumber
         )
         // Stable identity per pane — do NOT include tab id (was recreating NSScrollView
         // and wiping native scroll state on every file switch).
