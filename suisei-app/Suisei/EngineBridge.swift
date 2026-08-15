@@ -3067,11 +3067,17 @@ final class EngineBridge: ObservableObject {
     }
 
     /// Pull renderer: exact rows `[start, start+max)` for a pane, synchronously.
-    func pullBand(pane: Int, start: Int, max maxRows: Int) -> [EditorLine] {
+    ///
+    /// `wrapCols` is how many columns a wrapped row may use, and 0 means do not
+    /// wrap. A wrapped line comes back as several rows sharing one `lineNo`,
+    /// the ones after the first flagged `isWrapContinuation` — so the count of
+    /// rows returned is not the count of buffer lines asked for.
+    func pullBand(pane: Int, start: Int, max maxRows: Int, wrapCols: Int) -> [EditorLine] {
         guard let engine, maxRows > 0 else { return [] }
         var band = SuiseiBandC()
         let ok = suisei_engine_editor_band(
-            engine, UInt32(pane), UInt32(max(0, start)), UInt32(maxRows), &band
+            engine, UInt32(pane), UInt32(max(0, start)), UInt32(maxRows),
+            UInt16(clamping: wrapCols), &band
         )
         guard ok != 0 else { return [] }
         var out: [EditorLine] = []
@@ -3256,6 +3262,32 @@ final class EngineBridge: ObservableObject {
     /// Width of the document in display columns — the horizontal scroll extent.
     /// A high-water mark on the engine side (see `App::content_width`), so it
     /// never shrinks under a scroll in progress.
+    /// Soft-wrap geometry for a pane at `cols` columns. `cols == 0` answers as
+    /// if every line were one row, so the caller needs no mode branch.
+    func wrapTotalRows(pane: Int, cols: Int) -> Int {
+        guard let engine else { return 1 }
+        return Int(suisei_engine_wrap_total_rows(
+            engine, UInt32(max(0, pane)), UInt16(clamping: cols)
+        ))
+    }
+
+    /// First visual row of a buffer row.
+    func wrapVisualOf(pane: Int, cols: Int, row: Int) -> Int {
+        guard let engine else { return max(0, row) }
+        return Int(suisei_engine_wrap_visual_of(
+            engine, UInt32(max(0, pane)), UInt16(clamping: cols), UInt32(max(0, row))
+        ))
+    }
+
+    /// Buffer row and the segment of it drawn at a visual row.
+    func wrapBufferAt(pane: Int, cols: Int, visualRow: Int) -> (row: Int, segment: Int) {
+        guard let engine else { return (max(0, visualRow), 0) }
+        let packed = suisei_engine_wrap_buffer_at(
+            engine, UInt32(max(0, pane)), UInt16(clamping: cols), UInt32(max(0, visualRow))
+        )
+        return (Int(packed >> 32), Int(packed & 0xFFFF_FFFF))
+    }
+
     func contentCols() -> UInt32 {
         guard let engine else { return 0 }
         return suisei_engine_content_cols(engine)

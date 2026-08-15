@@ -417,6 +417,7 @@ pub fn build_editor_band(
     pane: usize,
     start: usize,
     rows: usize,
+    wrap_cols: u16,
 ) -> (Vec<EditorLineScene>, u32) {
     // A pane the desk does not have is not a request to be satisfied with some
     // other pane's document.
@@ -470,7 +471,7 @@ pub fn build_editor_band(
         0
     };
     let sel = if focused { app.selected_range() } else { None };
-    let lines = build_lines_at(app, tab, start, rows, Some(caret_vcol), sel, focused);
+    let lines = build_lines_at(app, tab, start, rows, Some(caret_vcol), sel, focused, wrap_cols);
     (lines, total)
 }
 
@@ -2205,6 +2206,9 @@ fn build_visible_lines_from_buffer(
         caret_vcol,
         sel,
         use_live_syntax,
+        // The packed-lines path never wrapped and does not now: it feeds the
+        // chrome snapshot, which the GUI does not render from.
+        0,
     )
 }
 
@@ -2217,6 +2221,7 @@ fn build_lines_at(
     caret_vcol: Option<u32>,
     sel: Option<(Position, Position)>,
     use_live_syntax: bool,
+    wrap_cols: u16,
 ) -> Vec<EditorLineScene> {
     let buf = buffer_for_tab(app, tab);
     let total = buf.line_count();
@@ -2243,11 +2248,10 @@ fn build_lines_at(
     // pane is narrower than the editor, so a wrapped line in a split pane
     // breaks past its own right edge. The face is the only side that knows a
     // pane's real width, and handing that number down is the next change.
-    let wrap_cols: u16 = if app.wrap_lines {
-        app.grid_cols().saturating_sub(5).max(20)
-    } else {
-        0
-    };
+    // The FACE decides how many columns fit — it knows the pane's width in
+    // points, the cell width, the gutter and whatever overlays the right edge.
+    // This used to be `app.grid_cols() - 5`, the whole editor's columns, so a
+    // wrapped line in a split pane broke past its own right edge.
     let wrap = wrap_cols > 0;
     // Resolve breakpoint path **once** — never canonicalize per row on the scroll hot path.
     let bp_lines: Option<std::collections::HashSet<usize>> = if is_current {
@@ -2827,7 +2831,7 @@ mod unicode_overlay_tests {
         app.search.input = "한글".into();
         app.recompute_search("한글", false);
         app.search.current = 1;
-        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true);
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0);
         let kinds: Vec<u8> = lines[0]
             .spans
             .iter()
@@ -2849,7 +2853,7 @@ mod unicode_overlay_tests {
         assert_eq!(app.search.pattern.as_deref(), Some("suisei"));
         assert_eq!(app.search.matches.len(), 2);
 
-        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true);
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0);
         assert!(
             lines[0]
                 .spans

@@ -1504,6 +1504,7 @@ pub extern "C" fn suisei_engine_editor_band(
     pane: u32,
     start_row: u32,
     max_rows: u32,
+    wrap_cols: u16,
     out: *mut SuiseiBandC,
 ) -> u8 {
     if ptr.is_null() || out.is_null() {
@@ -1515,7 +1516,8 @@ pub extern "C" fn suisei_engine_editor_band(
     }
     let o = unsafe { &mut *out };
     let rows = (max_rows as usize).min(SUISEI_BAND_MAX);
-    let (lines, total) = eng.0.editor_band(pane as usize, start_row as usize, rows);
+    let (lines, total) =
+        eng.0.editor_band(pane as usize, start_row as usize, rows, wrap_cols);
     o.start_row = start_row;
     o.doc_line_count = total;
     let n = lines.len().min(SUISEI_BAND_MAX);
@@ -1635,6 +1637,62 @@ fn write_minimap(o: &mut SuiseiMinimapC, buckets: Vec<(u8, u8, u8)>, total: u32)
         o.flags[i] = *flags;
     }
     1
+}
+
+/// Soft-wrap geometry for one pane's document at `cols` columns. `cols == 0`
+/// is "not wrapping", and every one of these answers as if each line were one
+/// row — so the face has one code path either way.
+///
+/// The COLUMNS are the face's number. Only it knows a pane's width in points,
+/// the cell width, the gutter and what overlays the right edge; core knows what
+/// a line measures. The map is cached per pane against the document version, so
+/// asking three times a frame builds nothing.
+
+/// Total visual rows — the document's height in rows, which is the scroll
+/// extent once the face multiplies by its line height.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_wrap_total_rows(
+    ptr: *const SuiseiEngine,
+    pane: u32,
+    cols: u16,
+) -> u32 {
+    if ptr.is_null() {
+        return 1;
+    }
+    unsafe { &*ptr }.0.wrap_total_rows(pane as usize, cols)
+}
+
+/// First visual row of a buffer row.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_wrap_visual_of(
+    ptr: *const SuiseiEngine,
+    pane: u32,
+    cols: u16,
+    row: u32,
+) -> u32 {
+    if ptr.is_null() {
+        return row;
+    }
+    unsafe { &*ptr }
+        .0
+        .wrap_visual_of(pane as usize, cols, row as usize)
+}
+
+/// Buffer row in the high 32 bits, segment within it in the low 32 — the
+/// inverse of `suisei_engine_wrap_visual_of`, for turning a click or a
+/// viewport top back into a line.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_wrap_buffer_at(
+    ptr: *const SuiseiEngine,
+    pane: u32,
+    cols: u16,
+    visual_row: u32,
+) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let (row, seg) = unsafe { &*ptr }.0.wrap_buffer_at(pane as usize, cols, visual_row);
+    ((row as u64) << 32) | (seg as u64 & 0xFFFF_FFFF)
 }
 
 pub const SUISEI_MAX_OUTLINE: usize = 128;

@@ -40,7 +40,7 @@ fn seed_buffers(engine: &mut Engine, n: usize) -> Vec<u64> {
 }
 
 fn first_row_text(engine: &Engine, pane: usize) -> Option<String> {
-    let (lines, _) = engine.editor_band(pane, 0, 4);
+    let (lines, _) = engine.editor_band(pane, 0, 4, 0);
     lines.first().map(|l| l.text.clone())
 }
 

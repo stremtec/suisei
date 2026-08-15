@@ -41,7 +41,7 @@ fn engine_with_blank_lines() -> Engine {
 
 /// (row index, has a selection span) for the whole document.
 fn selected_rows(engine: &Engine) -> Vec<(usize, bool)> {
-    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32);
+    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0);
     lines
         .iter()
         .map(|l| (l.line_no as usize, l.sel_v0.is_some()))
@@ -82,7 +82,7 @@ fn a_blank_line_gets_exactly_one_cell() {
     let mut engine = engine_with_blank_lines();
     engine.select_all();
 
-    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32);
+    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0);
     // Rows are 1-based in the scene; SRC's blank lines are the 2nd and 4th.
     let blank = lines
         .iter()

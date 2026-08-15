@@ -250,6 +250,27 @@ final class EditorScrollView: NSScrollView {
     /// Points of this pane's right edge covered by an overlay (the minimap).
     var rightInset: CGFloat = 0
 
+    /// How many columns a wrapped row may use in THIS pane.
+    ///
+    /// The pane's own width, minus the gutter, minus whatever is drawn over the
+    /// right edge, minus a column of breathing room so a full row does not sit
+    /// flush against the minimap. Zero when wrapping is off, which every layer
+    /// below reads as "one row per line".
+    ///
+    /// Core used to guess this from `app.grid_cols()` — the whole editor's
+    /// columns — so a wrapped line in a split pane broke past its own edge.
+    private func wrapColumns(wrapLines: Bool) -> Int {
+        guard wrapLines else { return 0 }
+        let cell = max(1, EditorMetrics.cellWidth)
+        let usable = contentView.bounds.width
+            - EditorMetrics.gutter
+            - rightInset
+            - cell
+        // A pane too narrow to hold anything still has to wrap somewhere, or
+        // `WrapMap` divides by a width of zero rows.
+        return max(8, Int(floor(usable / cell)))
+    }
+
     /// Document width in columns as of the last `apply`.
     private var lastContentCols: Int = 0
 
@@ -284,7 +305,9 @@ final class EditorScrollView: NSScrollView {
         // Plus any rows an expanded change has put on screen: they take height
         // like every other row, and a document sized without them cannot be
         // scrolled to its own end.
-        let count = max(1, Int(lastDocLineCount)) + canvas.extraVisualRows
+        // Visual rows, not buffer lines: a wrapped document is taller than its
+        // line count and could not otherwise be scrolled to its own end.
+        let count = canvas.totalVisualRows() + canvas.extraVisualRows
         let docH = max(bounds.height, CGFloat(count) * lineH + 8)
         // The engine owns the extent. The old budget was
         // `max(400, hScroll + 160)` — a width that GREW WITH THE SCROLL
@@ -383,11 +406,25 @@ final class EditorScrollView: NSScrollView {
             win.makeFirstResponder(canvas)
         }
 
-        // Both unconditional, for the reason in `fitCanvasToBounds`: until
-        // something wraps, taking the horizontal scroller away only takes the
-        // text away with it.
-        hasHorizontalScroller = true
-        horizontalScrollElasticity = .allowed
+        // ONE number, before anything reads it. The band is chunked at this
+        // width, the wrap map is built at this width, and the canvas is sized
+        // from that map — a row's contents and the count of rows computed at
+        // two different widths would put every line below the first wrap
+        // somewhere it is not drawn. Assigned ahead of `fitCanvasToBounds`
+        // below, which asks the map how tall the document is.
+        let cols = wrapColumns(wrapLines: wrapLines)
+        if canvas.wrapCols != cols {
+            canvas.setWrapCols(cols)
+            // Different chunking: the cached band is the old shape.
+            canvas.noteContentChanged()
+        }
+
+        // A wrapped document has nothing to pan to, but an unwrapped one does
+        // and the scroller is how you know. Both were switched off with wrap
+        // for years while nothing wrapped, which is how the setting came to
+        // hide text instead of folding it.
+        hasHorizontalScroller = !wrapLines
+        horizontalScrollElasticity = wrapLines ? .none : .allowed
 
         let docChanged = docLineCount != lastDocLineCount || wrapLines != lastWrap
         lastDocLineCount = docLineCount
@@ -520,7 +557,10 @@ final class EditorScrollView: NSScrollView {
         // chrome, so the snapshot's caret is from before this run of
         // keystrokes. Scrolling to it put the view where the caret used to be.
         let (row, vcol) = engine.caretRowVCol()
-        let y = visualY(row)
+        // The caret's own segment, not the line's first row: on a wrapped line
+        // those are different rows, and revealing the top of a line whose
+        // caret is four rows down scrolls to the wrong place.
+        let y = visualY(row) + CGFloat(canvas.caretSegment(row: row)) * lineH
         // Real-time glyph x against the same CTLine the draw uses. Falls back
         // to a cell estimate only if the caret line can't be fetched.
         let x: CGFloat = canvas.liveCaretGlyphX(row: row)
@@ -820,6 +860,16 @@ final class EditorCanvasView: NSView {
     private(set) var wrapLines: Bool = true
     /// Gutter counts from the caret line instead of from 1.
     private(set) var relativeNumber: Bool = false
+    func setWrapCols(_ cols: Int) { wrapCols = cols }
+
+    /// Columns a wrapped row may use, or 0 when not wrapping.
+    ///
+    /// The face's number, because only the face knows the pane's width in
+    /// points, the cell width, the gutter and what covers the right edge. It is
+    /// the SAME number the band is pulled with and the wrap map is built with —
+    /// a row count and a row's contents computed at two widths would place
+    /// every line below the first wrap somewhere it is not drawn.
+    private(set) var wrapCols: Int = 0
     /// Inline preview of the selected completion, drawn after the caret.
     /// Empty whenever the popup is closed or this pane is not the focused one.
     var ghostSuffix: String = "" {
@@ -1233,7 +1283,8 @@ final class EditorCanvasView: NSView {
                 let chunk = engine.pullBand(
                     pane: paneIndex,
                     start: cursor,
-                    max: min(160, want1 - cursor + 1)
+                    max: min(160, want1 - cursor + 1),
+                    wrapCols: wrapCols
                 )
                 if chunk.isEmpty { break }
                 pulled.append(contentsOf: chunk)
@@ -1279,6 +1330,10 @@ final class EditorCanvasView: NSView {
     func liveCaretGlyphX(row: Int) -> CGFloat? {
         guard engine != nil else { return nil }
         let band = rows(row, row)
+        // The row core marked as the caret's — with a wrapped line that is the
+        // SEGMENT the caret is on, and its `caretUTF16` is relative to that
+        // segment's text. Falling back to the line's first row is only for the
+        // case where the band has no caret in it at all.
         guard let line = band.first(where: { Int($0.lineNo) - 1 == row && $0.isCursor })
             ?? band.first(where: { Int($0.lineNo) - 1 == row })
         else { return nil }
@@ -1456,14 +1511,23 @@ final class EditorCanvasView: NSView {
         for (r, c) in hunkHoverRects(lineH: lineH) { renderer.addRect(r, c) }
         for (r, c) in gitBars(band, lineH: lineH) { renderer.addRect(r, c) }
         bracketRects.removeAll(keepingCapacity: true)
-        var wrapped: Set<UInt32> = []
-        if wrapLines {
-            for line in band where line.isWrapContinuation { wrapped.insert(line.lineNo) }
-        }
-
-        for line in band where !line.isWrapContinuation {
+        // Every row the band holds, continuations included.
+        //
+        // This used to be `where !line.isWrapContinuation`, with the rows after
+        // the first collapsed into a `⋯` at the right edge. Core has always
+        // split a wrapped line into a row per segment; the renderer drew the
+        // first one and dropped the rest on the floor, so turning Wrap Lines on
+        // did not wrap a long line — it hid everything past the first screenful
+        // of it. `segment` is counted here rather than carried over the ABI:
+        // the band arrives in order, so consecutive rows sharing a `lineNo` are
+        // that line's segments in sequence.
+        var segment = 0
+        var previousLineNo: UInt32 = .max
+        for line in band {
             let baseRow = max(0, Int(line.lineNo) - 1)
-            let y = visualY(baseRow)
+            segment = line.lineNo == previousLineNo ? segment + 1 : 0
+            previousLineNo = line.lineNo
+            let y = visualY(baseRow) + CGFloat(segment) * lineH
             if y + lineH < viewport.minY || y > viewport.maxY { continue }
             let rowRect = CGRect(x: viewport.minX, y: y, width: viewport.width, height: lineH)
 
@@ -1600,19 +1664,6 @@ final class EditorCanvasView: NSView {
                 renderer.addRect(CGRect(x: x0, y: y + lineH - 2, width: max(1, x1 - x0), height: 1), colors.fg)
             }
 
-            if wrapLines, wrapped.contains(line.lineNo) {
-                let marker = CTLineCreateWithAttributedString(NSAttributedString(
-                    string: "⋯",
-                    attributes: [.font: font, .foregroundColor: colors.dim.withAlphaComponent(0.85)]
-                ))
-                let markerWidth = CGFloat(CTLineGetTypographicBounds(marker, nil, nil, nil))
-                guard renderer.addLine(
-                    marker,
-                    origin: CGPoint(x: viewport.maxX - markerWidth - 6, y: textY + ascent),
-                    fallbackColor: colors.dim,
-                    scale: scale
-                ) else { return false }
-            }
 
             if line.isCursor {
                 let caretIndex = compositionCaretUTF16 ?? Int(line.caretUTF16)
@@ -1726,14 +1777,6 @@ final class EditorCanvasView: NSView {
         // Rebuilt below by whichever rows carry a hint this pass.
         bracketRects.removeAll(keepingCapacity: true)
 
-        // Wrapped primaries in this band (tails are clipped, marked with ⋯).
-        var wrapped: Set<UInt32> = []
-        if wrapLines {
-            for line in band where line.isWrapContinuation {
-                wrapped.insert(line.lineNo)
-            }
-        }
-
         PerfProbe.measure("   draw: gutter decorations") {
             syncBreakpointAnimations(band)
             syncLiveFlashes()
@@ -1748,10 +1791,14 @@ final class EditorCanvasView: NSView {
             }
         }
         let rowLoopStart = DispatchTime.now().uptimeNanoseconds
+        // Every row, continuations included — see the note in the Metal path.
+        var segment = 0
+        var previousLineNo: UInt32 = .max
         for line in band {
-            if line.isWrapContinuation { continue }
             let baseRow = max(0, Int(line.lineNo) - 1)
-            let y = visualY(baseRow)
+            segment = line.lineNo == previousLineNo ? segment + 1 : 0
+            previousLineNo = line.lineNo
+            let y = visualY(baseRow) + CGFloat(segment) * lineH
             if y + lineH < dirtyRect.minY || y > dirtyRect.maxY { continue }
 
             let rowRect = CGRect(x: 0, y: y, width: bounds.width, height: lineH)
@@ -1901,18 +1948,6 @@ final class EditorCanvasView: NSView {
 
             // Soft-wrap tail exists but can't stack in the absolute row model —
             // show a clipped-content marker at the right edge.
-            if wrapLines, wrapped.contains(line.lineNo) {
-                let marker = "⋯" as NSString
-                let mAttrs: [NSAttributedString.Key: Any] = [
-                    .font: font,
-                    .foregroundColor: colors.dim.withAlphaComponent(0.85),
-                ]
-                let mSize = marker.size(withAttributes: mAttrs)
-                marker.draw(
-                    at: CGPoint(x: bounds.width - mSize.width - 6, y: textY),
-                    withAttributes: mAttrs
-                )
-            }
 
             if line.isCursor {
                 // Resolve the caret against the DRAWN line, not the core's
@@ -2855,8 +2890,25 @@ final class EditorCanvasView: NSView {
     /// y goes through this, and everything that turns a y back into a row goes
     /// through `bufferRow(atY:)`. With nothing expanded both are the identity.
     func visualY(_ bufferRow: Int) -> CGFloat {
-        CGFloat(bufferRow) * EditorMetrics.lineHeight
+        CGFloat(visualRowOf(bufferRow)) * EditorMetrics.lineHeight
             + insertedHeight(above: bufferRow)
+    }
+
+    /// First VISUAL row of a buffer row — the identity when not wrapping.
+    ///
+    /// This is the whole of the row-model change. `visualY` multiplied the
+    /// buffer row by the line height, which is only its position while one
+    /// buffer row is one screen row; with wrapping the answer is a running
+    /// total over every line above, which core keeps as a prefix sum.
+    func visualRowOf(_ bufferRow: Int) -> Int {
+        guard wrapCols > 0, let engine else { return max(0, bufferRow) }
+        return engine.wrapVisualOf(pane: paneIndex, cols: wrapCols, row: max(0, bufferRow))
+    }
+
+    /// Total visual rows — the document's height in rows.
+    func totalVisualRows() -> Int {
+        guard wrapCols > 0, let engine else { return max(1, Int(docLineCount)) }
+        return max(1, engine.wrapTotalRows(pane: paneIndex, cols: wrapCols))
     }
 
     /// The buffer row drawn at a y, and nil inside the inserted block — those
@@ -2865,13 +2917,36 @@ final class EditorCanvasView: NSView {
     func bufferRow(atY y: CGFloat) -> Int? {
         let lineH = max(1, EditorMetrics.lineHeight)
         guard let e = shownChange, revealProgress > 0 else {
-            return max(0, Int(floor(y / lineH)))
+            return bufferRowOfVisual(Int(floor(y / lineH)))
         }
-        let top = CGFloat(e.insertAt) * lineH
+        let top = visualY(e.insertAt)
         let openH = CGFloat(e.lines.count) * lineH * revealProgress
-        if y < top { return max(0, Int(floor(y / lineH))) }
+        if y < top { return bufferRowOfVisual(Int(floor(y / lineH))) }
         if y < top + openH { return nil }
-        return max(0, Int(floor((y - openH) / lineH)))
+        return bufferRowOfVisual(Int(floor((y - openH) / lineH)))
+    }
+
+    /// The buffer row a visual row belongs to — the identity when not wrapping.
+    func bufferRowOfVisual(_ visualRow: Int) -> Int {
+        let v = max(0, visualRow)
+        guard wrapCols > 0, let engine else { return v }
+        return engine.wrapBufferAt(pane: paneIndex, cols: wrapCols, visualRow: v).row
+    }
+
+    /// Which segment of a line the caret sits on, from the band core marked.
+    /// 0 when not wrapping, or when the band does not carry the caret.
+    func caretSegment(row: Int) -> Int {
+        guard wrapCols > 0 else { return 0 }
+        let ofRow = rows(row, row).filter { Int($0.lineNo) - 1 == row }
+        return ofRow.firstIndex(where: \.isCursor) ?? 0
+    }
+
+    /// Which segment of its line is drawn at a visual row. 0 when not wrapping.
+    func segmentOfVisual(_ visualRow: Int) -> Int {
+        guard wrapCols > 0, let engine else { return 0 }
+        return engine.wrapBufferAt(
+            pane: paneIndex, cols: wrapCols, visualRow: max(0, visualRow)
+        ).segment
     }
 
     /// Nearest buffer row to a y — for gestures that must land somewhere even
@@ -3586,15 +3661,26 @@ final class EditorCanvasView: NSView {
     private func absoluteHitUTF16(_ docPoint: CGPoint) -> (UInt32, UInt32)? {
         let lineH = max(1, EditorMetrics.lineHeight)
         let row = nearestBufferRow(atY: docPoint.y)
+        // WHICH SEGMENT of the line was clicked, not just which line. A click
+        // on the third screen row of a wrapped line resolves inside that row's
+        // text, and the offset it produces is relative to that chunk — so the
+        // chunks above it on the same line have to be added back before core,
+        // which walks the whole line, is told a position.
+        let segment = max(0, Int(floor(docPoint.y / lineH)) - visualRowOf(row))
         let band = rows(row, row)
-        guard let line = band.first(where: { Int($0.lineNo) - 1 == row && !$0.isWrapContinuation })
-        else { return nil }
+        let ofRow = band.filter { Int($0.lineNo) - 1 == row }
+        guard !ofRow.isEmpty else { return nil }
+        let at = min(segment, ofRow.count - 1)
+        let line = ofRow[at]
+        // UTF-16 length of every chunk before this one. The chunks concatenate
+        // to the line, so their lengths sum to the offset this one starts at.
+        let base = ofRow[0..<at].reduce(0) { $0 + ($1.text as NSString).length }
         let font = EditorMetrics.monospaced(EditorMetrics.fontSize, weight: .regular)
         let ct = ctLine(for: line, font: font)
         let x = docPoint.x - EditorMetrics.gutter
         let idx = CTLineGetStringIndexForPosition(ct, CGPoint(x: max(0, x), y: 0))
         guard idx != kCFNotFound else { return nil }
-        return (UInt32(row), UInt32(max(0, idx)))
+        return (UInt32(row), UInt32(max(0, base + Int(idx))))
     }
 }
 

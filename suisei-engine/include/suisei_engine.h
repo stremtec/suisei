@@ -229,9 +229,24 @@ typedef struct SuiseiBandC {
   SuiseiEditorLineC lines[SUISEI_BAND_MAX];
 } SuiseiBandC;
 
+/* `wrap_cols` = columns a wrapped row may use; 0 = do not wrap. The FACE
+   decides it — only the face knows a pane's width in points, the cell width,
+   the gutter and what overlays the right edge. A wrapped line arrives as
+   several rows sharing one line_no, continuations flagged in git_sign & 0x80. */
 uint8_t suisei_engine_editor_band(
     const SuiseiEngine *ptr, uint32_t pane, uint32_t start_row, uint32_t max_rows,
-    SuiseiBandC *out);
+    uint16_t wrap_cols, SuiseiBandC *out);
+
+/* Soft-wrap geometry for the same pane at the same columns. Cached per pane
+   against the document version, so asking all three per frame builds nothing.
+   With cols == 0 they answer as if each line were one row. */
+uint32_t suisei_engine_wrap_total_rows(const SuiseiEngine *ptr, uint32_t pane,
+                                       uint16_t cols);
+uint32_t suisei_engine_wrap_visual_of(const SuiseiEngine *ptr, uint32_t pane,
+                                      uint16_t cols, uint32_t row);
+/* Buffer row in the high 32 bits, segment within it in the low 32. */
+uint64_t suisei_engine_wrap_buffer_at(const SuiseiEngine *ptr, uint32_t pane,
+                                      uint16_t cols, uint32_t visual_row);
 
 void suisei_engine_split_resize(SuiseiEngine *e, uint32_t pane_a,
                                 uint32_t pane_b, float delta);
