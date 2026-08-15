@@ -3,20 +3,52 @@
 //!
 //! `syntax_typing_perf` in suisei-core measures the PARSE, and the parse runs
 //! on the syntax worker — it is not what makes typing feel slow. This drives
-//! the real entry point the face calls, `gui_type_char`, through the real
-//! engine with a real file open, and times the whole thing.
+//! the two entry points the face's keystrokes reach, `gui_type_char` and
+//! `dispatch_key`, through the real engine with a real file open, and times
+//! the whole thing. Called on `Engine` rather than through the C shims, which
+//! are a null check and a deref around exactly these — and calling `Engine`
+//! directly is what lets the warm-up be `flush_syntax` instead of a sleep.
 //!
 //! ```text
 //! cargo test -p suisei-engine --release --test typing_latency -- --ignored --nocapture
 //! ```
+//!
+//! The measurement used to answer a question nobody asked, in four ways:
+//!
+//! * It typed into a **cold** engine. The worker had not parsed yet, so the
+//!   run measured an editor with no tree — the one state the user never types
+//!   in for more than a moment.
+//! * Its "Return" was `gui_type_char('\n')`, which is not what Return does.
+//!   Return is a key, it goes through `dispatch_key`, and smart Return —
+//!   copying indentation, opening a body between braces — is the part with any
+//!   cost in it. The row measured the fast path being handed a newline.
+//! * It stopped at 6,000 lines. Both regressions the performance audit found
+//!   were quoted at 20,000: a completion scope walk at 28.5 ms per key, and a
+//!   bracket match that cloned the buffer at 43.6 ms.
+//! * It asserted nothing, so it could not fail. A benchmark that cannot fail
+//!   is documentation.
+//!
+//! The table is still `#[ignore]`d — a timing table is a thing you read, not a
+//! thing that passes. `typing_cost_does_not_scale_with_the_file` runs with
+//! every other test and is the part that can fail; see its comment for why it
+//! asserts a ratio rather than a millisecond count.
 
-use std::ffi::CString;
 use std::time::Instant;
+
+use suisei_engine::Engine;
+use suisei_engine::bridge::input::key_from_ffi;
+
+/// FfiKeyCode::Enter — see bridge::input.
+const CODE_ENTER: u32 = 2;
 
 fn synthetic_rust(lines_target: usize) -> String {
     let mut s = String::with_capacity(lines_target * 40);
     let mut i = 0usize;
-    while s.lines().count() < lines_target {
+    // Counted as we go. The loop condition used to be `s.lines().count()`,
+    // which rescans the whole string every iteration — quadratic, and the
+    // reason nobody had run this at a size where it says anything.
+    let mut lines = 0usize;
+    while lines < lines_target {
         s.push_str(&format!("fn compute_{i}(x: usize) -> usize {{\n"));
         s.push_str("    let mut total: usize = 0; // running sum\n");
         s.push_str("    for step in 0..x {\n");
@@ -25,6 +57,7 @@ fn synthetic_rust(lines_target: usize) -> String {
         s.push_str("    }\n");
         s.push_str("    total\n");
         s.push_str("}\n\n");
+        lines += 8;
         i += 1;
     }
     s
@@ -35,6 +68,11 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
         return 0.0;
     }
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+}
+
+fn median(mut samples: Vec<f64>) -> f64 {
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    percentile(&samples, 0.50)
 }
 
 fn report(label: &str, mut samples: Vec<f64>) {
@@ -49,55 +87,145 @@ fn report(label: &str, mut samples: Vec<f64>) {
     );
 }
 
-/// One engine with `lines` of Rust open, caret parked mid-file.
-fn measure(lines: usize, keys: usize, newlines: bool) -> Vec<f64> {
-    let dir = std::env::temp_dir().join(format!("suisei-typing-{lines}-{newlines}"));
+/// What to press.
+#[derive(Clone, Copy, PartialEq)]
+enum Keys {
+    /// Plain characters only.
+    Plain,
+    /// Every eighth key is a real Return.
+    WithReturns,
+}
+
+/// What one keystroke cost, and how much of that was the worker's snapshot.
+struct Cost {
+    per_key: Vec<f64>,
+    /// `buffer.text()` — the full-document copy `refresh_syntax` hands the
+    /// syntax worker once per buffer version, which is once per keystroke.
+    snapshot: Vec<f64>,
+}
+
+/// One engine with `lines` of Rust open, caret parked mid-file, tree warm.
+fn measure(lines: usize, keys: usize, mode: Keys) -> Cost {
+    let dir = std::env::temp_dir().join(format!("suisei-typing-{lines}-{}", mode == Keys::Plain));
+    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("big.rs");
     std::fs::write(&path, synthetic_rust(lines)).unwrap();
 
-    let e = suisei_engine::ffi::suisei_engine_new();
-    assert!(!e.is_null());
-    let c = CString::new(path.to_str().unwrap()).unwrap();
-    assert_eq!(
-        suisei_engine::ffi::suisei_engine_open_path(e, c.as_ptr()),
-        1,
-        "opened the file"
-    );
+    let mut engine = Engine::new();
+    // A viewport, so the highlight window is a window. The engine queries
+    // tokens for the rows it can show, and with no size it can show none.
+    engine.resize(1600.0, 1000.0, 18.0, 8.0, 2.0);
+    engine.app = suisei_core::app::App::open_file(path.to_str().unwrap());
 
     // Park the caret in the middle: the top of a file is the cheap case and
     // not the one being complained about.
-    let mid = (lines / 2) as u32;
-    suisei_engine::ffi::suisei_engine_scroll_to(e, mid, 0);
-    suisei_engine::ffi::suisei_engine_click_utf16(e, mid, 0, 0);
-    suisei_engine::ffi::suisei_engine_gui_ensure_insert(e);
+    let mid = lines / 2;
+    let at = suisei_core::buffer::Position { row: mid, col: 0 };
+    engine.app.buffer.cursor = at;
+    engine.app.sel = suisei_core::selection::SelectionSet::single(
+        suisei_core::selection::Selection::caret(at),
+    );
+    engine.app.scroll = mid.saturating_sub(10);
+
+    // WAIT FOR THE TREE. The worker parses off the main thread, and until its
+    // first frame lands the engine is highlighting nothing — cheaper than the
+    // steady state, and not a state anyone types in for more than a moment.
+    // `flush_syntax` is the same warm-up the colour tests use, and it panics
+    // rather than quietly measuring a cold engine.
+    engine.flush_syntax();
 
     let mut out = Vec::with_capacity(keys);
     for k in 0..keys {
-        let ch: u32 = if newlines && k % 8 == 7 {
-            '\n' as u32
-        } else {
-            'x' as u32
-        };
+        let returns = mode == Keys::WithReturns && k % 8 == 7;
         let t = Instant::now();
-        suisei_engine::ffi::suisei_engine_gui_type_char(e, ch);
+        if returns {
+            // The real Return. `gui_type_char('\n')` reaches the typing fast
+            // path with a newline in it and skips smart Return entirely, so it
+            // measured neither what Return does nor what it costs.
+            engine.dispatch_key(key_from_ffi(CODE_ENTER, 0, 0, 0).expect("Enter"));
+        } else {
+            engine.gui_type_char('x');
+        }
         out.push(t.elapsed().as_secs_f64() * 1000.0);
     }
-    suisei_engine::ffi::suisei_engine_free(e);
+
+    let mut snapshot = Vec::with_capacity(keys);
+    for _ in 0..keys {
+        let t = Instant::now();
+        let text = engine.app.buffer.text();
+        snapshot.push(t.elapsed().as_secs_f64() * 1000.0);
+        drop(text);
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
-    out
+    Cost {
+        per_key: out,
+        snapshot,
+    }
 }
 
 #[test]
 #[ignore = "measurement, not an assertion"]
 fn per_keystroke_main_thread_cost() {
     println!();
-    println!("=== per-keystroke MAIN THREAD cost (gui_type_char end to end) ===");
-    for lines in [500usize, 1500, 3000, 6000] {
-        report(&format!("{lines} lines · plain typing"), measure(lines, 60, false));
+    println!("=== per-keystroke MAIN THREAD cost (warm tree, real Return) ===");
+    for lines in [500usize, 1500, 3000, 6000, 20000] {
+        let cost = measure(lines, 60, Keys::Plain);
+        report(&format!("{lines} lines · plain typing"), cost.per_key);
+        report(&format!("{lines} lines ·   of which snapshot"), cost.snapshot);
     }
-    report("6000 lines · every 8th key is Return", measure(6000, 60, true));
+    let ret = measure(20000, 60, Keys::WithReturns);
+    report("20000 lines · every 8th key is Return", ret.per_key);
     println!();
-    println!("Budget: one 60fps frame is 16.7ms, and layout and paint come after this.");
+    println!("Budget: one 120fps frame is 8.3ms, and layout and paint come after this.");
     println!();
+}
+
+/// A keystroke's cost must not follow the size of the file — beyond the one
+/// place it deliberately does.
+///
+/// A ratio rather than a millisecond ceiling. This runs unoptimised in the
+/// ordinary `cargo test` pass, on whatever machine happens to be running it,
+/// beside other tests competing for the same cores; an absolute budget would
+/// have to be set so loose that it caught nothing, and the number that would
+/// catch something is the number that makes the suite flaky.
+///
+/// **The snapshot is subtracted, and that is the interesting part.**
+/// `refresh_syntax` hands the syntax worker a full text snapshot per buffer
+/// version, which is once per keystroke, and that copy is O(file) on purpose:
+/// the parse is asynchronous, so what it parses has to be a snapshot that will
+/// not move underneath it. At 20,000 lines it is 1.5 ms of the 1.9 ms a key
+/// costs here — so a raw large-versus-small ratio measures that copy and
+/// almost nothing else, and would go on passing while a genuine O(file) pass
+/// was added next to it.
+///
+/// What is left is what this pins. Every regression the performance audit
+/// found had the same shape — a per-keystroke pass over the whole document: a
+/// completion scope walk, a bracket match that cloned the buffer, and (found
+/// by this test, once it was fixed enough to say anything) a scope walk that
+/// built a `ScopeSymbol` for all 2,500 of a file's globals to show eight.
+/// Ten times the file gives about ten times the cost when one of those is
+/// present, and about the same cost when none is.
+#[test]
+fn typing_cost_does_not_scale_with_the_file() {
+    let small = measure(2_000, 40, Keys::Plain);
+    let large = measure(20_000, 40, Keys::Plain);
+
+    let small_ms = median(small.per_key) - median(small.snapshot);
+    let large_ms = median(large.per_key) - median(large.snapshot);
+
+    // Both are well under a tenth of a millisecond when nothing is wrong, and
+    // a ratio of two numbers that small is mostly timer noise. The floor keeps
+    // the comparison meaningful without weakening it: anything O(file) at
+    // 20,000 lines lands far above it.
+    let floor = 0.05_f64;
+    let ratio = large_ms.max(floor) / small_ms.max(floor);
+    assert!(
+        ratio < 4.0,
+        "a keystroke got {ratio:.1}x more expensive for a 10x bigger file \
+         ({small_ms:.3}ms at 2k lines, {large_ms:.3}ms at 20k, both with the \
+         worker snapshot taken out) — something is walking the whole document \
+         on every key again"
+    );
 }

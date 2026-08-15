@@ -93,12 +93,12 @@ fn where_the_scope_walk_spends_its_time() {
     // typing path does now. `tree_gen` is constant here because the tree is:
     // in the app it advances only when the worker delivers a new parse.
     let mut cache = GlobalScopeCache::default();
-    let _ = scope::visible_at_cached(tree, text, byte, lang, &mut cache, 1);
+    let _ = scope::visible_at_cached(tree, text, byte, lang, &mut cache, 1, "");
     let mut cached = Vec::new();
     for i in 0..8 {
         let b = text[..byte - i * 97].rfind("individual_item").unwrap_or(byte);
         let t = Instant::now();
-        let syms = scope::visible_at_cached(tree, text, b, lang, &mut cache, 1);
+        let syms = scope::visible_at_cached(tree, text, b, lang, &mut cache, 1, "");
         cached.push((t.elapsed().as_secs_f64() * 1000.0, syms.len()));
     }
     let cached_mean: f64 = cached.iter().map(|s| s.0).sum::<f64>() / cached.len() as f64;
@@ -115,14 +115,14 @@ fn where_the_scope_walk_spends_its_time() {
     // The cache must not change the ANSWER, only its cost.
     let plain = scope::visible_at(tree, text, byte, lang);
     let mut c2 = GlobalScopeCache::default();
-    let via_cache = scope::visible_at_cached(tree, text, byte, lang, &mut c2, 1);
+    let via_cache = scope::visible_at_cached(tree, text, byte, lang, &mut c2, 1, "");
     assert_eq!(
         plain.iter().map(|s| &s.name).collect::<Vec<_>>(),
         via_cache.iter().map(|s| &s.name).collect::<Vec<_>>(),
         "the cached walk returned a different symbol list"
     );
     // …and a new tree generation must be noticed rather than served stale.
-    let refreshed = scope::visible_at_cached(tree, text, byte, lang, &mut c2, 2);
+    let refreshed = scope::visible_at_cached(tree, text, byte, lang, &mut c2, 2, "");
     assert_eq!(refreshed.len(), plain.len(), "a new generation was not recollected");
 
     // Not an assertion on the number — this is a measurement, and a threshold

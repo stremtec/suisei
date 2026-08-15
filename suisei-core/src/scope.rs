@@ -755,6 +755,10 @@ pub struct GlobalScopeCache {
     tree_gen: u64,
     /// `None` distinguishes "not yet computed" from "computed, and empty".
     symbols: Option<Vec<Found>>,
+    /// Byte offset of every line start in the tree's own text, and which text
+    /// that was. See [`Self::byte_of`].
+    line_starts: Vec<usize>,
+    line_key: Option<(u64, usize)>,
 }
 
 impl GlobalScopeCache {
@@ -775,6 +779,49 @@ impl GlobalScopeCache {
     pub fn invalidate(&mut self) {
         self.symbols = None;
     }
+
+    /// Byte offset of `row`/`col` in `src`, or `None` when `row` is past its
+    /// end — which means the tree is behind the buffer and the caller should
+    /// not ask this tree about the caret at all.
+    ///
+    /// The caller walked `src.lines()` from the top of the file to find this,
+    /// on every keystroke. That is the O(file) scan the completion path's own
+    /// comment names as half of the 28.5 ms per key it was measured at — and
+    /// the fix that comment describes only covers the case where the popup is
+    /// already up. Typing the first two characters of any identifier, or
+    /// deleting back to a shorter prefix, still walked. Measured 2.67 ms per
+    /// key at 20,000 lines against 0.32 ms at 2,000, in an unoptimised build:
+    /// ten times the file, eight times the cost.
+    ///
+    /// Keyed on the tree, because the text and the tree move together — see
+    /// `SyntaxEngine::live_tree` — so this is built a few times a second
+    /// instead of a few times a keystroke. The length is in the key as well,
+    /// which costs nothing and does not rely on that invariant holding.
+    pub fn byte_of(&mut self, src: &str, tree_gen: u64, row: usize, col: usize) -> Option<usize> {
+        if self.line_key != Some((tree_gen, src.len())) {
+            self.line_starts.clear();
+            if !src.is_empty() {
+                self.line_starts.push(0);
+                // `str::lines` yields no final empty line for a text that ends
+                // in a newline, and this has to agree with it: the caller's
+                // "row past the end" answer is what stops a stale tree from
+                // being asked about a caret it cannot place.
+                for (i, _) in src.match_indices('\n') {
+                    if i + 1 < src.len() {
+                        self.line_starts.push(i + 1);
+                    }
+                }
+            }
+            self.line_key = Some((tree_gen, src.len()));
+        }
+        let start = *self.line_starts.get(row)?;
+        let end = match self.line_starts.get(row + 1) {
+            Some(next) => next - 1,
+            None => src.len(),
+        };
+        let line = src[start..end].trim_end_matches('\n');
+        Some(start + line.char_indices().nth(col).map_or(line.len(), |(b, _)| b))
+    }
 }
 
 /// `visible_at`, reusing the global scope's symbols when the tree has not
@@ -786,12 +833,32 @@ pub fn visible_at_cached(
     lang: ScopeLang,
     cache: &mut GlobalScopeCache,
     tree_gen: u64,
+    prefix: &str,
 ) -> Vec<ScopeSymbol> {
-    visible_at_inner(tree, src, byte, lang, Some((cache, tree_gen)))
+    visible_at_inner(tree, src, byte, lang, Some((cache, tree_gen)), prefix)
 }
 
 pub fn visible_at(tree: &Tree, src: &str, byte: usize, lang: ScopeLang) -> Vec<ScopeSymbol> {
-    visible_at_inner(tree, src, byte, lang, None)
+    visible_at_inner(tree, src, byte, lang, None, "")
+}
+
+/// Cheap, deliberately permissive prefix test.
+///
+/// [`crate::completion::Completions::activate_with`] does the authoritative
+/// filtering, lowercasing both sides in full. This one exists only to avoid
+/// BUILDING a symbol that cannot survive that, so it is allowed to keep too
+/// many and never allowed to drop one — anything non-ASCII is kept rather than
+/// reasoned about, and an empty prefix keeps everything.
+///
+/// Without it the walk built a `ScopeSymbol` for every visible name on every
+/// keystroke, which in a 20,000-line file is about 2,500 allocations to show
+/// eight suggestions.
+fn may_match(name: &str, prefix: &str) -> bool {
+    if prefix.is_empty() || !prefix.is_ascii() || !name.is_ascii() {
+        return true;
+    }
+    name.len() >= prefix.len()
+        && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 
 fn visible_at_inner(
@@ -800,6 +867,7 @@ fn visible_at_inner(
     byte: usize,
     lang: ScopeLang,
     mut cache: Option<(&mut GlobalScopeCache, u64)>,
+    prefix: &str,
 ) -> Vec<ScopeSymbol> {
     let root = tree.root_node();
     let byte = byte.min(src.len());
@@ -853,24 +921,26 @@ fn visible_at_inner(
         // Only the global scope is worth caching, and it is the only one that
         // can be: an inner scope is identified by its node, which does not
         // survive a reparse, while the outermost one is just "the file".
-        let found: Vec<Found> = match (global, cache.as_mut()) {
+        // Borrowed, not cloned. The cache was doing its job — collecting the
+        // globals once per tree — and then handing back a copy of the whole
+        // list on every keystroke, which for a file with 2,500 top-level items
+        // is 2,500 `String` clones to answer one key.
+        let mut walked: Vec<Found> = Vec::new();
+        let found: &[Found] = match (global, cache.as_mut()) {
             (true, Some((c, wanted))) => {
                 if c.tree_gen != *wanted {
                     c.tree_gen = *wanted;
                     c.symbols = None;
                 }
-                c.symbols
-                    .get_or_insert_with(|| {
-                        let mut v = Vec::new();
-                        collect_in_scope(*scope, src, lang, *scope, &mut v);
-                        v
-                    })
-                    .clone()
+                c.symbols.get_or_insert_with(|| {
+                    let mut v = Vec::new();
+                    collect_in_scope(*scope, src, lang, *scope, &mut v);
+                    v
+                })
             }
             _ => {
-                let mut v = Vec::new();
-                collect_in_scope(*scope, src, lang, *scope, &mut v);
-                v
+                collect_in_scope(*scope, src, lang, *scope, &mut walked);
+                &walked
             }
         };
         // A function declared directly in a type's body is a method. Only
@@ -878,19 +948,23 @@ fn visible_at_inner(
         // said `method_definition` in their table.
         let methods_here = lang.method_owner_kinds().contains(&scope.kind());
         for (name, kind, ty) in found {
-            if name.is_empty() || seen.contains(&name) {
+            // The prefix test comes before the allocations, which is the whole
+            // reason it is here rather than only in `activate_with`. It depends
+            // on the NAME alone, so an inner binding and the outer one it
+            // shadows always agree about it and `seen` still shadows correctly.
+            if name.is_empty() || !may_match(name, prefix) || seen.contains(name.as_str()) {
                 continue;
             }
-            let kind = if methods_here && kind == SymbolKind::Function {
+            let kind = if methods_here && *kind == SymbolKind::Function {
                 SymbolKind::Method
             } else {
-                kind
+                *kind
             };
             seen.insert(name.clone());
             out.push(ScopeSymbol {
-                name,
+                name: name.clone(),
                 kind,
-                ty,
+                ty: ty.clone(),
                 global,
                 depth,
             });
@@ -1230,4 +1304,112 @@ fn innermost_declarator_name(node: Node, src: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod prefix_filter_tests {
+    use super::*;
+
+    /// `activate_with`'s rule, which is the one that decides what the user
+    /// sees. `may_match` is allowed to be looser and never tighter.
+    fn activate_would_keep(name: &str, prefix: &str) -> bool {
+        name.to_lowercase().starts_with(&prefix.to_lowercase())
+    }
+
+    #[test]
+    fn the_cheap_filter_never_drops_what_the_real_one_keeps() {
+        let names = [
+            "value", "Value", "VALUE", "val", "v", "", "이름", "vaLUEs", "ßtraße", "İstanbul",
+            "naïve", "x",
+        ];
+        let prefixes = ["", "v", "va", "VA", "Val", "이", "ß", "i", "zzz"];
+        for name in names {
+            for prefix in prefixes {
+                if activate_would_keep(name, prefix) {
+                    assert!(
+                        may_match(name, prefix),
+                        "may_match dropped {name:?} for prefix {prefix:?}, \
+                         which activate_with would have shown"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And it has to actually filter, or it is just a slower `true`.
+    #[test]
+    fn the_cheap_filter_still_rejects_the_common_case() {
+        assert!(!may_match("compute_1200", "val"));
+        assert!(!may_match("no", "nope"), "shorter than the prefix");
+        assert!(may_match("Value", "val"), "case-insensitive, like the real one");
+        assert!(may_match("anything", ""), "an empty prefix keeps everything");
+    }
+}
+
+#[cfg(test)]
+mod line_index_tests {
+    use super::*;
+
+    /// The walk this replaced, verbatim, as the oracle.
+    ///
+    /// An index is only worth having if it answers what the scan answered, and
+    /// the interesting cases are all at the edges: an empty file, a file with
+    /// no trailing newline, a column past the end of its line, and a row past
+    /// the end of the text — the last of which is how a stale tree declines to
+    /// place a caret at all.
+    fn by_walking(src: &str, row: usize, col: usize) -> Option<usize> {
+        let mut byte = 0usize;
+        for (i, line) in src.lines().enumerate() {
+            if i == row {
+                return Some(
+                    byte + line
+                        .char_indices()
+                        .nth(col)
+                        .map(|(b, _)| b)
+                        .unwrap_or(line.len()),
+                );
+            }
+            byte += line.len() + 1;
+        }
+        None
+    }
+
+    #[test]
+    fn the_line_index_answers_what_the_walk_answered() {
+        let texts = [
+            "",
+            "one",
+            "one\n",
+            "one\ntwo",
+            "one\ntwo\n",
+            "\n\n\n",
+            "fn main() {\n    let x = 1;\n}\n",
+            // Multi-byte, because a byte offset is not a column.
+            "let 이름 = 1;\nlet b = 2;\n",
+        ];
+        let mut cache = GlobalScopeCache::default();
+        for (t, src) in texts.iter().enumerate() {
+            for row in 0..5 {
+                for col in 0..6 {
+                    assert_eq!(
+                        cache.byte_of(src, t as u64, row, col),
+                        by_walking(src, row, col),
+                        "text {src:?} at row {row} col {col}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A new tree rebuilds the index; the same tree reuses it. Both directions
+    /// matter — the first is correctness, the second is the whole point.
+    #[test]
+    fn the_index_follows_the_tree_it_was_built_for() {
+        let mut cache = GlobalScopeCache::default();
+        assert_eq!(cache.byte_of("one\ntwo\n", 1, 1, 0), Some(4));
+        // Same generation, same answer, and no rebuild happened.
+        assert_eq!(cache.byte_of("one\ntwo\n", 1, 1, 0), Some(4));
+        // A different tree, and a text whose second line starts elsewhere.
+        assert_eq!(cache.byte_of("a\ntwo\n", 2, 1, 0), Some(2));
+    }
 }

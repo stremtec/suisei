@@ -584,7 +584,7 @@ impl App {
         }
         let ext = self.file_extension();
         let t_scope = std::time::Instant::now();
-        let symbols = self.symbols_in_scope_at_caret();
+        let symbols = self.symbols_in_scope_at_caret(&prefix);
         self.completions.last_scope_us = t_scope.elapsed().as_micros() as u32;
         self.completions
             .activate_with(&prefix, ext.as_deref(), &symbols);
@@ -608,7 +608,11 @@ impl App {
     /// scope here: the indexer has their trees, but "every identifier in the
     /// project" is a different feature with a different ranking problem, and it
     /// is not what lexical visibility means.
-    fn symbols_in_scope_at_caret(&mut self) -> Vec<crate::scope::ScopeSymbol> {
+    ///
+    /// `prefix` is passed down so the walk can skip building a symbol that
+    /// cannot match it. `activate_with` still does the authoritative filtering
+    /// — this only stops the list being 2,500 entries long on its way there.
+    fn symbols_in_scope_at_caret(&mut self, prefix: &str) -> Vec<crate::scope::ScopeSymbol> {
         let Some(lang) = crate::scope::ScopeLang::from_ext(self.syntax.live_ext()) else {
             return Vec::new();
         };
@@ -627,22 +631,16 @@ impl App {
         // the scope of one position against the prefix of another, which is a
         // wrong answer that still looks plausible.
         let cursor = self.sel.primary().head;
-        let mut byte = 0usize;
-        for (i, line) in text.lines().enumerate() {
-            if i == cursor.row {
-                byte += line
-                    .char_indices()
-                    .nth(cursor.col)
-                    .map(|(b, _)| b)
-                    .unwrap_or(line.len());
-                return crate::scope::visible_at_cached(
-                    tree, text, byte, lang, cache, tree_gen,
-                );
-            }
-            byte += line.len() + 1;
-        }
-        // Caret past the tree's last line: the tree is behind the buffer.
-        Vec::new()
+        // Through the cache's line index, not by walking the file. This used to
+        // scan `text.lines()` from the top on every keystroke — with the caret
+        // mid-file that is half the document per key, and it is half of what
+        // the comment above measured at 28.5 ms. `None` is the same answer the
+        // walk gave by falling off its end: the caret is past the tree's last
+        // line, so the tree is behind the buffer and cannot place it.
+        let Some(byte) = cache.byte_of(text, tree_gen, cursor.row, cursor.col) else {
+            return Vec::new();
+        };
+        crate::scope::visible_at_cached(tree, text, byte, lang, cache, tree_gen, prefix)
     }
 
     fn request_lsp_completions(&mut self) {
