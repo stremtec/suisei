@@ -348,6 +348,18 @@ pub static OCEAN: Theme = Theme {
 
 // ── CATPPUCCIN — Mocha, from the published palette ──
 //
+// `bg` is base, the same as `editor_bg`, and that is deliberate. Nine of the
+// palettes here set the two identically; the window floor IS the primary
+// surface, and mantle's job is the SECONDARY ones — the navigator, the status
+// bar, panels — which is where it is used below and what upstream Catppuccin
+// does with it too.
+//
+// It was mantle, and that is the one palette in this file where the difference
+// is visible: Light and Dark also separate them, by 6 and 9 levels, but in
+// near-white and near-black where the eye does not read the step. The same 9
+// levels in a mid-value violet does read, as a seam along every edge where the
+// titlebar and the shell meet the document.
+//
 // The named colours are Catppuccin Mocha as specified, not eyeballed:
 //   base #1E1E2E  mantle #181825  crust #11111B  surface0 #313244
 //   surface1 #45475A  overlay0 #6C7086  text #CDD6F4  subtext0 #A6ADC8
@@ -359,7 +371,7 @@ pub static OCEAN: Theme = Theme {
 // green for strings, peach for numbers, yellow for types, blue for functions.
 pub static CATPPUCCIN: Theme = Theme {
     name: "catppuccin",
-    bg: rgb(24, 24, 37),
+    bg: rgb(30, 30, 46),
     fg: rgb(205, 214, 244),
     keyword: rgb(203, 166, 247),
     string: rgb(166, 227, 161),

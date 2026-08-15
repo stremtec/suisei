@@ -99,6 +99,7 @@ enum WindowChrome {
 
         if opaque {
             clearTitlebarMaterial(in: window)
+            dumpTitlebar(window)
         }
     }
 
@@ -136,6 +137,50 @@ enum WindowChrome {
             // which may re-lay it out, and a hidden view it still owns survives
             // that where a removed one would be recreated.
             hideEffectViews(in: view)
+        }
+    }
+
+    /// Print the titlebar's view tree once, with what each layer is actually
+    /// filled with. `SUISEI_DIAG=titlebar`.
+    ///
+    /// Three attempts at the top band have now been made from screenshots, and
+    /// the thing that decides between them is not visible in one: whether the
+    /// band is an effect view that was missed, a layer with a colour of its
+    /// own, or the content showing through correctly and simply being a colour
+    /// nobody expected. Those are three different fixes.
+    private nonisolated(unsafe) static var dumpedTitlebar = false
+
+    static func dumpTitlebar(_ window: NSWindow) {
+        guard !dumpedTitlebar,
+              ProcessInfo.processInfo.environment["SUISEI_DIAG"]?
+                  .lowercased().contains("titlebar") == true,
+              let frameView = window.contentView?.superview else { return }
+        dumpedTitlebar = true
+
+        func walk(_ v: NSView, _ depth: Int) {
+            let name = String(describing: type(of: v))
+            let pad = String(repeating: "  ", count: depth)
+            var note = "frame=\(v.frame.integral)"
+            if v.isHidden { note += " HIDDEN" }
+            if let cg = v.layer?.backgroundColor,
+               let c = NSColor(cgColor: cg)?.usingColorSpace(.sRGB) {
+                note += String(
+                    format: " layer=#%02X%02X%02X α%.2f",
+                    Int(c.redComponent * 255), Int(c.greenComponent * 255),
+                    Int(c.blueComponent * 255), c.alphaComponent
+                )
+            }
+            if let e = v as? NSVisualEffectView {
+                note += " EFFECT material=\(e.material.rawValue) state=\(e.state.rawValue)"
+            }
+            NSLog("[suisei/titlebar] \(pad)\(name) \(note)")
+            for child in v.subviews { walk(child, depth + 1) }
+        }
+
+        NSLog("[suisei/titlebar] window bg=\(window.backgroundColor) opaque=\(window.isOpaque)")
+        for v in frameView.subviews
+        where String(describing: type(of: v)).contains("Titlebar") {
+            walk(v, 0)
         }
     }
 

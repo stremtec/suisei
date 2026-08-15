@@ -514,6 +514,31 @@ fn an_override_still_reaches_a_named_palette() {
     assert_eq!((painted.accent.r, painted.accent.g, painted.accent.b), (0, 255, 0));
 }
 
+/// The window's floor and the editor's surface must not be visibly different.
+///
+/// They are separate fields because a palette may want a quiet elevation step,
+/// and Light and Dark take one — but the titlebar is transparent and shows the
+/// document through it, so any gap between these two draws a seam along every
+/// edge where the shell meets the editor.
+///
+/// Nine of the palettes set them identically. Catppuccin used mantle for the
+/// floor, which is upstream-correct as a colour and wrong as a floor: the same
+/// 9 levels that vanish in Dark's near-black are plainly visible in a mid-value
+/// violet. The bound is on PERCEIVED difference rather than on equality, so a
+/// palette that wants Dark's elevation ramp can still have it.
+#[test]
+fn the_floor_and_the_editor_surface_do_not_show_a_seam() {
+    for t in theme::all_themes() {
+        let ratio = theme::contrast_ratio(t.bg, t.editor_bg);
+        assert!(
+            ratio < 1.20,
+            "{}: the window floor and the editor surface differ enough to read \
+             as a seam under the transparent titlebar (contrast {ratio:.3})",
+            t.name
+        );
+    }
+}
+
 /// Garbage from the face is refused rather than stored.
 #[test]
 fn the_panel_refuses_a_value_that_is_not_a_colour() {
