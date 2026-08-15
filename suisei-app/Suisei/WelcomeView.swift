@@ -42,10 +42,21 @@ struct WelcomeView: View {
     /// the same while the work moves down.
     var bootStages: [BootStage] = []
 
-    /// Slightly wider than the old Xcode sheet so the art panel can breathe.
-    static let windowSize = NSSize(width: 860, height: 500)
-    /// Control column share — art gets the majority (AE-style).
-    static let controlSplit: CGFloat = 0.40
+    /// Three columns now, so the width is the sum of them rather than a ratio.
+    ///
+    /// Recents used to sit UNDER the four action buttons in a 344pt rail, which
+    /// left it roughly 200pt tall and one line wide — a list of paths is the
+    /// one thing on this window that needs width, and it had the least. The
+    /// rail and the art keep their exact previous widths; the window grew
+    /// horizontally by the new column and by nothing else, so nothing that was
+    /// laid out before has moved.
+    static let controlWidth: CGFloat = 344
+    static let recentsWidth: CGFloat = 316
+    static let artWidth: CGFloat = 516
+    static let windowSize = NSSize(
+        width: controlWidth + recentsWidth + artWidth,
+        height: 500
+    )
     /// Welcome is borderless, so it cuts its own corner — and it has to match a
     /// real window sitting next to it. Same source as every other surface that
     /// lines up with a window edge.
@@ -79,14 +90,27 @@ struct WelcomeView: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             GeometryReader { geo in
-                let artW = geo.size.width * (1 - Self.controlSplit)
                 HStack(spacing: 0) {
                     controlColumn
-                        .frame(width: geo.size.width * Self.controlSplit, height: geo.size.height)
+                        .frame(width: Self.controlWidth, height: geo.size.height)
                         .background(controlBg)
 
+                    // Recents gets its own column, on the same rail surface —
+                    // a hairline separates them rather than a change of
+                    // material, so the left of this window still reads as one
+                    // panel with two jobs.
+                    recentsColumn
+                        .frame(width: Self.recentsWidth, height: geo.size.height)
+                        .background(controlBg)
+                        .overlay(alignment: .leading) {
+                            Rectangle().fill(hairline).frame(width: 1)
+                        }
+
                     artPanel
-                        .frame(width: artW, height: geo.size.height)
+                        .frame(
+                            width: max(0, geo.size.width - Self.controlWidth - Self.recentsWidth),
+                            height: geo.size.height
+                        )
                         // Soft bleed of the control rail into the art so the
                         // seam is a dissolve, not a hard cut.
                         .overlay(alignment: .leading) {
@@ -199,19 +223,13 @@ struct WelcomeView: View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer().frame(height: 40)
 
-            // Type-only lockup — Gondens (tall condensed display). DEMO only
-            // ships A–Z/a–z, so the version line stays on the system face.
+            // Type-only lockup — Milker. It carries A–Z/a–z only, so the
+            // version and legal lines stay on the system face.
             VStack(alignment: .leading, spacing: 0) {
                 Text("Suisei")
                     .font(brandWordmarkFont)
                     .foregroundStyle(Color.white)
-                    // Condensed faces want a hair of positive tracking so
-                    // stems do not fuse at display size.
-                    .tracking(0.4)
-                // Tall fonts overshoot the line box; clip nothing, just
-                // reclaim the excess leading below the wordmark.
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+                    .lineLimit(1)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("© 2025–2026 Stemtec. All rights reserved.")
                         .font(.system(size: 10, weight: .regular, design: .default))
@@ -250,7 +268,22 @@ struct WelcomeView: View {
         }
     }
 
-    /// Launch actions + recents — revealed together once boot is `ready`.
+    /// The recents column, revealed on the same beat as the actions.
+    ///
+    /// It reads `ready` itself rather than being handed it, because it no
+    /// longer shares a ZStack with the boot line — the loading state belongs to
+    /// the rail, and a second spinner over here would say the same thing twice.
+    private var recentsColumn: some View {
+        recentsSection
+            .padding(.top, 40)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .opacity(ready ? 1 : 0)
+            .offset(y: ready ? 0 : 10)
+            .allowsHitTesting(ready)
+            .animation(.smooth(duration: 0.55), value: ready)
+    }
+
+    /// Launch actions — revealed once boot is `ready`.
     private var actionsAndRecents: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(spacing: 8) {
@@ -263,17 +296,7 @@ struct WelcomeView: View {
                 welcomeButton(systemImage: "folder", title: "Open Existing Project…", action: onOpen)
             }
             .padding(.horizontal, 22)
-
-            Spacer().frame(height: 22)
-            Rectangle()
-                .fill(hairline)
-                .frame(height: 1)
-                .padding(.horizontal, 22)
-
-            // Recents live under the actions so the art panel stays pure.
-            recentsSection
-                .padding(.top, 14)
-                .frame(maxHeight: .infinity, alignment: .top)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
     }
 
@@ -296,25 +319,33 @@ struct WelcomeView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Tall condensed display face (Gondens). Registered from
-    /// `Resources/Fonts` via `ATSApplicationFontsPath` + a runtime register
-    /// so first launch before the system font cache settles still works.
+    /// The wordmark face — **Milker**, registered from `Resources/Fonts` via
+    /// `ATSApplicationFontsPath` plus a runtime register, so a first launch
+    /// before the system font cache settles still works.
+    ///
+    /// It replaces Gondens, and the reason is measurable rather than a matter
+    /// of taste. Gondens at 44pt reports a line height of **103.4pt** — its box
+    /// is 2.35× its point size — so drawing a 44pt wordmark reserved 103pt of
+    /// column and the layout below it had to be nudged back up. Milker at 44pt
+    /// reports 42.5. That single number is what "the font is vertically long"
+    /// was, and it is why the workarounds around this call site (a
+    /// `minimumScaleFactor`, a note about reclaiming excess leading) are gone
+    /// with it.
+    ///
+    /// Milker is also wider — 155pt against Gondens' 113 at the same size — and
+    /// the rail has 302pt of usable width, so the mark can be set larger
+    /// instead of smaller: 52pt measures ~183pt wide and ~50pt tall.
+    private static let wordmarkSize: CGFloat = 52
+
     private var brandWordmarkFont: Font {
         WelcomeFonts.registerIfNeeded()
-        // PostScript name from the OTF; family name as fallback.
-        if let face = NSFont(name: "GondensDEMO-Regular", size: 44)
-            ?? NSFont(name: "Gondens DEMO", size: 44)
-            ?? NSFont(name: "Gondens DEMO Regular", size: 44)
+        // PostScript name from the OTF, family name as the fallback.
+        if let face = NSFont(name: "MilkerRegular", size: Self.wordmarkSize)
+            ?? NSFont(name: "Milker", size: Self.wordmarkSize)
         {
             return Font(face)
         }
-        // System stand-in: condensed black is the closest built-in tall stack.
-        if let cond = NSFont(name: "AvenirNextCondensed-Heavy", size: 42)
-            ?? NSFont(name: "Avenir Next Condensed Heavy", size: 42)
-        {
-            return Font(cond)
-        }
-        return .system(size: 42, weight: .black, design: .default)
+        return .system(size: Self.wordmarkSize, weight: .heavy, design: .rounded)
     }
 
     // MARK: - Right art panel
@@ -418,14 +449,14 @@ struct WelcomeView: View {
             Text("Recents")
                 .font(.system(size: 11, weight: .semibold, design: .default))
                 .foregroundStyle(muted)
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 20)
                 .padding(.bottom, 8)
 
             if recents.isEmpty {
                 Text("No Recent Projects")
                     .font(.system(size: 12, weight: .regular))
                     .foregroundStyle(muted.opacity(0.75))
-                    .padding(.horizontal, 28)
+                    .padding(.horizontal, 20)
                     .padding(.top, 4)
             } else {
                 ScrollView {
