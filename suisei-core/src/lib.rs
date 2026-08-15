@@ -46,6 +46,7 @@ pub mod theme;
 pub mod undo;
 pub mod update;
 pub mod workspace_search;
+pub mod wrap;
 
 pub mod app;
 pub mod dispatch;

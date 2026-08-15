@@ -408,6 +408,14 @@ pub struct App {
     /// under the user's hand. So it only grows, and resets when the document
     /// does. See [`App::max_hscroll`].
     pub(crate) content_width: usize,
+    /// Soft-wrap row map for the live document, rebuilt when the document or
+    /// the wrap width changes. See [`crate::wrap`].
+    ///
+    /// A `RefCell` because every question the face asks about it arrives
+    /// through a `&self` getter — the map is a cache of the buffer, not a fact
+    /// about it, and making the getters `&mut` would put a write lock on the
+    /// paint path for something that is pure derivation.
+    pub(crate) wrap_map: std::cell::RefCell<crate::wrap::WrapMap>,
     /// Fingerprint of the text as it stands on disk (at load, and after each
     /// save). `modified` is a one-way latch — set by every edit, cleared only
     /// by a save — so undoing back to the original state left the file marked
@@ -683,6 +691,7 @@ impl Default for App {
             dirty_checked_version: 0,
             dirty_needs_recheck: false,
             content_width: 0,
+            wrap_map: std::cell::RefCell::new(crate::wrap::WrapMap::default()),
         };
         // The first pane shows the first tab — pane slots name documents
         // by id, and `BufferId::default()` names nothing.
@@ -696,18 +705,11 @@ impl Default for App {
 /// Display columns a line occupies: tabs advance to the next stop, wide glyphs
 /// (CJK, emoji) take two cells. Matches what the editor actually paints, so a
 /// scroll clamp derived from it lands on the last glyph rather than near it.
-fn display_width(line: &str, tab_width: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
-    let mut col = 0usize;
-    for ch in line.chars() {
-        col += if ch == '\t' {
-            tab_width - (col % tab_width)
-        } else {
-            ch.width().unwrap_or(0)
-        };
-    }
-    col
-}
+///
+/// Lives in [`crate::wrap`], which measures the same thing to decide where a
+/// line breaks. Two copies would let the wrap point and the horizontal extent
+/// disagree about where a line ends.
+use crate::wrap::display_columns as display_width;
 
 /// `text_hash("")` — the clean fingerprint of a brand-new empty buffer. A
 /// literal so `App::default()` stays a plain struct expression.
@@ -3907,6 +3909,26 @@ impl App {
         self.content_cols().saturating_sub(width).saturating_add(1)
     }
 
+    /// The live document's wrap map at `cols` columns, built if the cached one
+    /// no longer describes the document.
+    ///
+    /// `cols == 0` means wrapping is off, and produces the identity map — one
+    /// visual row per line — so the face has one code path either way.
+    ///
+    /// The columns are the FACE's number. It knows the pane width in points,
+    /// the cell width, the gutter and whatever overlays the right edge; core
+    /// knows what a line measures. Neither can answer alone, and this is the
+    /// seam.
+    pub fn wrap_map(&self, cols: u16) -> std::cell::Ref<'_, crate::wrap::WrapMap> {
+        let version = self.buffer.version();
+        let tab = self.tab_width.max(1).min(u16::MAX as usize) as u16;
+        if !self.wrap_map.borrow().is_valid_for(version, cols, tab) {
+            *self.wrap_map.borrow_mut() =
+                crate::wrap::WrapMap::build(self.buffer.lines(), version, cols, tab);
+        }
+        self.wrap_map.borrow()
+    }
+
     /// Width of the document in display columns, as [`App::content_width`]
     /// defines it: raised by whatever is on screen now, never lowered.
     pub fn content_cols(&mut self) -> usize {
@@ -6132,6 +6154,36 @@ mod tests {
         // A stray confirm now does nothing.
         app.confirm_close_pane_terminal(true);
         assert!(app.tabs.buffers.iter().any(|t| t.id == ids[1]));
+    }
+
+    /// The wrap map is derived from the document, so asking twice must not
+    /// build twice — and editing must not hand back the old shape.
+    ///
+    /// It is a `RefCell` behind a `&self` getter, which is the arrangement that
+    /// makes a cache invisible to its callers. This is the test that it stays
+    /// one: a map that never rebuilt would be as wrong as one that always did.
+    #[test]
+    fn the_wrap_map_is_rebuilt_exactly_when_it_stops_describing_the_document() {
+        let mut app = app_with("");
+        app.buffer = crate::buffer::Buffer::from_string("abcdefghij\nshort");
+        app.tab_width = 4;
+
+        // 10 columns: the first line is an exact fit, the second is shorter.
+        assert_eq!(app.wrap_map(10).total_rows(), 2);
+
+        // Narrower: the first line now needs two rows.
+        assert_eq!(app.wrap_map(5).total_rows(), 2 + 1);
+
+        // Off: one row per line, whatever they measure.
+        assert_eq!(app.wrap_map(0).total_rows(), 2);
+
+        // An edit at the same width is a different document.
+        app.buffer = crate::buffer::Buffer::from_string(&"x".repeat(25));
+        assert_eq!(app.wrap_map(10).total_rows(), 3);
+
+        // And the same question twice is the same answer, from the cache.
+        let first = app.wrap_map(10).total_rows();
+        assert_eq!(app.wrap_map(10).total_rows(), first);
     }
 
     /// A pane shell's title now arrives from the face — SwiftTerm reads the
