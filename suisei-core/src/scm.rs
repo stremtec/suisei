@@ -367,10 +367,30 @@ impl ScmPanel {
             ],
         ) {
             self.graph = git_graph::build_graph(&out);
+            self.mark_unpushed(root);
             if self.graph_selected >= self.graph.len() {
                 self.graph_selected = self.graph.len().saturating_sub(1);
             }
         }
+    }
+
+    /// Ask git which of HEAD's commits the upstream has not seen.
+    ///
+    /// A second call rather than something read off the rows we already have:
+    /// the walk above is `--all`, so other branches' tips sit between HEAD's
+    /// commits in date order, and taking the top `ahead` rows would badge
+    /// whichever commits happened to be recent. `ahead` counts; it does not
+    /// name.
+    ///
+    /// Bounded by the graph limit — there is no point naming commits that are
+    /// past the end of the list being drawn — and silent on failure, which is
+    /// the normal state of a branch with no upstream (`@{u}` is an error, not
+    /// an empty answer). Nothing is marked then, which is what `ahead` already
+    /// reports for the same branch.
+    fn mark_unpushed(&mut self, root: &Path) {
+        let limit = self.graph_limit.clamp(50, GRAPH_MAX_LIMIT).to_string();
+        let out = run_git(root, &["rev-list", "-n", &limit, "@{u}..HEAD"]).unwrap_or_default();
+        git_graph::mark_unpushed(&mut self.graph, &out);
     }
 
     /// Fetch more history (double limit, capped). Call while graph is focused.

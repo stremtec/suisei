@@ -2677,13 +2677,25 @@ struct ContentView: View {
                     )
 
                     if !engine.chrome.scm.graph.isEmpty {
-                        Text("History")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.top, 12)
-                            .padding(.bottom, 4)
+                        let unpushed = engine.chrome.scm.graph.filter(\.unpushed).count
+                        HStack(spacing: 6) {
+                            Text("History")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                            // The other two sections count their rows here.
+                            // Counting commits would say the graph limit, which
+                            // is a setting; what the column is scanned for is
+                            // how much is still local.
+                            if unpushed > 0 {
+                                Text("\(unpushed) unpushed")
+                                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                                    .foregroundStyle(accent)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.top, 12)
+                        .padding(.bottom, 4)
                         ForEach(engine.chrome.scm.graph) { g in
                             scmHistoryRow(g)
                                 .padding(.horizontal, 10)
@@ -2768,7 +2780,28 @@ struct ContentView: View {
                 .lineLimit(1)
             }
             Spacer(minLength: 0)
+            if g.unpushed { scmUnpushedBadge(selected: g.selected) }
         }
+    }
+
+    /// Xcode's `U`: this commit is on HEAD and not on its upstream yet.
+    ///
+    /// Trailing, so the badges line up in one column and the list can be
+    /// scanned for "what have I not pushed" without reading a single subject.
+    ///
+    /// Core marks the rows; the face does not count them. The graph walk is
+    /// `git log --all`, so other branches' tips sit between HEAD's commits in
+    /// date order — badging the top `ahead` rows would have marked whichever
+    /// commits were most recent, on any branch.
+    private func scmUnpushedBadge(selected: Bool) -> some View {
+        Text("U")
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .foregroundStyle(selected ? accentForeground : accent)
+            .frame(width: 14, height: 14)
+            .background(
+                Circle().fill(accent.opacity(selected ? 0.30 : 0.16))
+            )
+            .help("Not pushed to the upstream yet")
     }
 
     /// The graph walker's lane colour, so a branch keeps one hue down the

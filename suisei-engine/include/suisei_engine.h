@@ -702,6 +702,10 @@ typedef struct SuiseiScmSnapshot {
   char graph_when[SUISEI_MAX_SCM_GRAPH][32];
   char graph_refs[SUISEI_MAX_SCM_GRAPH][96];
   uint8_t graph_color[SUISEI_MAX_SCM_GRAPH];
+  /* 1 = on HEAD and not on its upstream (Xcode's `U`). Per row, not a count:
+     the walk is `git log --all`, so the first N rows of a date-ordered
+     all-branches list are not the N unpushed commits. */
+  uint8_t graph_unpushed[SUISEI_MAX_SCM_GRAPH];
   /* staged packed first [0..staged_count), then changes */
 } SuiseiScmSnapshot;
 

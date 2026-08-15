@@ -306,6 +306,8 @@ pub struct ScmGraphRowScene {
     pub refs: String,
     /// Lane colour index from the graph walker, so a branch keeps one hue.
     pub color: u8,
+    /// On HEAD, not yet on its upstream.
+    pub unpushed: bool,
     pub selected: bool,
 }
 
@@ -1463,6 +1465,7 @@ fn build_scm(app: &App) -> ScmScene {
                 when: row.when.clone(),
                 refs: row.refs.clone(),
                 color: row.color,
+                unpushed: row.unpushed,
                 selected: i == app.scm.graph_selected,
             }
         })

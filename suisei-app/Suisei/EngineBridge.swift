@@ -459,6 +459,8 @@ struct ScmGraphItem: Equatable, Identifiable {
     var when: String
     var refs: String
     var color: UInt8
+    /// On HEAD, not yet on its upstream — the `U` badge.
+    var unpushed: Bool
     var selected: Bool
 }
 
@@ -5618,6 +5620,7 @@ final class EngineBridge: ObservableObject {
         withUnsafeBytes(of: snap.graph_when) { whenRaw in
         withUnsafeBytes(of: snap.graph_refs) { refsRaw in
         withUnsafeBytes(of: snap.graph_color) { colorRaw in
+        withUnsafeBytes(of: snap.graph_unpushed) { pushRaw in
             withUnsafeBytes(of: snap.graph_selected) { selRaw in
                 let gCap = Int(SUISEI_GRAPH_LINE)
                 func field(_ raw: UnsafeRawBufferPointer, _ i: Int, _ cap: Int) -> String {
@@ -5635,10 +5638,12 @@ final class EngineBridge: ObservableObject {
                         when: field(whenRaw, i, 32),
                         refs: field(refsRaw, i, 96),
                         color: colorRaw[i],
+                        unpushed: pushRaw[i] != 0,
                         selected: selRaw[i] != 0
                     ))
                 }
             }
+        }
         }
         }
         }

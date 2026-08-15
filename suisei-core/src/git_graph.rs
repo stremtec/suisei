@@ -86,6 +86,14 @@ pub struct GraphRow {
     pub color: u8,
     /// Graph strip (one glyph per column; typically width ≤ 8)
     pub glyphs: Vec<GraphGlyph>,
+    /// On HEAD but not on its upstream — Xcode's `U` badge.
+    ///
+    /// Not derivable from anything else in this row, and not from the row's
+    /// POSITION either: the walk is `git log --all`, so tips of other branches
+    /// interleave by date and "the first `ahead` rows" is a different set of
+    /// commits than "the unpushed ones". Whoever builds the graph asks git and
+    /// marks the rows; the layout does not know and leaves it false.
+    pub unpushed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +271,7 @@ pub(crate) fn layout_graph(commits: &[RawCommit]) -> Vec<GraphRow> {
             lane,
             color,
             glyphs,
+            unpushed: false,
         });
     }
 
@@ -310,6 +319,29 @@ fn paint_merge_link(glyphs: &mut Vec<GraphGlyph>, from: usize, to: usize, color:
 pub fn build_graph(log_text: &str) -> Vec<GraphRow> {
     let commits = parse_log_output(log_text);
     layout_graph(&commits)
+}
+
+/// Flag the rows git says are not on the upstream yet.
+///
+/// `rev_list` is the raw output of `git rev-list <upstream>..HEAD`: one full
+/// hash per line, empty when there is no upstream or nothing to push. Kept
+/// separate from `build_graph` because the graph is `--all` and the answer is
+/// about HEAD — two different questions that happen to share a row list.
+///
+/// Returns how many rows were marked, which is not always the same as the
+/// `ahead` count from `git status`: `ahead` is unbounded and the graph is
+/// windowed, so a branch far ahead of its upstream shows badges only on the
+/// commits that fit.
+pub fn mark_unpushed(rows: &mut [GraphRow], rev_list: &str) -> usize {
+    let unpushed: std::collections::HashSet<&str> = rev_list.split_whitespace().collect();
+    let mut marked = 0;
+    for row in rows.iter_mut() {
+        row.unpushed = unpushed.contains(row.hash.as_str());
+        if row.unpushed {
+            marked += 1;
+        }
+    }
+    marked
 }
 
 /// Map lane color id → (r,g,b) — VS Code–ish branch colors.
@@ -363,6 +395,46 @@ aaa0000000000000000000000000000000000000\0aaa0000\0\0\0first\0A\03 hours ago\n";
         // all on lane 0 ideally
         assert!(rows.iter().all(|r| r.lane == 0));
         assert!(matches!(rows[0].glyphs[0], GraphGlyph::Node(_)));
+    }
+
+    /// The badge follows the hash, not the row number.
+    ///
+    /// This is the whole reason `mark_unpushed` exists as a second question to
+    /// git. The graph is `git log --all --date-order`, so a colleague's tip
+    /// pushed an hour ago sits ABOVE the two commits you have not pushed. Row
+    /// 0 belongs to someone else; rows 1 and 2 are yours.
+    #[test]
+    fn an_unpushed_badge_is_not_the_top_of_the_list() {
+        let theirs = "ttt0000000000000000000000000000000000000";
+        let mine_b = "bbb0000000000000000000000000000000000001";
+        let mine_a = "aaa0000000000000000000000000000000000000";
+        let base = "ppp0000000000000000000000000000000000000";
+        let text = format!(
+            "{theirs}\0ttt0000\0{base}\0\0their work\0B\01 hour ago\n\
+             {mine_b}\0bbb0001\0{mine_a}\0\0my second\0A\02 hours ago\n\
+             {mine_a}\0aaa0000\0{base}\0\0my first\0A\03 hours ago\n\
+             {base}\0ppp0000\0\0\0base\0A\04 hours ago\n"
+        );
+        let mut rows = build_graph(&text);
+        // `git rev-list @{u}..HEAD` names them; it does not rank them.
+        let marked = mark_unpushed(&mut rows, &format!("{mine_b}\n{mine_a}\n"));
+        assert_eq!(marked, 2);
+        assert!(!rows[0].unpushed, "their commit is on the upstream");
+        assert!(rows[1].unpushed);
+        assert!(rows[2].unpushed);
+        assert!(!rows[3].unpushed, "the base is shared");
+    }
+
+    /// No upstream means `git rev-list @{u}..HEAD` fails, and the caller passes
+    /// the empty string it got. Nothing is marked — the same answer `ahead`
+    /// already gives for a branch with nothing to compare against.
+    #[test]
+    fn no_upstream_marks_nothing() {
+        let text = "aaa0000000000000000000000000000000000000\0aaa0000\0\0\0first\0A\03 hours ago\n";
+        let mut rows = build_graph(text);
+        rows[0].unpushed = true; // whatever a previous refresh left behind
+        assert_eq!(mark_unpushed(&mut rows, ""), 0);
+        assert!(!rows[0].unpushed, "a re-mark clears as well as sets");
     }
 
     #[test]

@@ -2526,6 +2526,12 @@ pub struct SuiseiScmSnapshot {
     pub graph_refs: [[c_char; 96]; SUISEI_MAX_SCM_GRAPH],
     /// Lane colour index from the graph walker, so branches keep their hue.
     pub graph_color: [u8; SUISEI_MAX_SCM_GRAPH],
+    /// 1 = on HEAD and not on its upstream. Xcode's `U`.
+    ///
+    /// Per row rather than a count, because the walk is `--all`: with a count
+    /// the face's only rule would be "the first N", and the first N rows of a
+    /// date-ordered all-branches walk are not the unpushed commits.
+    pub graph_unpushed: [u8; SUISEI_MAX_SCM_GRAPH],
 }
 
 #[repr(C)]
@@ -2646,6 +2652,7 @@ pub extern "C" fn suisei_engine_scm(ptr: *const SuiseiEngine, out: *mut SuiseiSc
         write_cstr(&mut o.graph_when[gi], &g.when);
         write_cstr(&mut o.graph_refs[gi], &g.refs);
         o.graph_color[gi] = g.color;
+        o.graph_unpushed[gi] = u8::from(g.unpushed);
     }
     1
 }
