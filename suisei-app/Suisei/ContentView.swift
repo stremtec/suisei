@@ -337,27 +337,22 @@ struct ContentView: View {
     // Live theme from Core (`engine.chrome.theme`) — updates when settings apply.
     private var theme: ThemeSnap { engine.chrome.theme }
 
-    /// The editor's own surface — the system's text-content colour, resolved
-    /// against the theme's light/dark, exactly as the Git workbench does it.
+    /// The editor's own surface — the palette's.
     ///
-    /// This used to be `theme.editorBg`, an authored near-black that put the
-    /// theme's near-white text at a contrast the workbench never shows. Taking
-    /// the surface from AppKit instead makes the two windows one app, and it
-    /// tracks the platform: `.textBackgroundColor` moves with Increase
-    /// Contrast and with whatever macOS decides a content surface is, which an
-    /// authored constant cannot.
+    /// This was `.textBackgroundColor`, the system's content surface, resolved
+    /// against the theme's light/dark. The argument for it was that AppKit
+    /// tracks Increase Contrast and an authored constant cannot, and that
+    /// taking the surface from the platform makes the editor and the workbench
+    /// one app. Both true, and both beside the point once the palette is
+    /// something other than Light or Dark: Catppuccin authors #1E1E2E, and
+    /// under that rule the editor painted the system's grey while the syntax
+    /// on top of it was Catppuccin's. Choosing a theme changed the words and
+    /// not the page.
     ///
-    /// Only the SURFACES move. Syntax colours stay the theme's — those are the
-    /// theme.
-    private var editorBg: Color { Color(nsColor: Self.systemSurface(light: isLightTheme)) }
-
-    /// `.textBackgroundColor` and friends are dynamic: they answer differently
-    /// per `NSAppearance`. The chrome's light/dark is the theme's, not the
-    /// system's, so they are resolved explicitly against it — otherwise a dark
-    /// theme under a light system paints a white editor.
-    private static func systemSurface(light: Bool) -> NSColor {
-        resolve(.textBackgroundColor, light: light)
-    }
+    /// Light and Dark still look like the platform, because their `editor_bg`
+    /// was authored to. The difference is that now that is a property of those
+    /// two palettes rather than a rule imposed on all thirteen.
+    private var editorBg: Color { theme.color(theme.editorBg) }
 
     private static func resolve(_ color: NSColor, light: Bool) -> NSColor {
         // Through `themedAppearanceName`, so a resolved surface still tracks
@@ -666,7 +661,17 @@ struct ContentView: View {
         // view runs the sidebar up under them.
         .background(
             ThemedWindowChrome(
-                background: .windowBackgroundColor,
+                // The editor's surface, not the palette's floor.
+                //
+                // The tab strip lives in the titlebar, so the titlebar's colour
+                // IS the tab bar's — and a tab bar belongs to the editor under
+                // it, not to the shell around it. Catppuccin makes the
+                // difference obvious: its floor is mantle #181825 and its
+                // editor is base #1E1E2E, so painting the titlebar with the
+                // floor put a visible seam straight across the top of the
+                // document. The floor still shows where it should: the
+                // navigator, the status bar, the space around the island.
+                background: NSColor(theme.color(theme.editorBg)),
                 light: isLightTheme,
                 identifier: WindowChrome.editorIdentifier,
                 opaque: true
@@ -1328,15 +1333,17 @@ struct ContentView: View {
     /// Everything around the editor — the same surface the Git workbench's
     /// window uses.
     ///
-    /// This was `editorBg` darkened by 16% in dark mode, so the shell was
-    /// always further from the content than macOS puts it, and the whole window
-    /// read as higher contrast than a native one. `.windowBackgroundColor` sits
-    /// LIGHTER than `.textBackgroundColor` in dark mode, which is the direction
-    /// AppKit actually goes: chrome recedes by being nearer the mid grey, not
-    /// by going blacker.
-    private var shellBase: Color {
-        Color(nsColor: Self.resolve(.windowBackgroundColor, light: isLightTheme))
-    }
+    /// It was `editorBg` darkened by 16%, so the shell sat further from the
+    /// content than macOS puts it and the window read as higher contrast than a
+    /// native one. Then it was `.windowBackgroundColor`, which fixed the
+    /// direction — AppKit's chrome recedes by nearing the mid grey, not by
+    /// going blacker — but answered with the SYSTEM's grey, so choosing
+    /// Catppuccin repainted the code and left the frame around it macOS-grey.
+    ///
+    /// It is the palette's own floor now. Every theme authors one; `bg` was
+    /// carried by all thirteen and read by nothing, which is precisely why the
+    /// theme stopped at the text.
+    private var shellBase: Color { theme.windowBg }
 
     /// Sidebar column — navigator strip on top, flat content below.
     ///
@@ -1489,7 +1496,7 @@ struct ContentView: View {
             }
             .clipShape(shape)
             .overlay(shape.strokeBorder(theme.separator, lineWidth: 1))
-            .shadow(color: .black.opacity(isLightTheme ? 0.07 : 0.30), radius: 9, y: 2)
+            .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.10 : 0.42), radius: 9, y: 2)
             .padding(.vertical, ContentView.panelGap)
             .padding(.trailing, ContentView.panelGap)
     }
@@ -1725,7 +1732,7 @@ struct ContentView: View {
                         )
                     )
                     // Separated from the tree by depth, not a hairline.
-                    .shadow(color: .black.opacity(isLightTheme ? 0.10 : 0.35), radius: 6, y: 2)
+                    .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.13 : 0.48), radius: 6, y: 2)
             }
         }
         .frame(height: NavStrip.iconH + NavStrip.inset * 2)
@@ -3431,7 +3438,7 @@ struct ContentView: View {
                                     .frame(width: contextWidth)
                                 }
                                 .background(editorBg)
-                                .shadow(color: .black.opacity(0.14), radius: 12, x: -4)
+                                .shadow(color: theme.shadowInk.opacity(0.20), radius: 12, x: -4)
                                 .transition(.move(edge: .trailing).combined(with: .opacity))
                             }
                         }
@@ -4341,7 +4348,7 @@ struct ContentView: View {
             Capsule(style: .continuous)
                 .strokeBorder(fg.opacity(0.08), lineWidth: 0.5)
         )
-        .shadow(color: .black.opacity(isLightTheme ? 0.08 : 0.28), radius: 8, y: 3)
+        .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.11 : 0.40), radius: 8, y: 3)
         .padding(.top, 8)
         .padding(.trailing, 12)
     }
@@ -4599,7 +4606,7 @@ struct ContentView: View {
                         RoundedRectangle(cornerRadius: panelR, style: .continuous)
                             .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6)
                     )
-                    .shadow(color: .black.opacity(isLightTheme ? 0.16 : 0.45), radius: 10, y: 4)
+                    .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.20 : 0.58), radius: 10, y: 4)
                     .onChange(of: engine.chrome.completions.selected) { _, sel in
                         proxy.scrollTo(sel, anchor: .center)
                     }
@@ -5226,7 +5233,7 @@ struct ContentView: View {
                 SuiseiGlass.panel(light: isLightTheme, style: engine.glassStyle),
                 in: RoundedRectangle(cornerRadius: Radius.floating, style: .continuous)
             )
-            .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
+            .shadow(color: theme.shadowInk.opacity(0.34), radius: 20, y: 6)
         }
         .transition(.opacity)
         .allowsHitTesting(false)

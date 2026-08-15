@@ -375,9 +375,14 @@ fi
 # Document icon for project.suiseiprj. Rendered from the app icon package's own
 # knot, so the document and the app cannot drift apart.
 PRJ_ICNS="$ROOT/suisei-app/Resources/SuiseiProject.icns"
-if [[ ! -f "$PRJ_ICNS" || "$ROOT/scripts/render_project_icon.py" -nt "$PRJ_ICNS" ]]; then
-  python3 "$ROOT/scripts/render_project_icon.py" >/dev/null \
-    && rm -rf "$ROOT/suisei-app/Resources/SuiseiProject.iconset" || true
+PRJ_SVG="$ROOT/suisei-app/Resources/SuiseiProject.svg"
+PRJ_RENDER="$ROOT/scripts/render_project_icon.swift"
+if [[ ! -f "$PRJ_ICNS" || "$PRJ_SVG" -nt "$PRJ_ICNS" || "$PRJ_RENDER" -nt "$PRJ_ICNS" ]]; then
+  PRJ_SET="$(mktemp -d)/SuiseiProject.iconset"
+  if swift "$PRJ_RENDER" "$PRJ_SVG" "$PRJ_SET" >/dev/null 2>&1; then
+    iconutil -c icns "$PRJ_SET" -o "$PRJ_ICNS" || true
+  fi
+  rm -rf "$PRJ_SET"
 fi
 [[ -f "$PRJ_ICNS" ]] && cp -f "$PRJ_ICNS" "$RES/SuiseiProject.icns"
 

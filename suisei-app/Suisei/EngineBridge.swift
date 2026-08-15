@@ -776,6 +776,26 @@ extension ThemeSnap {
     var successColor: Color { color(success) }
     var warningColor: Color { color(warning) }
     var dangerColor: Color { color(errorColor) }
+
+    /// The ink a shadow is cast in.
+    ///
+    /// Pure black is only correct on a neutral grey window. Cast over a
+    /// palette that has a hue — Catppuccin's floor is #181825, blue-violet —
+    /// black is a colour that is not in the palette, and the gap between the
+    /// editor and the shell reads as dirt rather than as depth.
+    ///
+    /// So it is the window's own floor driven most of the way to black: the
+    /// same hue, far enough down to read as shadow. Real shadows are the
+    /// surface with the light taken away, which is exactly this arithmetic.
+    var shadowInk: Color {
+        let r = Double((windowBg_ >> 16) & 0xFF) / 255.0
+        let g = Double((windowBg_ >> 8) & 0xFF) / 255.0
+        let b = Double(windowBg_ & 0xFF) / 255.0
+        // 0.22 keeps the hue legible without letting the shadow glow. A light
+        // palette needs to go further down, or its "shadow" is a pale wash.
+        let keep = (0.299 * r + 0.587 * g + 0.114 * b) > 0.5 ? 0.10 : 0.22
+        return Color(red: r * keep, green: g * keep, blue: b * keep)
+    }
 }
 
 extension ChromeSnapshot {

@@ -178,7 +178,7 @@ struct GitWorkbenchWindowView: View {
         .background(theme.windowBg.ignoresSafeArea())
         .background(
             ThemedWindowChrome(
-                background: .windowBackgroundColor,
+                background: NSColor(theme.windowBg),
                 light: isLightTheme,
                 identifier: WindowChrome.gitWorkbenchIdentifier,
                 opaque: true,
@@ -818,7 +818,7 @@ struct GitWorkbenchWindowView: View {
                 description: Text("Open a file or folder inside a Git repository.")
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(theme.color(theme.editorBg))
         } else if sourceMode == .changes {
             changesWorkspace
         } else {
@@ -863,7 +863,7 @@ struct GitWorkbenchWindowView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(theme.color(theme.editorBg))
     }
 
     private var identityAndCommitRow: some View {
@@ -943,7 +943,7 @@ struct GitWorkbenchWindowView: View {
                 .padding(.bottom, 2)
         }
         .frame(height: 48)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(theme.color(theme.editorBg))
     }
 
     private var changesFilterBar: some View {
@@ -1083,7 +1083,7 @@ struct GitWorkbenchWindowView: View {
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(theme.color(theme.editorBg))
     }
 
     @ViewBuilder
@@ -1453,7 +1453,7 @@ struct GitWorkbenchWindowView: View {
         // of creating thousands of SwiftUI/Accessibility nodes or artificial
         // 60-line pages.
         .frame(height: min(440, diffCanvasHeight(visibleRows)))
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(theme.color(theme.editorBg))
     }
 
     private var localBranches: [GitBranchItem] { model.branches.filter { !$0.remote } }

@@ -187,18 +187,20 @@ fn one_palettes_edits_do_not_reach_another() {
 /// differ.
 #[test]
 fn the_highlight_preference_and_an_accent_override_differ() {
-    let base = theme::resolve("ocean", true);
+    // Asked of `dark`, because only the two canvas palettes take the highlight
+    // tint at all — see `a_named_palette_keeps_its_own_accent`.
+    let base = theme::resolve("dark", true);
 
     let mut derived = Config::default();
-    derived.theme = "ocean".into();
+    derived.theme = "dark".into();
     derived.highlight_color = "#FF2D55".into();
     let derived = theme::effective(&derived.theme, &derived, true);
 
     let mut exact = Config::default();
-    exact.theme = "ocean".into();
+    exact.theme = "dark".into();
     exact
         .theme_overrides
-        .insert("ocean".into(), overrides(&[("accent", "#FF2D55")]));
+        .insert("dark".into(), overrides(&[("accent", "#FF2D55")]));
     let exact = theme::effective(&exact.theme, &exact, true);
 
     assert_eq!(derived.accent, exact.accent, "both set the accent itself");
@@ -458,6 +460,58 @@ fn catppuccin_is_in_the_catalogue() {
         theme::contrast_ratio(t.fg, t.editor_bg) >= 4.5,
         "a palette shipped by us passes the bar our own editor warns by"
     );
+}
+
+/// A named palette lands whole. Its accent is part of it.
+///
+/// `highlight_color` is a tint for the two palettes that are a CANVAS — Light
+/// and Dark are deliberately neutral and their accent is the one colour a user
+/// is expected to choose. Catppuccin's mauve was picked against Catppuccin's
+/// background by whoever authored it, and a leftover highlight preference
+/// repainting it means choosing a theme gets you most of a theme.
+#[test]
+fn a_named_palette_keeps_its_own_accent() {
+    let mut cfg = Config::default();
+    cfg.highlight_color = "#FF2D55".into();
+
+    for name in ["catppuccin", "ocean", "monokai", "nord", "gruvbox"] {
+        cfg.theme = name.into();
+        let painted = theme::effective(&cfg.theme, &cfg, true);
+        let authored = theme::resolve(name, true);
+        assert_eq!(
+            painted.accent, authored.accent,
+            "{name} must keep the accent it was authored with"
+        );
+        assert_eq!(
+            painted.selection_bg, authored.selection_bg,
+            "{name}'s selection is derived from its own accent, not the preference"
+        );
+    }
+
+    // Light and Dark are canvases, and still take the tint.
+    for name in ["light", "dark"] {
+        cfg.theme = name.into();
+        let painted = theme::effective(&cfg.theme, &cfg, name == "dark");
+        assert_eq!(
+            (painted.accent.r, painted.accent.g, painted.accent.b),
+            (0xFF, 0x2D, 0x55),
+            "{name} is a canvas — the highlight preference is what colours it"
+        );
+    }
+}
+
+/// An explicit per-token edit still wins on a named palette. That is a change
+/// made TO this theme, not a setting left over from another one.
+#[test]
+fn an_override_still_reaches_a_named_palette() {
+    let mut cfg = Config::default();
+    cfg.theme = "catppuccin".into();
+    cfg.highlight_color = "#FF2D55".into();
+    cfg.theme_overrides
+        .insert("catppuccin".into(), overrides(&[("accent", "#00FF00")]));
+
+    let painted = theme::effective(&cfg.theme, &cfg, true);
+    assert_eq!((painted.accent.r, painted.accent.g, painted.accent.b), (0, 255, 0));
 }
 
 /// Garbage from the face is refused rather than stored.

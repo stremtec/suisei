@@ -284,7 +284,7 @@ struct SettingsWindowView: View {
         .accentColor(theme.color(theme.accent))
         .background(
             ThemedWindowChrome(
-                background: NSColor.windowBackgroundColor,
+                background: NSColor(theme.windowBg),
                 light: preferredScheme == .light || (preferredScheme == nil && isLightTheme),
                 identifier: WindowChrome.settingsIdentifier
             )
@@ -594,7 +594,7 @@ struct SettingsWindowView: View {
             }
             .animation(nil, value: selectedPageID)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(theme.windowBg)
         .task(id: settingsFingerprint) { await commitWhenSettled() }
     }
 
@@ -648,7 +648,7 @@ struct SettingsWindowView: View {
             for w in NSApp.windows where w.identifier == WindowChrome.settingsIdentifier {
                 WindowChrome.applyThemedTitlebar(
                     to: w,
-                    background: NSColor.windowBackgroundColor,
+                    background: NSColor(theme.windowBg),
                     light: light
                 )
             }
@@ -783,10 +783,16 @@ struct SettingsWindowView: View {
         if let highlight = rows(.highlightColor).first {
             Section {
                 accentColorSelector(highlight)
+                    .disabled(pinnedThemeName != nil)
             } header: {
                 Text("Highlight")
             } footer: {
-                Text("Unlike the Accent well above, this also re-derives everything downstream of it — selection, search, and the text drawn on accent.")
+                // Disabled rather than hidden, and the reason is stated. A
+                // control that vanishes is a puzzle; a greyed one with a
+                // sentence next to it is an answer.
+                Text(pinnedThemeName == nil
+                    ? "Unlike the Accent well above, this also re-derives everything downstream of it — selection, search, and the text drawn on accent."
+                    : "\(themeDisplayName(activePaletteName)) brings its own accent, so this does not apply. It tints Light and Dark, which are deliberately neutral. To change this theme's accent, use the Accent well above.")
             }
         }
 

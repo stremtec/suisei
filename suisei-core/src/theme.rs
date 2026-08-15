@@ -1265,8 +1265,29 @@ pub fn with_overrides(
 pub fn effective(name: &str, cfg: &crate::config::Config, system_is_dark: bool) -> Theme {
     let (base_name, key) = override_target(name, cfg, system_is_dark);
     let base = resolve(&base_name, system_is_dark);
-    let tinted = with_highlight(base, &cfg.highlight_color);
+    // A named palette lands whole, accent included.
+    //
+    // `highlight_color` is a tint for the two palettes that are a CANVAS —
+    // Light and Dark are deliberately neutral, and the accent is the one
+    // colour in them the user is expected to choose. Catppuccin is not a
+    // canvas: its mauve is part of the palette, chosen against its own
+    // background by whoever authored it, and letting a leftover highlight
+    // preference repaint it means picking a theme gives you most of a theme.
+    //
+    // Per-token overrides still apply after this. Those are an explicit edit
+    // to THIS palette; a highlight preference is a setting that happens to
+    // still be lying around from a different one.
+    let tinted = if takes_highlight_tint(&base_name) {
+        with_highlight(base, &cfg.highlight_color)
+    } else {
+        *base
+    };
     with_overrides(&tinted, cfg.theme_overrides.get(&key))
+}
+
+/// Whether a palette is a canvas to be tinted, or a finished thing.
+pub fn takes_highlight_tint(resolved_name: &str) -> bool {
+    matches!(resolved_name, "light" | "dark")
 }
 
 /// Which palette a theme is built on, and which override table belongs to it.

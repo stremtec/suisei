@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img"
+     aria-label="Suisei project document">
+  <title>Suisei Project</title>
+  <desc>
+    A monochrome document mark for project.suiseiprj. Single colour on purpose:
+    it is drawn with `currentColor`, so it takes the palette it is placed in
+    rather than carrying one of its own — the file browser tints it like every
+    other row, and the same file renders correctly on a light sheet and a dark
+    one without a second asset.
+
+    Strokes, not fills, and all of them 34 units at a 1024 canvas — one weight
+    for the whole mark. Mixed weights read as two drawings sharing a frame at
+    icon size, where the difference between 24 and 34 units is one pixel.
+  </desc>
+
+  <g fill="none" stroke="currentColor" stroke-width="34"
+     stroke-linejoin="round" stroke-linecap="round">
+    <!-- The sheet, with the folded corner cut out of its outline rather than
+         drawn on top of it: a page whose corner is turned has no edge there. -->
+    <path d="M232 128
+             h360
+             l200 200
+             v568
+             a40 40 0 0 1 -40 40
+             H232
+             a40 40 0 0 1 -40 -40
+             V168
+             a40 40 0 0 1 40 -40 z" />
+    <!-- The fold itself. It starts where the outline left off, so the two read
+         as one continuous corner. -->
+    <path d="M592 128 v160 a40 40 0 0 0 40 40 h160" />
+
+    <!-- A comet: 彗星 is what Suisei means, and it is the one mark that is
+         both the app's own and unmistakable at this size.
+         Two shapes were tried and rejected first. Parallel arcs read as a
+         wave, which a dozen other file types already use; crossing them read
+         as an X, which on a document says deleted or invalid. -->
+    <!-- The tail, sweeping back up toward the fold. Three strokes rather than
+         a filled wedge: a wedge at 16pt is a grey smear, three lines stay
+         three lines. -->
+    <!-- Held clear of the sheet's right edge by more than half a stroke width:
+         a tail that touches the border reads as breaking out of the page. -->
+    <path d="M452 686 q132 -54 218 -158" />
+    <path d="M424 632 q106 -66 172 -168" />
+    <path d="M486 744 q134 -28 222 -100" />
+  </g>
+  <!-- The head, filled — the one solid in the mark, so the eye has something
+       to land on when every stroke has collapsed to a hairline. -->
+  <circle cx="390" cy="712" r="58" fill="currentColor" />
+</svg>
