@@ -108,9 +108,11 @@ fn indexed_rows_carry_their_index() {
 
 #[test]
 fn the_gpu_rows_are_listed() {
-    // The concrete regression: these three are toggles with working handlers in
-    // Core that the GUI never showed, because the GUI's list of toggles was
-    // five label strings typed by hand.
+    // The original regression: these three had working handlers in Core that
+    // the GUI never showed, because the GUI's list of toggles was five label
+    // strings typed by hand. They are deliberately no longer PRESENTED (see
+    // `a_switch_with_no_feature_behind_it_is_not_presented`) — but they must
+    // stay listed, because their values are still parsed and written.
     let kinds: Vec<u32> = rows().iter().map(|r| r.kind()).collect();
     for (code, name) in [
         (9, "GPU accel"),
@@ -124,41 +126,60 @@ fn the_gpu_rows_are_listed() {
     }
 }
 
+/// Everything about editing text is on the page called Editor.
+///
+/// The concrete confusion this replaces: Tab Width, Line Numbers and Line
+/// Wrapping were on **General**, while the page named **Editor** held Keep Undo
+/// History and Use System Clipboard. So "where do I turn on wrapping" had two
+/// plausible answers and the obvious one was wrong — the Editor page was the
+/// one page that did not have line wrapping on it.
 #[test]
-fn native_general_is_not_a_wall_of_switches() {
-    let general: Vec<_> = rows()
-        .into_iter()
-        .filter(|row| row.presentation().page == SettingSurfacePage::General)
-        .collect();
+fn editor_settings_are_on_the_editor_page() {
+    for row in [
+        SettingRow::TabWidth,
+        SettingRow::RelativeNumber,
+        SettingRow::WrapLines,
+        SettingRow::UndoCaching,
+        SettingRow::ClipboardSync,
+    ] {
+        assert_eq!(
+            row.presentation().page,
+            SettingSurfacePage::Editor,
+            "{row:?} decides how the editor treats text, so it belongs on Editor"
+        );
+    }
 
-    assert!(
-        !general.is_empty(),
-        "General has editor defaults to present"
-    );
-    assert_eq!(
-        general
-            .iter()
-            .filter(|row| row.presentation().control == SettingControl::Toggle)
-            .count(),
-        0,
-        "mode-like booleans in General must be menus/segments, not switches"
-    );
-    assert!(
-        general
-            .iter()
-            .any(|row| { row.presentation().control == SettingControl::Menu })
-    );
-    assert!(
-        general
-            .iter()
-            .all(|row| { row.presentation().control != SettingControl::Segmented }),
-        "tiny number-only segmented controls make preferences harder to scan"
-    );
     assert_eq!(
         SettingRow::TabWidth.presentation().control,
         SettingControl::Menu,
         "tab width is a discrete choice, presented as a checked native menu"
     );
+}
+
+/// General presents no Core rows: it is the app's About/landing page, and the
+/// face builds it. Anything else there would be a setting whose real home is
+/// one of the named pages.
+#[test]
+fn general_is_not_a_junk_drawer() {
+    let general: Vec<_> = rows()
+        .into_iter()
+        .filter(|row| row.presentation().page == SettingSurfacePage::General)
+        .collect();
+    assert!(
+        general.is_empty(),
+        "these rows fell back to General instead of naming their page: {general:?}"
+    );
+}
+
+/// One page owns the update question.
+///
+/// `Check for Updates` was a General row AND the Software Update page read the
+/// same row by kind, so one config key was answered from two places.
+#[test]
+fn update_checking_is_owned_by_software_update() {
+    let row = SettingRow::UpdateCheck.presentation();
+    assert_eq!(row.page, SettingSurfacePage::SoftwareUpdate);
+    assert_eq!(row.control, SettingControl::Menu);
 }
 
 #[test]
@@ -205,20 +226,64 @@ fn appearance_modes_are_explicit_and_persistable() {
     assert_eq!(panel.draft.glass_style, "tinted");
 }
 
+/// A switch with no feature behind it is not presented — and its stored value
+/// still survives.
+///
+/// Two different deaths, same treatment:
+///
+/// * `KeyHints` switched the which-key overlay, which was removed when Suisei
+///   stopped having leader/prefix chords. `key_hints` is now read out of the
+///   config and written back, and nothing between those points consumes it.
+/// * The three GPU rows describe Suisei drawing ITSELF into Ghostty or Kitty.
+///   The workspace builds core, engine and the daemon; the Mac app is the only
+///   face. The Editor page carried them under a footer that admitted as much
+///   — "The native Mac editor does not require them" — above three switches
+///   that did nothing in the only editor there is.
+///
+/// Not presented is not the same as deleted. The row keeps its ABI kind, keeps
+/// its handler, and keeps round-tripping through the config file, so an
+/// existing `~/.config` still loads and a future frontend can have it back.
 #[test]
-fn terminal_only_controls_are_advanced() {
+fn a_switch_with_no_feature_behind_it_is_not_presented() {
+    let listed = rows();
+
     for row in [
+        SettingRow::KeyHints,
         SettingRow::GpuAcc,
         SettingRow::GpuGraphics,
         SettingRow::GpuHyperlinks,
     ] {
         let presentation = row.presentation();
-        assert_eq!(presentation.page, SettingSurfacePage::Editor);
+        assert_eq!(
+            presentation.page,
+            SettingSurfacePage::None,
+            "{row:?} has no feature behind it and must not take space in Settings"
+        );
+        assert_eq!(
+            presentation.control,
+            SettingControl::None,
+            "{row:?} must present no control — the face filters on this too"
+        );
         assert!(
-            presentation.advanced,
-            "{row:?} should be collapsed by default"
+            listed.contains(&row),
+            "{row:?} must stay listed: its value is still parsed and written"
         );
     }
+
+    // The value survives the switch. Driving the row still moves the draft.
+    let mut panel = SettingsPanel::new();
+    panel.open_panel();
+    panel.page = SettingsPage::Setting;
+    panel.selected = listed
+        .iter()
+        .position(|row| *row == SettingRow::KeyHints)
+        .expect("key-hints row");
+    let before = panel.draft.key_hints;
+    panel.set_value(u32::from(!before));
+    assert_ne!(
+        panel.draft.key_hints, before,
+        "the stored setting must still be reachable — only its switch is gone"
+    );
 }
 
 #[test]

@@ -100,6 +100,10 @@ struct SettingsWindowView: View {
         let symbol: String
         let searchTerms: String
         let corePage: Int
+        /// Fill of the sidebar tile. Defaulted because the pushed sub-pages
+        /// (Profile, Sign-In & Security, Automatic/Beta Updates) never appear
+        /// in the sidebar and so never draw one.
+        var tint: Color = .gray
     }
 
     private struct PresentedSettingGroup: Identifiable {
@@ -124,36 +128,45 @@ struct SettingsWindowView: View {
             searchTerms: "account github sign in profile avatar token", corePage: 1
         ),
         Page(
-            id: .general, title: "General", symbol: "gearshape",
-            searchTerms: "overview settings preferences", corePage: 1
+            id: .general, title: "General", symbol: "gearshape.fill",
+            searchTerms: "overview about version build release notes", corePage: 1,
+            tint: Color(nsColor: .systemGray)
         ),
         Page(
-            id: .appearance, title: "Appearance", symbol: "paintbrush",
-            searchTerms: "theme light dark auto color", corePage: 1
+            id: .appearance, title: "Appearance", symbol: "paintbrush.fill",
+            searchTerms: "theme light dark auto color accent highlight glass", corePage: 1,
+            tint: Color(nsColor: .systemBlue)
         ),
         Page(
             id: .editor, title: "Editor", symbol: "square.and.pencil",
-            searchTerms: "editing wrap line tab gpu clipboard undo minimap overview", corePage: 1
+            searchTerms:
+                "editing wrap line numbers relative tab width clipboard undo minimap", corePage: 1,
+            tint: Color(nsColor: .systemIndigo)
         ),
         Page(
-            id: .languageServers, title: "Language Servers", symbol: "square.stack.3d.up",
-            searchTerms: "lsp language server command", corePage: 1
+            id: .languageServers, title: "Language Servers", symbol: "square.stack.3d.up.fill",
+            searchTerms: "lsp language server command completion diagnostics", corePage: 1,
+            tint: Color(nsColor: .systemTeal)
         ),
         Page(
             id: .sourceControl, title: "Source Control", symbol: "arrow.triangle.branch",
-            searchTerms: "git scm repository workbench", corePage: 1
+            searchTerms: "git scm repository workbench commit branch", corePage: 1,
+            tint: Color(nsColor: .systemOrange)
         ),
         Page(
-            id: .extensions, title: "Extensions", symbol: "puzzlepiece.extension",
-            searchTerms: "extension language syntax grammar", corePage: 2
+            id: .extensions, title: "Extensions", symbol: "puzzlepiece.extension.fill",
+            searchTerms: "extension language syntax grammar vscode", corePage: 2,
+            tint: Color(nsColor: .systemPurple)
         ),
         Page(
-            id: .shortcuts, title: "Shortcuts", symbol: "keyboard",
-            searchTerms: "keyboard key binding command", corePage: 3
+            id: .shortcuts, title: "Shortcuts", symbol: "keyboard.fill",
+            searchTerms: "keyboard key binding command", corePage: 3,
+            tint: Color(nsColor: .systemGray)
         ),
         Page(
             id: .softwareUpdate, title: "Software Update", symbol: "arrow.triangle.2.circlepath",
-            searchTerms: "software update version release beta automatic", corePage: 1
+            searchTerms: "software update version release beta automatic install", corePage: 1,
+            tint: Color(nsColor: .systemGray)
         ),
     ]
 
@@ -359,12 +372,26 @@ struct SettingsWindowView: View {
         .padding(.vertical, 4)
     }
 
+    /// A filled, tinted squircle with a white glyph — the thing that makes a
+    /// sidebar read as System Settings at a glance.
+    ///
+    /// These were flat `.secondary` glyphs, which is how Xcode's navigator
+    /// draws icons, not how the Settings window does. Eight identical grey
+    /// symbols also gave the eye nothing to aim at: the colour is what lets you
+    /// hit "Editor" without reading the word.
     private func sidebarIcon(for page: Page, size: CGFloat) -> some View {
-        Image(systemName: page.symbol)
-            .symbolRenderingMode(.monochrome)
-            .font(.system(size: size * 0.68, weight: .regular))
-            .foregroundStyle(.secondary)
+        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+            .fill(page.tint.gradient)
             .frame(width: size, height: size)
+            .overlay(
+                Image(systemName: page.symbol)
+                    .font(.system(size: size * 0.56, weight: .medium))
+                    .foregroundStyle(.white)
+            )
+            // The glyph is white on a saturated fill in both appearances, so
+            // it must not be dimmed along with the row when the list is not
+            // the first responder — a greyed tile reads as a disabled page.
+            .accessibilityHidden(true)
     }
 
     private var historyControl: some View {
@@ -487,6 +514,7 @@ struct SettingsWindowView: View {
                         automaticUpdates: rows(.updateCheck).first,
                         onOpenAutomatic: { navigate(to: .softwareUpdateAutomatic) },
                         onOpenBeta: { navigate(to: .softwareUpdateBeta) },
+                        onCheckNow: { engine.checkForSoftwareUpdate() },
                         onInfo: { engine.openSoftwareUpdateNotes() }
                     )
                 case .softwareUpdateAutomatic:
@@ -542,35 +570,41 @@ struct SettingsWindowView: View {
                 }
             }
             .animation(nil, value: selectedPageID)
-
-            // Apply bar, only where something can be applied.
-            //
-            // System Settings has no Save at all — it commits as you type. This
-            // window still needs an explicit commit (Core owns the rows and
-            // writing on each keystroke would rewrite the config file per
-            // character), so the affordance stays; what changes is that it now
-            // reads as a sheet's action bar at the bottom rather than as a
-            // toolbar button beside a title, and the "Unsaved" badge became the
-            // plain sentence it always meant.
-            if s.dirty {
-                Divider()
-                HStack(spacing: 10) {
-                    Image(systemName: "pencil.circle.fill")
-                        .foregroundStyle(.orange)
-                    Text("You have unsaved changes.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    Button("Save") { engine.saveSettings() }
-                        .keyboardShortcut("s", modifiers: .command)
-                }
-                .animation(.snappy(duration: 0.2), value: s.dirty)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
-                .background(.bar)
-            }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .task(id: settingsFingerprint) { await commitWhenSettled() }
+    }
+
+    /// Everything the user could have just changed, as one comparable value.
+    ///
+    /// `dirty` alone cannot drive the debounce: it goes true on the first
+    /// change and stays true, so a timer keyed on it would fire once and then
+    /// ignore every later edit until a save reset it.
+    private var settingsFingerprint: String {
+        var out = s.dirty ? "1" : "0"
+        for row in s.rows {
+            out += ";\(row.id):\(row.valueIndex):\(row.value)"
+        }
+        return out
+    }
+
+    /// Commit once the changes stop, instead of asking the user to.
+    ///
+    /// System Settings has no Save button; this window had one, and a bar
+    /// across the bottom saying "You have unsaved changes." The reason was
+    /// real — Core owns the rows, and writing on every change would rewrite
+    /// `~/.suisei.toml` per keystroke — but the reason argues for a debounce,
+    /// not for a button. `task(id:)` cancels and restarts whenever the
+    /// fingerprint moves, so dragging through the colour wheel or arrowing
+    /// down the theme menu writes the settled value exactly once.
+    ///
+    /// Nothing waits on this: values already take effect live off the draft.
+    /// The write is only what makes them survive a relaunch.
+    private func commitWhenSettled() async {
+        guard s.dirty else { return }
+        try? await Task.sleep(for: .milliseconds(500))
+        guard !Task.isCancelled, s.dirty else { return }
+        engine.saveSettings()
     }
 
     private func retheme() {
@@ -591,20 +625,79 @@ struct SettingsWindowView: View {
 
     // MARK: General
 
+    /// General is About plus the way out to Software Update — nothing else.
+    ///
+    /// It used to open with its own copy of the Color Scheme tiles (Appearance
+    /// had the same three tiles, and the Liquid Glass row that belongs beside
+    /// them), and then list Tab Width, Line Numbers and Line Wrapping under
+    /// "Editor Defaults" while a page named Editor sat below it in the sidebar.
+    /// Those rows named their page in Core; this page presents no Core rows at
+    /// all now, which `general_is_not_a_junk_drawer` keeps true.
     @ViewBuilder private var generalSections: some View {
         Section {
-            appearanceModeSelector
-        } header: {
-            Text("Appearance")
+            HStack(spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 52, height: 52)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Suisei")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(SuiseiBuild.installedName)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text("Engine \(EngineBridge.engineVersion)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 6)
         }
 
-        ForEach(presentedGroups(on: .general)) { group in
-            Section(group.title) {
-                ForEach(group.rows) { row in
-                    settingControl(row)
-                }
-            }
+        Section {
+            navigationRow(
+                "Software Update",
+                value: updateSummary,
+                symbol: "arrow.triangle.2.circlepath"
+            ) { navigate(to: .softwareUpdate) }
+
+            Button("Release Notes…") { engine.openSoftwareUpdateNotes() }
         }
+    }
+
+    /// What General says next to Software Update without opening it.
+    private var updateSummary: String {
+        let store = EngineBridge.shared.softwareUpdate
+        if store.snap.available { return "Update Available" }
+        return rows(.updateCheck).first?.valueIndex == 0 ? "Manual" : "Automatic"
+    }
+
+    /// A row that goes somewhere, drawn the way System Settings draws one.
+    private func navigationRow(
+        _ title: String,
+        value: String,
+        symbol: String? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18)
+                }
+                Text(title).foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                Text(value).foregroundStyle(.secondary)
+                Image(systemName: "chevron.forward")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder private var appearanceSections: some View {
@@ -670,37 +763,34 @@ struct SettingsWindowView: View {
         .padding(.vertical, 4)
     }
 
+    /// Everything about how the editor treats text, on the page called Editor.
+    ///
+    /// The minimap is deliberately spliced in directly after **Display** rather
+    /// than trailing all the Core groups: it answers the same question those
+    /// rows do — what you see beside the text — and it was reading as an
+    /// afterthought below Editing. It is a face-side preference, so Core cannot
+    /// order it; this is the one place that knows both.
+    ///
+    /// The "Advanced ▸ Terminal Compatibility" disclosure that used to close
+    /// this page is gone. Its own footer said "The native Mac editor does not
+    /// require them" — three switches for a terminal frontend that does not
+    /// exist. They are still stored, just not offered.
     @ViewBuilder private var editorSections: some View {
-        ForEach(presentedGroups(on: .editor)) { group in
+        let groups = presentedGroups(on: .editor)
+        ForEach(groups) { group in
             Section(group.title) {
                 ForEach(group.rows) { row in
                     settingControl(row)
                 }
             }
-        }
-
-        minimapSection
-
-        let advancedRows = presentedRows(on: .editor, advanced: true)
-        if !advancedRows.isEmpty {
-            Section {
-                DisclosureGroup("Terminal Compatibility") {
-                    VStack(spacing: 0) {
-                        ForEach(Array(advancedRows.enumerated()), id: \.element.id) { index, row in
-                            settingControl(row)
-                                .padding(.vertical, 7)
-                            if index < advancedRows.count - 1 {
-                                Divider()
-                            }
-                        }
-                    }
-                    .padding(.top, 4)
-                }
-            } header: {
-                Text("Advanced")
-            } footer: {
-                Text("These options affect terminal frontends. The native Mac editor does not require them.")
+            if group.title == "Display" {
+                minimapSection
             }
+        }
+        // If Core ever stops emitting a Display group, the minimap must still
+        // be reachable. A setting you cannot find is the bug this page is for.
+        if !groups.contains(where: { $0.title == "Display" }) {
+            minimapSection
         }
     }
 

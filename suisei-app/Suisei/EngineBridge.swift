@@ -619,12 +619,15 @@ enum SettingKind: UInt32 {
 /// Native layout metadata supplied by Core. Raw values are the append-only ABI
 /// in `SettingSurfacePage::code` and `SettingControl::code`.
 enum SettingSurfacePage: UInt32 {
+    /// Stored, parsed, written — and presented nowhere. A row lands here when
+    /// the feature behind it is gone but its config key must still load.
     case none = 0
     case general = 1
     case appearance = 2
     case editor = 3
     case languageServers = 4
     case sourceControl = 5
+    case softwareUpdate = 6
 }
 
 enum SettingControlKind: UInt32 {

@@ -33,11 +33,23 @@ enum SuiseiBuild {
 }
 
 /// System Settings → Software Update.
+///
+/// The page used to say one thing in every state: a red "This is not a valid
+/// release." under the installed build, and a footer explaining that Suisei
+/// "cannot install this update" — with no update in sight. Both sentences came
+/// from `UpdateState::start_install`, which is gated until Suisei publishes
+/// signed snapshots. That is a fact about INSTALLING, and it was being printed
+/// as a verdict on the build the user is running.
+///
+/// It also had no Check Now. `suisei_engine_update_check` and its bridge method
+/// existed and nothing in the app called either, so the only check that ever
+/// ran was the throttled one at launch.
 struct SoftwareUpdatePage: View {
     @ObservedObject var store: SoftwareUpdateStore
     var automaticUpdates: SettingsRowItem?
     var onOpenAutomatic: () -> Void
     var onOpenBeta: () -> Void
+    var onCheckNow: () -> Void
     var onInfo: () -> Void
 
     private var snap: SoftwareUpdateSnap { store.snap }
@@ -47,59 +59,96 @@ struct SoftwareUpdatePage: View {
         Form {
             Section {
                 statusRow
+                if snap.available, !snap.notes.isEmpty {
+                    Text(snap.notes)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, 2)
+                }
             } footer: {
-                Text("Suisei cannot install this update because it is not a signed Suisei release.")
+                // Only where it is true: when there IS something to install.
+                if snap.available {
+                    Text("Suisei does not publish signed in-place updates yet. Download this release from GitHub and replace the app.")
+                }
             }
 
             Section {
-                LabeledContent("Installed", value: SuiseiBuild.installedName)
-            } header: {
-                Text("Installed")
+                settingsLink(
+                    "Automatic Updates",
+                    value: automaticOn ? "On" : "Off",
+                    action: onOpenAutomatic
+                )
+                settingsLink(
+                    "Beta Updates",
+                    value: store.betaUpdates ? "On" : "Off",
+                    action: onOpenBeta
+                )
             }
 
             Section {
-                settingsLink("Automatic Updates", value: automaticOn ? "On" : "Off", action: onOpenAutomatic)
-                settingsLink("Beta Updates", value: store.betaUpdates ? "On" : "Off", action: onOpenBeta)
+                LabeledContent("Build", value: SuiseiBuild.installedName)
+                LabeledContent("Engine", value: versionLabel)
+            } footer: {
+                Text("Suisei checks for a newer GitHub release; it never sends anything about your files.")
             }
         }
         .formStyle(.grouped)
     }
 
     private var statusRow: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
             Image(nsImage: NSApp.applicationIconImage)
                 .resizable()
                 .interpolation(.high)
-                .frame(width: 44, height: 44)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .frame(width: 48, height: 48)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(SuiseiBuild.installedName)
+                Text(headline)
                     .font(.body)
-                Text(versionLabel)
+                Text(subhead)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Text("This is not a valid release.")
-                    .font(.subheadline)
-                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer(minLength: 8)
 
-            if snap.checking {
-                ProgressView().controlSize(.small)
-            }
-
-            Button(action: onInfo) {
-                Image(systemName: "info.circle")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .symbolRenderingMode(.hierarchical)
-            }
-            .buttonStyle(.borderless)
-            .help("About this version")
+            trailingControl
         }
         .padding(.vertical, 4)
+    }
+
+    @ViewBuilder private var trailingControl: some View {
+        if snap.checking {
+            ProgressView()
+                .controlSize(.small)
+                .padding(.trailing, 4)
+        } else if snap.available {
+            Button("Release Notes…", action: onInfo)
+                .buttonStyle(.borderedProminent)
+        } else {
+            Button("Check Now", action: onCheckNow)
+        }
+    }
+
+    /// What is true right now, in the order the states can actually occur.
+    private var headline: String {
+        if snap.installed { return "Restart to finish updating" }
+        if snap.installing { return "Installing…" }
+        if snap.checking { return "Checking for Updates…" }
+        if snap.available { return "Update Available" }
+        return "Suisei is up to date"
+    }
+
+    private var subhead: String {
+        if snap.installed { return "Quit and reopen Suisei to load the installed version." }
+        if snap.checking { return SuiseiBuild.installedName }
+        if snap.available {
+            let version = snap.latest.isEmpty ? "A newer release" : "Version \(snap.latest)"
+            return "\(version) is available — you have \(versionLabel)."
+        }
+        return "\(SuiseiBuild.installedName) is the latest version."
     }
 
     private var versionLabel: String {
@@ -139,7 +188,7 @@ struct SoftwareUpdateAutomaticPage: View {
                     set: onSetAutomatic
                 ))
             } footer: {
-                Text("When this is on, Suisei looks for a GitHub Release at launch. Install is disabled until a signed Suisei snapshot exists.")
+                Text("When this is on, Suisei asks GitHub for the latest release at launch, at most once every four hours. Check Now ignores that interval.")
             }
         }
         .formStyle(.grouped)

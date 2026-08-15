@@ -408,6 +408,20 @@ struct ContentView: View {
         )
     }
     private var accent: Color { theme.color(theme.accent) }
+
+    /// Text that stays readable on a filled `accent`.
+    ///
+    /// The accent is the user's, and Appearance offers Yellow — white on
+    /// `#FFD60A` is barely a colour difference. Same rule the Git workbench
+    /// already uses for its accent-filled chips.
+    private var accentForeground: Color {
+        let packed = theme.accent
+        let r = Double((packed >> 16) & 0xFF) / 255.0
+        let g = Double((packed >> 8) & 0xFF) / 255.0
+        let b = Double(packed & 0xFF) / 255.0
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 0.58 ? .black : .white
+    }
+
     /// The theme, handed to the non-text viewers, which live outside this file
     /// and so cannot reach `theme` themselves.
     private var viewerPalette: ViewerPalette {
@@ -4360,34 +4374,25 @@ struct ContentView: View {
     /// end, narrow enough not to read as a sheet.
     private static let paletteWidth: CGFloat = 560
 
+    /// A field, a hairline, a list — Open Quickly's shape.
+    ///
+    /// What was here instead: a header bar carrying the palette's kind on the
+    /// left and a fake "Esc" key capsule on the right, above a field set in SF
+    /// **Rounded**. Neither Spotlight nor Open Quickly has a header, and macOS
+    /// does not set chrome in Rounded — it is the system font for watchOS and
+    /// for playful app content, so a rounded palette reads as a different
+    /// platform before you have read a word of it. The kind is worth keeping,
+    /// so it became the field's prompt, which is where a Mac says what a search
+    /// field searches.
     private var palettePanel: some View {
         glassPanel(corner: 20) {
             VStack(spacing: 0) {
-                HStack {
-                    Text(engine.chrome.palette.kind.isEmpty
-                        ? "Palette" : engine.chrome.palette.kind)
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("Esc")
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        // `primary` (= labelColor), not raw white: it resolves
-                        // per appearance and moves with Increase Contrast.
-                        // White reads as a wash in dark and as nothing at all
-                        // in light.
-                        .background(Capsule().fill(Color.primary.opacity(0.08)))
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
-                        .foregroundStyle(accent.opacity(0.9))
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
                     TextField(
-                        "Type to filter…",
+                        palettePrompt,
                         text: Binding(
                             get: { engine.chrome.palette.query },
                             set: { engine.setPaletteQuery($0) }
@@ -4396,11 +4401,11 @@ struct ContentView: View {
                     .textFieldStyle(.plain)
                     .foregroundStyle(fg)
                     .focused($overlayTextInput, equals: .palette)
-                    Spacer()
+                    Spacer(minLength: 0)
                 }
-                .font(.system(size: 15, design: .rounded))
+                .font(.system(size: 15))
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.vertical, 13)
                 .onAppear {
                     DispatchQueue.main.async { overlayTextInput = .palette }
                 }
@@ -4415,6 +4420,12 @@ struct ContentView: View {
                 paletteList
             }
         }
+    }
+
+    /// What this palette is for, said once, where a Mac says it.
+    private var palettePrompt: String {
+        let kind = engine.chrome.palette.kind
+        return kind.isEmpty ? "Search" : kind
     }
 
     /// The results, with the keyboard selection kept on screen.
@@ -4460,13 +4471,14 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(item.label)
                         .font(.system(size: 13))
-                        .foregroundStyle(selected ? Color.white : Color.primary)
+                        .foregroundStyle(selected ? accentForeground : Color.primary)
                         .lineLimit(1)
                     if !item.detail.isEmpty {
                         Text(item.detail)
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundStyle(
-                                selected ? Color.white.opacity(0.75) : Color.secondary
+                                selected
+                                    ? accentForeground.opacity(0.75) : Color.secondary
                             )
                             .lineLimit(1)
                             .truncationMode(.middle)

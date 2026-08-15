@@ -692,14 +692,26 @@ pub enum SettingRow {
 /// Native Settings destinations. These values cross the engine/Swift ABI;
 /// append only. They are deliberately independent from the four legacy TUI
 /// tabs in [`SettingsPage`].
+///
+/// Exactly one page owns each question. A setting that appears on two pages is
+/// two answers to one question, and the user has to guess which one the app
+/// believes — so a row names its page here and nowhere else decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingSurfacePage {
+    /// Not presented on any native page.
+    ///
+    /// The row still exists, is still parsed from and written to the config
+    /// file, and can still be driven by a keybinding — it simply has no place
+    /// in Settings. That is the state of a switch whose feature is gone: the
+    /// stored value must survive so an existing config still loads, and the
+    /// switch must not, because operating it does nothing.
     None,
     General,
     Appearance,
     Editor,
     LanguageServers,
     SourceControl,
+    SoftwareUpdate,
 }
 
 impl SettingSurfacePage {
@@ -711,6 +723,7 @@ impl SettingSurfacePage {
             Self::Editor => 3,
             Self::LanguageServers => 4,
             Self::SourceControl => 5,
+            Self::SoftwareUpdate => 6,
         }
     }
 }
@@ -806,7 +819,9 @@ impl SettingRow {
 
     pub fn presentation(self) -> SettingPresentation {
         use SettingControl::{Action, Color, Menu, None, Segmented, Toggle};
-        use SettingSurfacePage::{Appearance, Editor, General, LanguageServers, SourceControl};
+        use SettingSurfacePage::{
+            Appearance, Editor, LanguageServers, SoftwareUpdate, SourceControl,
+        };
 
         match self {
             Self::ThemeHeader => SettingPresentation {
@@ -847,34 +862,42 @@ impl SettingRow {
             },
             Self::HighlightColor => SettingPresentation {
                 page: Appearance,
-                group: "Highlight",
+                group: "Theme",
                 control: Color,
                 label: "Highlight Color",
                 detail: "Used for selections, focus, links, and active controls.",
                 options: "",
                 advanced: false,
             },
+            // Display, Tab Width and the wrap/number menus were on General
+            // while the Editor page held Keep Undo History and Use System
+            // Clipboard — so "how the editor shows text" was answered on two
+            // pages, and the one named Editor was the page that did not have
+            // Line Wrapping on it.
             Self::EditorHeader => SettingPresentation {
-                page: General,
-                group: "Editor Defaults",
+                page: Editor,
+                group: "Display",
                 control: None,
-                label: "Editor Defaults",
+                label: "Display",
                 detail: "",
                 options: "",
                 advanced: false,
             },
             Self::TabWidth => SettingPresentation {
-                page: General,
-                group: "Editor Defaults",
+                page: Editor,
+                group: "Display",
                 control: Menu,
                 label: "Tab Width",
                 detail: "Number of spaces used when inserting a tab.",
                 options: "2 Spaces|4 Spaces|8 Spaces",
                 advanced: false,
             },
+            // Owned by Software Update, which is where a person goes to ask
+            // this. It was on General as well, and the two rows wrote the same
+            // config key from two pages.
             Self::UpdateCheck => SettingPresentation {
-                page: General,
-                group: "Application",
+                page: SoftwareUpdate,
+                group: "Automatic Updates",
                 control: Menu,
                 label: "Check for Updates",
                 detail: "Choose whether Suisei checks for a newer release at launch.",
@@ -882,8 +905,8 @@ impl SettingRow {
                 advanced: false,
             },
             Self::RelativeNumber => SettingPresentation {
-                page: General,
-                group: "Editor Defaults",
+                page: Editor,
+                group: "Display",
                 control: Menu,
                 label: "Line Numbers",
                 detail: "Relative numbers show the distance from the current line.",
@@ -891,8 +914,8 @@ impl SettingRow {
                 advanced: false,
             },
             Self::WrapLines => SettingPresentation {
-                page: General,
-                group: "Editor Defaults",
+                page: Editor,
+                group: "Display",
                 control: Menu,
                 label: "Line Wrapping",
                 detail: "Wrap long lines at the window edge or scroll horizontally.",
@@ -917,39 +940,50 @@ impl SettingRow {
                 options: "",
                 advanced: false,
             },
+            // Not presented. The which-key overlay this switched was removed
+            // when Suisei stopped having leader/prefix chords, so the switch
+            // reads `key_hints` out of the config, writes it back, and nothing
+            // between those two points consumes it. The config key stays so an
+            // existing file still parses.
             Self::KeyHints => SettingPresentation {
-                page: Editor,
-                group: "Editing",
-                control: Toggle,
+                page: SettingSurfacePage::None,
+                group: "",
+                control: None,
                 label: "Show Key Hints",
-                detail: "Show available continuations while a command prefix is active.",
+                detail: "",
                 options: "",
                 advanced: false,
             },
+            // Not presented, for the same reason and a blunter one: these three
+            // describe Suisei drawing ITSELF into Ghostty or Kitty. There is no
+            // terminal frontend — the workspace builds core, engine and the
+            // daemon, and the Mac app is the only face. The page even said so
+            // ("The native Mac editor does not require them") while listing
+            // three switches that do nothing in the only editor there is.
             Self::GpuAcc => SettingPresentation {
-                page: Editor,
-                group: "Terminal Compatibility",
-                control: Menu,
+                page: SettingSurfacePage::None,
+                group: "",
+                control: None,
                 label: "Terminal Rendering",
-                detail: "Enhanced mode uses supported Ghostty and Kitty terminal features.",
+                detail: "",
                 options: "Compatibility|Enhanced",
                 advanced: true,
             },
             Self::GpuGraphics => SettingPresentation {
-                page: Editor,
-                group: "Terminal Compatibility",
-                control: Toggle,
+                page: SettingSurfacePage::None,
+                group: "",
+                control: None,
                 label: "Inline Terminal Graphics",
-                detail: "Allow image protocols in compatible terminal frontends.",
+                detail: "",
                 options: "",
                 advanced: true,
             },
             Self::GpuHyperlinks => SettingPresentation {
-                page: Editor,
-                group: "Terminal Compatibility",
-                control: Toggle,
+                page: SettingSurfacePage::None,
+                group: "",
+                control: None,
                 label: "Terminal Hyperlinks",
-                detail: "Emit clickable links in compatible terminal frontends.",
+                detail: "",
                 options: "",
                 advanced: true,
             },
