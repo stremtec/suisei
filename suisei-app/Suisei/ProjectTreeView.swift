@@ -263,6 +263,17 @@ struct ProjectTreeView: View {
                                 renameFocused = true
                             }
                             .frame(maxWidth: 220)
+                    } else if name == SuiseiProject.marker {
+                        // The marker is the folder's identity card, not a file
+                        // anyone opens. It reads as itself rather than as the
+                        // eleventh grey row: a git status letter would be the
+                        // wrong thing to colour it, so it does not take one.
+                        Text(name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Self.projectInk)
+                            .shadow(color: Self.projectInk.opacity(0.7), radius: 4)
+                            .shadow(color: Self.projectInk.opacity(0.35), radius: 9)
+                            .lineLimit(1)
                     } else {
                         Text(name)
                             .fontWeight(isDir && index.masterPath == path ? .semibold : .regular)
@@ -674,7 +685,18 @@ struct ProjectTreeView: View {
             }
         }
         dirs.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        files.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        // The project marker sorts to the floor, always.
+        //
+        // Alphabetically it lands under P, wedged between two source files it
+        // has nothing to do with. It is not a file anyone opens or edits — it
+        // is the folder's identity card — and the one place it can sit without
+        // interrupting a scan for real files is the end of the list.
+        files.sort {
+            let a = $0.name == SuiseiProject.marker
+            let b = $1.name == SuiseiProject.marker
+            if a != b { return b }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
         let all = dirs + files
         Self.listingCache[path] = all
         return all
@@ -779,6 +801,10 @@ struct ProjectTreeView: View {
         case "html", "css", "scss": return "globe"
         case "lock": return "lock.doc"
         default:
+            // Filled, against the other manifests' outline: it names the
+            // project the way they name a package, and it is the only one of
+            // them Suisei wrote itself.
+            if name == SuiseiProject.marker { return "shippingbox.fill" }
             if name == "Cargo.toml" || name == "Package.swift" || name == "package.json" {
                 return "shippingbox"
             }
@@ -787,10 +813,24 @@ struct ProjectTreeView: View {
         }
     }
 
+    /// The project marker's purple.
+    ///
+    /// A literal, not the accent: the accent is the user's and can be set to
+    /// anything, including a colour every other row already uses. This row is
+    /// meant to be the one that is not like the others.
+    ///
+    /// Two glow radii rather than one — a tight 4pt for the bloom right at the
+    /// glyph edges and a wide 9pt for the halo. One radius gives either a
+    /// blurred word or a faint fog, never light.
+    static let projectInk = Color(nsColor: .systemPurple)
+
     private func iconColor(name: String, isDir: Bool, isRoot: Bool) -> Color {
         if isDir || isRoot {
             return accent
         }
+        // The icon sits against the name; leaving it grey beside a glowing
+        // purple word reads as a rendering fault rather than as emphasis.
+        if name == SuiseiProject.marker { return Self.projectInk }
         let ext = (name as NSString).pathExtension.lowercased()
         switch ext {
         case "rs": return Color(nsColor: .systemOrange)

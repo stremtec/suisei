@@ -2616,7 +2616,9 @@ final class EngineBridge: ObservableObject {
             }
         }
         guard url.path.withCString({ suisei_project_mark($0) }) != 0 else {
-            presentError("Could not write \(url.lastPathComponent)/project.suiseiprj.", nil)
+            presentError(
+                "Could not write \(url.lastPathComponent)/\(SuiseiProject.marker).", nil
+            )
             return
         }
         _ = openPath(url.path)

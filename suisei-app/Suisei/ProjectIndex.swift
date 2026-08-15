@@ -1,6 +1,17 @@
 import Foundation
 import SwiftUI
 
+/// Facts about a Suisei project that more than one view needs.
+enum SuiseiProject {
+    /// The file that says "this folder is a project".
+    ///
+    /// `suisei_core::project::MARKER` is the authority — core creates the file
+    /// and core decides what a project is. This is the face's copy, named once
+    /// so the two views that have to recognise the file are comparing against
+    /// the same string rather than each against its own literal.
+    static let marker = "project.suiseiprj"
+}
+
 // MARK: - File-private constants (implicitly Sendable — safe to read from any
 // concurrency domain without @MainActor isolation).
 
