@@ -405,9 +405,28 @@ final class EditorScrollView: NSScrollView {
         // from `abs(coreLine - clipLine)` could never separate "restore a tab"
         // (instant) from "jump to a symbol" (animate) — any threshold got one
         // of them wrong.
+        //
+        // …and it is the FOCUSED pane that obeys. `scrollIntent` is one field on
+        // `App`: it describes what core just did to the document it is holding,
+        // which is the focused pane's. Every pane read it, so focusing pane B
+        // told pane A to restore a position it had not left.
+        //
+        // That is visible exactly once, and only from the bottom of a document.
+        // A clip resting at the end sits at `docHeight - viewportHeight`, which
+        // is not a whole number of lines; core stores the scroll as a line
+        // index, `floor`ed. Restoring it multiplies that integer back out and
+        // the view rises by the lost remainder — after which the clip IS on a
+        // line boundary, `coreLine == clipLine`, and nothing moves again. "튄
+        // 이후로 안 건들면 안 움직임."
+        //
+        // A pane that is not focused and whose document did change still lands
+        // correctly: it falls to the `docChanged` branch below, which is what
+        // that branch is for.
+        let focusedPane = engine?.editorSplit.isSplit != true
+            || paneIndex == engine?.editorSplit.focus
         let coreLine = Int(docScroll)
         let clipLine = Int(floor(documentVisibleRect.minY / max(1, lineH)))
-        if !isUserScrolling, !canvas.isLiveScrolling, !canvas.isTrackingDrag,
+        if focusedPane, !isUserScrolling, !canvas.isLiveScrolling, !canvas.isTrackingDrag,
            scrollIntent != 0
         {
             switch scrollIntent {
