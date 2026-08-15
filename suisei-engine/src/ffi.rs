@@ -295,24 +295,40 @@ pub extern "C" fn suisei_engine_dispatch_key(
 /// index; the core speaks cell columns. Converting HERE keeps the East-Asian
 /// width rule in exactly one place — doing it in Swift would duplicate it and
 /// the two would drift.
+///
+/// **Against the line the face was shown, which is not the line in the
+/// buffer.** `build_editor_lines` sends `expand_tabs(raw, tab_width)`, so on a
+/// tab-indented line CoreText measured a run of spaces and answered with an
+/// offset into that run. Read against the raw line — one `\t` where the face
+/// saw four cells — every character counted three positions too far, and a
+/// click on the first non-blank landed at the end of the line. This is the
+/// whole "the caret is slightly off on lines with tabs" bug, and it predates
+/// soft wrap: the two strings have differed since tabs were expanded for
+/// drawing.
+///
+/// Nothing is converted back to a buffer column here. The expanded text IS the
+/// screen row, so summing cell widths up to the offset gives the screen column
+/// `click_at` wants directly, and `pos_from_click` does the one remaining
+/// conversion against the raw line.
 fn vcol_for_utf16(eng: &SuiseiEngine, row: u32, utf16_off: u32) -> u32 {
-    let buf = &eng.0.app().buffer;
+    let app = eng.0.app();
+    let buf = &app.buffer;
     let row = (row as usize).min(buf.line_count().saturating_sub(1));
-    let line = buf.line(row);
+    let shown = suisei_core::wrap::expand_tabs(buf.line(row), app.tab_width);
     let mut seen_u16 = 0usize;
-    let mut char_col = 0usize;
-    for ch in line.chars() {
+    let mut col = 0usize;
+    for ch in shown.chars() {
         let next = seen_u16.saturating_add(ch.len_utf16());
         if next > utf16_off as usize {
             break;
         }
         seen_u16 = next;
-        char_col += 1;
+        // Combining marks are width zero. An earlier `.max(1)` invented a cell
+        // for every jamo and accent, and drag-selection drifted from what
+        // CoreText drew.
+        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
     }
-    // Delegate width policy to Buffer. In particular, combining marks are
-    // width zero; the previous `.max(1)` invented a cell for every jamo/accent
-    // and made drag-selection drift from what CoreText drew.
-    buf.buffer_col_to_screen_col(row, char_col) as u32
+    col as u32
 }
 
 /// Click addressed by UTF-16 offset instead of cell column.
@@ -4328,6 +4344,48 @@ mod tests {
         let bytes: &[u8] = unsafe { std::slice::from_raw_parts(dst.as_ptr() as *const u8, 4) };
         assert_eq!(&bytes[..3], b"abc");
         assert_eq!(bytes[3], 0);
+    }
+
+    /// A click lands where it was clicked on a tab-indented line.
+    ///
+    /// The face measures against the string it was HANDED, and that string is
+    /// `expand_tabs(raw, tab_width)`. Clicking the `f` of `\tfn` therefore
+    /// reports UTF-16 offset 4 — four expanded cells of indent. Read against
+    /// the raw line, which has one `\t` there, the old conversion counted four
+    /// characters in and answered with the screen column of buffer col 4:
+    /// past the end. Every click on an indented line missed, and the deeper
+    /// the indent the further.
+    #[test]
+    fn a_click_on_a_tab_indented_line_lands_where_it_was_clicked() {
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        engine.0.app.tab_width = 4;
+        engine.0.app.buffer = suisei_core::buffer::Buffer::from_string("\tfn main() {}");
+
+        // "    fn main() {}" — the `f` is the fifth UTF-16 unit, offset 4.
+        assert_eq!(vcol_for_utf16(&engine, 0, 4), 4, "the f is at screen col 4");
+        // And a screen column of 4 is buffer column 1: just past the tab.
+        suisei_engine_click_utf16(&mut *engine, 0, 4, 0);
+        assert_eq!(engine.0.app.buffer.cursor.col, 1);
+
+        // Two tabs at width 8: the face sees sixteen cells of indent.
+        engine.0.app.tab_width = 8;
+        engine.0.app.buffer = suisei_core::buffer::Buffer::from_string("\t\tdeep");
+        assert_eq!(vcol_for_utf16(&engine, 0, 16), 16);
+        suisei_engine_click_utf16(&mut *engine, 0, 16, 0);
+        assert_eq!(engine.0.app.buffer.cursor.col, 2, "past both tabs");
+    }
+
+    /// A wide character is one UTF-16 unit and two cells, and the offset the
+    /// face sends counts units. Expanding tabs must not disturb that.
+    #[test]
+    fn a_wide_character_still_measures_two_cells() {
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        engine.0.app.tab_width = 4;
+        engine.0.app.buffer = suisei_core::buffer::Buffer::from_string("\t야르x");
+        // Shown as "    야르x": offsets 0-3 indent, 4 = 야, 5 = 르, 6 = x.
+        assert_eq!(vcol_for_utf16(&engine, 0, 4), 4);
+        assert_eq!(vcol_for_utf16(&engine, 0, 5), 6, "야 takes two cells");
+        assert_eq!(vcol_for_utf16(&engine, 0, 6), 8, "르 takes two more");
     }
 
     #[test]

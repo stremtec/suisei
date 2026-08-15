@@ -3971,7 +3971,7 @@ impl App {
         // Ensure the cursor's wrap segment is on-screen.
         let screen_col = self
             .buffer
-            .buffer_col_to_screen_col(cursor_row, self.buffer.cursor.col);
+            .buffer_col_to_screen_col(cursor_row, self.buffer.cursor.col, self.tab_width);
         let cursor_wrap = if wrap { screen_col / text_width } else { 0 };
 
         // Horizontal-scroll mode: pan so the cursor stays visible.

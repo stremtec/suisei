@@ -2721,7 +2721,7 @@ impl Engine {
         let col = self
             .app
             .buffer
-            .screen_col_to_buffer_col(row, visual_col as usize);
+            .screen_col_to_buffer_col(row, visual_col as usize, self.app.tab_width);
         let max_col = self.app.buffer.line(row).chars().count();
         Position::new(row, col.min(max_col))
     }

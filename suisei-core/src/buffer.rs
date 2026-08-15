@@ -154,32 +154,39 @@ impl Buffer {
         }
     }
 
-    pub fn buffer_col_to_screen_col(&self, row: usize, buf_col: usize) -> usize {
+    /// Cells a character takes on screen at `visual`.
+    ///
+    /// `tab_width` is a parameter because it is a setting. Both conversions
+    /// used to hardcode 4 while the compositor expanded with `app.tab_width`,
+    /// so at any other tab width the two disagreed about where a tab ends —
+    /// and the click path runs through both.
+    fn cell_width(ch: char, visual: usize, tab_width: usize) -> usize {
+        if ch == '\t' {
+            let w = tab_width.max(1);
+            w - (visual % w)
+        } else {
+            ch.width().unwrap_or(1)
+        }
+    }
+
+    pub fn buffer_col_to_screen_col(&self, row: usize, buf_col: usize, tab_width: usize) -> usize {
         let line = self.line(row);
         let mut visual = 0;
         for (i, ch) in line.chars().enumerate() {
             if i >= buf_col {
                 return visual;
             }
-            visual += if ch == '\t' {
-                4 - (visual % 4)
-            } else {
-                ch.width().unwrap_or(1)
-            };
+            visual += Self::cell_width(ch, visual, tab_width);
         }
         visual
     }
 
-    pub fn screen_col_to_buffer_col(&self, row: usize, screen_col: usize) -> usize {
+    pub fn screen_col_to_buffer_col(&self, row: usize, screen_col: usize, tab_width: usize) -> usize {
         let line = self.line(row);
         let mut visual = 0;
         let mut buf_col = 0;
         for ch in line.chars() {
-            let w = if ch == '\t' {
-                4 - (visual % 4)
-            } else {
-                ch.width().unwrap_or(1)
-            };
+            let w = Self::cell_width(ch, visual, tab_width);
             if visual + w > screen_col {
                 return buf_col;
             }
@@ -1324,27 +1331,41 @@ mod tests {
     #[test]
     fn test_screen_col_to_buffer_col() {
         let buf = Buffer::from_string("\thello");
-        assert_eq!(buf.screen_col_to_buffer_col(0, 0), 0);
-        assert_eq!(buf.screen_col_to_buffer_col(0, 1), 0);
-        assert_eq!(buf.screen_col_to_buffer_col(0, 3), 0);
-        assert_eq!(buf.screen_col_to_buffer_col(0, 4), 1);
-        assert_eq!(buf.screen_col_to_buffer_col(0, 5), 2);
+        assert_eq!(buf.screen_col_to_buffer_col(0, 0, 4), 0);
+        assert_eq!(buf.screen_col_to_buffer_col(0, 1, 4), 0);
+        assert_eq!(buf.screen_col_to_buffer_col(0, 3, 4), 0);
+        assert_eq!(buf.screen_col_to_buffer_col(0, 4, 4), 1);
+        assert_eq!(buf.screen_col_to_buffer_col(0, 5, 4), 2);
     }
 
     #[test]
     fn test_buffer_col_to_screen_col() {
         let buf = Buffer::from_string("\thello");
-        assert_eq!(buf.buffer_col_to_screen_col(0, 0), 0);
-        assert_eq!(buf.buffer_col_to_screen_col(0, 1), 4);
-        assert_eq!(buf.buffer_col_to_screen_col(0, 5), 8);
+        assert_eq!(buf.buffer_col_to_screen_col(0, 0, 4), 0);
+        assert_eq!(buf.buffer_col_to_screen_col(0, 1, 4), 4);
+        assert_eq!(buf.buffer_col_to_screen_col(0, 5, 4), 8);
+    }
+
+    /// The tab stop follows the setting. Both conversions hardcoded 4 while
+    /// the compositor expanded with `app.tab_width`, so at any other width the
+    /// drawn line and the click arithmetic disagreed about where a tab ends.
+    #[test]
+    fn a_tab_stop_is_the_configured_width() {
+        let buf = Buffer::from_string("\thello");
+        assert_eq!(buf.buffer_col_to_screen_col(0, 1, 8), 8);
+        assert_eq!(buf.screen_col_to_buffer_col(0, 8, 8), 1);
+        assert_eq!(buf.buffer_col_to_screen_col(0, 1, 2), 2);
+        assert_eq!(buf.screen_col_to_buffer_col(0, 2, 2), 1);
+        // A width of zero would divide by zero, and no editor means it.
+        assert_eq!(buf.buffer_col_to_screen_col(0, 1, 0), 1);
     }
 
     #[test]
     fn test_col_roundtrip_tabs() {
         let buf = Buffer::from_string("\t\tfn main()");
         for bc in 0..=buf.line(0).chars().count() {
-            let sc = buf.buffer_col_to_screen_col(0, bc);
-            let back = buf.screen_col_to_buffer_col(0, sc);
+            let sc = buf.buffer_col_to_screen_col(0, bc, 4);
+            let back = buf.screen_col_to_buffer_col(0, sc, 4);
             assert_eq!(back, bc, "roundtrip failed at buf_col={}", bc);
         }
     }
@@ -1353,8 +1374,8 @@ mod tests {
     fn test_col_roundtrip_spaces() {
         let buf = Buffer::from_string("        let x = 1;");
         for bc in 0..=buf.line(0).chars().count() {
-            let sc = buf.buffer_col_to_screen_col(0, bc);
-            let back = buf.screen_col_to_buffer_col(0, sc);
+            let sc = buf.buffer_col_to_screen_col(0, bc, 4);
+            let back = buf.screen_col_to_buffer_col(0, sc, 4);
             assert_eq!(back, bc, "roundtrip failed at buf_col={}", bc);
         }
     }
@@ -1363,8 +1384,8 @@ mod tests {
     fn test_col_roundtrip_cjk() {
         let buf = Buffer::from_string("야르~");
         for bc in 0..=buf.line(0).chars().count() {
-            let sc = buf.buffer_col_to_screen_col(0, bc);
-            let back = buf.screen_col_to_buffer_col(0, sc);
+            let sc = buf.buffer_col_to_screen_col(0, bc, 4);
+            let back = buf.screen_col_to_buffer_col(0, sc, 4);
             assert_eq!(back, bc, "roundtrip failed at buf_col={} for '야르~'", bc);
         }
     }
@@ -1372,16 +1393,16 @@ mod tests {
     #[test]
     fn test_cjk_width() {
         let buf = Buffer::from_string("a한b");
-        assert_eq!(buf.buffer_col_to_screen_col(0, 0), 0); // 'a' at col 0
-        assert_eq!(buf.buffer_col_to_screen_col(0, 1), 1); // '한' at col 1 → screen col 1
-        assert_eq!(buf.buffer_col_to_screen_col(0, 2), 3); // 'b' at col 2 → screen col 3 (한=width 2)
+        assert_eq!(buf.buffer_col_to_screen_col(0, 0, 4), 0); // 'a' at col 0
+        assert_eq!(buf.buffer_col_to_screen_col(0, 1, 4), 1); // '한' at col 1 → screen col 1
+        assert_eq!(buf.buffer_col_to_screen_col(0, 2, 4), 3); // 'b' at col 2 → screen col 3 (한=width 2)
     }
     #[test]
     fn test_col_roundtrip_mixed() {
         let buf = Buffer::from_string("  \t  hello\tworld");
         for bc in 0..=buf.line(0).chars().count() {
-            let sc = buf.buffer_col_to_screen_col(0, bc);
-            let back = buf.screen_col_to_buffer_col(0, sc);
+            let sc = buf.buffer_col_to_screen_col(0, bc, 4);
+            let back = buf.screen_col_to_buffer_col(0, sc, 4);
             assert_eq!(back, bc, "roundtrip failed at buf_col={}", bc);
         }
     }
