@@ -510,6 +510,7 @@ struct ProjectTreeView: View {
     /// of them, including out of the project entirely.
     private func moveElsewhere(_ path: String) {
         let panel = NSOpenPanel()
+        engine.sizePanel(panel, remembering: "moveTo")
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false

@@ -2365,6 +2365,7 @@ final class EngineBridge: ObservableObject {
         // file the user could not find and the system would eventually delete.
         if chrome.welcome {
             let panel = NSSavePanel()
+            sizePanel(panel, remembering: "newFile")
             panel.nameFieldStringValue = "Untitled.txt"
             panel.canCreateDirectories = true
             panel.prompt = "Create"
@@ -2390,6 +2391,7 @@ final class EngineBridge: ObservableObject {
     func createProjectFolder() {
         cancelPointerSession()
         let panel = NSSavePanel()
+        sizePanel(panel, remembering: "newProject")
         panel.nameFieldStringValue = "New Project"
         panel.canCreateDirectories = true
         panel.prompt = "Create"
@@ -2562,8 +2564,40 @@ final class EngineBridge: ObservableObject {
         alert.runModal()
     }
 
+    /// Give a file panel a size of its own.
+    ///
+    /// `NSOpenPanel`/`NSSavePanel` restore their frame from AppKit's own
+    /// defaults, and this app never told any of them what it wanted — so the
+    /// frame they came back at was whatever had been stored, which on the
+    /// reported case was the editor window's. Choosing a project from Welcome
+    /// produced a file chooser the size of a full editor.
+    ///
+    /// An autosave name PER PURPOSE fixes both halves: each panel remembers its
+    /// own size rather than sharing one, and a default frame applied when there
+    /// is nothing remembered means the first time is a file chooser rather than
+    /// an inheritance. After that the user's own resizing wins, which is the
+    /// point of remembering at all.
+    func sizePanel(_ panel: NSSavePanel, remembering name: String) {
+        let key = "suisei.panel.\(name)"
+        panel.setFrameAutosaveName(key)
+        // `setFrameAutosaveName` returns false when the name is already taken by
+        // a live window; either way, an unremembered panel gets our size.
+        if UserDefaults.standard.string(forKey: "NSWindow Frame \(key)") == nil {
+            let size = NSSize(width: 760, height: 480)
+            var frame = NSRect(origin: .zero, size: size)
+            if let screen = NSScreen.main?.visibleFrame {
+                frame.origin = NSPoint(
+                    x: screen.midX - size.width / 2,
+                    y: screen.midY - size.height / 2
+                )
+            }
+            panel.setFrame(frame, display: false)
+        }
+    }
+
     func openProjectFolder() {
         let panel = NSOpenPanel()
+        sizePanel(panel, remembering: "openProject")
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
@@ -2597,6 +2631,7 @@ final class EngineBridge: ObservableObject {
         let url = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !url.isEmpty else { return }
         let panel = NSOpenPanel()
+        sizePanel(panel, remembering: "cloneDestination")
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
@@ -2985,6 +3020,7 @@ final class EngineBridge: ObservableObject {
     func saveAsPanel() {
         commitPendingEditorComposition()
         let panel = NSSavePanel()
+        sizePanel(panel, remembering: "saveAs")
         panel.canCreateDirectories = true
         // Open where the user is working rather than wherever the panel was
         // last: an untitled buffer almost always belongs in the project.
@@ -3018,6 +3054,7 @@ final class EngineBridge: ObservableObject {
 
     func openFilePanel() {
         let panel = NSOpenPanel()
+        sizePanel(panel, remembering: "openFile")
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.begin { [weak self] result in
