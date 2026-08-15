@@ -924,6 +924,11 @@ uint8_t suisei_engine_references(const SuiseiEngine *ptr,
 /* Quick Help inspector — LSP hover. Asynchronous: request, then poll. */
 #define SUISEI_HOVER_TEXT 4096
 
+/* 1 when a language server is attached; writes its name into `out` when `out`
+   and `cap` are given. Lets a surface tell "no server for this language" from
+   "the server had nothing to say about this symbol". */
+uint8_t suisei_engine_lsp_server(const SuiseiEngine *ptr, char *out, uint32_t cap);
+
 void suisei_engine_request_hover(SuiseiEngine *ptr);
 uint8_t suisei_engine_hover_text(const SuiseiEngine *ptr, char *out, uint32_t cap);
 

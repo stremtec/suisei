@@ -3551,6 +3551,34 @@ pub extern "C" fn suisei_engine_hover_text(
     1
 }
 
+/// Whether a language server is attached, and which one.
+///
+/// Core has had `lsp.server_running` and `lsp.server_name` the whole time and
+/// neither crossed. Without them the face cannot tell "no server for this
+/// language" from "the server had nothing to say about this symbol", so Quick
+/// Help answered both with the same shrug — and told a user who plainly HAS
+/// rust-analyzer that descriptions come from a language server.
+///
+/// Returns 1 when a server is running. `out`/`cap` may be null/0 when the
+/// caller only wants the flag.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_lsp_server(
+    ptr: *const SuiseiEngine,
+    out: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let eng = unsafe { &*ptr };
+    let lsp = &eng.0.app().lsp;
+    if !out.is_null() && cap > 0 {
+        let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+        write_cstr(dst, &lsp.server_name);
+    }
+    u8::from(lsp.server_running)
+}
+
 /// One row a live reload touched. 8 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]

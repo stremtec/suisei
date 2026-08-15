@@ -1291,6 +1291,8 @@ final class EngineBridge: ObservableObject {
     /// on a click cannot, because the interesting third of a second is the one
     /// right after it opens.
     @Published private(set) var hoverPending = false
+    /// The language server attached to the current document, or "" for none.
+    @Published private(set) var lspServerName = ""
     private var hoverPoll: DispatchWorkItem?
     /// Discards results from a superseded query — the user types faster than a
     /// project grep finishes, and out-of-order replies would otherwise win.
@@ -4133,6 +4135,18 @@ final class EngineBridge: ObservableObject {
     /// Asks the language server about the symbol under the caret, then polls
     /// for the reply — hover is a round trip, so the answer is never ready in
     /// the same frame as the question.
+    /// How long to keep reading before calling it a no.
+    ///
+    /// The single catch-up read at 350 ms was inherited from the inspector
+    /// tab, where a user who saw nothing could re-select the tab and try
+    /// again. A popover that opens on a click has no such retry: whatever it
+    /// says at 350 ms is what it says forever. And 350 ms was a guess about
+    /// another process rather than a fact about one — rust-analyzer's first
+    /// hover after a cold start is well past it, and the answer that arrives
+    /// at 600 ms landed in `hoverText` with nobody left watching.
+    private static let hoverDeadline: TimeInterval = 4
+    private static let hoverReadInterval: TimeInterval = 0.08
+
     func refreshHover() {
         guard let engine else {
             hoverText = ""
@@ -4144,16 +4158,29 @@ final class EngineBridge: ObservableObject {
         // it is a wrong answer that looks like a right one.
         hoverText = ""
         hoverPending = true
+        refreshLspServer()
         suisei_engine_request_hover(engine)
         readHoverText()
-        // One catch-up read after the server has had a chance to answer.
+        guard hoverPending else { return }
         hoverPoll?.cancel()
+        scheduleHoverRead(until: Date().addingTimeInterval(Self.hoverDeadline))
+    }
+
+    private func scheduleHoverRead(until deadline: Date) {
         let work = DispatchWorkItem { [weak self] in
-            self?.readHoverText()
-            self?.hoverPending = false
+            guard let self, self.hoverPending else { return }
+            self.readHoverText()
+            guard self.hoverPending else { return }
+            if Date() >= deadline {
+                // Asked, waited, nothing came. That is an answer too, and the
+                // card can only say so once we stop claiming to be asking.
+                self.hoverPending = false
+                return
+            }
+            self.scheduleHoverRead(until: deadline)
         }
         hoverPoll = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverReadInterval, execute: work)
     }
 
     private func readHoverText() {
@@ -4162,10 +4189,26 @@ final class EngineBridge: ObservableObject {
         let ok = suisei_engine_hover_text(engine, &buf, UInt32(SUISEI_HOVER_TEXT))
         hoverText = ok != 0 ? String(cString: buf) : ""
         if !hoverText.isEmpty {
-            // Answered early — stop saying we are still asking.
+            // Answered — stop saying we are still asking.
             hoverPending = false
             hoverPoll?.cancel()
         }
+    }
+
+    /// Which language server is attached to this document, if any.
+    ///
+    /// Core has known this all along and it never crossed the ABI, so every
+    /// surface that had nothing to show could only shrug in one way. Read on
+    /// demand rather than published per frame: it changes when a server starts
+    /// or dies, and the only thing that asks is a card that has just opened.
+    func refreshLspServer() {
+        guard let engine else {
+            lspServerName = ""
+            return
+        }
+        var buf = [CChar](repeating: 0, count: 64)
+        let running = suisei_engine_lsp_server(engine, &buf, 64)
+        lspServerName = running != 0 ? String(cString: buf) : ""
     }
 
     // MARK: - Issue navigator

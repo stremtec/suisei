@@ -77,19 +77,43 @@ struct QuickHelpCard: View {
             .padding(.vertical, 12)
         } else {
             VStack(alignment: .leading, spacing: 3) {
-                Text(symbol.isEmpty ? "Nothing to describe here." : "No description.")
+                Text(emptyHeadline)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                Text(
-                    symbol.isEmpty
-                        ? "Right-click a name to ask about it."
-                        : "Descriptions come from the language server for this file."
-                )
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+                Text(emptyDetail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
         }
+    }
+
+    private var emptyHeadline: String {
+        if symbol.isEmpty { return "Nothing to describe here." }
+        return "No description."
+    }
+
+    /// Why there is nothing, as precisely as the app can say it.
+    ///
+    /// This used to be one sentence for every case — "Descriptions come from
+    /// the language server for this file" — which told a user who plainly has
+    /// rust-analyzer running something they already knew, and blamed a
+    /// component that was working. Core has always known whether a server is
+    /// attached and which one; it simply never crossed the ABI, so the card
+    /// could only shrug in one way.
+    ///
+    /// A server that is attached and answers nothing is the interesting case,
+    /// and it is usually not about the symbol: rust-analyzer answers nothing
+    /// for every position in a file that is not in its crate graph — a scratch
+    /// file beside Cargo.toml rather than under a member's `src/`. Naming the
+    /// server is what turns "no idea" into somewhere to look.
+    private var emptyDetail: String {
+        if symbol.isEmpty { return "Right-click a name to ask about it." }
+        let server = engine.lspServerName
+        if server.isEmpty {
+            return "No language server is attached to this file."
+        }
+        return "\(server) had nothing for this position — it may not have this file in its project."
     }
 }
