@@ -5210,9 +5210,13 @@ struct ContentView: View {
     private var quickHelpContent: some View {
         Group {
             if engine.hoverText.isEmpty {
+                // Was "Put the caret on a symbol, then reopen this tab" — a
+                // feature explaining its own wiring, because switching to this
+                // tab was the only thing that ever asked. Right-clicking a name
+                // asks now, and answers next to the name.
                 navigatorPlaceholder(
                     "questionmark.circle", "No description",
-                    "Put the caret on a symbol, then reopen this tab."
+                    "Right-click a symbol in the editor and choose Quick Help."
                 )
             } else {
                 ScrollView {

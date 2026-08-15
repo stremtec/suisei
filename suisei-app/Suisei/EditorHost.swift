@@ -930,6 +930,16 @@ final class EditorCanvasView: NSView {
 
     private(set) var docLineCount: UInt32 = 1
     private(set) var showFocusRing: Bool = false
+    /// Where the last right-click landed, and what identifier was under it.
+    ///
+    /// Captured in `menu(for:)` because that is the last moment the event
+    /// exists: by the time an item is chosen the pointer has moved to the menu
+    /// and the click is long gone, and both the anchor and the symbol are
+    /// about where the question was asked.
+    private var contextMenuPoint: CGPoint = .zero
+    private var contextMenuSymbol: String = ""
+    /// Held so a second Quick Help replaces the first rather than stacking.
+    private var quickHelpPopover: NSPopover?
     var colors = Colors(
         bg: .textBackgroundColor, fg: .labelColor, dim: .secondaryLabelColor,
         accent: .controlAccentColor, sel: .selectedTextBackgroundColor,
@@ -3664,9 +3674,14 @@ final class EditorCanvasView: NSView {
         // Was a vim-Visual probe, which the GUI never entered — Cut/Copy were
         // therefore always disabled. The painted band knows the truth.
         let selectionActive = bandRows.contains { $0.hasSelection }
+        // Where the question was asked. The popover anchors here, and the
+        // symbol is read from here, so both have to survive until the menu item
+        // is chosen — by then the event is long gone.
+        let p = convert(event.locationInWindow, from: nil)
+        contextMenuPoint = p
+        contextMenuSymbol = symbolUnderPointer(p) ?? ""
         // Click outside a selection moves the caret there first (Xcode behavior).
         if !selectionActive {
-            let p = convert(event.locationInWindow, from: nil)
             let (row, col) = absoluteHit(p)
             engine.placeCaret(row: row, col: col)
         }
@@ -3682,6 +3697,27 @@ final class EditorCanvasView: NSView {
         cut.isEnabled = selectionActive
         copy.isEnabled = selectionActive
         menu.autoenablesItems = false
+
+        // First, because it is the reason for right-clicking a name rather
+        // than for right-clicking the editor.
+        //
+        // Present and disabled when the click was not on an identifier, rather
+        // than absent: an item that comes and goes makes the user hunt for it,
+        // and "there is nothing here to describe" is the answer they were
+        // after anyway.
+        let help = item(
+            contextMenuSymbol.isEmpty
+                ? "Quick Help"
+                : "Quick Help for “\(contextMenuSymbol)”",
+            #selector(ctxQuickHelp(_:))
+        )
+        help.image = NSImage(
+            systemSymbolName: "info.circle", accessibilityDescription: nil
+        )
+        help.isEnabled = !contextMenuSymbol.isEmpty
+        menu.addItem(help)
+        menu.addItem(.separator())
+
         menu.addItem(cut)
         menu.addItem(copy)
         menu.addItem(item("Paste", #selector(ctxPaste(_:)), key: "v"))
@@ -3719,6 +3755,83 @@ final class EditorCanvasView: NSView {
     @objc private func ctxReveal(_ sender: Any?) {
         guard let file = engine?.chrome.filename, file.hasPrefix("/") else { return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file)])
+    }
+
+    /// Ask about the symbol that was right-clicked, and answer beside it.
+    ///
+    /// The caret is already on it — `menu(for:)` moved it there — so the
+    /// engine's existing hover request is asking about the right thing. What
+    /// was missing was anywhere to put the answer at the moment of asking: the
+    /// only caller of `refreshHover` was switching to the inspector's Quick
+    /// Help tab, which is why that tab's empty state told the user to reopen
+    /// it.
+    @objc private func ctxQuickHelp(_ sender: Any?) {
+        guard let engine else { return }
+        engine.refreshHover()
+
+        let popover = NSPopover()
+        // Transient: it goes away on the next click anywhere, like every other
+        // informational popover on the system. It has nothing to confirm.
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(
+            rootView: QuickHelpCard(engine: engine, symbol: contextMenuSymbol)
+        )
+        // A point has no edges to hang off, so the anchor is a two-point box
+        // around the click. Bigger and the card visibly floats away from the
+        // word it is about.
+        let anchor = NSRect(
+            x: contextMenuPoint.x - 1, y: contextMenuPoint.y - 1, width: 2, height: 2
+        )
+        quickHelpPopover?.close()
+        quickHelpPopover = popover
+        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
+    }
+
+    /// The identifier under `p`, or nil when there is not one there.
+    ///
+    /// Read off the DRAWN line rather than asked of core, because the drawn
+    /// line is what the pointer was over — the same reason the hit test itself
+    /// works in UTF-16 offsets into that text. Tabs being expanded in it does
+    /// not matter here: a tab is not part of a word either way.
+    private func symbolUnderPointer(_ p: CGPoint) -> String? {
+        guard let (row, u16) = absoluteHitUTF16(p) else { return nil }
+        // The row's segments concatenate to the line, wrapped or not.
+        let line = rows(Int(row), Int(row))
+            .filter { Int($0.lineNo) - 1 == Int(row) }
+            .map(\.text)
+            .joined()
+        return Self.identifier(in: line, atUTF16: Int(u16))
+    }
+
+    /// The word around `idx`.
+    ///
+    /// Letters, digits and underscore — every language Suisei parses spells
+    /// identifiers out of those, and asking core which language this is to
+    /// refine it would buy nothing the language server does not already decide
+    /// for itself when it answers.
+    ///
+    /// A click one position past the end of a word still means that word,
+    /// which is where the pointer lands when you click the right half of the
+    /// last letter.
+    static func identifier(in line: String, atUTF16 idx: Int) -> String? {
+        let ns = line as NSString
+        guard ns.length > 0 else { return nil }
+        func isWord(_ at: Int) -> Bool {
+            // A lone surrogate is half a character and cannot be classified.
+            // Identifiers outside the BMP are rare enough that treating one as
+            // a boundary loses nothing worth the complication.
+            guard let scalar = UnicodeScalar(ns.character(at: at)) else { return false }
+            let c = Character(scalar)
+            return c.isLetter || c.isNumber || c == "_"
+        }
+        var i = min(max(0, idx), ns.length - 1)
+        if !isWord(i), i > 0, isWord(i - 1) { i -= 1 }
+        guard isWord(i) else { return nil }
+        var start = i
+        var end = i
+        while start > 0, isWord(start - 1) { start -= 1 }
+        while end + 1 < ns.length, isWord(end + 1) { end += 1 }
+        return ns.substring(with: NSRange(location: start, length: end - start + 1))
     }
 
     private func absoluteHit(_ docPoint: CGPoint) -> (UInt32, UInt32) {

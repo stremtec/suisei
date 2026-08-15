@@ -1282,6 +1282,15 @@ final class EngineBridge: ObservableObject {
     @Published private(set) var referencesReady: Bool = false
     @Published private(set) var referencesTruncated: Bool = false
     @Published private(set) var hoverText: String = ""
+    /// A hover question is out and has not been answered.
+    ///
+    /// An empty `hoverText` means two different things — "nobody has said
+    /// anything yet" and "there is nothing to say" — and a surface that shows
+    /// the answer has to tell them apart. The inspector tab could get away
+    /// without it by simply printing whatever was there; a popover that opens
+    /// on a click cannot, because the interesting third of a second is the one
+    /// right after it opens.
+    @Published private(set) var hoverPending = false
     private var hoverPoll: DispatchWorkItem?
     /// Discards results from a superseded query — the user types faster than a
     /// project grep finishes, and out-of-order replies would otherwise win.
@@ -4127,13 +4136,22 @@ final class EngineBridge: ObservableObject {
     func refreshHover() {
         guard let engine else {
             hoverText = ""
+            hoverPending = false
             return
         }
+        // Cleared before the question, not after the answer. A stale
+        // description under a new symbol's name is worse than a blank card:
+        // it is a wrong answer that looks like a right one.
+        hoverText = ""
+        hoverPending = true
         suisei_engine_request_hover(engine)
         readHoverText()
         // One catch-up read after the server has had a chance to answer.
         hoverPoll?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.readHoverText() }
+        let work = DispatchWorkItem { [weak self] in
+            self?.readHoverText()
+            self?.hoverPending = false
+        }
         hoverPoll = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
@@ -4143,6 +4161,11 @@ final class EngineBridge: ObservableObject {
         var buf = [CChar](repeating: 0, count: Int(SUISEI_HOVER_TEXT))
         let ok = suisei_engine_hover_text(engine, &buf, UInt32(SUISEI_HOVER_TEXT))
         hoverText = ok != 0 ? String(cString: buf) : ""
+        if !hoverText.isEmpty {
+            // Answered early — stop saying we are still asking.
+            hoverPending = false
+            hoverPoll?.cancel()
+        }
     }
 
     // MARK: - Issue navigator
