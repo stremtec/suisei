@@ -297,9 +297,59 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>Suisei</string>
   <key>CFBundleIconName</key>
   <string>Suisei</string>
-  <!-- Bundled display fonts (Welcome wordmark: Gondens DEMO). -->
+  <!-- Bundled display fonts (Welcome wordmark: Milker). -->
   <key>ATSApplicationFontsPath</key>
   <string>Fonts</string>
+  <!-- project.suiseiprj gets its own icon in Finder.
+
+       Declared as an EXPORTED type because Suisei defines this format; an
+       imported declaration is for reading somebody else's. The identifier is
+       reverse-DNS and permanent — Launch Services caches it, and changing it
+       later orphans every marker already on disk.
+
+       It conforms to public.json, which is true (the file is JSON) and is what
+       lets Quick Look preview one without Suisei installed. -->
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>com.stemtec.suisei.project</string>
+      <key>UTTypeDescription</key>
+      <string>Suisei Project</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.json</string>
+        <string>public.data</string>
+      </array>
+      <key>UTTypeIconFile</key>
+      <string>SuiseiProject</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>suiseiprj</string>
+        </array>
+      </dict>
+    </dict>
+  </array>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Suisei Project</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.stemtec.suisei.project</string>
+      </array>
+      <key>CFBundleTypeIconFile</key>
+      <string>SuiseiProject</string>
+      <!-- Editor, not Viewer: opening one opens the project it marks. -->
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST
@@ -322,6 +372,15 @@ fi
 if [[ -f "$ICON_SRC_DIR/Assets.car" ]]; then
   cp -f "$ICON_SRC_DIR/Assets.car" "$RES/Assets.car"
 fi
+# Document icon for project.suiseiprj. Rendered from the app icon package's own
+# knot, so the document and the app cannot drift apart.
+PRJ_ICNS="$ROOT/suisei-app/Resources/SuiseiProject.icns"
+if [[ ! -f "$PRJ_ICNS" || "$ROOT/scripts/render_project_icon.py" -nt "$PRJ_ICNS" ]]; then
+  python3 "$ROOT/scripts/render_project_icon.py" >/dev/null \
+    && rm -rf "$ROOT/suisei-app/Resources/SuiseiProject.iconset" || true
+fi
+[[ -f "$PRJ_ICNS" ]] && cp -f "$PRJ_ICNS" "$RES/SuiseiProject.icns"
+
 if [[ -f "$ICON_SRC_DIR/Suisei.icns" ]]; then
   cp -f "$ICON_SRC_DIR/Suisei.icns" "$RES/Suisei.icns"
 fi
