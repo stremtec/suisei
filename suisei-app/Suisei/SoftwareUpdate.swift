@@ -74,13 +74,17 @@ struct SoftwareUpdatePage: View {
             }
 
             Section {
-                settingsLink(
-                    "Automatic Updates",
+                SettingsNavigationRow(
+                    symbol: "clock.arrow.circlepath",
+                    tint: Color(nsColor: .systemBlue),
+                    title: "Automatic Updates",
                     value: automaticOn ? "On" : "Off",
                     action: onOpenAutomatic
                 )
-                settingsLink(
-                    "Beta Updates",
+                SettingsNavigationRow(
+                    symbol: "hammer.fill",
+                    tint: Color(nsColor: .systemOrange),
+                    title: "Beta Updates",
                     value: store.betaUpdates ? "On" : "Off",
                     action: onOpenBeta
                 )
@@ -156,22 +160,6 @@ struct SoftwareUpdatePage: View {
         return EngineBridge.engineVersion
     }
 
-    private func settingsLink(_ title: String, value: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack {
-                Text(title)
-                    .foregroundStyle(.primary)
-                Spacer()
-                Text(value)
-                    .foregroundStyle(.secondary)
-                Image(systemName: "chevron.forward")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
 }
 
 struct SoftwareUpdateAutomaticPage: View {

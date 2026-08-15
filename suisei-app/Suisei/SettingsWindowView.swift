@@ -9,6 +9,9 @@ struct SettingsWindowView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var engineReferenceExpanded = false
     @State private var searchText = ""
+    /// Shortcuts' own filter. Separate from `searchText`, which filters the
+    /// sidebar's pages — Xcode's Shortcuts pane has its own Filter field too.
+    @State private var shortcutFilter = ""
     @State private var selectedPageID: PageID = .general
     @State private var pageHistory: [PageID] = [.general]
     @State private var historyIndex = 0
@@ -51,13 +54,32 @@ struct SettingsWindowView: View {
         }
     }
 
+    /// Which of the Color Scheme tiles is on — or `custom`, meaning none is.
+    ///
+    /// `config.theme` is one field with three meanings: `system`, the two
+    /// built-in palettes `light`/`dark`, and any other catalogue name. Core's
+    /// `value_index` for AppearanceMode folds that last case into 0, so pinning
+    /// Ocean lit the **Automatic** tile — the window claimed to be following
+    /// macOS while showing a palette macOS never asked for. The theme rows
+    /// carry the truth (Core marks the active one with `●`), so ask them.
     private var appearanceMode: String {
+        if pinnedThemeName != nil { return "custom" }
         guard let index = rows(.appearanceMode).first?.valueIndex else { return "system" }
         switch index {
         case 1: return "light"
         case 2: return "dark"
         default: return "system"
         }
+    }
+
+    /// The catalogue theme pinned right now, when it is not one the Color
+    /// Scheme tiles already answer for.
+    private var pinnedThemeName: String? {
+        guard let marked = rows(.theme).first(where: { $0.label.contains("●") }) else {
+            return nil
+        }
+        let name = clean(marked.label)
+        return (name == "light" || name == "dark") ? nil : name
     }
 
     private var glassStyle: String {
@@ -100,10 +122,6 @@ struct SettingsWindowView: View {
         let symbol: String
         let searchTerms: String
         let corePage: Int
-        /// Fill of the sidebar tile. Defaulted because the pushed sub-pages
-        /// (Profile, Sign-In & Security, Automatic/Beta Updates) never appear
-        /// in the sidebar and so never draw one.
-        var tint: Color = .gray
     }
 
     private struct PresentedSettingGroup: Identifiable {
@@ -128,45 +146,37 @@ struct SettingsWindowView: View {
             searchTerms: "account github sign in profile avatar token", corePage: 1
         ),
         Page(
-            id: .general, title: "General", symbol: "gearshape.fill",
-            searchTerms: "overview about version build release notes", corePage: 1,
-            tint: Color(nsColor: .systemGray)
+            id: .general, title: "General", symbol: "gearshape",
+            searchTerms: "overview about version build release notes", corePage: 1
         ),
         Page(
-            id: .appearance, title: "Appearance", symbol: "paintbrush.fill",
-            searchTerms: "theme light dark auto color accent highlight glass", corePage: 1,
-            tint: Color(nsColor: .systemBlue)
+            id: .appearance, title: "Appearance", symbol: "paintbrush",
+            searchTerms: "theme light dark auto color accent highlight glass", corePage: 1
         ),
         Page(
             id: .editor, title: "Editor", symbol: "square.and.pencil",
             searchTerms:
-                "editing wrap line numbers relative tab width clipboard undo minimap", corePage: 1,
-            tint: Color(nsColor: .systemIndigo)
+                "editing wrap line numbers relative tab width clipboard undo minimap", corePage: 1
         ),
         Page(
-            id: .languageServers, title: "Language Servers", symbol: "square.stack.3d.up.fill",
-            searchTerms: "lsp language server command completion diagnostics", corePage: 1,
-            tint: Color(nsColor: .systemTeal)
+            id: .languageServers, title: "Language Servers", symbol: "square.stack.3d.up",
+            searchTerms: "lsp language server command completion diagnostics", corePage: 1
         ),
         Page(
             id: .sourceControl, title: "Source Control", symbol: "arrow.triangle.branch",
-            searchTerms: "git scm repository workbench commit branch", corePage: 1,
-            tint: Color(nsColor: .systemOrange)
+            searchTerms: "git scm repository workbench commit branch", corePage: 1
         ),
         Page(
-            id: .extensions, title: "Extensions", symbol: "puzzlepiece.extension.fill",
-            searchTerms: "extension language syntax grammar vscode", corePage: 2,
-            tint: Color(nsColor: .systemPurple)
+            id: .extensions, title: "Extensions", symbol: "puzzlepiece.extension",
+            searchTerms: "extension language syntax grammar vscode", corePage: 2
         ),
         Page(
-            id: .shortcuts, title: "Shortcuts", symbol: "keyboard.fill",
-            searchTerms: "keyboard key binding command", corePage: 3,
-            tint: Color(nsColor: .systemGray)
+            id: .shortcuts, title: "Shortcuts", symbol: "keyboard",
+            searchTerms: "keyboard key binding command", corePage: 3
         ),
         Page(
             id: .softwareUpdate, title: "Software Update", symbol: "arrow.triangle.2.circlepath",
-            searchTerms: "software update version release beta automatic install", corePage: 1,
-            tint: Color(nsColor: .systemGray)
+            searchTerms: "software update version release beta automatic install", corePage: 1
         ),
     ]
 
@@ -372,25 +382,19 @@ struct SettingsWindowView: View {
         .padding(.vertical, 4)
     }
 
-    /// A filled, tinted squircle with a white glyph — the thing that makes a
-    /// sidebar read as System Settings at a glance.
+    /// A flat monochrome glyph — Xcode's Settings sidebar, not System
+    /// Settings'.
     ///
-    /// These were flat `.secondary` glyphs, which is how Xcode's navigator
-    /// draws icons, not how the Settings window does. Eight identical grey
-    /// symbols also gave the eye nothing to aim at: the colour is what lets you
-    /// hit "Editor" without reading the word.
+    /// These were briefly filled, tinted squircles, which is the System
+    /// Settings idiom. Suisei is an editor and sits beside Xcode, whose
+    /// Settings sidebar is outline symbols in one colour with a filled accent
+    /// capsule marking the selection. Copying the wrong Apple window is still
+    /// copying the wrong window.
     private func sidebarIcon(for page: Page, size: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-            .fill(page.tint.gradient)
+        Image(systemName: page.symbol)
+            .symbolRenderingMode(.monochrome)
+            .font(.system(size: size * 0.68, weight: .regular))
             .frame(width: size, height: size)
-            .overlay(
-                Image(systemName: page.symbol)
-                    .font(.system(size: size * 0.56, weight: .medium))
-                    .foregroundStyle(.white)
-            )
-            // The glyph is white on a saturated fill in both appearances, so
-            // it must not be dimmed along with the row when the list is not
-            // the first responder — a greyed tile reads as a disabled page.
             .accessibilityHidden(true)
     }
 
@@ -656,10 +660,11 @@ struct SettingsWindowView: View {
         }
 
         Section {
-            navigationRow(
-                "Software Update",
-                value: updateSummary,
-                symbol: "arrow.triangle.2.circlepath"
+            SettingsNavigationRow(
+                symbol: "arrow.triangle.2.circlepath",
+                tint: Color(nsColor: .systemGray),
+                title: "Software Update",
+                value: updateSummary
             ) { navigate(to: .softwareUpdate) }
 
             Button("Release Notes…") { engine.openSoftwareUpdateNotes() }
@@ -673,32 +678,6 @@ struct SettingsWindowView: View {
         return rows(.updateCheck).first?.valueIndex == 0 ? "Manual" : "Automatic"
     }
 
-    /// A row that goes somewhere, drawn the way System Settings draws one.
-    private func navigationRow(
-        _ title: String,
-        value: String,
-        symbol: String? = nil,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                if let symbol {
-                    Image(systemName: symbol)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 18)
-                }
-                Text(title).foregroundStyle(.primary)
-                Spacer(minLength: 8)
-                Text(value).foregroundStyle(.secondary)
-                Image(systemName: "chevron.forward")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
 
     @ViewBuilder private var appearanceSections: some View {
         Section {
@@ -710,14 +689,23 @@ struct SettingsWindowView: View {
             Text("Automatic follows macOS. Liquid Glass changes floating editor controls without changing syntax colours.")
         }
 
+        Section {
+            themeSelector
+            themePreviewCard
+            themeSwatches
+        } header: {
+            Text("Theme")
+        } footer: {
+            Text("A theme pins one palette regardless of the colour scheme above. Match Color Scheme follows macOS instead.")
+        }
+
         if let highlight = rows(.highlightColor).first {
             Section {
                 accentColorSelector(highlight)
-                customAccentColorSelector(highlight)
             } header: {
-                Text("Theme")
+                Text("Accent")
             } footer: {
-                Text("Default follows the selected palette. A custom accent changes selections, focus, links, and active controls.")
+                Text("Default follows the selected palette. Any other accent changes selections, focus, links, and active controls.")
             }
         }
     }
@@ -865,6 +853,55 @@ struct SettingsWindowView: View {
         }
     }
 
+    /// The palette catalogue, which had no control at all.
+    ///
+    /// Core ships fifteen themes and a `SettingRow::Theme(i)` for each, and the
+    /// Appearance page rendered none of them — it hand-built its two sections
+    /// and never called `presentedGroups(on: .appearance)`. `themePreviewCard`
+    /// and `themeSwatches` were written to sit under this picker and had no
+    /// caller either. So the catalogue was reachable only by hand-editing
+    /// `~/.suisei.toml`.
+    ///
+    /// `light` and `dark` are left out on purpose: `config.theme` is ONE field
+    /// holding either `system`, one of those two, or a catalogue name, so the
+    /// Color Scheme tiles above already answer for them. Listing them twice
+    /// would be two controls silently overwriting each other. "Match Color
+    /// Scheme" hands the field back to the tiles.
+    private var themeSelector: some View {
+        let themeRows = rows(.theme).filter {
+            let name = clean($0.label)
+            return name != "light" && name != "dark"
+        }
+        return Picker("Theme", selection: Binding<Int>(
+            get: { themeRows.first(where: { $0.label.contains("●") })?.id ?? -1 },
+            set: { id in
+                if id < 0 {
+                    if let mode = rows(.appearanceMode).first {
+                        engine.settingsSetValue(mode.id, value: 0)
+                    }
+                } else {
+                    // Core ignores the option for a Theme row — selecting the
+                    // row IS the choice (`apply_row_value` reads the index the
+                    // row carries).
+                    engine.settingsSetValue(id, value: 0)
+                }
+            }
+        )) {
+            Text("Match Color Scheme").tag(-1)
+            Divider()
+            ForEach(themeRows) { row in
+                Text(themeDisplayName(clean(row.label))).tag(row.id)
+            }
+        }
+    }
+
+    /// `mono_dark` → "Mono Dark". Core's names are config keys, not labels.
+    private func themeDisplayName(_ raw: String) -> String {
+        raw.split(separator: "_")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+
     /// Live swatch strip of the active theme (bg / fg / accent / syntax hues).
     private var themePreviewCard: some View {
         Group {
@@ -989,29 +1026,17 @@ struct SettingsWindowView: View {
                     .help(preset.name)
                 }
 
+                // Custom sits at the END of the same strip, which is where
+                // System Settings puts it — one row, one question. It used to
+                // be a second row ("Custom Accent Color") carrying its own
+                // Default button, so the accent was asked twice and "Default"
+                // was offered twice: once as the multicolour circle that opens
+                // this strip, once as a text button below it.
+                CompactColorWell(color: bindHighlightColor(row))
+                    .frame(width: 26, height: 22)
+                    .help("Custom…")
             }
             .fixedSize(horizontal: true, vertical: false)
-        }
-        .padding(.vertical, 5)
-    }
-
-    private func customAccentColorSelector(_ row: SettingsRowItem) -> some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Custom Accent Color")
-                Text("Choose any sRGB colour or return to the palette default.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 16)
-            Button("Default") {
-                engine.settingsSetHighlightColor("default")
-            }
-            .buttonStyle(.borderless)
-            .disabled(row.value.caseInsensitiveCompare("default") == .orderedSame)
-            CompactColorWell(color: bindHighlightColor(row))
-                .frame(width: 44, height: 22)
-                .help("Choose Custom Accent Color")
         }
         .padding(.vertical, 5)
     }
@@ -1291,90 +1316,104 @@ struct SettingsWindowView: View {
         }
     }
 
+    /// Xcode's Shortcuts pane: a filter, then the commands grouped by where
+    /// they live, each with its key equivalent right-aligned.
+    ///
+    /// This was a two-column `LazyVGrid` of hand-drawn key chips — a shape no
+    /// Mac settings window uses, and one that put the KEY first and the command
+    /// second, so the column you would scan for ("Save") was the one you could
+    /// not scan. Xcode leads with the command and right-aligns the keys; that
+    /// is also the only order that stays aligned when the key strings differ
+    /// in width.
     @ViewBuilder private var helpSections: some View {
+        let engineRows = s.rows.filter { !$0.isHeader }
+
         Section {
-            shortcutGrid([
-                ("⌘S", "Save"),
-                ("⌘P", "Open file"),
-                ("⇧⌘P", "Command palette"),
-                ("⌘F", "Find in file"),
-                ("⌘G / ⇧⌘G", "Next / previous match"),
-                ("⇧⌘F", "Find in project"),
-                ("⌘Z / ⇧⌘Z", "Undo / redo"),
-                ("⌃⇥ / ⌃⇧⇥", "Next / previous tab"),
-            ])
-        } header: {
-            Text("Editing")
+            TextField("Filter", text: $shortcutFilter)
+                .textFieldStyle(.roundedBorder)
         }
-        Section {
-            shortcutGrid([
-                ("⌘0", "Toggle navigator"),
-                ("⌥⌘0", "Toggle inspector"),
-                ("⇧⌘Y", "Toggle debug area"),
-                ("⌃T", "Terminal in debug area"),
-                ("⌃⇧T", "Terminal in editor pane"),
-                ("⇧⌘V", "Pretty preview"),
-                ("⌃G / ⌃⇧G", "Source control / Git workbench"),
-                ("⌘,", "Settings"),
-            ])
-        } header: {
-            Text("Panels")
-        }
-        Section {
-            DisclosureGroup(isExpanded: $engineReferenceExpanded) {
-                LazyVStack(spacing: 0) {
-                    ForEach(s.rows.filter { !$0.isHeader }.prefix(24)) { row in
-                        shortcutRow(row.label, row.value)
+
+        ForEach(Self.shortcutGroups, id: \.title) { group in
+            let matches = group.items.filter { shortcutMatches($0.command, $0.keys) }
+            if !matches.isEmpty {
+                Section(group.title) {
+                    ForEach(matches, id: \.command) { item in
+                        shortcutRow(item.command, item.keys)
                     }
                 }
-                .padding(.top, 6)
-            } label: {
-                HStack {
-                    Text("Show engine commands")
-                    Spacer()
-                    Text("\(min(24, s.rows.filter { !$0.isHeader }.count))")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
             }
-        } header: {
-            Text("Engine Reference")
-        } footer: {
-            Text("Full Suisei keybinding reference — advanced users can drive Core directly.")
+        }
+
+        // Core's own binding table. Capped, and the cap is stated rather than
+        // silently swallowing the tail — a list that stops without saying so
+        // reads as a complete list.
+        let engineMatches = engineRows.filter { shortcutMatches($0.label, $0.value) }
+        if !engineMatches.isEmpty {
+            Section {
+                DisclosureGroup(isExpanded: $engineReferenceExpanded) {
+                    ForEach(engineMatches.prefix(Self.engineCommandLimit)) { row in
+                        shortcutRow(clean(row.label), row.value)
+                    }
+                } label: {
+                    LabeledContent("Engine Commands", value: "\(engineMatches.count)")
+                }
+            } header: {
+                Text("Advanced")
+            } footer: {
+                Text(
+                    engineMatches.count > Self.engineCommandLimit
+                        ? "Showing the first \(Self.engineCommandLimit) of \(engineMatches.count) engine bindings."
+                        : "Suisei's engine bindings — advanced users can drive Core directly."
+                )
+            }
         }
     }
 
-    private func shortcutRow(_ keys: String, _ what: String) -> some View {
-        HStack(spacing: 8) {
+    private static let engineCommandLimit = 24
+
+    private struct ShortcutGroup {
+        let title: String
+        let items: [(command: String, keys: String)]
+    }
+
+    private static let shortcutGroups: [ShortcutGroup] = [
+        ShortcutGroup(title: "Editing", items: [
+            ("Save", "⌘S"),
+            ("Open File", "⌘P"),
+            ("Command Palette", "⇧⌘P"),
+            ("Find in File", "⌘F"),
+            ("Next / Previous Match", "⌘G / ⇧⌘G"),
+            ("Find in Project", "⇧⌘F"),
+            ("Undo / Redo", "⌘Z / ⇧⌘Z"),
+            ("Next / Previous Tab", "⌃⇥ / ⌃⇧⇥"),
+        ]),
+        ShortcutGroup(title: "Panels", items: [
+            ("Toggle Navigator", "⌘0"),
+            ("Toggle Inspector", "⌥⌘0"),
+            ("Toggle Debug Area", "⇧⌘Y"),
+            ("Terminal in Debug Area", "⌃T"),
+            ("Terminal in Editor Pane", "⌃⇧T"),
+            ("Pretty Preview", "⇧⌘V"),
+            ("Source Control / Git Workbench", "⌃G / ⌃⇧G"),
+            ("Settings", "⌘,"),
+        ]),
+    ]
+
+    private func shortcutMatches(_ command: String, _ keys: String) -> Bool {
+        let query = shortcutFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return true }
+        return command.localizedCaseInsensitiveContains(query)
+            || keys.localizedCaseInsensitiveContains(query)
+    }
+
+    /// Command on the left, key equivalent right-aligned — the order every Mac
+    /// shortcut list uses, including the menu bar itself.
+    private func shortcutRow(_ command: String, _ keys: String) -> some View {
+        LabeledContent(command) {
             Text(keys)
                 .font(.system(size: 12, design: .monospaced))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.row, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
-                )
-            Text(what)
-                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Spacer(minLength: 0)
-        }
-        .frame(minHeight: 30)
-    }
-
-    private func shortcutGrid(_ rows: [(String, String)]) -> some View {
-        LazyVGrid(
-            columns: [
-                GridItem(.flexible(), spacing: 12),
-                GridItem(.flexible(), spacing: 12),
-            ],
-            alignment: .leading,
-            spacing: 0
-        ) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                shortcutRow(row.0, row.1)
-            }
         }
     }
 
@@ -1529,6 +1568,51 @@ struct SettingsWindowView: View {
         label
             .replacingOccurrences(of: "●", with: "")
             .trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// A row that pushes to another page, drawn the way Xcode's Settings draws one.
+///
+/// Xcode uses two different icon treatments and it is worth being precise about
+/// which is which. Its **sidebar** is flat monochrome outline symbols in the
+/// label's own colour. Its **in-page navigation rows** — Editing ▸ Display,
+/// Completion, Indentation — are tinted squircles with a white glyph and a
+/// trailing chevron. Suisei briefly had the squircles in the sidebar, which is
+/// the System Settings idiom, on an editor that sits next to Xcode.
+struct SettingsNavigationRow: View {
+    var symbol: String
+    var tint: Color
+    var title: String
+    var value: String = ""
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(tint.gradient)
+                    .frame(width: 20, height: 20)
+                    .overlay(
+                        Image(systemName: symbol)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                    )
+                Text(title).foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                if !value.isEmpty {
+                    Text(value)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Image(systemName: "chevron.forward")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
     }
 }
 
