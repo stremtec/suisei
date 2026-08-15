@@ -178,6 +178,19 @@ final class EditorScrollView: NSScrollView {
     private(set) var isUserScrolling = false
     private var suppressPush = false
     private var lastDocLineCount: UInt32 = 0
+    /// The line height this clip was last positioned at.
+    ///
+    /// ⌘+ / ⌘− changes it, and a clip's origin is in POINTS. Nothing else in
+    /// `apply` notices: the document's line count has not changed and no scroll
+    /// intent is set, so the point offset survives a change of the very unit it
+    /// was measured in and lands on a different line — further down on ⌘−,
+    /// where the lines just got shorter.
+    ///
+    /// It is also why the minimap "did not show" the jump: Core's `scroll` is a
+    /// LINE and it did not move, so the indicator was right and the viewer was
+    /// wrong. Which in turn is why jumping from the outline afterwards
+    /// misbehaved — it computes against a base the view no longer agrees with.
+    private var lastLineHeight: CGFloat = 0
     private var lastWrap = true
     private var lastContentGen: UInt64 = 0
     private var lastHCols: Int = 0
@@ -461,7 +474,12 @@ final class EditorScrollView: NSScrollView {
         hasHorizontalScroller = !wrapLines
         horizontalScrollElasticity = wrapLines ? .none : .allowed
 
-        let docChanged = docLineCount != lastDocLineCount || wrapChanged
+        // A zoom moves every row without changing a single one of them, so it
+        // has to be re-anchored the same way a document change is: put Core's
+        // line back under the top of the clip.
+        let metricsChanged = lastLineHeight != 0 && lineH != lastLineHeight
+        lastLineHeight = lineH
+        let docChanged = docLineCount != lastDocLineCount || wrapChanged || metricsChanged
         lastDocLineCount = docLineCount
         // Only the focused pane may ask, because `contentCols()` can only
         // answer for one document: it measures `App::buffer` — the LIVE one —

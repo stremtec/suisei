@@ -437,6 +437,13 @@ struct GitWorkbenchWindowView: View {
     ///
     /// The `Divider` goes with it. `scrollEdgeEffectStyle(.soft)` is the native
     /// version of that line and it does not leave a seam.
+    /// Blank space kept under the last sidebar row. Measured from the window,
+    /// clamped so it is neither useless on a short one nor most of a tall one.
+    @State private var sidebarHeight: CGFloat = 600
+    private var sidebarBottomRoom: CGFloat {
+        min(360, max(120, sidebarHeight * 0.40))
+    }
+
     private var sidebar: some View {
         List(selection: $sidebarSelection) {
             if sourceMode == .changes {
@@ -448,6 +455,16 @@ struct GitWorkbenchWindowView: View {
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 4, for: .scrollContent)
+        // Room under the last row, so the file at the bottom of the list can be
+        // read and clicked from the middle of the column rather than from the
+        // very edge of the window. Without it, scrolling to the end puts the
+        // last change flush against the floor: the one row you had to travel
+        // furthest to reach is the one with nothing under it.
+        //
+        // 40% of the column rather than a fixed number — the point is where the
+        // row lands in the VIEW, and a constant that centres it on a short
+        // window strands it on a tall one.
+        .contentMargins(.bottom, sidebarBottomRoom, for: .scrollContent)
         // Every row is one line. `lineLimit` propagates through the
         // environment, so setting it here means a row added later cannot
         // reintroduce wrapping by omission — and a two-line label in a column
@@ -469,6 +486,13 @@ struct GitWorkbenchWindowView: View {
         // on the display link, because the collapse is an AppKit animation and
         // a SwiftUI `GeometryReader` never sees its intermediate frames.
         .background(SidebarPresentationTrace())
+        .background {
+            GeometryReader { geo in
+                Color.clear.onChange(of: geo.size.height, initial: true) { _, h in
+                    if h > 1 { sidebarHeight = h }
+                }
+            }
+        }
     }
 
     /// Same explicit-geometry pill used by the editor navigator: one authority
@@ -1446,7 +1470,9 @@ struct GitWorkbenchWindowView: View {
             historical: historical,
             untracked: untracked,
             light: isLightTheme,
-            accent: theme.accent
+            accent: theme.accent,
+            addInk: theme.success,
+            delInk: theme.errorColor
         )
         // AppKit virtualizes/reuses the visible rows. Small diffs keep their
         // natural height; large files become one native scroll surface instead
@@ -1838,6 +1864,11 @@ private struct GitDiffTableView: NSViewRepresentable {
     let untracked: Bool
     let light: Bool
     let accent: UInt32
+    /// The palette's own added/removed hues. Passed in rather than reached for
+    /// as `NSColor.systemGreen`/`systemRed`: those are macOS's, and a theme
+    /// that repaints the whole app has no business stopping at the diff.
+    let addInk: UInt32
+    let delInk: UInt32
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -1888,10 +1919,14 @@ private struct GitDiffTableView: NSViewRepresentable {
         private var untracked = false
         private var light = false
         private var accent = NSColor.controlAccentColor
+        private var addInk = NSColor.systemGreen
+        private var delInk = NSColor.systemRed
         private var measuredContentWidth: CGFloat = 420
 
         func update(from parent: GitDiffTableView, in scroll: NSScrollView) {
             let nextAccent = Self.color(parent.accent)
+            addInk = Self.color(parent.addInk)
+            delInk = Self.color(parent.delInk)
             let dataChanged = rows != parent.rows
                 || historical != parent.historical
                 || untracked != parent.untracked
@@ -1954,7 +1989,9 @@ private struct GitDiffTableView: NSViewRepresentable {
                 historical: historical,
                 untracked: untracked,
                 light: light,
-                accent: accent
+                accent: accent,
+                addInk: addInk,
+                delInk: delInk
             )
             return cell
         }
@@ -2047,7 +2084,9 @@ private final class GitDiffCell: NSTableCellView {
         historical: Bool,
         untracked: Bool,
         light: Bool,
-        accent: NSColor
+        accent: NSColor,
+        addInk: NSColor,
+        delInk: NSColor
     ) {
         let old = row.oldLine.map(String.init) ?? ""
         let new = row.newLine.map(String.init) ?? ""
@@ -2056,37 +2095,38 @@ private final class GitDiffCell: NSTableCellView {
         marker.stringValue = row.marker
         source.stringValue = row.content
 
-        let green = NSColor.systemGreen
-        let red = NSColor.systemRed
+        let green = addInk
+        let red = delInk
+        // Added and removed read the same way whether you are looking at a
+        // commit or at your own working tree.
+        //
+        // They did not. `historical` selected green/red for a commit's diff and
+        // ONE neutral wash for both kinds otherwise — same background, same
+        // accent-coloured bar, same secondary marker, same label text — so in
+        // Changes, which is the view this window opens on, a + and a − were
+        // drawn identically. The distinction is the whole reason the column is
+        // there.
         let background: NSColor
-        if !historical || untracked {
-            switch row.kind {
-            case .addition, .deletion:
-                background = NSColor.labelColor.withAlphaComponent(light ? 0.025 : 0.045)
-            case .hunk:
-                background = accent.withAlphaComponent(light ? 0.08 : 0.13)
-            default:
-                background = .clear
-            }
-        } else {
-            switch row.kind {
-            case .addition: background = green.withAlphaComponent(light ? 0.11 : 0.16)
-            case .deletion: background = red.withAlphaComponent(light ? 0.09 : 0.14)
-            case .hunk: background = accent.withAlphaComponent(light ? 0.08 : 0.13)
-            default: background = .clear
-            }
+        switch row.kind {
+        case .addition: background = green.withAlphaComponent(light ? 0.11 : 0.16)
+        case .deletion: background = red.withAlphaComponent(light ? 0.09 : 0.14)
+        case .hunk: background = accent.withAlphaComponent(light ? 0.08 : 0.13)
+        default: background = .clear
         }
         layer?.backgroundColor = background.cgColor
 
         switch row.kind {
         case .addition:
-            bar.layer?.backgroundColor = (historical ? green : accent).cgColor
-            marker.textColor = historical ? green : .secondaryLabelColor
-            source.textColor = historical ? green : .labelColor
+            bar.layer?.backgroundColor = green.cgColor
+            marker.textColor = green
+            // The SOURCE stays label-coloured. Tinting the code green as well
+            // was the historical view's habit and it costs legibility for a
+            // fact the bar, the marker and the wash have each already stated.
+            source.textColor = .labelColor
         case .deletion:
-            bar.layer?.backgroundColor = (historical ? red : accent).cgColor
-            marker.textColor = historical ? red : .secondaryLabelColor
-            source.textColor = historical ? red : .labelColor
+            bar.layer?.backgroundColor = red.cgColor
+            marker.textColor = red
+            source.textColor = .labelColor
         case .hunk:
             bar.layer?.backgroundColor = accent.withAlphaComponent(0.8).cgColor
             marker.textColor = accent
