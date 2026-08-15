@@ -19,6 +19,27 @@ enum EditorDiagnostics {
     static let bandGaps = modes.contains("band") || modes.contains("all")
     static let metal = modes.contains("metal") || modes.contains("all")
     static let wrap = modes.contains("wrap") || modes.contains("all")
+    static let ime = modes.contains("ime") || modes.contains("all")
+
+    /// Every `NSTextInputClient` call, in order, with the state it left.
+    ///
+    /// "Backspace needs two presses" has several shapes that all look the same
+    /// from a chair: the input method could be emptying the composition on the
+    /// first press (so the second is the first real delete, and the behaviour
+    /// is right but reads wrong), it could be calling `unmarkText` — which this
+    /// client treats as *accept*, and would re-insert the text being deleted —
+    /// or the key could be consumed without reaching the document at all.
+    ///
+    /// They are three different fixes and the difference is entirely in the
+    /// order of these calls, which is not visible on screen.
+    static func reportIME(_ call: String, _ detail: String, marked: String) {
+        guard ime else { return }
+        NSLog("[suisei/ime] \(call) \(detail)  marked=\(quoted(marked))")
+    }
+
+    private static func quoted(_ s: String) -> String {
+        s.isEmpty ? "∅" : "\"\(s)\""
+    }
 
     /// Where a wrapped row's right edge comes from.
     ///

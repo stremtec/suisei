@@ -1106,6 +1106,10 @@ final class EditorCanvasView: NSView {
     override func keyDown(with event: NSEvent) {
         currentKeyEvent = event
         inputHandledKey = false
+        EditorDiagnostics.reportIME(
+            "keyDown", "code=\(event.keyCode) chars=\(event.characters ?? "")",
+            marked: markedText
+        )
         defer { currentKeyEvent = nil }
         interpretKeyEvents([event])
     }
@@ -3781,12 +3785,18 @@ extension EditorCanvasView: NSTextInputClient {
 
     func insertText(_ string: Any, replacementRange: NSRange) {
         guard !resolvingMarkedTextForDocumentAction else { return }
+        EditorDiagnostics.reportIME(
+            "insertText", "\(asString(string))", marked: markedText
+        )
         inputHandledKey = true
         commitText(asString(string))
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         guard !resolvingMarkedTextForDocumentAction else { return }
+        EditorDiagnostics.reportIME(
+            "setMarkedText", "\(asString(string))", marked: markedText
+        )
         inputHandledKey = true
         let beginningComposition = markedText.isEmpty
         if beginningComposition {
@@ -3830,6 +3840,7 @@ extension EditorCanvasView: NSTextInputClient {
     }
 
     func unmarkText() {
+        EditorDiagnostics.reportIME("unmarkText", "→ commits", marked: markedText)
         guard !markedText.isEmpty else { return }
         let pending = markedText
         markedText = ""
@@ -3886,6 +3897,9 @@ extension EditorCanvasView: NSTextInputClient {
     /// we have not mapped to a semantic core command yet fall through to the
     /// existing NSEvent path, so nothing regresses during the migration.
     override func doCommand(by selector: Selector) {
+        EditorDiagnostics.reportIME(
+            "doCommand", "\(selector) handled=\(inputHandledKey)", marked: markedText
+        )
         // The input method already turned this key into text or composition;
         // replaying the raw event would apply it a second time.
         if inputHandledKey { return }
