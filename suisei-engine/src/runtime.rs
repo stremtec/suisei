@@ -2168,6 +2168,75 @@ impl Engine {
         self.recompose();
     }
 
+    /// The palette the user is editing right now.
+    ///
+    /// Resolved, not requested: with `theme = "system"` the edit belongs to the
+    /// light or dark palette actually on screen, and only this layer knows
+    /// which — the face cannot see `system_is_dark`.
+    fn editing_palette(&self) -> String {
+        suisei_core::theme::resolve(&self.app.settings.draft.theme, self.app.system_is_dark)
+            .name
+            .to_string()
+    }
+
+    /// Set or clear one colour of the palette being shown.
+    ///
+    /// Unlike `settings_set_highlight_color` this does NOT write the config
+    /// file. A colour well emits continuously while it is dragged, and the
+    /// Settings window already debounces its commit — saving here would put a
+    /// file write on every frame of the drag, which is the thing the debounce
+    /// exists to stop. The draft is applied so the editor repaints live; the
+    /// write follows when the dragging stops.
+    pub fn settings_set_theme_token(&mut self, index: u32, value: &str) {
+        use suisei_core::settings::SettingsAction;
+        use suisei_core::theme::ThemeToken;
+        if !self.app.settings.visible() {
+            return;
+        }
+        let Some(token) = ThemeToken::ALL.get(index as usize).copied() else {
+            return;
+        };
+        let palette = self.editing_palette();
+        if self.app.settings.set_theme_token(&palette, token, value) == SettingsAction::ApplyTheme {
+            self.app.apply_settings_draft();
+            self.recompose();
+        }
+    }
+
+    /// Put every colour of the current palette back to what its author chose.
+    pub fn settings_reset_theme_tokens(&mut self) {
+        use suisei_core::settings::SettingsAction;
+        if !self.app.settings.visible() {
+            return;
+        }
+        let palette = self.editing_palette();
+        if self.app.settings.reset_theme_tokens(&palette) == SettingsAction::ApplyTheme {
+            self.app.apply_settings_draft();
+            self.recompose();
+        }
+    }
+
+    /// Which tokens of the current palette the user has changed, as a bit per
+    /// `ThemeToken::ALL` index.
+    ///
+    /// A mask rather than a list: there are twenty tokens, the face needs the
+    /// answer on every redraw to decide which rows offer a Reset, and one u32
+    /// costs nothing to poll.
+    pub fn theme_override_mask(&self) -> u32 {
+        use suisei_core::theme::ThemeToken;
+        let palette = self.editing_palette();
+        let Some(tokens) = self.app.settings.draft.theme_overrides.get(&palette) else {
+            return 0;
+        };
+        let mut mask = 0u32;
+        for (i, token) in ThemeToken::ALL.iter().enumerate() {
+            if tokens.contains_key(token.key()) {
+                mask |= 1 << i;
+            }
+        }
+        mask
+    }
+
     /// Explicit save (also used when Settings window closes).
     pub fn settings_save(&mut self) {
         // Always persist draft when panel open (covers dirty races + face Save).

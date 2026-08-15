@@ -587,7 +587,19 @@ struct SettingsWindowView: View {
     /// change and stays true, so a timer keyed on it would fire once and then
     /// ignore every later edit until a save reset it.
     private var settingsFingerprint: String {
-        var out = s.dirty ? "1" : "0"
+        // Theme colours are in here on purpose. Core applies a colour edit to
+        // the draft but deliberately does NOT write the file — a colour well
+        // emits continuously while dragged. Those edits are not rows, so
+        // without them the fingerprint would not move and the debounce below
+        // would never fire: every colour change would be lost on quit.
+        //
+        // The mask alone is not enough. Dragging a well from red to green
+        // leaves the same bit set, so only the resulting COLOURS distinguish
+        // one value from the next.
+        var out = "\(s.dirty ? 1 : 0):\(engine.themeOverrideMask)"
+        for token in EngineBridge.themeTokens {
+            out += ":\(color(ofToken: token.key))"
+        }
         for row in s.rows {
             out += ";\(row.id):\(row.valueIndex):\(row.value)"
         }
@@ -687,16 +699,15 @@ struct SettingsWindowView: View {
     }
 
 
-    /// Themes, shaped like Xcode's: the picker, then what it does to code, then
-    /// the surfaces it paints, then the one thing you may override.
+    /// Themes, shaped like Xcode's: the picker, the live preview, then every
+    /// colour with a well beside it.
     ///
-    /// Xcode's page lets you edit every category. Suisei's cannot, on purpose —
-    /// `theme::with_highlight` says why: "Syntax colours and surfaces stay
-    /// authored as a coherent Light or Dark palette. Allowing each of those
-    /// colours to drift independently recreates the low-contrast theme
-    /// combinations this layer exists to prevent." So the categories are shown
-    /// and not offered, and the accent is offered because it is the one
-    /// override the palette layer accepts.
+    /// The page used to show twenty colours and let you change one. The palette
+    /// layer refused the rest and argued it — letting each colour drift
+    /// independently is how unreadable themes get made. The reason was right
+    /// and the conclusion was too strong, so Core now allows the edits and
+    /// measures the result: a row whose contrast against the editor background
+    /// falls below the readable floor says so, instead of being disallowed.
     @ViewBuilder private var themeSections: some View {
         Section {
             themeSelector
@@ -708,72 +719,202 @@ struct SettingsWindowView: View {
             syntaxPreview
         } header: {
             Text("Source Editor")
+        } footer: {
+            if let worst = worstContrast {
+                Label(
+                    "\(worst.label) is hard to read on this background (\(contrastText(worst.ratio)) contrast). \(Self.readableFloorText)",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+            }
         }
 
         Section {
-            ForEach(Self.surfaceTokens, id: \.name) { token in
-                LabeledContent(token.name) {
-                    swatch(token.color(theme))
-                }
+            ForEach(inkTokens) { token in
+                themeTokenRow(token)
+            }
+        } header: {
+            Text("Syntax")
+        }
+
+        Section {
+            ForEach(surfaceTokens) { token in
+                themeTokenRow(token)
             }
         } header: {
             Text("Surfaces")
-        } footer: {
-            Text("Syntax and surface colours come with the theme. Only the accent below can be changed — a palette whose colours drift apart independently is how unreadable themes are made.")
         }
 
         if let highlight = rows(.highlightColor).first {
             Section {
                 accentColorSelector(highlight)
             } header: {
-                Text("Accent")
+                Text("Highlight")
             } footer: {
-                Text("Default follows the selected palette. Any other accent changes selections, focus, links, and active controls.")
+                Text("Unlike the Accent swatch above, this also re-derives everything downstream of it — selection, search, and the text drawn on accent.")
             }
+        }
+
+        Section {
+            Button("Reset \(themeDisplayName(activePaletteName)) to Its Original Colours") {
+                engine.settingsResetThemeTokens()
+            }
+            .disabled(engine.themeOverrideMask == 0)
+        } footer: {
+            Text(overrideCount == 0
+                ? "No colours changed on this theme."
+                : "\(overrideCount) colour\(overrideCount == 1 ? "" : "s") changed. Edits are kept per theme, so switching themes does not carry them over.")
         }
     }
 
-    private struct ThemeToken {
-        let name: String
-        let color: (ThemeSnap) -> UInt32
+    private static let readableFloorText =
+        "3:1 is the readable floor for code; 4.5:1 is the standard for body text."
+
+    /// Core's token table, split the way the page groups it. `isEditorInk` is
+    /// not published, so the split is by key — the keys are ABI and the surface
+    /// ones are the short, closed list.
+    private static let surfaceKeys: Set<String> = [
+        "editor_bg", "selection_bg", "cursor", "status_bg", "accent",
+    ]
+
+    private var inkTokens: [EngineBridge.ThemeTokenInfo] {
+        EngineBridge.themeTokens.filter { !Self.surfaceKeys.contains($0.key) }
     }
 
-    /// The categories Xcode lists, named for what they are here.
-    private static let syntaxTokens: [ThemeToken] = [
-        ThemeToken(name: "Plain Text", color: \.fg),
-        ThemeToken(name: "Comments", color: \.comment),
-        ThemeToken(name: "Strings", color: \.string),
-        ThemeToken(name: "Numbers", color: \.number),
-        ThemeToken(name: "Keywords", color: \.keyword),
-        ThemeToken(name: "Type Names", color: \.typeName),
-        ThemeToken(name: "Function Names", color: \.function),
-        ThemeToken(name: "Macros", color: \.macroName),
-        ThemeToken(name: "Namespaces", color: \.namespace),
-        ThemeToken(name: "Parameters", color: \.parameter),
-        ThemeToken(name: "Properties", color: \.property),
-        ThemeToken(name: "Constants", color: \.constant),
-        ThemeToken(name: "Operators", color: \.operatorColor),
-        ThemeToken(name: "Punctuation", color: \.punctuation),
-        ThemeToken(name: "Dimmed Text", color: \.dim),
-    ]
+    private var surfaceTokens: [EngineBridge.ThemeTokenInfo] {
+        EngineBridge.themeTokens.filter { Self.surfaceKeys.contains($0.key) }
+    }
 
-    private static let surfaceTokens: [ThemeToken] = [
-        ThemeToken(name: "Editor Background", color: \.editorBg),
-        ThemeToken(name: "Selection", color: \.selection),
-        ThemeToken(name: "Cursor", color: \.caret),
-        ThemeToken(name: "Status Bar", color: \.statusBg),
-    ]
+    /// The live colour of a token, from the snapshot the editor is painting
+    /// with. Core owns the names and the order; this is the one mapping the
+    /// face has to keep, because `ThemeSnap` is a Swift type Core cannot name.
+    private func color(ofToken key: String) -> UInt32 {
+        switch key {
+        case "fg": theme.fg
+        case "comment": theme.comment
+        case "string": theme.string
+        case "number": theme.number
+        case "keyword": theme.keyword
+        case "type_name": theme.typeName
+        case "function": theme.function
+        case "macro_name": theme.macroName
+        case "namespace": theme.namespace
+        case "parameter": theme.parameter
+        case "property": theme.property
+        case "constant": theme.constant
+        case "operator": theme.operatorColor
+        case "punctuation": theme.punctuation
+        case "line_no": theme.dim
+        case "editor_bg": theme.editorBg
+        case "selection_bg": theme.selection
+        case "cursor": theme.caret
+        case "status_bg": theme.statusBg
+        case "accent": theme.accent
+        default: theme.fg
+        }
+    }
+
+    private var activePaletteName: String {
+        pinnedThemeName ?? (isLightTheme ? "light" : "dark")
+    }
+
+    private var overrideCount: Int {
+        engine.themeOverrideMask.nonzeroBitCount
+    }
+
+    private func isOverridden(_ token: EngineBridge.ThemeTokenInfo) -> Bool {
+        engine.themeOverrideMask & (1 << UInt32(token.index)) != 0
+    }
+
+    /// One colour, with a well to change it and — once changed — a way back.
+    ///
+    /// The Reset button appears only on rows the user has actually edited.
+    /// Showing it on all twenty would put a control next to every colour that
+    /// does nothing for nineteen of them.
+    private func themeTokenRow(_ token: EngineBridge.ThemeTokenInfo) -> some View {
+        let packed = color(ofToken: token.key)
+        let ratio = contrastAgainstEditorBackground(token)
+        return LabeledContent {
+            HStack(spacing: 8) {
+                if let ratio, ratio < 3.0 {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help("\(contrastText(ratio)) contrast on the editor background. \(Self.readableFloorText)")
+                }
+                if isOverridden(token) {
+                    Button("Reset") { engine.settingsSetThemeToken(token.index, "default") }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                }
+                CompactColorWell(color: Binding(
+                    get: { theme.color(packed) },
+                    set: { engine.settingsSetThemeToken(token.index, hexString(for: $0)) }
+                ))
+                .frame(width: 40, height: 20)
+                .help("Change \(token.label)")
+            }
+        } label: {
+            Text(token.label)
+        }
+    }
+
+    /// How this token reads on the editor background — `nil` for the tokens
+    /// that are not ink on it, where the number would mean nothing.
+    private func contrastAgainstEditorBackground(
+        _ token: EngineBridge.ThemeTokenInfo
+    ) -> Double? {
+        guard !Self.surfaceKeys.contains(token.key) else { return nil }
+        return Self.contrast(color(ofToken: token.key), theme.editorBg)
+    }
+
+    private var worstContrast: (label: String, ratio: Double)? {
+        inkTokens
+            .compactMap { token -> (String, Double)? in
+                guard let ratio = contrastAgainstEditorBackground(token), ratio < 3.0 else {
+                    return nil
+                }
+                return (token.label, ratio)
+            }
+            .min { $0.1 < $1.1 }
+            .map { (label: $0.0, ratio: $0.1) }
+    }
+
+    private func contrastText(_ ratio: Double) -> String {
+        String(format: "%.1f:1", ratio)
+    }
+
+    /// WCAG relative contrast — the same formula `theme::contrast_ratio` uses
+    /// in Core. It is duplicated rather than crossed the ABI because the face
+    /// needs it per row per redraw and it is eight lines of arithmetic; the
+    /// Rust side has the test that pins the numbers.
+    private static func contrast(_ a: UInt32, _ b: UInt32) -> Double {
+        let la = luminance(a)
+        let lb = luminance(b)
+        let (hi, lo) = la > lb ? (la, lb) : (lb, la)
+        return (hi + 0.05) / (lo + 0.05)
+    }
+
+    private static func luminance(_ packed: UInt32) -> Double {
+        let channel = { (v: UInt32) -> Double in
+            let value = Double(v) / 255.0
+            return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return channel((packed >> 16) & 0xFF) * 0.2126
+            + channel((packed >> 8) & 0xFF) * 0.7152
+            + channel(packed & 0xFF) * 0.0722
+    }
 
     /// Every category, painted in its own colour on the theme's own background
-    /// — Xcode's Source Editor list. A theme picker with no preview asks you to
-    /// choose fifteen palettes by name.
+    /// — Xcode's Source Editor list, and the thing that makes an edit legible
+    /// as you make it. A theme picker with no preview asks you to choose
+    /// fifteen palettes by name.
     private var syntaxPreview: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 1) {
-                ForEach(Self.syntaxTokens, id: \.name) { token in
-                    Text(token.name)
+                ForEach(inkTokens) { token in
+                    Text(token.label)
                         .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(theme.color(token.color(theme)))
+                        .foregroundStyle(theme.color(color(ofToken: token.key)))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 1.5)
@@ -789,18 +930,6 @@ struct SettingsWindowView: View {
                 .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
         )
         .padding(.vertical, 4)
-    }
-
-    /// A read-only colour chip, shaped like the colour wells beside it so the
-    /// page reads as one thing — but deliberately not a control.
-    private func swatch(_ packed: UInt32) -> some View {
-        RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .fill(theme.color(packed))
-            .frame(width: 40, height: 20)
-            .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
-            )
     }
 
     private var appearanceModeSelector: some View {

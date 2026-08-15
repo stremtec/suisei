@@ -546,6 +546,20 @@ void suisei_engine_settings_set_highlight_color(SuiseiEngine *ptr, const char *v
 void suisei_engine_settings_goto_page(SuiseiEngine *ptr, uint32_t page);
 void suisei_engine_settings_save(SuiseiEngine *ptr);
 
+/* ── Theme colours ─────────────────────────────────────────────────────────
+ * The addressable colours of a theme, and the user's edits to them. A token is
+ * addressed by its INDEX in the table below, so the table's order is ABI.
+ * `suisei_engine_theme_tokens` writes "key|Label" one per line, in that order;
+ * read it once and keep the order rather than hard-coding a list, or an
+ * appended token will silently shift what every index means.
+ * Setting an empty value or "default" clears the edit and restores the
+ * theme's own colour.                                                       */
+uint8_t suisei_engine_theme_tokens(char *out, size_t cap);
+uint32_t suisei_engine_theme_override_mask(const SuiseiEngine *ptr);
+void suisei_engine_settings_set_theme_token(SuiseiEngine *ptr, uint32_t index,
+                                            const char *value);
+void suisei_engine_settings_reset_theme_tokens(SuiseiEngine *ptr);
+
 /* ── GitHub account (Settings) ─────────────────────────────────────────── */
 /* Independent of chrome. The face probes generation and copies this only
    when it moves, so a profile refresh cannot republish the editor. */

@@ -221,6 +221,18 @@ pub struct SuiseiUpdateSnapshot {
     pub notes: [c_char; SUISEI_UPDATE_NOTES_CAP],
 }
 
+/// `write_cstr` for a caller-owned buffer described by pointer and capacity.
+///
+/// # Safety
+/// `dst` must be valid for writes of `cap` bytes.
+unsafe fn write_cstr_raw(dst: *mut c_char, cap: usize, s: &str) {
+    if dst.is_null() || cap == 0 {
+        return;
+    }
+    let slice = unsafe { std::slice::from_raw_parts_mut(dst, cap) };
+    write_cstr(slice, s);
+}
+
 fn write_cstr(dst: &mut [c_char], s: &str) {
     dst.fill(0);
     // Truncate on a char boundary: a mid-UTF-8 cut used to hand the face an
@@ -2261,6 +2273,65 @@ pub extern "C" fn suisei_engine_settings_set_highlight_color(
     let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
     unsafe {
         (*ptr).0.settings_set_highlight_color(&value);
+    }
+}
+
+/// The addressable theme colours, as `key|Label` one per line, in the order
+/// their indices run.
+///
+/// One call rather than twenty: the face needs the whole table once, at build
+/// time of its Themes page, and the pipe/newline shape is the one Core already
+/// uses for a row's `options`. The face keeps only the mapping from key to its
+/// own snapshot field — the names and the ORDER come from here, so an appended
+/// token cannot silently shift what an index means.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_theme_tokens(out: *mut c_char, cap: usize) -> u8 {
+    if out.is_null() || cap == 0 {
+        return 0;
+    }
+    let table = suisei_core::theme::ThemeToken::ALL
+        .iter()
+        .map(|t| format!("{}|{}", t.key(), t.label()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    unsafe { write_cstr_raw(out, cap, &table) };
+    1
+}
+
+/// Bit per `ThemeToken` index: set when the user has changed that colour on the
+/// palette currently being edited.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_theme_override_mask(ptr: *const SuiseiEngine) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).0.theme_override_mask() }
+}
+
+/// Set one theme colour. An empty value or `"default"` clears the override.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_settings_set_theme_token(
+    ptr: *mut SuiseiEngine,
+    index: u32,
+    value: *const c_char,
+) {
+    if ptr.is_null() || value.is_null() {
+        return;
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    unsafe {
+        (*ptr).0.settings_set_theme_token(index, &value);
+    }
+}
+
+/// Put every colour of the current palette back to the theme's own.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_settings_reset_theme_tokens(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.settings_reset_theme_tokens();
     }
 }
 

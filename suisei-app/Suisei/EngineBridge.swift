@@ -4558,6 +4558,64 @@ final class EngineBridge: ObservableObject {
         refreshChrome()
     }
 
+    /// One addressable theme colour. `index` is its position in Core's table
+    /// and is the ABI — never hard-code the order here, read it.
+    struct ThemeTokenInfo: Identifiable, Equatable {
+        let index: Int
+        let key: String
+        let label: String
+        var id: Int { index }
+    }
+
+    /// Core's token table, read once.
+    ///
+    /// `static let` rather than a computed property: the table is compiled into
+    /// the engine and cannot change while the app runs, and the Themes page
+    /// asks for it on every redraw.
+    static let themeTokens: [ThemeTokenInfo] = {
+        var buffer = [CChar](repeating: 0, count: 2048)
+        guard suisei_engine_theme_tokens(&buffer, buffer.count) != 0 else { return [] }
+        return String(cString: buffer)
+            .split(separator: "\n")
+            .enumerated()
+            .compactMap { index, line in
+                let parts = line.split(separator: "|", maxSplits: 1)
+                guard parts.count == 2 else { return nil }
+                return ThemeTokenInfo(
+                    index: index,
+                    key: String(parts[0]),
+                    label: String(parts[1])
+                )
+            }
+    }()
+
+    /// Bit per token index: the user has changed that colour on the palette
+    /// currently being edited.
+    var themeOverrideMask: UInt32 {
+        guard let engine else { return 0 }
+        return suisei_engine_theme_override_mask(engine)
+    }
+
+    /// Set one theme colour. Empty or `"default"` restores the theme's own.
+    ///
+    /// Core deliberately does not write the config file here — a colour well
+    /// emits continuously while dragged, and Settings debounces its commit. The
+    /// mask is part of that window's fingerprint, so the write follows once the
+    /// dragging stops.
+    func settingsSetThemeToken(_ index: Int, _ value: String) {
+        guard let engine else { return }
+        value.withCString {
+            suisei_engine_settings_set_theme_token(engine, UInt32(index), $0)
+        }
+        refreshChrome()
+    }
+
+    func settingsResetThemeTokens() {
+        guard let engine else { return }
+        suisei_engine_settings_reset_theme_tokens(engine)
+        refreshChrome()
+    }
+
     var glassStyle: SuiseiGlassStyle {
         guard let engine else { return .clear }
         return SuiseiGlassStyle(rawValue: suisei_engine_glass_style(engine)) ?? .clear
