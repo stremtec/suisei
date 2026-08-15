@@ -158,10 +158,19 @@ struct GitWorkbenchWindowView: View {
         .navigationTitle("Source Control")
         .toolbarTitleDisplayMode(.inline)
         .toolbar { sourceControlToolbar }
-        // 294pt source list + 318pt history + a useful 420pt diff column.
-        // Below this the workbench is not a smaller layout; it is a clipped
-        // three-column layout. Keep the default width as its honest minimum.
-        .frame(minWidth: 1040, minHeight: 560)
+        // The minimum is the WINDOW's, not this view's — see `minContentSize`
+        // below. Expressed here as `frame(minWidth: 1040)` it was a width the
+        // content could demand, so opening the sidebar asked for 288 + 1040:
+        // the split view grew to 1328, centred itself with 144pt hanging off
+        // each side for the whole animation, and snapped back in the final two
+        // frames. `SUISEI_DIAG=sidebar` shows it exactly:
+        //
+        //     pane0=[x-144 w288] pane1=[x-144 w1328]
+        //     pane0=[x0    w288] pane1=[x0    w1328]
+        //     pane0=[x0    w288] pane1=[x0    w1040]
+        //
+        // Closing never did this — it shrinks the pane in place, x pinned at 0
+        // — which is why only opening popped.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .preferredColorScheme(isLightTheme ? .light : .dark)
         .tint(accent)
@@ -172,7 +181,11 @@ struct GitWorkbenchWindowView: View {
                 background: .windowBackgroundColor,
                 light: isLightTheme,
                 identifier: WindowChrome.gitWorkbenchIdentifier,
-                opaque: true
+                opaque: true,
+                // 294pt source list + 318pt history + a useful 420pt diff
+                // column. Below this the workbench is not a smaller layout; it
+                // is a clipped three-column one.
+                minContentSize: NSSize(width: 1040, height: 560)
             )
         )
     }

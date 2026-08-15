@@ -105,6 +105,17 @@ struct ThemedWindowChrome: NSViewRepresentable {
     var light: Bool
     var identifier: NSUserInterfaceItemIdentifier? = nil
     var opaque: Bool = false
+    /// Smallest content the window may be dragged to.
+    ///
+    /// Set on the WINDOW rather than as a `frame(minWidth:)` on the content,
+    /// and the Git workbench is why. A minimum expressed as a SwiftUI frame is
+    /// a size the content is entitled to DEMAND, so opening the sidebar made
+    /// the demand `sidebar + detailMinimum`; the split view grew past the
+    /// window, centred itself with 144pt hanging off each side for the whole
+    /// animation, and snapped back in the last two frames. A window minimum
+    /// cannot do that — it bounds the window and the content gets what is
+    /// there.
+    var minContentSize: NSSize? = nil
 
     func makeNSView(context: Context) -> NSView {
         let v = NSView(frame: .zero)
@@ -121,6 +132,9 @@ struct ThemedWindowChrome: NSViewRepresentable {
         guard let window = nsView.window else { return }
         if let identifier {
             window.identifier = identifier
+        }
+        if let minContentSize, window.contentMinSize != minContentSize {
+            window.contentMinSize = minContentSize
         }
         WindowChrome.applyThemedTitlebar(
             to: window,
