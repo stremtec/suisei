@@ -441,7 +441,11 @@ struct GitWorkbenchWindowView: View {
     /// clamped so it is neither useless on a short one nor most of a tall one.
     @State private var sidebarHeight: CGFloat = 600
     private var sidebarBottomRoom: CGFloat {
-        min(360, max(120, sidebarHeight * 0.40))
+        // Two thirds of the column. The first pass used 40% clamped to 360,
+        // which is a comfortable margin — and a margin is not what this is for.
+        // The point is that the LAST file can be brought to the middle of the
+        // column, which takes most of a screenful.
+        min(560, max(200, sidebarHeight * 0.66))
     }
 
     private var sidebar: some View {
@@ -1870,6 +1874,13 @@ private struct GitDiffTableView: NSViewRepresentable {
     let addInk: UInt32
     let delInk: UInt32
 
+    /// Blank space kept under the last row of a diff.
+    ///
+    /// Deliberately large. A diff is read top to bottom and then stops; what is
+    /// useful is being able to bring the END of it into the middle of the pane,
+    /// and that needs most of a screenful rather than a comfortable margin.
+    static let bottomRoom: CGFloat = 420
+
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -1880,6 +1891,24 @@ private struct GitDiffTableView: NSViewRepresentable {
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
         scroll.scrollerStyle = .overlay
+        // Room under the last hunk. Xcode leaves roughly a third of the pane
+        // empty below a diff, and the reason is not decoration: the last change
+        // in a file is the one you scrolled furthest to reach, and reading it
+        // off the very bottom edge of a window means reading it in the worst
+        // place on screen.
+        //
+        // `contentInsets` rather than a spacer row: a spacer is a row, so it
+        // takes a selection, a height calculation, and an index that has to be
+        // excluded from everything that walks the rows.
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(
+            top: 0, left: 0, bottom: GitDiffTableView.bottomRoom, right: 0
+        )
+        // The scroller should still run the full height; without this the
+        // overlay knob is inset by the same amount and floats above the floor.
+        scroll.scrollerInsets = NSEdgeInsets(
+            top: 0, left: 0, bottom: -GitDiffTableView.bottomRoom, right: 0
+        )
 
         let table = NSTableView(frame: .zero)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("diff"))
