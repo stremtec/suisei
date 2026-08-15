@@ -276,6 +276,31 @@
          인스펙터 Quick Help 탭도 같은 원문을 찍고 있었어서 같은 렌더러로.
        · 카드 폭 460pt — 키워드 답에는 코드가 들어 있고, 세 토큰마다 줄바꿈되는
          코드는 더 이상 예제가 아님.
+     → 그리고 진짜 원인이 하나 더 있었음(사용자가 app.rs — 확실히 크레이트 안 —
+       에서 "No language server is attached to this file" 을 받음):
+       **언어 서버가 Finder 실행에서는 한 번도 뜬 적이 없었음.**
+       · command_exists 는 exec::is_available 로 물음 = 증강된 검색 경로(= Finder
+         환경에서도 Homebrew 가 남아 있는 그 목록). 그런데 spawn 은 맨
+         Command::new 였고, 그건 자식이 물려받은 PATH 로 찾음 — Finder 의 PATH 는
+         /usr/bin:/bin:/usr/sbin:/sbin. 그래서 게이트는 "rust-analyzer 설치됨" 이라
+         하고 spawn 은 "그런 파일 없음" 이라 함. server_running 이 false 로 남고
+         hover·진단·시맨틱 토큰·인레이 힌트·rename 이 전부 조용히 빈 값.
+       · command_exists 주석이 이미 이걸 약속하고 있었음 — "exec::tool 이 spawn 할
+         바로 그 검색 목록으로 물으니 '설치됨' 과 '띄울 수 있음' 이 어긋날 수 없다".
+         호출 반대편에서는 그 약속을 지킬 수가 없었음. b30da36 이 rg/cargo/gh 에
+         대해 이 부류를 고쳤는데, 장수 자식 프로세스를 띄우는 두 군데를 놓쳤음.
+       · 실제 rust-analyzer 로 Finder PATH 에서 전후 측정:
+           전  running=false, 진단 없음, 62초 뒤 FAILED
+           후  3.5초 만에 통과
+         (cargo test --no-run 으로 테스트 바이너리를 뽑아
+          env -i PATH=/usr/bin:/bin:... 로 직접 돌림)
+       · 이 실패는 그 환경에서만 재현되므로, 상시 가드는 '불가능하게 만드는 것' 을
+         검사함: LspClient 가 exec::tool 이 해석한 프로그램을 기록하고, 그게
+         절대경로여야 함(이름은 자식의 PATH 가 판정할 여지가 있는 것).
+         두 모듈 import 에서 Command 를 뺌 — 맨 생성자를 import 해둔 게 이렇게 된
+         경위임.
+       · DAP 어댑터도 spawn 6군데가 같은 결함이었음. DAP 자체는 미완(#9)이지만
+         "Finder 에서 띄우면 어댑터를 못 찾는다" 는 나중에 발견할 가치가 없음.
      → 남은 것 둘:
        · Quick Help 탭 자체는 여전히 탭 전환 때만 갱신됨. 캐럿마다 갱신하면
          타이핑 경로에서 키마다 LSP 왕복이 되니 스로틀 설계가 따로 필요함.
