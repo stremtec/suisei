@@ -262,14 +262,20 @@ final class EditorScrollView: NSScrollView {
     private func wrapColumns(wrapLines: Bool) -> Int {
         guard wrapLines else { return 0 }
         let cell = max(1, EditorMetrics.cellWidth)
+        // `rightInset` already holds the row off whatever covers the edge, so
+        // there is no second column of margin to take here.
         let usable = contentView.bounds.width
             - EditorMetrics.gutter
             - rightInset
-            - cell
         // A pane too narrow to hold anything still has to wrap somewhere, or
         // `WrapMap` divides by a width of zero rows.
         return max(8, Int(floor(usable / cell)))
     }
+
+    /// Wrap width as of the last sync — the canvas's copy is the same number,
+    /// kept here so `fitCanvasToBounds` can ask whether it is wrapping without
+    /// reaching through.
+    private var lastWrapCols: Int = 0
 
     /// Document width in columns as of the last `apply`.
     private var lastContentCols: Int = 0
@@ -284,7 +290,24 @@ final class EditorScrollView: NSScrollView {
     /// short of the new edge until some later event happened to re-apply.
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
+        // The wrap width is a function of this frame, so it has to be
+        // recomputed HERE and not only in `apply`. A panel slide changes the
+        // frame through AppKit layout; `apply` runs on a SwiftUI publish, which
+        // arrives when the animation ends. So the text went on wrapping at the
+        // old width for the whole slide and snapped at the end of it.
+        syncWrapColumns()
         fitCanvasToBounds()
+    }
+
+    /// Recompute the wrap width from the pane as it is now, and tell the canvas
+    /// if it moved. Cheap: a divide and a compare unless it changed.
+    private func syncWrapColumns() {
+        let cols = wrapColumns(wrapLines: lastWrap)
+        guard cols != canvas.wrapCols else { return }
+        canvas.setWrapCols(cols)
+        lastWrapCols = cols
+        // Different chunking: the band in hand is the old shape.
+        canvas.noteContentChanged()
     }
 
     /// Re-size the document after the canvas changed how many rows it draws.
@@ -314,18 +337,16 @@ final class EditorScrollView: NSScrollView {
         // POSITION, so every pan to the right made the document wider and the
         // pan could never reach an end.
         //
-        // Not conditional on `lastWrap` any more, because nothing wraps. The
-        // band protocol has a place for it — `EditorLine.isWrapContinuation`,
-        // bit 0x80 of `git_sign` — and the draw below honours it, but no
-        // producer anywhere in core or the engine ever sets that bit. So with
-        // "Wrap Lines" on, the document was sized to the viewport, there was
-        // nowhere to scroll, and the part of a long line past the right edge
-        // was not wrapped OR reachable: it was gone. Sizing to the content
-        // always means the text is at worst somewhere you can scroll to.
-        let docW = max(
-            max(bounds.width, 1),
-            CGFloat(lastContentCols) * cell + EditorMetrics.gutter + 32
-        )
+        // Conditional on wrapping again, now that wrapping wraps. It was made
+        // unconditional while the renderer still discarded continuation rows,
+        // because a document sized to the viewport then had nowhere to scroll
+        // and the text past the right edge was neither folded nor reachable.
+        // Folded text has nothing to pan to, so a canvas wider than the pane
+        // would be empty space with a scroller attached to it.
+        var docW = max(bounds.width, 1)
+        if lastWrapCols == 0 {
+            docW = max(docW, CGFloat(lastContentCols) * cell + EditorMetrics.gutter + 32)
+        }
         let newSize = NSSize(width: docW, height: docH)
         guard abs(canvas.frame.width - newSize.width) > 0.5
             || abs(canvas.frame.height - newSize.height) > 0.5
@@ -412,12 +433,12 @@ final class EditorScrollView: NSScrollView {
         // two different widths would put every line below the first wrap
         // somewhere it is not drawn. Assigned ahead of `fitCanvasToBounds`
         // below, which asks the map how tall the document is.
-        let cols = wrapColumns(wrapLines: wrapLines)
-        if canvas.wrapCols != cols {
-            canvas.setWrapCols(cols)
-            // Different chunking: the cached band is the old shape.
-            canvas.noteContentChanged()
-        }
+        // Captured before `lastWrap` moves: `docChanged` below compares against
+        // it, and assigning first made "wrap was just toggled" invisible — the
+        // one moment every row's position changes.
+        let wrapChanged = wrapLines != lastWrap
+        lastWrap = wrapLines
+        syncWrapColumns()
 
         // A wrapped document has nothing to pan to, but an unwrapped one does
         // and the scroller is how you know. Both were switched off with wrap
@@ -426,9 +447,8 @@ final class EditorScrollView: NSScrollView {
         hasHorizontalScroller = !wrapLines
         horizontalScrollElasticity = wrapLines ? .none : .allowed
 
-        let docChanged = docLineCount != lastDocLineCount || wrapLines != lastWrap
+        let docChanged = docLineCount != lastDocLineCount || wrapChanged
         lastDocLineCount = docLineCount
-        lastWrap = wrapLines
         // Only the focused pane may ask, because `contentCols()` can only
         // answer for one document: it measures `App::buffer` — the LIVE one —
         // over `App::scroll`, and `restore_state_from_tab` resets its
@@ -1371,6 +1391,10 @@ final class EditorCanvasView: NSView {
     /// where you are. Every other row shows its distance, which is the number
     /// you would type after a motion.
     private func gutterNumber(for line: EditorLine) -> UInt32 {
+        // A wrapped line has ONE number, on its first row. The rows after it
+        // are the same line, and repeating the number down the gutter says
+        // there are three line 26s — which is what it looked like.
+        if line.isWrapContinuation { return 0 }
         guard relativeNumber, !line.isCursor else { return line.lineNo }
         let caret = caretLineNo
         guard caret > 0 else { return line.lineNo }
@@ -1389,6 +1413,11 @@ final class EditorCanvasView: NSView {
         _ number: UInt32, isCursor: Bool, font: NSFont,
         onBreakpoint: Bool = false
     ) -> (line: CTLine, width: CGFloat) {
+        // 0 is not a line: it is `gutterNumber`'s way of saying this row
+        // continues the one above and owns no number.
+        if number == 0 {
+            return (CTLineCreateWithAttributedString(NSAttributedString(string: "")), 0)
+        }
         let key = GutterKey(
             number: number, isCursor: isCursor,
             onBreakpoint: onBreakpoint, colorGen: colorGen
