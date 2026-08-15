@@ -661,17 +661,17 @@ struct ContentView: View {
         // view runs the sidebar up under them.
         .background(
             ThemedWindowChrome(
-                // The editor's surface, not the palette's floor.
+                // The palette's floor. The navigator's material is translucent
+                // and samples what is behind it, so this is the colour the
+                // sidebar ends up being — set it to the editor's surface and
+                // the sidebar stops being a distinct surface at all.
                 //
-                // The tab strip lives in the titlebar, so the titlebar's colour
-                // IS the tab bar's — and a tab bar belongs to the editor under
-                // it, not to the shell around it. Catppuccin makes the
-                // difference obvious: its floor is mantle #181825 and its
-                // editor is base #1E1E2E, so painting the titlebar with the
-                // floor put a visible seam straight across the top of the
-                // document. The floor still shows where it should: the
-                // navigator, the status bar, the space around the island.
-                background: NSColor(theme.color(theme.editorBg)),
+                // The tab bar matching the editor is not this window's
+                // background's job: the titlebar is transparent and shows the
+                // content under it (`clearTitlebarMaterial`), so the band over
+                // the editor is the editor and the band over the navigator is
+                // the navigator.
+                background: NSColor(theme.windowBg),
                 light: isLightTheme,
                 identifier: WindowChrome.editorIdentifier,
                 opaque: true

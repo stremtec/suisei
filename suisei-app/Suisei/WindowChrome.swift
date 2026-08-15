@@ -98,37 +98,43 @@ enum WindowChrome {
         }
 
         if opaque {
-            clearTitlebarMaterial(in: window, background: background)
+            clearTitlebarMaterial(in: window)
         }
     }
 
-    /// Stop the titlebar band painting its own material over the window.
+    /// Make the titlebar band genuinely transparent, so the CONTENT shows
+    /// through it.
     ///
-    /// `titlebarAppearsTransparent` makes the TITLEBAR transparent; it does not
-    /// touch the vibrancy AppKit puts behind a toolbar. With a toolbar present
-    /// that material sits above the window's background and below nothing, so
-    /// the top band stayed a neutral grey while the document under it was the
-    /// palette's — the tab strip lives up there, which is why it read as "the
-    /// tab bar is a different colour from the editor".
+    /// `titlebarAppearsTransparent` makes the titlebar transparent and leaves
+    /// alone the vibrancy AppKit puts behind a toolbar. That material sat above
+    /// the window's background, so the top band stayed a neutral grey while the
+    /// document under it was the palette's — and the tab strip lives up there,
+    /// which is why it read as "the tab bar is a different colour from the
+    /// editor".
     ///
-    /// Setting the window's `backgroundColor` cannot reach it, and neither can
-    /// anything in SwiftUI: the effect view is AppKit's, in the titlebar
-    /// container, outside the content view entirely.
+    /// The band is hidden, NOT repainted. Painting it one colour was the first
+    /// attempt and it was worse: the titlebar spans the whole width, so a solid
+    /// fill covered the navigator's material where it continues up through the
+    /// titlebar — the full-height-sidebar arrangement this window is built on —
+    /// and flattened the window into one slab. Transparent, each half of the
+    /// band shows what is beneath it: the sidebar's material on the left, the
+    /// editor's surface on the right, which is what Xcode looks like and what
+    /// the arrangement was for.
     ///
-    /// Found by class name rather than by index. The titlebar's view tree is
-    /// AppKit's and its shape changes between releases, so anything positional
-    /// would be a silent no-op the next time it moves — and a no-op here looks
-    /// exactly like the bug.
-    private static func clearTitlebarMaterial(in window: NSWindow, background: NSColor) {
+    /// Found by class name rather than by index. That view tree is AppKit's and
+    /// its shape changes between releases, so anything positional would be a
+    /// silent no-op the next time it moves — and a no-op here looks exactly
+    /// like the bug.
+    private static func clearTitlebarMaterial(in window: NSWindow) {
         guard let frameView = window.contentView?.superview else { return }
         for view in frameView.subviews
         where String(describing: type(of: view)).contains("TitlebarContainer") {
             view.wantsLayer = true
-            view.layer?.backgroundColor = background.cgColor
+            view.layer?.backgroundColor = NSColor.clear.cgColor
             // The effect view is a child of the titlebar view inside the
-            // container. Hiding it rather than removing it: it belongs to
-            // AppKit, which may re-lay it out, and a hidden view it still owns
-            // survives that where a removed one would be recreated.
+            // container. Hidden rather than removed: it belongs to AppKit,
+            // which may re-lay it out, and a hidden view it still owns survives
+            // that where a removed one would be recreated.
             hideEffectViews(in: view)
         }
     }
