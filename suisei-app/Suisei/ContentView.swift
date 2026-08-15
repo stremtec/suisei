@@ -1470,7 +1470,7 @@ struct ContentView: View {
                             .fill(terminalDockFill)
                             .overlay(
                                 dockedTerminalShape.stroke(
-                                    Color(nsColor: .separatorColor).opacity(0.6),
+                                    theme.separator.opacity(0.6),
                                     lineWidth: 1
                                 )
                             )
@@ -1478,7 +1478,7 @@ struct ContentView: View {
                                 // Full-width rule under the 28pt terminal
                                 // header — beneath the navigator included.
                                 Rectangle()
-                                    .fill(Color(nsColor: .separatorColor).opacity(0.6))
+                                    .fill(theme.separator.opacity(0.6))
                                     .frame(height: 1)
                                     .offset(y: 28)
                             }
@@ -1488,7 +1488,7 @@ struct ContentView: View {
                 }
             }
             .clipShape(shape)
-            .overlay(shape.strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
+            .overlay(shape.strokeBorder(theme.separator, lineWidth: 1))
             .shadow(color: .black.opacity(isLightTheme ? 0.07 : 0.30), radius: 9, y: 2)
             .padding(.vertical, ContentView.panelGap)
             .padding(.trailing, ContentView.panelGap)
@@ -1721,7 +1721,7 @@ struct ContentView: View {
                     .overlay(
                         // `stroke`, not `strokeBorder` — see `SplitCapsule`.
                         pill.stroke(
-                            Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1
+                            theme.separator.opacity(0.6), lineWidth: 1
                         )
                     )
                     // Separated from the tree by depth, not a hairline.
@@ -2238,7 +2238,7 @@ struct ContentView: View {
                     .padding(.vertical, 5)
                     .background(
                         RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                            .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                            .fill(theme.panelSurface.opacity(0.55))
                     )
                 Button("One") {
                     if let hit = engine.searchHits.first {
@@ -2696,7 +2696,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .overlay(alignment: .top) {
-                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+                Rectangle().fill(theme.separator).frame(height: 1)
             }
         }
     }
@@ -3194,7 +3194,7 @@ struct ContentView: View {
             .frame(height: 58, alignment: .leading)
 
             Rectangle()
-                .fill(Color(nsColor: .separatorColor))
+                .fill(theme.separator)
                 .frame(height: 1)
 
             ScrollView {
@@ -3223,7 +3223,7 @@ struct ContentView: View {
         // semantic colour — it is that colour mixed with whatever happens to be
         // behind it, so it stops tracking appearance and Increase Contrast.
         // Depth here comes from the `Color.primary` washes on the rows.
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(theme.windowBg)
     }
 
     private func gitWorkbenchSourceSection(_ title: String) -> some View {
@@ -3337,7 +3337,7 @@ struct ContentView: View {
         .padding(.horizontal, 12)
         .frame(height: 44)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+            Rectangle().fill(theme.separator).frame(height: 1)
         }
     }
 
@@ -3505,7 +3505,7 @@ struct ContentView: View {
 
     private var gitWorkbenchDivider: some View {
         Rectangle()
-            .fill(Color(nsColor: .separatorColor))
+            .fill(theme.separator)
             .frame(width: 1)
     }
 
@@ -3597,7 +3597,7 @@ struct ContentView: View {
         .padding(.horizontal, 12)
         .frame(height: 32)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+            Rectangle().fill(theme.separator).frame(height: 1)
         }
     }
 
@@ -3649,7 +3649,7 @@ struct ContentView: View {
             .padding(.horizontal, 14)
             .frame(height: 34)
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+                Rectangle().fill(theme.separator).frame(height: 1)
             }
 
             if gitBranchRows.isEmpty {
@@ -3788,7 +3788,7 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+                Rectangle().fill(theme.separator).frame(height: 1)
             }
 
             if lines.isEmpty {
@@ -3948,7 +3948,7 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .frame(height: 32)
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+                Rectangle().fill(theme.separator).frame(height: 1)
             }
 
             if lines.isEmpty || (lines.count == 1 && lines[0].localizedCaseInsensitiveContains("clean")) {
@@ -4171,7 +4171,7 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .frame(height: 32)
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+                Rectangle().fill(theme.separator).frame(height: 1)
             }
 
             if body.isEmpty {
@@ -4419,7 +4419,7 @@ struct ContentView: View {
                 }
 
                 Rectangle()
-                    .fill(Color(nsColor: .separatorColor))
+                    .fill(theme.separator)
                     .frame(height: 1)
 
                 paletteList
@@ -4592,7 +4592,7 @@ struct ContentView: View {
                     .frame(width: panelW, height: listH)
                     .background(
                         RoundedRectangle(cornerRadius: panelR, style: .continuous)
-                            .fill(Color(nsColor: .windowBackgroundColor))
+                            .fill(theme.windowBg)
                     )
                     .clipShape(RoundedRectangle(cornerRadius: panelR, style: .continuous))
                     .overlay(
@@ -4728,7 +4728,7 @@ struct ContentView: View {
         .frame(height: ContentView.editorHeaderHeight)
         .background(editorBg)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+            Rectangle().fill(theme.separator).frame(height: 1)
         }
     }
 
@@ -4862,7 +4862,7 @@ struct ContentView: View {
                     .overlay(alignment: .leading) {
                         if index > 0 {
                             Rectangle()
-                                .fill(Color(nsColor: .separatorColor))
+                                .fill(theme.separator)
                                 .frame(width: 1, height: 12)
                                 .opacity(
                                     inspectorMode == mode
@@ -4907,7 +4907,7 @@ struct ContentView: View {
                 .overlay(
                     Capsule(style: .continuous)
                         .strokeBorder(
-                            Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1
+                            theme.separator.opacity(0.6), lineWidth: 1
                         )
                 )
         )
@@ -5269,7 +5269,7 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .overlay(alignment: .bottom) {
-                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+                Rectangle().fill(theme.separator).frame(height: 1)
             }
 
             if engine.preview.lines.isEmpty {
@@ -5446,7 +5446,7 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .overlay(alignment: .bottom) {
-                    Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+                    Rectangle().fill(theme.separator).frame(height: 1)
                 }
             }
 
@@ -5693,7 +5693,7 @@ struct ContentView: View {
                 .background(editorBg.opacity(0.95))
                 .overlay(alignment: .bottom) {
                     Rectangle()
-                        .fill(pane.focused ? accent.opacity(0.5) : Color(nsColor: .separatorColor))
+                        .fill(pane.focused ? accent.opacity(0.5) : theme.separator)
                         .frame(height: pane.focused ? 2 : 1)
                 }
 
@@ -5865,7 +5865,7 @@ struct ContentView: View {
 
     private func splitDivider(vertical: Bool) -> some View {
         Rectangle()
-            .fill(Color(nsColor: .separatorColor))
+            .fill(theme.separator)
             .frame(width: vertical ? 1 : nil, height: vertical ? nil : 1)
             .frame(maxWidth: vertical ? 1 : .infinity, maxHeight: vertical ? .infinity : 1)
     }

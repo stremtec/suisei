@@ -535,6 +535,30 @@ typedef struct SuiseiThemeSnapshot {
   uint32_t constant;
   uint32_t operator;
   uint32_t punctuation;
+  /* Chrome. The palette drives the whole app, not just the text. */
+  uint32_t window_bg;
+  uint32_t border;
+  uint32_t panel_bg;
+  uint32_t panel_border;
+  uint32_t panel_sel_bg;
+  uint32_t panel_sel_fg;
+  uint32_t explorer_bg;
+  uint32_t explorer_fg;
+  uint32_t explorer_selected;
+  uint32_t status_fg;
+  uint32_t muted;
+  uint32_t success;
+  uint32_t warning;
+  uint32_t error;
+  uint32_t accent_fg;
+  uint32_t search_bg;
+  uint32_t completion_bg;
+  uint32_t completion_selected;
+  uint32_t completion_border;
+  uint32_t terminal_bg;
+  uint32_t git_add_bg;
+  uint32_t git_del_bg;
+  uint32_t git_hunk;
 } SuiseiThemeSnapshot;
 
 uint8_t suisei_engine_completions(const SuiseiEngine *ptr, SuiseiCompletionsSnapshot *out);

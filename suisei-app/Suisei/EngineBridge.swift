@@ -702,6 +702,31 @@ struct ThemeSnap: Equatable {
     var constant: UInt32
     var operatorColor: UInt32
     var punctuation: UInt32
+    // Chrome. Core has carried these all along; the face used the
+    // system's colours instead, so a theme stopped at the text.
+    var windowBg_: UInt32
+    var border: UInt32
+    var panelBg: UInt32
+    var panelBorder: UInt32
+    var panelSelBg: UInt32
+    var panelSelFg: UInt32
+    var explorerBg: UInt32
+    var explorerFg: UInt32
+    var explorerSelected: UInt32
+    var statusFg: UInt32
+    var muted: UInt32
+    var success: UInt32
+    var warning: UInt32
+    var errorColor: UInt32
+    var accentFg: UInt32
+    var searchBg: UInt32
+    var completionBg: UInt32
+    var completionSelected: UInt32
+    var completionBorder: UInt32
+    var terminalBg: UInt32
+    var gitAddBg: UInt32
+    var gitDelBg: UInt32
+    var gitHunk: UInt32
 
     static let empty = ThemeSnap(
         name: "ocean",
@@ -710,8 +735,10 @@ struct ThemeSnap: Equatable {
         selection: 0x2A3A55, caret: 0xC8E08C, statusBg: 0x0A0C14,
         keyword: 0x00DCFF, string: 0x96E6B4, comment: 0x606C7A,
         number: 0xFFB482, typeName: 0x64C8FF, function: 0xFFDC78,
-        macroName: 0xFD8F3F, namespace: 0x9EF1DD, parameter: 0xC8C8CD, property: 0x78C3B4, constant: 0xD0BF69, operatorColor: 0xDDDDDD, punctuation: 0x94949B
+        macroName: 0xFD8F3F, namespace: 0x9EF1DD, parameter: 0xC8C8CD, property: 0x78C3B4, constant: 0xD0BF69, operatorColor: 0xDDDDDD, punctuation: 0x94949B,
+        windowBg_: 0x0F111A, border: 0x3A4258, panelBg: 0x191C26, panelBorder: 0x4682C8, panelSelBg: 0x2D4664, panelSelFg: 0xE6EBFF, explorerBg: 0x0C0E16, explorerFg: 0xBEC8D2, explorerSelected: 0x00DCFF, statusFg: 0xB4BEC8, muted: 0x646E82, success: 0x64C88C, warning: 0xDCB450, errorColor: 0xF07878, accentFg: 0x000000, searchBg: 0x68581A, completionBg: 0x191C26, completionSelected: 0x00DCFF, completionBorder: 0x00DCFF, terminalBg: 0x080C08, gitAddBg: 0x142820, gitDelBg: 0x2D1618, gitHunk: 0x64B4FF
     )
+
 
     /// Theme colours arrive packed as `0xAARRGGBB`. Alpha is real: chrome
     /// tokens use it so separators composite over whatever is behind them,
@@ -723,6 +750,32 @@ struct ThemeSnap: Equatable {
         let b = Double(packed & 0xFF) / 255.0
         return Color(red: r, green: g, blue: b).opacity(a)
     }
+}
+
+extension ThemeSnap {
+    /// The chrome colours, named for what they replace.
+    ///
+    /// A theme used to stop at the text: every surface, hairline and panel in
+    /// the app was an AppKit system colour, so choosing Catppuccin repainted
+    /// the code and left the window around it looking like every other Mac app.
+    /// Core has carried all of these since the palettes were written — the face
+    /// simply never asked for them.
+    ///
+    /// The system colours were not wrong, they were just answering a different
+    /// question: "what does macOS look like right now" rather than "what does
+    /// this palette look like". Where the answer should still be the system's —
+    /// control materials, focus rings, selection in native lists — it stays the
+    /// system's, because those follow Increase Contrast and the user's accent
+    /// and a theme has no business overriding them.
+    var separator: Color { color(border) }
+    var windowBg: Color { color(windowBg_) }
+    var panelSurface: Color { color(panelBg) }
+    var panelEdge: Color { color(panelBorder) }
+    var navigatorBg: Color { color(explorerBg) }
+    var mutedText: Color { color(muted) }
+    var successColor: Color { color(success) }
+    var warningColor: Color { color(warning) }
+    var dangerColor: Color { color(errorColor) }
 }
 
 extension ChromeSnapshot {
@@ -5967,7 +6020,30 @@ final class EngineBridge: ObservableObject {
             property: snap.property,
             constant: snap.constant,
             operatorColor: snap.operator,
-            punctuation: snap.punctuation
+            punctuation: snap.punctuation,
+            windowBg_: snap.window_bg,
+            border: snap.border,
+            panelBg: snap.panel_bg,
+            panelBorder: snap.panel_border,
+            panelSelBg: snap.panel_sel_bg,
+            panelSelFg: snap.panel_sel_fg,
+            explorerBg: snap.explorer_bg,
+            explorerFg: snap.explorer_fg,
+            explorerSelected: snap.explorer_selected,
+            statusFg: snap.status_fg,
+            muted: snap.muted,
+            success: snap.success,
+            warning: snap.warning,
+            errorColor: snap.error,
+            accentFg: snap.accent_fg,
+            searchBg: snap.search_bg,
+            completionBg: snap.completion_bg,
+            completionSelected: snap.completion_selected,
+            completionBorder: snap.completion_border,
+            terminalBg: snap.terminal_bg,
+            gitAddBg: snap.git_add_bg,
+            gitDelBg: snap.git_del_bg,
+            gitHunk: snap.git_hunk
         )
     }
 

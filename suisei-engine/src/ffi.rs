@@ -2144,6 +2144,29 @@ pub struct SuiseiThemeSnapshot {
     pub constant: u32,
     pub operator: u32,
     pub punctuation: u32,
+    pub window_bg: u32,
+    pub border: u32,
+    pub panel_bg: u32,
+    pub panel_border: u32,
+    pub panel_sel_bg: u32,
+    pub panel_sel_fg: u32,
+    pub explorer_bg: u32,
+    pub explorer_fg: u32,
+    pub explorer_selected: u32,
+    pub status_fg: u32,
+    pub muted: u32,
+    pub success: u32,
+    pub warning: u32,
+    pub error: u32,
+    pub accent_fg: u32,
+    pub search_bg: u32,
+    pub completion_bg: u32,
+    pub completion_selected: u32,
+    pub completion_border: u32,
+    pub terminal_bg: u32,
+    pub git_add_bg: u32,
+    pub git_del_bg: u32,
+    pub git_hunk: u32,
 }
 
 #[unsafe(no_mangle)]
@@ -2233,6 +2256,29 @@ pub extern "C" fn suisei_engine_theme(
     o.constant = t.constant;
     o.operator = t.operator;
     o.punctuation = t.punctuation;
+    o.window_bg = t.window_bg;
+    o.border = t.border;
+    o.panel_bg = t.panel_bg;
+    o.panel_border = t.panel_border;
+    o.panel_sel_bg = t.panel_sel_bg;
+    o.panel_sel_fg = t.panel_sel_fg;
+    o.explorer_bg = t.explorer_bg;
+    o.explorer_fg = t.explorer_fg;
+    o.explorer_selected = t.explorer_selected;
+    o.status_fg = t.status_fg;
+    o.muted = t.muted;
+    o.success = t.success;
+    o.warning = t.warning;
+    o.error = t.error;
+    o.accent_fg = t.accent_fg;
+    o.search_bg = t.search_bg;
+    o.completion_bg = t.completion_bg;
+    o.completion_selected = t.completion_selected;
+    o.completion_border = t.completion_border;
+    o.terminal_bg = t.terminal_bg;
+    o.git_add_bg = t.git_add_bg;
+    o.git_del_bg = t.git_del_bg;
+    o.git_hunk = t.git_hunk;
     1
 }
 

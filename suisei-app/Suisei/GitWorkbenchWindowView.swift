@@ -175,7 +175,7 @@ struct GitWorkbenchWindowView: View {
         .preferredColorScheme(isLightTheme ? .light : .dark)
         .tint(accent)
         .accentColor(accent)
-        .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+        .background(theme.windowBg.ignoresSafeArea())
         .background(
             ThemedWindowChrome(
                 background: .windowBackgroundColor,
@@ -569,7 +569,7 @@ struct GitWorkbenchWindowView: View {
                 .fill(Color.primary.opacity(isLightTheme ? 0.045 : 0.08))
                 .overlay {
                     Capsule(style: .continuous)
-                        .stroke(Color(nsColor: .separatorColor).opacity(0.65), lineWidth: 1)
+                        .stroke(theme.separator.opacity(0.65), lineWidth: 1)
                 }
         }
     }
@@ -909,7 +909,7 @@ struct GitWorkbenchWindowView: View {
                 }
                 .overlay {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(Color(nsColor: .separatorColor).opacity(canCommit ? 0 : 0.55), lineWidth: 1)
+                        .stroke(theme.separator.opacity(canCommit ? 0 : 0.55), lineWidth: 1)
                 }
             }
             .buttonStyle(.plain)
@@ -919,7 +919,7 @@ struct GitWorkbenchWindowView: View {
         }
         .padding(.horizontal, 12)
         .frame(minHeight: 53)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(theme.windowBg)
     }
 
     private var commitMessageEditor: some View {
@@ -962,7 +962,7 @@ struct GitWorkbenchWindowView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 34)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(theme.windowBg)
     }
 
     /// Scope controls are a floating glass lens, not three AppKit segmented
@@ -1052,11 +1052,11 @@ struct GitWorkbenchWindowView: View {
             }
         }
         .animation(.easeOut(duration: 0.14), value: expanded)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(theme.panelSurface)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
+                .stroke(theme.separator.opacity(0.7), lineWidth: 1)
         }
         .contextMenu { worktreeContextMenu(row) }
     }
@@ -1132,7 +1132,7 @@ struct GitWorkbenchWindowView: View {
                 .contentMargins(.top, 0, for: .scrollContent)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(theme.windowBg)
     }
 
     private var historyHeader: some View {
@@ -1307,11 +1307,11 @@ struct GitWorkbenchWindowView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(theme.panelSurface)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
+                .stroke(theme.separator.opacity(0.7), lineWidth: 1)
         }
     }
 
@@ -1365,11 +1365,11 @@ struct GitWorkbenchWindowView: View {
             }
         }
         .animation(.easeOut(duration: 0.14), value: expanded)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(theme.panelSurface)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
+                .stroke(theme.separator.opacity(0.7), lineWidth: 1)
         }
     }
 
@@ -1435,7 +1435,7 @@ struct GitWorkbenchWindowView: View {
         .font(.system(size: 10.5, weight: .medium))
         .padding(.horizontal, 10)
         .frame(minHeight: 31)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(theme.panelSurface)
         .contentShape(Rectangle())
     }
 
