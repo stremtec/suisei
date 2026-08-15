@@ -3526,6 +3526,80 @@ pub extern "C" fn suisei_engine_pane_terminal_cwd(
     1
 }
 
+/// Mark a directory as a project — write `project.suiseiprj` if it has none.
+///
+/// Idempotent: a folder that is already a project keeps the identity it has.
+/// Returns 1 when the folder is a project afterwards, 0 when the file could not
+/// be written (read-only volume, no permission).
+///
+/// Freestanding — no engine. The face calls it from "New Project" and from
+/// "Set Project Master Directory", neither of which needs a document open.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_project_mark(dir: *const c_char) -> u8 {
+    let Some(dir) = cstr_path(dir) else { return 0 };
+    u8::from(suisei_core::project::ensure(&dir).is_ok())
+}
+
+/// Whether this exact directory carries the marker.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_project_is_marked(dir: *const c_char) -> u8 {
+    let Some(dir) = cstr_path(dir) else { return 0 };
+    u8::from(suisei_core::project::is_project(&dir))
+}
+
+/// The project root at or above `path`, written to `out`. 0 when there is none.
+///
+/// Walks up, so a file deep inside a project answers with the project. This is
+/// what the face asks before letting a folder become a master directory: a
+/// non-zero answer that is not the folder itself means it is inside one.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_project_root_of(
+    path: *const c_char,
+    out: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if out.is_null() || cap == 0 {
+        return 0;
+    }
+    let Some(path) = cstr_path(path) else { return 0 };
+    let Some(root) = suisei_core::project::find_root(&path) else {
+        return 0;
+    };
+    let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(dst, &root.display().to_string());
+    1
+}
+
+/// A project's display name, or its identity, from its marker.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_project_name(
+    dir: *const c_char,
+    out: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if out.is_null() || cap == 0 {
+        return 0;
+    }
+    let Some(dir) = cstr_path(dir) else { return 0 };
+    let Some(p) = suisei_core::project::read(&dir) else {
+        return 0;
+    };
+    let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(dst, &p.name);
+    1
+}
+
+fn cstr_path(p: *const c_char) -> Option<std::path::PathBuf> {
+    if p.is_null() {
+        return None;
+    }
+    let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+    if s.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(s))
+}
+
 /// Where a shell with no pane of its own should start — the docked strip's.
 ///
 /// Core's answer to "which directory is this window about": the explorer's

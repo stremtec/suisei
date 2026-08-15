@@ -354,6 +354,20 @@ void suisei_engine_toggle_preview(SuiseiEngine *e);
 /* Full terminal TAB (second call closes it). Direct, for the same reason. */
 void suisei_engine_toggle_terminal_tab(SuiseiEngine *e);
 void suisei_engine_focus_terminal(SuiseiEngine *ptr, uint8_t on);
+/* ── project.suiseiprj ─────────────────────────────────────────────────────
+   The file that says "this folder is a project". Carries a stable project_id
+   and a display name — and deliberately no members, roles or tokens: a file in
+   a repository is editable by anyone who can edit the repository, so a member
+   list in it is a permission you can grant yourself with a text editor.
+   Freestanding: no engine needed, and none of these open a document. */
+/* Write the marker if absent; keep the existing identity if present. */
+uint8_t suisei_project_mark(const char *dir);
+uint8_t suisei_project_is_marked(const char *dir);
+/* Project root at or ABOVE `path`; 0 when there is none. A non-zero answer
+   that is not `path` itself means `path` is inside a project. */
+uint8_t suisei_project_root_of(const char *path, char *out, uint32_t cap);
+uint8_t suisei_project_name(const char *dir, char *out, uint32_t cap);
+
 /* Where a shell with no pane of its own should start — the docked strip's.
    The face runs those shells, and asks for this each time it opens one. */
 uint8_t suisei_engine_terminal_cwd(const SuiseiEngine *ptr, char *out, uint32_t cap);

@@ -30,6 +30,7 @@ pub mod palette;
 pub mod panes;
 pub mod peek;
 pub mod preview;
+pub mod project;
 pub mod pump;
 pub mod registers;
 pub mod scm;

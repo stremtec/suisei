@@ -380,10 +380,17 @@ struct ProjectTreeView: View {
                 Divider()
             }
             if isDir {
-                if index.masterPath == path {
-                    // Already the master — offer to leave, not to re-set.
-                    Button("Unset Project Master Directory") { index.unsetMaster() }
+                // Masters are a SET now, so the question is about this folder
+                // rather than about "the" master.
+                if index.masters.contains(where: { $0 == path }) {
+                    Button("Unset Project Master Directory") { index.unsetMaster(path) }
                     Button("Re-index") { index.start() }
+                } else if let refusal = index.masterRefusal(for: path) {
+                    // Shown and disabled rather than hidden: a missing item is
+                    // a mystery, a greyed one with the reason beside it is an
+                    // answer. Nesting is the only thing refused.
+                    Button("Set Project Master Directory — \(refusal)") {}
+                        .disabled(true)
                 } else {
                     Button("Set Project Master Directory") { index.setMaster(path) }
                 }

@@ -282,6 +282,11 @@ struct SuiseiApp: App {
             }
             .keyboardShortcut("n", modifiers: .command)
 
+            Button("New Project…") {
+                engine.createProjectFolder()
+            }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+
             Button("Open…") {
                 engine.openProjectFolder()
             }
@@ -359,6 +364,11 @@ private struct WelcomeSceneRoot: View {
         engine.createNewProject()
         recents = RecentStore.load()
         promoteToEditor()
+            },
+            onNewProject: {
+        engine.createProjectFolder()
+        recents = RecentStore.load()
+        promoteToEditorIfLeftWelcome()
             },
             onOpen: {
         engine.openProjectFolder()

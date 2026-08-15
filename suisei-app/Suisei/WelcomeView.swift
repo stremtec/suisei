@@ -25,6 +25,7 @@ struct BootStage: Identifiable {
 /// - Top-leading dismiss (not traffic lights)
 struct WelcomeView: View {
     var onCreate: () -> Void
+    var onNewProject: () -> Void
     var onOpen: () -> Void
     var onClone: () -> Void
     var onOpenRecent: (String) -> Void
@@ -253,6 +254,10 @@ struct WelcomeView: View {
     private var actionsAndRecents: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(spacing: 8) {
+                // A project first: it is the thing this window is for, and
+                // until now the only way to get one was to open a folder that
+                // already existed somewhere else.
+                welcomeButton(systemImage: "shippingbox", title: "Create New Project…", action: onNewProject)
                 welcomeButton(systemImage: "plus.square", title: "Create New File…", action: onCreate)
                 welcomeButton(systemImage: "square.and.arrow.down.on.square", title: "Clone Git Repository…", action: onClone)
                 welcomeButton(systemImage: "folder", title: "Open Existing Project…", action: onOpen)
@@ -385,7 +390,15 @@ struct WelcomeView: View {
 
     // MARK: - Recents (compact, under actions)
 
-    private var recentFolders: [RecentItem] { recents.filter(\.isDir) }
+    /// Folders, projects first.
+    ///
+    /// A marked folder is the thing you came here to open; an unmarked one is
+    /// somewhere you happened to be. Ordering by that rather than by recency
+    /// alone is the whole point of the marker existing.
+    private var recentFolders: [RecentItem] {
+        let dirs = recents.filter(\.isDir)
+        return dirs.filter(\.isProject) + dirs.filter { !$0.isProject }
+    }
 
     private func recentFiles(in folder: RecentItem) -> [RecentItem] {
         let prefix = folder.path.hasSuffix("/") ? folder.path : folder.path + "/"
@@ -572,9 +585,14 @@ private struct RecentFolderRow: View {
                 }
                 .buttonStyle(.plain)
 
-                Image(systemName: "folder.fill")
+                // A project reads as one at a glance. Same slot, same size —
+                // only the glyph and its weight change, so the column stays a
+                // column.
+                Image(systemName: item.isProject ? "shippingbox.fill" : "folder.fill")
                     .font(.system(size: 12))
-                    .foregroundStyle(Color.white.opacity(0.55))
+                    .foregroundStyle(
+                        Color.white.opacity(item.isProject ? 0.85 : 0.55)
+                    )
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
@@ -802,6 +820,12 @@ struct RecentItem: Identifiable, Equatable, Codable {
     var title: String
     var subtitle: String
     var isDir: Bool
+    /// This folder carries `project.suiseiprj`.
+    ///
+    /// Decoded as `false` for entries written before the marker existed, which
+    /// is what `Codable` does with a missing key given a default — and the
+    /// right answer, because those entries were never checked.
+    var isProject: Bool = false
 }
 
 enum RecentStore {
@@ -821,11 +845,23 @@ enum RecentStore {
         let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
         let title = url.lastPathComponent
         let parent = url.deletingLastPathComponent().path
+        let isProject = isDir && path.withCString { suisei_project_is_marked($0) != 0 }
         items.insert(
-            RecentItem(path: path, title: title, subtitle: parent, isDir: isDir),
+            RecentItem(
+                path: path, title: title, subtitle: parent,
+                isDir: isDir, isProject: isProject
+            ),
             at: 0
         )
-        if items.count > 12 { items = Array(items.prefix(12)) }
+        // Projects are not evicted by files. The cap used to be a flat twelve,
+        // so opening a dozen files buried the three folders you actually work
+        // in — the entries most worth keeping were the ones most easily pushed
+        // out, because you open a project once and its files all day.
+        var projects = items.filter(\.isProject)
+        var rest = items.filter { !$0.isProject }
+        if projects.count > 8 { projects = Array(projects.prefix(8)) }
+        if rest.count > 12 { rest = Array(rest.prefix(12)) }
+        items = projects + rest
         if let data = try? JSONEncoder().encode(items) {
             UserDefaults.standard.set(data, forKey: key)
         }

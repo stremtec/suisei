@@ -45,8 +45,16 @@ final class ProjectIndex: ObservableObject {
     @Published private(set) var indexed: Set<String> = []
     /// Files that could not be read (permissions, not text, vanished).
     @Published private(set) var failed: Set<String> = []
-    /// Master directory, once the user picks one.
-    @Published private(set) var masterPath: String?
+    /// Master directories, in the order they were set.
+    ///
+    /// Plural. It was one path for the whole app, so setting a second project
+    /// silently forgot the first — and a machine has more than one project on
+    /// it. What stays forbidden is NESTING: a master inside another master
+    /// would index the same files twice and give one folder two roots.
+    @Published private(set) var masters: [String] = []
+    /// The most recently set one, for anything that still wants a single
+    /// answer (the tree's "Unset" item, status text).
+    var masterPath: String? { masters.last }
     @Published private(set) var isRunning = false
     @Published private(set) var total = 0
     @Published private(set) var done = 0
@@ -59,14 +67,53 @@ final class ProjectIndex: ObservableObject {
     private var paused = false
     /// Set by the view so warming can parse through the engine.
     weak var engine: EngineBridge?
-    private static let masterKey = "suisei.masterDirectory"
+    private static let mastersKey = "suisei.masterDirectories"
+    /// The single-path key this replaced. Read once, then never written again,
+    /// so an existing install keeps the project it had.
+    private static let legacyMasterKey = "suisei.masterDirectory"
 
     init() {
-        if let saved = UserDefaults.standard.string(forKey: Self.masterKey),
-           FileManager.default.fileExists(atPath: saved)
-        {
-            masterPath = saved
+        let d = UserDefaults.standard
+        var saved = d.stringArray(forKey: Self.mastersKey) ?? []
+        if saved.isEmpty, let legacy = d.string(forKey: Self.legacyMasterKey) {
+            saved = [legacy]
         }
+        masters = saved.filter { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Why a directory may not become a master.
+    ///
+    /// `nil` means it may. Both directions are refused, not just the one the
+    /// user named: allowing a PARENT of an existing master would put that
+    /// master inside a master a moment later, which is the same illegal shape
+    /// discovered in the other order.
+    func masterRefusal(for path: String) -> String? {
+        let p = Self.normalised(path)
+        if masters.contains(where: { Self.normalised($0) == p }) {
+            return "This folder is already a project master directory."
+        }
+        if let outer = masters.first(where: { Self.contains($0, p) }) {
+            return "Inside “\(URL(fileURLWithPath: outer).lastPathComponent)”, "
+                + "which is already a project master directory."
+        }
+        if let inner = masters.first(where: { Self.contains(p, $0) }) {
+            return "Contains “\(URL(fileURLWithPath: inner).lastPathComponent)”, "
+                + "which is already a project master directory."
+        }
+        return nil
+    }
+
+    private static func normalised(_ p: String) -> String {
+        let s = URL(fileURLWithPath: p).standardizedFileURL.path
+        return s.hasSuffix("/") && s.count > 1 ? String(s.dropLast()) : s
+    }
+
+    /// Whether `outer` is a strict ancestor of `inner`. Compared on path
+    /// COMPONENTS: a `hasPrefix` check would call `/a/bc` a child of `/a/b`.
+    private static func contains(_ outer: String, _ inner: String) -> Bool {
+        let a = normalised(outer), b = normalised(inner)
+        guard a != b else { return false }
+        return b.hasPrefix(a.hasSuffix("/") ? a : a + "/")
     }
 
     /// Stand down while the user is dragging or typing.
@@ -76,18 +123,27 @@ final class ProjectIndex: ObservableObject {
     func isIndexed(_ path: String) -> Bool { indexed.contains(path) }
     func didFail(_ path: String) -> Bool { failed.contains(path) }
 
-    /// Point the index at `path` and start warming everything under it.
-    func setMaster(_ path: String) {
+    /// Add `path` as a master directory and warm everything under it.
+    ///
+    /// Refused when it would nest — see `masterRefusal`. Marks the folder as a
+    /// project on the way in, which is what puts it above loose files in
+    /// Recents.
+    @discardableResult
+    func setMaster(_ path: String) -> String? {
+        if let refusal = masterRefusal(for: path) { return refusal }
         task?.cancel()
-        masterPath = path
-        UserDefaults.standard.set(path, forKey: Self.masterKey)
+        masters.append(Self.normalised(path))
+        UserDefaults.standard.set(masters, forKey: Self.mastersKey)
+        _ = path.withCString { suisei_project_mark($0) }
         indexed.removeAll()
         failed.removeAll()
         start()
+        return nil
     }
 
     func start() {
-        guard let root = masterPath else { return }
+        let roots = masters
+        guard !roots.isEmpty else { return }
         task?.cancel()
         isRunning = true
         done = 0
@@ -96,7 +152,11 @@ final class ProjectIndex: ObservableObject {
         task = Task { [weak self] in
             // Discovery and line counting are IO — keep them off the main actor
             // so the editor stays responsive while the index builds.
-            let files = await Self.discover(root: root)
+            //
+            // Every master in one list, sorted together: the biggest file in
+            // the whole set is the one most worth warming first, whichever
+            // project it is in. Masters cannot nest, so nothing is walked twice.
+            let files = await Self.discover(roots: roots)
             guard !Task.isCancelled else { return }
             await MainActor.run { self?.total = files.count }
 
@@ -127,15 +187,26 @@ final class ProjectIndex: ObservableObject {
         }
     }
 
-    /// Stop indexing and forget the master directory.
-    func unsetMaster() {
+    /// Forget one master directory, or all of them.
+    ///
+    /// The `project.suiseiprj` file stays. It is the project's identity and
+    /// belongs to the repository, not to this machine's indexing preferences —
+    /// deleting it here would silently change what a teammate's clone is.
+    func unsetMaster(_ path: String? = nil) {
         stop()
-        masterPath = nil
-        UserDefaults.standard.removeObject(forKey: Self.masterKey)
+        if let path {
+            let p = Self.normalised(path)
+            masters.removeAll { Self.normalised($0) == p }
+        } else {
+            masters.removeAll()
+        }
+        UserDefaults.standard.set(masters, forKey: Self.mastersKey)
+        UserDefaults.standard.removeObject(forKey: Self.legacyMasterKey)
         indexed.removeAll()
         failed.removeAll()
         total = 0
         done = 0
+        if !masters.isEmpty { start() }
     }
 
     func stop() {
@@ -185,9 +256,9 @@ final class ProjectIndex: ObservableObject {
 
     /// Code files under `root`, **most lines first** — the expensive ones get
     /// warmed while the user is still getting oriented.
-    private nonisolated static func discover(root: String) async -> [Entry] {
+    private nonisolated static func discover(roots: [String]) async -> [Entry] {
         await Task.detached(priority: .utility) {
-            collectFiles(root: root).sorted { $0.lines > $1.lines }
+            roots.flatMap { collectFiles(root: $0) }.sorted { $0.lines > $1.lines }
         }.value
     }
 

@@ -2375,6 +2375,59 @@ final class EngineBridge: ObservableObject {
         }
     }
 
+    /// New Project — pick or make a folder, mark it, index it, open it.
+    ///
+    /// Distinct from `createNewProject`, which despite the name makes an
+    /// untitled FILE. A project is a folder that carries `project.suiseiprj`,
+    /// and this is the only thing that creates one deliberately besides "Set
+    /// Project Master Directory".
+    ///
+    /// The marker is written into a folder the user chose in a save panel, so
+    /// nothing appears in a repository nobody pointed at. Opening a folder does
+    /// NOT mark it — an app that quietly adds a file to every project you look
+    /// at is an app that dirties a clean tree.
+    @MainActor
+    func createProjectFolder() {
+        cancelPointerSession()
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "New Project"
+        panel.canCreateDirectories = true
+        panel.prompt = "Create"
+        panel.message = "Where should the project go?"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try FileManager.default.createDirectory(
+                at: url, withIntermediateDirectories: true
+            )
+        } catch {
+            // The folder may already exist, which is fine — the marker below is
+            // idempotent and an existing project keeps its identity. Anything
+            // else is reported rather than swallowed.
+            if !FileManager.default.fileExists(atPath: url.path) {
+                presentError("Could not create the project folder.", error)
+                return
+            }
+        }
+        guard url.path.withCString({ suisei_project_mark($0) }) != 0 else {
+            presentError("Could not write \(url.lastPathComponent)/project.suiseiprj.", nil)
+            return
+        }
+        _ = openPath(url.path)
+        ensureProjectTree()
+        // A new project is one you mean to work in, so index it. Refused only
+        // if it would nest, which a folder you just created cannot — unless you
+        // put it inside an existing project, and then the refusal is right.
+        projectIndex?.setMaster(url.path)
+    }
+
+    private func presentError(_ message: String, _ error: Error?) {
+        let alert = NSAlert()
+        alert.messageText = message
+        if let error { alert.informativeText = error.localizedDescription }
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
     // MARK: - File operations
     //
     // The filesystem call lives here, not in the core: Trash is an AppKit
