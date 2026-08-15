@@ -161,15 +161,114 @@ impl WrapMap {
 /// A line exactly `cols` wide is also one row: the break belongs *after* the
 /// last cell that fits, and a trailing empty segment is a blank row the
 /// document does not contain.
+///
+/// **A walk, not a division.** `ceil(width / cols)` is wrong wherever a glyph
+/// is wider than one cell, because a double-width glyph that will not fit
+/// starts the next row rather than being cut in half. Four Hangul syllables at
+/// three columns are FOUR rows — two cells, break, two cells, break — and the
+/// division says three. The renderer breaks greedily
+/// ([`visual_chunks`]); a count that disagreed with it would put every row
+/// below the line in the wrong place.
 fn rows_for(line: &str, cols: u16, tab_width: usize) -> usize {
     if cols == 0 {
         return 1;
     }
-    let w = display_columns(line, tab_width);
-    if w == 0 {
-        return 1;
+    let width = cols as usize;
+    let tab = tab_width.max(1);
+    let mut rows = 1usize;
+    let mut row_w = 0usize;
+    let mut col = 0usize;
+    for ch in line.chars() {
+        // A tab is cells, not a glyph: expanded it is N spaces, and a break
+        // can land between any two of them. Walking it as one advance of N
+        // would refuse to break inside a tab and overflow the row instead —
+        // and the renderer, which chunks text that has already been expanded,
+        // breaks inside it.
+        let cells: usize = if ch == '\t' { tab - (col % tab) } else { 0 };
+        if ch == '\t' {
+            for _ in 0..cells {
+                if row_w + 1 > width {
+                    rows += 1;
+                    row_w = 0;
+                }
+                row_w += 1;
+            }
+            col += cells;
+            continue;
+        }
+        let w = char_cells(ch);
+        if row_w > 0 && row_w + w > width {
+            rows += 1;
+            row_w = 0;
+        }
+        row_w += w;
+        col += w;
     }
-    w.div_ceil(cols as usize)
+    rows
+}
+
+fn char_cells(ch: char) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    ch.width().unwrap_or(0)
+}
+
+/// Tabs as the spaces they paint as.
+///
+/// The renderer works in expanded coordinates — syntax spans, the caret column
+/// and the selection are all reported against this string — so wrapping has to
+/// see the same text. Lived in the engine's scene builder with the tab width
+/// hardcoded to 4, which is its own quiet bug: a document set to eight-column
+/// tabs was measured at four everywhere the expansion was used.
+pub fn expand_tabs(s: &str, tab_width: usize) -> String {
+    let tab = tab_width.max(1);
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0usize;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let n = tab - (col % tab);
+            for _ in 0..n {
+                out.push(' ');
+            }
+            col += n;
+        } else {
+            out.push(ch);
+            col += char_cells(ch);
+        }
+    }
+    out
+}
+
+/// Split already-expanded text into the rows it wraps to, each with the
+/// display column it starts at.
+///
+/// The one place a line is broken. [`rows_for`] counts what this produces;
+/// they are tested against each other, because a count and a split that
+/// disagree put every row below the line somewhere it is not drawn.
+pub fn visual_chunks(text: &str, cols: u16) -> Vec<(u32, String)> {
+    if cols == 0 {
+        return vec![(0, text.to_string())];
+    }
+    let width = cols as usize;
+    let mut out = Vec::new();
+    let mut col: u32 = 0;
+    let mut seg_start_col: u32 = 0;
+    let mut seg = String::new();
+    let mut seg_w = 0usize;
+    for ch in text.chars() {
+        let w = char_cells(ch).max(1);
+        if seg_w > 0 && seg_w + w > width {
+            out.push((seg_start_col, std::mem::take(&mut seg)));
+            seg_start_col = col;
+            seg_w = 0;
+        }
+        seg.push(ch);
+        seg_w += w;
+        col += w as u32;
+    }
+    if !seg.is_empty() || out.is_empty() {
+        out.push((seg_start_col, seg));
+    }
+    out
 }
 
 /// Display columns a line occupies: tabs advance to the next stop, wide glyphs
@@ -317,6 +416,78 @@ mod tests {
         assert_eq!(m.segment_columns(2), (20, 30));
         let flat = WrapMap::build(&doc(&["x"]), 1, 0, 4);
         assert_eq!(flat.segment_columns(0), (0, usize::MAX));
+    }
+
+    /// **The count and the split must agree, always.**
+    ///
+    /// `WrapMap` says how tall a line is; `visual_chunks` says what its rows
+    /// contain. They are separate walks over the same rule, and if they ever
+    /// disagree the document is a different height than it draws — every row
+    /// below the line lands where nothing is painted, and every click below it
+    /// resolves to the wrong line. This is the test that keeps them one rule.
+    ///
+    /// The cases are the ones a division gets wrong: wide glyphs that cannot
+    /// straddle a boundary, and tabs, which expand to cells that can.
+    #[test]
+    fn the_row_count_and_the_split_agree() {
+        let cases: &[&str] = &[
+            "",
+            "a",
+            "abcdefghij",
+            "abcdefghijk",
+            &"x".repeat(97),
+            "한한한한",
+            "한한한한한",
+            "a한한",
+            "한a한a",
+            "\t",
+            "\t\t\t\t",
+            "\tabc\tdef",
+            "a\t한\tb",
+            "  \t한글 코드 \t끝",
+        ];
+        for tab in [2usize, 4, 8] {
+            for cols in 1u16..=20 {
+                for raw in cases {
+                    let counted = rows_for(raw, cols, tab);
+                    let split = visual_chunks(&expand_tabs(raw, tab), cols).len();
+                    assert_eq!(
+                        counted, split,
+                        "line {raw:?} at {cols} cols, tab {tab}: \
+                         counted {counted} rows, split into {split}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The case that made this one rule instead of two: four double-width
+    /// glyphs at three columns are four rows, and `ceil(8 / 3)` is three.
+    #[test]
+    fn a_wide_glyph_starts_a_row_rather_than_being_cut() {
+        assert_eq!(display_columns("한한한한", 4), 8);
+        assert_eq!(rows_for("한한한한", 3, 4), 4);
+        assert_eq!(visual_chunks("한한한한", 3).len(), 4);
+        assert_ne!(8usize.div_ceil(3), 4, "the division this replaced");
+    }
+
+    /// Tabs expand before they wrap, so a break can land inside one.
+    #[test]
+    fn a_tab_can_be_broken_across_rows() {
+        // One tab at width 8 is eight cells; at three columns that is three
+        // rows, which only happens if the tab is cells rather than a glyph.
+        assert_eq!(expand_tabs("\t", 8), " ".repeat(8));
+        assert_eq!(rows_for("\t", 3, 8), 3);
+        assert_eq!(visual_chunks(&expand_tabs("\t", 8), 3).len(), 3);
+    }
+
+    /// The tab width reaches the expansion. It used to be hardcoded to 4 in the
+    /// engine's copy, so an eight-column document was measured at four.
+    #[test]
+    fn the_tab_width_is_honoured() {
+        assert_eq!(expand_tabs("\ta", 2), "  a");
+        assert_eq!(expand_tabs("\ta", 8), "        a");
+        assert_eq!(display_columns("\ta", 8), 9);
     }
 
     /// An empty document is one row, because the caret is somewhere.

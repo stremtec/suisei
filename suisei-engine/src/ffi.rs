@@ -1123,6 +1123,7 @@ pub extern "C" fn suisei_engine_caret_row_vcol(ptr: *const SuiseiEngine) -> u64 
     let vcol = crate::compositor::visual_col(
         app.buffer.line(cursor.row),
         crate::compositor::drawn_caret_col(app),
+        app.tab_width,
     ) as u64;
     (row << 32) | (vcol & 0xFFFF_FFFF)
 }

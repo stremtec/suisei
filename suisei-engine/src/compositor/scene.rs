@@ -465,7 +465,7 @@ pub fn build_editor_band(
     let total = buf.line_count() as u32;
     let caret_vcol = if focused {
         let c = app.buffer.cursor();
-        visual_col(app.buffer.line(c.row), drawn_caret_col(app)) as u32
+        visual_col(app.buffer.line(c.row), drawn_caret_col(app), app.tab_width) as u32
     } else {
         0
     };
@@ -509,7 +509,7 @@ pub fn patch_chrome_editor_scroll(app: &App, frame_gen: u64, chrome: &mut Chrome
     let caret_vcol = if welcome {
         0
     } else {
-        visual_col(app.buffer.line(cursor.row), drawn_caret_col(app)) as u32
+        visual_col(app.buffer.line(cursor.row), drawn_caret_col(app), app.tab_width) as u32
     };
     let sel = app.selected_range();
     // Patch path may reuse unfocused pane snapshots (typing hot path in splits).
@@ -631,7 +631,7 @@ pub fn compose(app: &App, frame_gen: u64, outline: &[OutlineItemScene]) -> Frame
     let caret_vcol = if welcome {
         0
     } else {
-        visual_col(app.buffer.line(cursor.row), drawn_caret_col(app)) as u32
+        visual_col(app.buffer.line(cursor.row), drawn_caret_col(app), app.tab_width) as u32
     };
     let sel = app.selected_range();
     let (lines, pane_focus, panes) = if welcome {
@@ -2134,7 +2134,7 @@ fn build_editor_surfaces(
             Some(caret_vcol)
         } else {
             let line = buf.line(pane_cursor.0.min(buf.line_count().saturating_sub(1)));
-            Some(visual_col(line, pane_cursor.1) as u32)
+            Some(visual_col(line, pane_cursor.1, app.tab_width) as u32)
         };
         let pane_sel = if focused { sel } else { None };
         let lines = if build_lines {
@@ -2236,12 +2236,19 @@ fn build_lines_at(
     } else {
         usize::MAX
     };
-    let wrap = app.wrap_lines;
-    let text_width = if wrap {
-        app.grid_cols().saturating_sub(5).max(20) as usize
+    // Columns a wrapped row may use. Zero means do not wrap, which is the
+    // same shape `WrapMap` uses — one rule, one sentinel.
+    //
+    // Derived from the whole editor's grid, which is wrong in a split: each
+    // pane is narrower than the editor, so a wrapped line in a split pane
+    // breaks past its own right edge. The face is the only side that knows a
+    // pane's real width, and handing that number down is the next change.
+    let wrap_cols: u16 = if app.wrap_lines {
+        app.grid_cols().saturating_sub(5).max(20)
     } else {
-        usize::MAX
+        0
     };
+    let wrap = wrap_cols > 0;
     // Resolve breakpoint path **once** — never canonicalize per row on the scroll hot path.
     let bp_lines: Option<std::collections::HashSet<usize>> = if is_current {
         let path_str = app
@@ -2307,7 +2314,7 @@ fn build_lines_at(
         }
         buffer_rows_taken += 1;
         let raw = buf.line(row);
-        let mut text = expand_tabs(raw);
+        let mut text = suisei_core::wrap::expand_tabs(raw, app.tab_width);
         if text.len() > 480 {
             let mut cut = 480;
             while cut > 0 && !text.is_char_boundary(cut) {
@@ -2337,8 +2344,8 @@ fn build_lines_at(
                 .into_iter()
                 .take(32)
                 .filter_map(|(kind, start, end)| {
-                    let v0 = visual_col(raw, start) as u32;
-                    let v1 = visual_col(raw, end) as u32;
+                    let v0 = visual_col(raw, start, app.tab_width) as u32;
+                    let v1 = visual_col(raw, end, app.tab_width) as u32;
                     (v1 > v0).then_some(SpanScene {
                         start: v0,
                         end: v1,
@@ -2361,8 +2368,8 @@ fn build_lines_at(
                 if pattern_len > 0 {
                     let (base, matches) = app.search_matches_row_slice(row);
                     for (offset, m) in matches.iter().enumerate() {
-                        let start = visual_col(raw, m.col) as u32;
-                        let end = visual_col(raw, m.col.saturating_add(pattern_len)) as u32;
+                        let start = visual_col(raw, m.col, app.tab_width) as u32;
+                        let end = visual_col(raw, m.col.saturating_add(pattern_len), app.tab_width) as u32;
                         if end > start {
                             full_spans.push(SpanScene {
                                 start,
@@ -2384,7 +2391,7 @@ fn build_lines_at(
             0
         };
         let chunks = if wrap {
-            wrap_visual_chunks(&text, text_width)
+            suisei_core::wrap::visual_chunks(&text, wrap_cols)
         } else {
             vec![(0u32, text.clone())]
         };
@@ -2476,7 +2483,7 @@ fn build_lines_at(
                 if head.row != row {
                     continue;
                 }
-                let vc = visual_col(raw, head.col) as u32;
+                let vc = visual_col(raw, head.col, app.tab_width) as u32;
                 if vc >= base_col && vc < caret_limit {
                     let u = utf16_offset_for_vcol(&chunk, vc.saturating_sub(base_col));
                     spans.push(SpanScene {
@@ -2488,8 +2495,8 @@ fn build_lines_at(
             }
             if diags_active {
                 for d in app.lsp.diagnostics_for_row(row) {
-                    let v0 = visual_col(raw, d.col_start) as u32;
-                    let v1 = visual_col(raw, d.col_end.max(d.col_start.saturating_add(1))) as u32;
+                    let v0 = visual_col(raw, d.col_start, app.tab_width) as u32;
+                    let v1 = visual_col(raw, d.col_end.max(d.col_start.saturating_add(1)), app.tab_width) as u32;
                     let s = v0.max(base_col);
                     let e = v1.min(end_col.max(base_col + 1));
                     if e > s {
@@ -2560,35 +2567,6 @@ fn build_lines_at(
     lines
 }
 
-/// Split expanded (tab-expanded) text into visual-column chunks for soft-wrap.
-fn wrap_visual_chunks(text: &str, width: usize) -> Vec<(u32, String)> {
-    if width == 0 || width == usize::MAX {
-        return vec![(0, text.to_string())];
-    }
-    let mut out = Vec::new();
-    let mut col: u32 = 0;
-    let mut seg_start_col: u32 = 0;
-    let mut seg = String::new();
-    let mut seg_w = 0usize;
-    for ch in text.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-        if seg_w > 0 && seg_w + w > width {
-            out.push((seg_start_col, seg));
-            seg = String::new();
-            seg_start_col = col;
-            seg_w = 0;
-        }
-        seg.push(ch);
-        seg_w += w;
-        col += w as u32;
-    }
-    if seg.is_empty() && out.is_empty() {
-        out.push((0, String::new()));
-    } else if !seg.is_empty() || out.is_empty() {
-        out.push((seg_start_col, seg));
-    }
-    out
-}
 
 /// UTF-16 offset of the character that starts at terminal cell column `vcol`.
 /// Bridges the core's cell grid to the renderer's glyph advances.
@@ -2682,8 +2660,8 @@ fn syntax_spans_for_row(app: &App, row: usize, raw: &str) -> Vec<SpanScene> {
     };
     let mut out = Vec::with_capacity(spans_src.len());
     for (kind, start, end) in spans_src {
-        let v0 = visual_col(raw, start) as u32;
-        let v1 = visual_col(raw, end) as u32;
+        let v0 = visual_col(raw, start, app.tab_width) as u32;
+        let v1 = visual_col(raw, end, app.tab_width) as u32;
         if v1 > v0 {
             out.push(SpanScene {
                 start: v0,
@@ -2757,13 +2735,13 @@ pub(crate) fn selection_on_line(
     // CoreText. Clamp against display width, then convert to UTF-16 once.
     let line_len = visual_width_str(expanded) as u32;
     let v0 = if row == start.row {
-        visual_col(raw, start.col) as u32
+        visual_col(raw, start.col, app.tab_width) as u32
     } else {
         0
     };
     // Exclusive visual end: one past the inclusive buffer end column.
     let v1 = if row == end.row {
-        visual_col(raw, end.col.saturating_add(1)) as u32
+        visual_col(raw, end.col.saturating_add(1), app.tab_width) as u32
     } else {
         line_len
     };
@@ -2776,32 +2754,26 @@ pub(crate) fn selection_on_line(
     (Some(v0), Some(v1.min(line_len.saturating_add(1))))
 }
 
-fn expand_tabs(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut col = 0usize;
-    for ch in s.chars() {
-        if ch == '\t' {
-            let n = 4 - (col % 4);
-            for _ in 0..n {
-                out.push(' ');
-            }
-            col += n;
-        } else {
-            out.push(ch);
-            col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-        }
-    }
-    out
-}
+// `expand_tabs` lived here with the tab width hardcoded to 4 and
+// `wrap_visual_chunks` beside it. Both are `suisei_core::wrap`'s now: the wrap
+// map counts the rows a line takes and this builder produces their contents,
+// and those two answers have to come from one rule or the document is a
+// different height than it draws.
 
-pub(crate) fn visual_col(line: &str, buf_col: usize) -> usize {
+/// Display column a buffer column sits at, on a raw (unexpanded) line.
+///
+/// `tab_width` rather than a hardcoded 4: this and the expansion have to place
+/// a tab at the same stop, or a syntax span on a tabbed line is highlighted
+/// beside the text it describes.
+pub(crate) fn visual_col(line: &str, buf_col: usize, tab_width: usize) -> usize {
+    let tab = tab_width.max(1);
     let mut col = 0usize;
     for (i, ch) in line.chars().enumerate() {
         if i >= buf_col {
             break;
         }
         if ch == '\t' {
-            col += 4 - (col % 4);
+            col += tab - (col % tab);
         } else {
             col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
         }
