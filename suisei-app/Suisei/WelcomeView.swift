@@ -105,6 +105,7 @@ struct WelcomeView: View {
 
                             recentsColumn
                                 .frame(width: Self.recentsWidth)
+                                .overlay(alignment: .leading) { columnDivider }
                         }
                         .frame(maxHeight: .infinity, alignment: .top)
                     }
@@ -285,15 +286,27 @@ struct WelcomeView: View {
         .animation(.smooth(duration: 0.55), value: ready)
     }
 
-    /// The recents column, revealed on the same beat as the actions.
+    /// A short rule between the two columns.
     ///
-    /// Separated from the actions by being a SURFACE, not by a rule. A hairline
-    /// down the middle ran from the wordmark to the floor and cut the panel in
-    /// half — it drew the strongest line in the window across its emptiest
-    /// part. An inset card says the same thing by occupying its own space: it
-    /// reads as a thing sitting on the rail rather than as a border between two
-    /// halves, and it stops short of every edge so nothing reaches the bottom
-    /// but the content.
+    /// The full-height version ran from the wordmark to the floor: the
+    /// strongest line in the window, drawn across its emptiest part, cutting
+    /// one panel in half. A card was worse in the other direction — it made
+    /// recents a separate object sitting on the rail when it is part of it.
+    ///
+    /// A short rule says only what needs saying. It fades out at both ends
+    /// rather than stopping dead, because a 1pt line with hard terminals reads
+    /// as a line that was clipped rather than one that was drawn that length.
+    private var columnDivider: some View {
+        LinearGradient(
+            colors: [.clear, hairline, hairline, .clear],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .frame(width: 1, height: 150)
+        .allowsHitTesting(false)
+    }
+
+    /// The recents column, revealed on the same beat as the actions.
     ///
     /// It reads `ready` itself rather than being handed it, because it no
     /// longer shares a ZStack with the boot line — the loading state belongs to
@@ -301,19 +314,9 @@ struct WelcomeView: View {
     /// twice.
     private var recentsColumn: some View {
         recentsSection
-            .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.white.opacity(0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
-            )
-            .padding(.leading, 4)
-            .padding(.trailing, 22)
+            .padding(.top, 4)
             .padding(.bottom, 26)
+            .frame(maxHeight: .infinity, alignment: .top)
             .opacity(ready ? 1 : 0)
             .offset(y: ready ? 0 : 10)
             .allowsHitTesting(ready)
@@ -492,14 +495,14 @@ struct WelcomeView: View {
             Text("Recents")
                 .font(.system(size: 11, weight: .semibold, design: .default))
                 .foregroundStyle(muted)
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 22)
                 .padding(.bottom, 8)
 
             if recents.isEmpty {
                 Text("No Recent Projects")
                     .font(.system(size: 12, weight: .regular))
                     .foregroundStyle(muted.opacity(0.75))
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 22)
                     .padding(.top, 4)
             } else {
                 ScrollView {
@@ -564,8 +567,8 @@ struct WelcomeView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 4)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
                 }
             }
         }
