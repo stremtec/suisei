@@ -96,6 +96,51 @@ enum WindowChrome {
             button.alphaValue = 1
             button.isEnabled = true
         }
+
+        if opaque {
+            clearTitlebarMaterial(in: window, background: background)
+        }
+    }
+
+    /// Stop the titlebar band painting its own material over the window.
+    ///
+    /// `titlebarAppearsTransparent` makes the TITLEBAR transparent; it does not
+    /// touch the vibrancy AppKit puts behind a toolbar. With a toolbar present
+    /// that material sits above the window's background and below nothing, so
+    /// the top band stayed a neutral grey while the document under it was the
+    /// palette's — the tab strip lives up there, which is why it read as "the
+    /// tab bar is a different colour from the editor".
+    ///
+    /// Setting the window's `backgroundColor` cannot reach it, and neither can
+    /// anything in SwiftUI: the effect view is AppKit's, in the titlebar
+    /// container, outside the content view entirely.
+    ///
+    /// Found by class name rather than by index. The titlebar's view tree is
+    /// AppKit's and its shape changes between releases, so anything positional
+    /// would be a silent no-op the next time it moves — and a no-op here looks
+    /// exactly like the bug.
+    private static func clearTitlebarMaterial(in window: NSWindow, background: NSColor) {
+        guard let frameView = window.contentView?.superview else { return }
+        for view in frameView.subviews
+        where String(describing: type(of: view)).contains("TitlebarContainer") {
+            view.wantsLayer = true
+            view.layer?.backgroundColor = background.cgColor
+            // The effect view is a child of the titlebar view inside the
+            // container. Hiding it rather than removing it: it belongs to
+            // AppKit, which may re-lay it out, and a hidden view it still owns
+            // survives that where a removed one would be recreated.
+            hideEffectViews(in: view)
+        }
+    }
+
+    private static func hideEffectViews(in view: NSView) {
+        for child in view.subviews {
+            if let effect = child as? NSVisualEffectView {
+                effect.isHidden = true
+            } else {
+                hideEffectViews(in: child)
+            }
+        }
     }
 }
 
