@@ -53,10 +53,9 @@ struct WelcomeView: View {
     static let controlWidth: CGFloat = 344
     static let recentsWidth: CGFloat = 316
     static let artWidth: CGFloat = 516
-    static let windowSize = NSSize(
-        width: controlWidth + recentsWidth + artWidth,
-        height: 500
-    )
+    /// The wordmark's band, and the two columns beneath it.
+    static let leftWidth: CGFloat = controlWidth + recentsWidth
+    static let windowSize = NSSize(width: leftWidth + artWidth, height: 500)
     /// Welcome is borderless, so it cuts its own corner — and it has to match a
     /// real window sitting next to it. Same source as every other surface that
     /// lines up with a window edge.
@@ -91,24 +90,36 @@ struct WelcomeView: View {
         ZStack(alignment: .topLeading) {
             GeometryReader { geo in
                 HStack(spacing: 0) {
-                    controlColumn
-                        .frame(width: Self.controlWidth, height: geo.size.height)
-                        .background(controlBg)
+                    // The wordmark spans BOTH left columns and the two columns
+                    // start under it. Splitting the rail put the mark in a
+                    // 344pt slot with the buttons directly beneath, and left
+                    // the bottom half of both columns empty — the window had
+                    // grown a third column without giving anything a reason to
+                    // reach the floor.
+                    VStack(spacing: 0) {
+                        brandHeader
 
-                    // Recents gets its own column, on the same rail surface —
-                    // a hairline separates them rather than a change of
-                    // material, so the left of this window still reads as one
-                    // panel with two jobs.
-                    recentsColumn
-                        .frame(width: Self.recentsWidth, height: geo.size.height)
-                        .background(controlBg)
-                        .overlay(alignment: .leading) {
-                            Rectangle().fill(hairline).frame(width: 1)
+                        HStack(spacing: 0) {
+                            actionsColumn
+                                .frame(width: Self.controlWidth)
+
+                            // A hairline rather than a change of material, so
+                            // the left of this window still reads as one panel
+                            // with two jobs.
+                            recentsColumn
+                                .frame(width: Self.recentsWidth)
+                                .overlay(alignment: .leading) {
+                                    Rectangle().fill(hairline).frame(width: 1)
+                                }
                         }
+                        .frame(maxHeight: .infinity, alignment: .top)
+                    }
+                    .frame(width: Self.leftWidth, height: geo.size.height)
+                    .background(controlBg)
 
                     artPanel
                         .frame(
-                            width: max(0, geo.size.width - Self.controlWidth - Self.recentsWidth),
+                            width: max(0, geo.size.width - Self.leftWidth),
                             height: geo.size.height
                         )
                         // Soft bleed of the control rail into the art so the
@@ -219,53 +230,58 @@ struct WelcomeView: View {
 
     // MARK: - Left control column
 
-    private var controlColumn: some View {
+    /// The wordmark band across the top of both left columns.
+    ///
+    /// Type-only lockup — Milker. It carries A–Z/a–z only, so the version and
+    /// legal lines stay on the system face.
+    private var brandHeader: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Spacer().frame(height: 40)
-
-            // Type-only lockup — Milker. It carries A–Z/a–z only, so the
-            // version and legal lines stay on the system face.
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Suisei")
-                    .font(brandWordmarkFont)
-                    .foregroundStyle(Color.white)
-                    .lineLimit(1)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("© 2025–2026 Stemtec. All rights reserved.")
-                        .font(.system(size: 10, weight: .regular, design: .default))
-                        .foregroundStyle(muted.opacity(0.90))
-                    Text("Suisei 2026dev · Legal Information")
-                        .font(.system(size: 10, weight: .regular, design: .default))
-                        .foregroundStyle(muted.opacity(0.75))
-                }
-                .padding(.top, 10)
+            Text("Suisei")
+                .font(brandWordmarkFont)
+                .foregroundStyle(Color.white)
+                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("© 2025–2026 Stemtec. All rights reserved.")
+                    .font(.system(size: 10, weight: .regular, design: .default))
+                    .foregroundStyle(muted.opacity(0.90))
+                Text("Suisei 2026dev · Legal Information")
+                    .font(.system(size: 10, weight: .regular, design: .default))
+                    .foregroundStyle(muted.opacity(0.75))
             }
-            .padding(.leading, 22)
-            .padding(.trailing, 20)
-            .opacity(appeared ? 1 : 0)
-            .offset(y: appeared ? 0 : 6)
-
-            Spacer().frame(height: 28)
-
-            // The actions/recents wait behind the boot sequence; the loading
-            // line occupies the same region until `ready`, then the actions
-            // rise into place. Both live in one ZStack so the reveal is a
-            // cross-fade in a fixed footprint, not a layout jump.
-            ZStack(alignment: .top) {
-                bootLoadingView
-                    .opacity(ready ? 0 : 1)
-                    .allowsHitTesting(!ready)
-
-                actionsAndRecents
-                    .opacity(ready ? 1 : 0)
-                    .offset(y: ready ? 0 : 10)
-                    .allowsHitTesting(ready)
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
-            .animation(.smooth(duration: 0.55), value: ready)
-
-            Spacer(minLength: 12)
+            .padding(.top, 8)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 26)
+        .padding(.trailing, 20)
+        .padding(.top, 34)
+        .padding(.bottom, 26)
+        .opacity(appeared ? 1 : 0)
+        .offset(y: appeared ? 0 : 6)
+    }
+
+    /// The launch actions, sitting on the floor of their column.
+    ///
+    /// They used to be directly under the wordmark with everything below them
+    /// empty. Bottom-aligned they close the column, and the space the window
+    /// gained reads as air around the mark rather than as a gap nobody filled.
+    private var actionsColumn: some View {
+        // The actions wait behind the boot sequence; the loading line occupies
+        // the same region until `ready`, then the actions rise into place. Both
+        // live in one ZStack so the reveal is a cross-fade in a fixed
+        // footprint, not a layout jump.
+        ZStack(alignment: .bottom) {
+            bootLoadingView
+                .opacity(ready ? 0 : 1)
+                .allowsHitTesting(!ready)
+
+            launchActions
+                .opacity(ready ? 1 : 0)
+                .offset(y: ready ? 0 : 10)
+                .allowsHitTesting(ready)
+        }
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .padding(.bottom, 26)
+        .animation(.smooth(duration: 0.55), value: ready)
     }
 
     /// The recents column, revealed on the same beat as the actions.
@@ -275,7 +291,7 @@ struct WelcomeView: View {
     /// the rail, and a second spinner over here would say the same thing twice.
     private var recentsColumn: some View {
         recentsSection
-            .padding(.top, 40)
+            .padding(.top, 4)
             .frame(maxHeight: .infinity, alignment: .top)
             .opacity(ready ? 1 : 0)
             .offset(y: ready ? 0 : 10)
@@ -284,20 +300,22 @@ struct WelcomeView: View {
     }
 
     /// Launch actions — revealed once boot is `ready`.
-    private var actionsAndRecents: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(spacing: 8) {
-                // A project first: it is the thing this window is for, and
-                // until now the only way to get one was to open a folder that
-                // already existed somewhere else.
-                welcomeButton(systemImage: "shippingbox", title: "Create New Project…", action: onNewProject)
-                welcomeButton(systemImage: "plus.square", title: "Create New File…", action: onCreate)
-                welcomeButton(systemImage: "square.and.arrow.down.on.square", title: "Clone Git Repository…", action: onClone)
-                welcomeButton(systemImage: "folder", title: "Open Existing Project…", action: onOpen)
-            }
-            .padding(.horizontal, 22)
-            .frame(maxHeight: .infinity, alignment: .top)
+    ///
+    /// No `maxHeight: .infinity` here. The stack sizes to its four buttons and
+    /// the column's `alignment: .bottom` puts it on the floor; filling the
+    /// height and top-aligning inside would pin them back under the wordmark,
+    /// which is what this layout change was undoing.
+    private var launchActions: some View {
+        VStack(spacing: 8) {
+            // A project first: it is the thing this window is for, and until
+            // now the only way to get one was to open a folder that already
+            // existed somewhere else.
+            welcomeButton(systemImage: "shippingbox", title: "Create New Project…", action: onNewProject)
+            welcomeButton(systemImage: "plus.square", title: "Create New File…", action: onCreate)
+            welcomeButton(systemImage: "square.and.arrow.down.on.square", title: "Clone Git Repository…", action: onClone)
+            welcomeButton(systemImage: "folder", title: "Open Existing Project…", action: onOpen)
         }
+        .padding(.horizontal, 22)
     }
 
     /// The After Effects-style status line: a spinner plus the current boot
@@ -332,10 +350,13 @@ struct WelcomeView: View {
     /// `minimumScaleFactor`, a note about reclaiming excess leading) are gone
     /// with it.
     ///
-    /// Milker is also wider — 155pt against Gondens' 113 at the same size — and
-    /// the rail has 302pt of usable width, so the mark can be set larger
-    /// instead of smaller: 52pt measures ~183pt wide and ~50pt tall.
-    private static let wordmarkSize: CGFloat = 52
+    /// Milker is also wider — 155pt against Gondens' 113 at the same size.
+    ///
+    /// The mark now spans BOTH left columns rather than one 344pt rail, so it
+    /// has ~614pt to work in. Measured: 104pt sets "Suisei" at 366pt wide and
+    /// 101pt tall, which fills the band without reaching its trailing edge —
+    /// the point is a header with presence, not a word jammed edge to edge.
+    private static let wordmarkSize: CGFloat = 104
 
     private var brandWordmarkFont: Font {
         WelcomeFonts.registerIfNeeded()
