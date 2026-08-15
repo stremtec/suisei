@@ -416,6 +416,10 @@ pub struct App {
     /// about it, and making the getters `&mut` would put a write lock on the
     /// paint path for something that is pure derivation.
     pub(crate) wrap_map: std::cell::RefCell<crate::wrap::WrapMap>,
+    /// How wide a "two-cell" glyph really paints, in hundredths of a narrow
+    /// cell. Pushed down by the face, which is the only side that can measure
+    /// the font it draws with. See [`crate::wrap::WIDE_TWO_CELLS`].
+    pub wide_glyph_ratio: u16,
     /// Fingerprint of the text as it stands on disk (at load, and after each
     /// save). `modified` is a one-way latch — set by every edit, cleared only
     /// by a save — so undoing back to the original state left the file marked
@@ -692,6 +696,7 @@ impl Default for App {
             dirty_needs_recheck: false,
             content_width: 0,
             wrap_map: std::cell::RefCell::new(crate::wrap::WrapMap::default()),
+            wide_glyph_ratio: crate::wrap::WIDE_TWO_CELLS,
         };
         // The first pane shows the first tab — pane slots name documents
         // by id, and `BufferId::default()` names nothing.
@@ -3922,9 +3927,10 @@ impl App {
     pub fn wrap_map(&self, cols: u16) -> std::cell::Ref<'_, crate::wrap::WrapMap> {
         let version = self.buffer.version();
         let tab = self.tab_width.max(1).min(u16::MAX as usize) as u16;
-        if !self.wrap_map.borrow().is_valid_for(version, cols, tab) {
+        let wide = self.wide_glyph_ratio;
+        if !self.wrap_map.borrow().is_valid_for(version, cols, tab, wide) {
             *self.wrap_map.borrow_mut() =
-                crate::wrap::WrapMap::build(self.buffer.lines(), version, cols, tab);
+                crate::wrap::WrapMap::build(self.buffer.lines(), version, cols, tab, wide);
         }
         self.wrap_map.borrow()
     }

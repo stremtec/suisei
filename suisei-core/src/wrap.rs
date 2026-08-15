@@ -46,6 +46,7 @@ pub struct WrapMap {
     /// [`crate::buffer::Buffer::version`] this was built from.
     version: u64,
     tab_width: u16,
+    wide_ratio: u16,
 }
 
 impl WrapMap {
@@ -54,11 +55,18 @@ impl WrapMap {
     /// All three matter. The version alone misses a pane being resized; the
     /// width alone misses an edit; and the tab width changes how wide a line
     /// is without changing a byte of it.
-    pub fn is_valid_for(&self, version: u64, cols: u16, tab_width: u16) -> bool {
+    pub fn is_valid_for(
+        &self,
+        version: u64,
+        cols: u16,
+        tab_width: u16,
+        wide_ratio: u16,
+    ) -> bool {
         !self.starts.is_empty()
             && self.version == version
             && self.cols == cols
             && self.tab_width == tab_width
+            && self.wide_ratio == wide_ratio
     }
 
     /// Build the map for `lines` at `cols` columns.
@@ -66,13 +74,19 @@ impl WrapMap {
     /// `cols == 0` disables wrapping: every line is one row. That is the same
     /// shape as the wrapped map rather than a separate mode, so nothing above
     /// has to branch on whether wrapping is on.
-    pub fn build(lines: &[String], version: u64, cols: u16, tab_width: u16) -> Self {
+    pub fn build(
+        lines: &[String],
+        version: u64,
+        cols: u16,
+        tab_width: u16,
+        wide_ratio: u16,
+    ) -> Self {
         let tab = tab_width.max(1) as usize;
         let mut starts = Vec::with_capacity(lines.len() + 1);
         let mut at = 0u32;
         for line in lines {
             starts.push(at);
-            at = at.saturating_add(rows_for(line, cols, tab) as u32);
+            at = at.saturating_add(rows_for(line, cols, tab, wide_ratio) as u32);
         }
         starts.push(at);
         Self {
@@ -80,6 +94,7 @@ impl WrapMap {
             cols,
             version,
             tab_width,
+            wide_ratio,
         }
     }
 
@@ -169,14 +184,14 @@ impl WrapMap {
 /// division says three. The renderer breaks greedily
 /// ([`visual_chunks`]); a count that disagreed with it would put every row
 /// below the line in the wrong place.
-fn rows_for(line: &str, cols: u16, tab_width: usize) -> usize {
+fn rows_for(line: &str, cols: u16, tab_width: usize, wide_ratio: u16) -> usize {
     if cols == 0 {
         return 1;
     }
-    let width = cols as usize;
+    let width = cols as u32 * CELL;
     let tab = tab_width.max(1);
     let mut rows = 1usize;
-    let mut row_w = 0usize;
+    let mut row_w = 0u32;
     let mut col = 0usize;
     for ch in line.chars() {
         // A tab is cells, not a glyph: expanded it is N spaces, and a break
@@ -187,22 +202,22 @@ fn rows_for(line: &str, cols: u16, tab_width: usize) -> usize {
         let cells: usize = if ch == '\t' { tab - (col % tab) } else { 0 };
         if ch == '\t' {
             for _ in 0..cells {
-                if row_w + 1 > width {
+                if row_w + CELL > width {
                     rows += 1;
                     row_w = 0;
                 }
-                row_w += 1;
+                row_w += CELL;
             }
             col += cells;
             continue;
         }
-        let w = char_cells(ch);
+        let w = char_width(ch, wide_ratio);
         if row_w > 0 && row_w + w > width {
             rows += 1;
             row_w = 0;
         }
         row_w += w;
-        col += w;
+        col += char_cells(ch);
     }
     rows
 }
@@ -210,6 +225,32 @@ fn rows_for(line: &str, cols: u16, tab_width: usize) -> usize {
 fn char_cells(ch: char) -> usize {
     use unicode_width::UnicodeWidthChar;
     ch.width().unwrap_or(0)
+}
+
+/// One narrow cell, in the hundredths this module measures wrapping in.
+pub const CELL: u32 = 100;
+
+/// How wide a "two-cell" glyph really paints, in hundredths of a narrow cell.
+///
+/// The cell model says CJK is two cells, and in a terminal that is true because
+/// the terminal draws on a grid. The EDITOR does not: it lays text out with
+/// real CoreText advances, which is why the caret is carried as a UTF-16 offset
+/// rather than a cell column. Measured with the shipped font at size 12, `한`
+/// advances 10.380pt against a narrow cell's 7.200 — **1.44 cells, not 2**.
+///
+/// Wrapping at two cells therefore budgeted 39% more width than a Hangul line
+/// paints, and a Korean paragraph broke with a quarter of the pane still empty.
+/// The face measures the real ratio for the font in use and pushes it down;
+/// this default is the terminal-true value for anything that never does.
+pub const WIDE_TWO_CELLS: u16 = 200;
+
+/// Width of one character in hundredths of a cell.
+fn char_width(ch: char, wide_ratio: u16) -> u32 {
+    match char_cells(ch) {
+        0 => 0,
+        1 => CELL,
+        _ => u32::from(wide_ratio.max(1)),
+    }
 }
 
 /// Tabs as the spaces they paint as.
@@ -244,18 +285,18 @@ pub fn expand_tabs(s: &str, tab_width: usize) -> String {
 /// The one place a line is broken. [`rows_for`] counts what this produces;
 /// they are tested against each other, because a count and a split that
 /// disagree put every row below the line somewhere it is not drawn.
-pub fn visual_chunks(text: &str, cols: u16) -> Vec<(u32, String)> {
+pub fn visual_chunks(text: &str, cols: u16, wide_ratio: u16) -> Vec<(u32, String)> {
     if cols == 0 {
         return vec![(0, text.to_string())];
     }
-    let width = cols as usize;
+    let width = cols as u32 * CELL;
     let mut out = Vec::new();
     let mut col: u32 = 0;
     let mut seg_start_col: u32 = 0;
     let mut seg = String::new();
-    let mut seg_w = 0usize;
+    let mut seg_w = 0u32;
     for ch in text.chars() {
-        let w = char_cells(ch).max(1);
+        let w = char_width(ch, wide_ratio).max(CELL);
         if seg_w > 0 && seg_w + w > width {
             out.push((seg_start_col, std::mem::take(&mut seg)));
             seg_start_col = col;
@@ -263,7 +304,10 @@ pub fn visual_chunks(text: &str, cols: u16) -> Vec<(u32, String)> {
         }
         seg.push(ch);
         seg_w += w;
-        col += w as u32;
+        // The reported column stays CELLS: `base_col` rebases syntax spans and
+        // the caret, which are cell coordinates. Only the break decision is
+        // measured in hundredths.
+        col += char_cells(ch).max(1) as u32;
     }
     if !seg.is_empty() || out.is_empty() {
         out.push((seg_start_col, seg));
@@ -304,7 +348,7 @@ mod tests {
     #[test]
     fn no_wrap_is_one_row_per_line() {
         let d = doc(&["", "short", &"x".repeat(500)]);
-        let m = WrapMap::build(&d, 1, 0, 4);
+        let m = WrapMap::build(&d, 1, 0, 4, WIDE_TWO_CELLS);
         assert_eq!(m.total_rows(), 3);
         for row in 0..3 {
             assert_eq!(m.rows_of(row), 1);
@@ -316,7 +360,7 @@ mod tests {
     /// An empty line is a row you can put the caret on, not zero rows.
     #[test]
     fn an_empty_line_still_occupies_a_row() {
-        let m = WrapMap::build(&doc(&["", "", ""]), 1, 10, 4);
+        let m = WrapMap::build(&doc(&["", "", ""]), 1, 10, 4, WIDE_TWO_CELLS);
         assert_eq!(m.total_rows(), 3);
         assert_eq!(m.visual_of(2), 2);
     }
@@ -326,11 +370,11 @@ mod tests {
     /// document does not contain.
     #[test]
     fn an_exact_fit_does_not_spill_a_blank_row() {
-        let m = WrapMap::build(&doc(&["abcdefghij"]), 1, 10, 4);
+        let m = WrapMap::build(&doc(&["abcdefghij"]), 1, 10, 4, WIDE_TWO_CELLS);
         assert_eq!(m.rows_of(0), 1);
         assert_eq!(m.total_rows(), 1);
 
-        let m = WrapMap::build(&doc(&["abcdefghijk"]), 1, 10, 4);
+        let m = WrapMap::build(&doc(&["abcdefghijk"]), 1, 10, 4, WIDE_TWO_CELLS);
         assert_eq!(m.rows_of(0), 2, "one cell over is two rows");
     }
 
@@ -339,7 +383,7 @@ mod tests {
     #[test]
     fn visual_and_buffer_are_inverses() {
         let d = doc(&["a", &"b".repeat(25), "", &"c".repeat(10), "d"]);
-        let m = WrapMap::build(&d, 1, 10, 4);
+        let m = WrapMap::build(&d, 1, 10, 4, WIDE_TWO_CELLS);
         // 1 + 3 + 1 + 1 + 1
         assert_eq!(m.total_rows(), 7);
         assert_eq!(m.visual_of(0), 0);
@@ -367,7 +411,7 @@ mod tests {
         assert_eq!(display_columns("\t", 4), 4);
         assert_eq!(display_columns("a\t", 4), 4, "advance TO the stop");
         assert_eq!(display_columns("\t\t\t\t", 4), 16);
-        let m = WrapMap::build(&doc(&["\t\t\t\t"]), 1, 10, 4);
+        let m = WrapMap::build(&doc(&["\t\t\t\t"]), 1, 10, 4, WIDE_TWO_CELLS);
         assert_eq!(m.rows_of(0), 2);
     }
 
@@ -377,7 +421,7 @@ mod tests {
     #[test]
     fn wide_glyphs_take_two_cells() {
         assert_eq!(display_columns("한글", 4), 4);
-        let m = WrapMap::build(&doc(&["한글한글한글"]), 1, 10, 4);
+        let m = WrapMap::build(&doc(&["한글한글한글"]), 1, 10, 4, WIDE_TWO_CELLS);
         assert_eq!(m.rows_of(0), 2, "12 columns at width 10");
     }
 
@@ -385,13 +429,13 @@ mod tests {
     /// of rows at a different tab stop, and nothing else would notice.
     #[test]
     fn validity_covers_width_version_and_tab_stop() {
-        let m = WrapMap::build(&doc(&["\t\ta"]), 7, 10, 4);
-        assert!(m.is_valid_for(7, 10, 4));
-        assert!(!m.is_valid_for(8, 10, 4), "an edit");
-        assert!(!m.is_valid_for(7, 12, 4), "a resize");
-        assert!(!m.is_valid_for(7, 10, 8), "a tab-width change");
+        let m = WrapMap::build(&doc(&["\t\ta"]), 7, 10, 4, WIDE_TWO_CELLS);
+        assert!(m.is_valid_for(7, 10, 4, WIDE_TWO_CELLS));
+        assert!(!m.is_valid_for(8, 10, 4, WIDE_TWO_CELLS), "an edit");
+        assert!(!m.is_valid_for(7, 12, 4, WIDE_TWO_CELLS), "a resize");
+        assert!(!m.is_valid_for(7, 10, 8, WIDE_TWO_CELLS), "a tab-width change");
         assert!(
-            !WrapMap::default().is_valid_for(0, 0, 4),
+            !WrapMap::default().is_valid_for(0, 0, 4, WIDE_TWO_CELLS),
             "a map that was never built describes nothing"
         );
     }
@@ -400,7 +444,7 @@ mod tests {
     /// bands asynchronously and can ask about a row an edit has just removed.
     #[test]
     fn out_of_range_rows_clamp() {
-        let m = WrapMap::build(&doc(&["a", "b"]), 1, 10, 4);
+        let m = WrapMap::build(&doc(&["a", "b"]), 1, 10, 4, WIDE_TWO_CELLS);
         assert_eq!(m.visual_of(99), m.total_rows());
         assert_eq!(m.rows_of(99), 1);
         assert_eq!(m.buffer_at(999), (1, 0));
@@ -410,11 +454,11 @@ mod tests {
     /// says "all of it".
     #[test]
     fn segments_carve_the_line_into_columns() {
-        let m = WrapMap::build(&doc(&[&"x".repeat(25)]), 1, 10, 4);
+        let m = WrapMap::build(&doc(&[&"x".repeat(25)]), 1, 10, 4, WIDE_TWO_CELLS);
         assert_eq!(m.segment_columns(0), (0, 10));
         assert_eq!(m.segment_columns(1), (10, 20));
         assert_eq!(m.segment_columns(2), (20, 30));
-        let flat = WrapMap::build(&doc(&["x"]), 1, 0, 4);
+        let flat = WrapMap::build(&doc(&["x"]), 1, 0, 4, WIDE_TWO_CELLS);
         assert_eq!(flat.segment_columns(0), (0, usize::MAX));
     }
 
@@ -449,8 +493,8 @@ mod tests {
         for tab in [2usize, 4, 8] {
             for cols in 1u16..=20 {
                 for raw in cases {
-                    let counted = rows_for(raw, cols, tab);
-                    let split = visual_chunks(&expand_tabs(raw, tab), cols).len();
+                    let counted = rows_for(raw, cols, tab, WIDE_TWO_CELLS);
+                    let split = visual_chunks(&expand_tabs(raw, tab), cols, WIDE_TWO_CELLS).len();
                     assert_eq!(
                         counted, split,
                         "line {raw:?} at {cols} cols, tab {tab}: \
@@ -466,8 +510,8 @@ mod tests {
     #[test]
     fn a_wide_glyph_starts_a_row_rather_than_being_cut() {
         assert_eq!(display_columns("한한한한", 4), 8);
-        assert_eq!(rows_for("한한한한", 3, 4), 4);
-        assert_eq!(visual_chunks("한한한한", 3).len(), 4);
+        assert_eq!(rows_for("한한한한", 3, 4, WIDE_TWO_CELLS), 4);
+        assert_eq!(visual_chunks("한한한한", 3, WIDE_TWO_CELLS).len(), 4);
         assert_ne!(8usize.div_ceil(3), 4, "the division this replaced");
     }
 
@@ -477,8 +521,8 @@ mod tests {
         // One tab at width 8 is eight cells; at three columns that is three
         // rows, which only happens if the tab is cells rather than a glyph.
         assert_eq!(expand_tabs("\t", 8), " ".repeat(8));
-        assert_eq!(rows_for("\t", 3, 8), 3);
-        assert_eq!(visual_chunks(&expand_tabs("\t", 8), 3).len(), 3);
+        assert_eq!(rows_for("\t", 3, 8, WIDE_TWO_CELLS), 3);
+        assert_eq!(visual_chunks(&expand_tabs("\t", 8), 3, WIDE_TWO_CELLS).len(), 3);
     }
 
     /// The tab width reaches the expansion. It used to be hardcoded to 4 in the
@@ -490,10 +534,60 @@ mod tests {
         assert_eq!(display_columns("\ta", 8), 9);
     }
 
+    /// A wide glyph is as wide as it PAINTS, not as wide as the cell model
+    /// says.
+    ///
+    /// The editor lays text out with real CoreText advances — that is why the
+    /// caret crosses as a UTF-16 offset and not a cell column — and with the
+    /// shipped font `한` advances 1.44 narrow cells, not 2. Budgeting it at 2
+    /// gave a Korean paragraph 39% more width than it paints, so it broke with
+    /// a quarter of the pane still empty.
+    ///
+    /// The columns REPORTED stay cells, because `base_col` rebases syntax
+    /// spans and the caret and those are cell coordinates. Only the break
+    /// decision is measured in hundredths.
+    #[test]
+    fn a_wide_glyph_is_budgeted_at_what_it_paints() {
+        // Ten columns of budget. At two cells each, five syllables fill it.
+        assert_eq!(rows_for("한한한한한", 10, 4, 200), 1);
+        assert_eq!(rows_for("한한한한한한", 10, 4, 200), 2);
+
+        // At the measured 1.44, six fit in the same ten columns — 6 × 144 =
+        // 864 of the 1000 hundredths, and a seventh would be 1008.
+        assert_eq!(rows_for("한한한한한한", 10, 4, 144), 1);
+        assert_eq!(rows_for("한한한한한한한", 10, 4, 144), 2);
+
+        // And the split agrees with the count at the measured ratio too —
+        // the property the whole module rests on, not just at the default.
+        for wide in [100u16, 144, 175, 200, 260] {
+            for cols in 1u16..=16 {
+                for raw in ["한한한한한한한한", "a한b한c한", "한a", "\t한\t한"] {
+                    assert_eq!(
+                        rows_for(raw, cols, 4, wide),
+                        visual_chunks(&expand_tabs(raw, 4), cols, wide).len(),
+                        "{raw:?} at {cols} cols, wide {wide}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The reported column of each chunk stays in CELLS whatever the ratio —
+    /// spans and the caret are rebased against it.
+    #[test]
+    fn chunk_columns_are_cells_not_hundredths() {
+        let narrow = visual_chunks("한한한한", 2, 200);
+        assert_eq!(narrow.iter().map(|c| c.0).collect::<Vec<_>>(), vec![0, 2, 4, 6]);
+        // A different ratio changes WHERE it breaks, never the units.
+        let wide = visual_chunks("한한한한", 4, 144);
+        assert_eq!(wide[0].0, 0);
+        assert!(wide.iter().all(|c| c.0 % 2 == 0), "cell columns: {wide:?}");
+    }
+
     /// An empty document is one row, because the caret is somewhere.
     #[test]
     fn an_empty_document_is_one_row() {
-        assert_eq!(WrapMap::build(&[], 1, 10, 4).total_rows(), 1);
-        assert_eq!(WrapMap::build(&doc(&[""]), 1, 10, 4).total_rows(), 1);
+        assert_eq!(WrapMap::build(&[], 1, 10, 4, WIDE_TWO_CELLS).total_rows(), 1);
+        assert_eq!(WrapMap::build(&doc(&[""]), 1, 10, 4, WIDE_TWO_CELLS).total_rows(), 1);
     }
 }

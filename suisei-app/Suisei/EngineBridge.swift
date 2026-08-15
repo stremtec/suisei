@@ -925,6 +925,66 @@ enum EditorMetrics {
         return w
     }
 
+    private static var textAdvanceCache: [CGFloat: CGFloat] = [:]
+
+    /// What one column of text ACTUALLY advances when drawn.
+    ///
+    /// Not [`cellWidth`], which is a layout quantum: measured at `.medium` and
+    /// rounded UP to a whole point, because the gutter and the caret estimates
+    /// want a stable grid. The text is drawn at `.regular` with real CoreText
+    /// advances, and at size 12 those two differ by 8.000 vs 7.200 — 11%.
+    ///
+    /// That is 11% of every row, and soft wrap divides a pane's width by it to
+    /// decide how many columns fit. Rounding the cell up rounds the column
+    /// count down: a 46-column row was budgeted 368pt of a pane that paints it
+    /// in 331pt, so the line broke five columns early with the space still
+    /// there. Measured over 100 cells, so a single glyph's rounding cannot
+    /// stand in for the run.
+    static var textAdvance: CGFloat {
+        if let hit = textAdvanceCache[fontSize] { return hit }
+        let font = monospaced(fontSize, weight: .regular)
+        let line = CTLineCreateWithAttributedString(
+            NSAttributedString(string: String(repeating: "M", count: 100), attributes: [.font: font])
+        )
+        let w = max(1, CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil)) / 100)
+        textAdvanceCache[fontSize] = w
+        return w
+    }
+
+    /// How wide a "two-cell" glyph really paints, in hundredths of a narrow
+    /// cell — what soft wrap has to budget CJK at.
+    ///
+    /// The cell model calls CJK two cells and a terminal makes that true by
+    /// drawing on a grid. This editor does not: it uses real CoreText
+    /// advances, which is why the caret crosses the ABI as a UTF-16 offset and
+    /// not a cell column. With the shipped font `한` advances 1.44 narrow
+    /// cells, so wrapping at two budgeted 39% more width than a Hangul line
+    /// paints — a Korean paragraph broke with a quarter of the pane empty.
+    ///
+    /// Measured rather than assumed because it is a property of the FALLBACK:
+    /// JetBrains Mono has no Hangul, so the ratio is whatever face macOS
+    /// substitutes, and that can differ by system and by size.
+    static var wideGlyphRatio: UInt16 {
+        if let hit = wideRatioCache[fontSize] { return hit }
+        let font = monospaced(fontSize, weight: .regular)
+        func advance(_ s: String) -> CGFloat {
+            CGFloat(CTLineGetTypographicBounds(
+                CTLineCreateWithAttributedString(
+                    NSAttributedString(string: s, attributes: [.font: font])
+                ), nil, nil, nil
+            ))
+        }
+        let narrow = max(0.01, advance(String(repeating: "M", count: 100)) / 100)
+        // A run, so one glyph's rounding cannot stand in for the average.
+        let wide = advance(String(repeating: "한", count: 50)) / 50
+        // Clamped: a fallback that reported something absurd would make every
+        // line one row, or none.
+        let ratio = UInt16(max(100, min(300, (wide / narrow * 100).rounded())))
+        wideRatioCache[fontSize] = ratio
+        return ratio
+    }
+    private static var wideRatioCache: [CGFloat: UInt16] = [:]
+
     static var lineHeight: CGFloat { fontSize + linePad * 2 }
 
     @discardableResult
@@ -933,6 +993,8 @@ enum EditorMetrics {
         // Keyed by size, so nothing is stale — but a zoom run would otherwise
         // grow the caches one entry per step.
         cellWidthCache.removeAll(keepingCapacity: true)
+        textAdvanceCache.removeAll(keepingCapacity: true)
+        wideRatioCache.removeAll(keepingCapacity: true)
         UserDefaults.standard.set(Double(fontSize), forKey: "suisei.fontSize")
         return fontSize
     }
@@ -1190,6 +1252,19 @@ final class EngineBridge: ObservableObject {
         fontGeneration &+= 1
     }
 
+    /// Tell core how wide a two-cell glyph actually paints, so soft wrap
+    /// budgets CJK at what it draws rather than at what the cell model claims.
+    ///
+    /// The ratio is a property of the FALLBACK face macOS substitutes for the
+    /// glyphs JetBrains Mono has none of, so it can differ by size — pushed
+    /// from `reapplyEditorMetrics`, which is where every font change already
+    /// tells core its new metrics, and once at startup for the session that
+    /// never zooms.
+    func pushWideGlyphRatio() {
+        guard let engine else { return }
+        suisei_engine_set_wide_glyph_ratio(engine, EditorMetrics.wideGlyphRatio)
+    }
+
     func closeSettings() {
         guard chrome.settings.open else { return }
         cancelPointerSession()
@@ -1225,6 +1300,7 @@ final class EngineBridge: ObservableObject {
         // flips the welcome rule, so Welcome yields to the restored editor.
         suisei_engine_restore_session(engine)
         pushSystemAppearance()
+        pushWideGlyphRatio()
         observeSystemAppearance()
         refreshChrome()
         checkRecovery()
@@ -1828,6 +1904,9 @@ final class EngineBridge: ObservableObject {
     /// After font zoom, force Core viewport recompute even if pixel size is unchanged.
     private func reapplyEditorMetrics() {
         guard let engine else { return }
+        // Every metric core needs, from one place. The wrap ratio is measured
+        // against the font, so it moves with the size.
+        pushWideGlyphRatio()
         let w = lastEditorSize.width
         let h = lastEditorSize.height
         guard w > 80, h > 80 else {

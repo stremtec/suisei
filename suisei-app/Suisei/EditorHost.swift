@@ -261,7 +261,12 @@ final class EditorScrollView: NSScrollView {
     /// columns — so a wrapped line in a split pane broke past its own edge.
     private func wrapColumns(wrapLines: Bool) -> Int {
         guard wrapLines else { return 0 }
-        let cell = max(1, EditorMetrics.cellWidth)
+        // `textAdvance`, not `cellWidth`: the latter is the gutter's layout
+        // quantum, measured at `.medium` and rounded UP to a whole point. The
+        // text draws at `.regular` with real advances, and dividing a pane by
+        // the rounded-up number rounds the column count DOWN — five columns of
+        // a 46-column row at size 12, left empty at the right edge.
+        let advance = max(1, EditorMetrics.textAdvance)
         // `rightInset` already holds the row off whatever covers the edge, so
         // there is no second column of margin to take here.
         let usable = contentView.bounds.width
@@ -269,7 +274,7 @@ final class EditorScrollView: NSScrollView {
             - rightInset
         // A pane too narrow to hold anything still has to wrap somewhere, or
         // `WrapMap` divides by a width of zero rows.
-        return max(8, Int(floor(usable / cell)))
+        return max(8, Int(floor(usable / advance)))
     }
 
     /// Wrap width as of the last sync — the canvas's copy is the same number,

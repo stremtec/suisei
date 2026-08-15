@@ -1693,14 +1693,15 @@ impl Engine {
         let buf = crate::compositor::buffer_for_tab(&self.app, tab);
         let version = buf.version();
         let tab_w = self.app.tab_width.max(1).min(u16::MAX as usize) as u16;
+        let wide = self.app.wide_glyph_ratio;
         let slot = pane.min(suisei_core::split::MAX_PANES.saturating_sub(1));
         let mut cache = self.wrap_maps.borrow_mut();
         if cache.len() <= slot {
             cache.resize_with(slot + 1, || (usize::MAX, WrapMap::default()));
         }
         let entry = &mut cache[slot];
-        if entry.0 != tab || !entry.1.is_valid_for(version, cols, tab_w) {
-            *entry = (tab, WrapMap::build(buf.lines(), version, cols, tab_w));
+        if entry.0 != tab || !entry.1.is_valid_for(version, cols, tab_w, wide) {
+            *entry = (tab, WrapMap::build(buf.lines(), version, cols, tab_w, wide));
         }
         f(&entry.1)
     }

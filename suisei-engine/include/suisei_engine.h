@@ -237,6 +237,12 @@ uint8_t suisei_engine_editor_band(
     const SuiseiEngine *ptr, uint32_t pane, uint32_t start_row, uint32_t max_rows,
     uint16_t wrap_cols, SuiseiBandC *out);
 
+/* How wide a "two-cell" glyph really paints, in hundredths of a narrow cell.
+   The editor draws with real advances, not on a grid, and with the shipped font
+   Hangul is 1.44 cells — budgeting it at 2 broke Korean lines a quarter of a
+   pane early. Only the face can measure the font it draws with. */
+void suisei_engine_set_wide_glyph_ratio(SuiseiEngine *ptr, uint16_t hundredths);
+
 /* Soft-wrap geometry for the same pane at the same columns. Cached per pane
    against the document version, so asking all three per frame builds nothing.
    With cols == 0 they answer as if each line were one row. */

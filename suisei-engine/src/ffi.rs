@@ -1648,6 +1648,27 @@ fn write_minimap(o: &mut SuiseiMinimapC, buckets: Vec<(u8, u8, u8)>, total: u32)
 /// a line measures. The map is cached per pane against the document version, so
 /// asking three times a frame builds nothing.
 
+/// How wide a "two-cell" glyph really paints, in hundredths of a narrow cell.
+///
+/// The cell model says CJK is two cells, and in a terminal that is true because
+/// the terminal draws on a grid. The editor lays text out with real CoreText
+/// advances — which is why the caret crosses as a UTF-16 offset and not a cell
+/// column — and with the shipped font `한` advances 1.44 narrow cells. Wrapping
+/// at two budgeted 39% more width than a Hangul line paints, so a Korean
+/// paragraph broke with a quarter of the pane still empty.
+///
+/// Only the face can measure the font it draws with, so only the face can say.
+/// 200 (the terminal-true value) until it does.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_set_wide_glyph_ratio(ptr: *mut SuiseiEngine, hundredths: u16) {
+    if ptr.is_null() || hundredths == 0 {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().wide_glyph_ratio = hundredths;
+    }
+}
+
 /// Total visual rows — the document's height in rows, which is the scroll
 /// extent once the face multiplies by its line height.
 #[unsafe(no_mangle)]

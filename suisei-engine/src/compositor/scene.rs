@@ -2395,7 +2395,7 @@ fn build_lines_at(
             0
         };
         let chunks = if wrap {
-            suisei_core::wrap::visual_chunks(&text, wrap_cols)
+            suisei_core::wrap::visual_chunks(&text, wrap_cols, app.wide_glyph_ratio)
         } else {
             vec![(0u32, text.clone())]
         };
