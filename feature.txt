@@ -22,16 +22,45 @@
     → 남은 것: PATH 말고 Account UI 자체가 안정적인지는 미확인.
 }
 
-☐ 3. Setting ui 개선{
+✅ 3. Setting ui 개선{
     Account 쪽 이외에도 여러 부문에서 UI가 '애플답지 않음.' 애플 네이티브 버튼이나 제질을 안쓴게 좀 많은듯?
+
+    → 기준을 Xcode 설정창으로 잡음(사용자 지적). 처음엔 시스템 설정 쪽으로 갔다가
+      되돌림 — 사이드바는 컬러 타일이 아니라 라벨과 같은 색의 모노크롬 글리프.
+      컬러 타일은 Xcode 에서 '페이지 안의 이동 행'에 씀(Editing ▸ Display 등).
+      그래서 SettingsNavigationRow 로 옮김.
+    → Save 바 제거. 시스템 설정엔 저장 버튼이 없음. Core 가 행을 갖고 있어서
+      매 변경마다 쓰면 설정 파일을 키 입력마다 다시 쓰는 게 이유였는데, 그건
+      디바운스의 근거지 버튼의 근거가 아님. 행 지문에 건 task(id:) 가 편집마다
+      취소·재시작해서 색상환을 드래그해도 최종값만 한 번 씀.
+    → Shortcuts 페이지: 손으로 그린 키 칩 2열 그리드였음. 키가 먼저 오니까
+      정작 눈으로 찾는 열("Save")이 못 찾는 열이었음. 필터 + 명령 왼쪽 /
+      키 오른쪽 정렬로. 메뉴 막대가 쓰는 순서.
+    → Appearance 가 액센트를 두 번 물었음(원 스트립 + "Custom Accent Color" 행,
+      Default 버튼도 두 개). 한 줄로, 커스텀 웰은 스트립 끝에.
+    → Account 페이지는 손 안 댐 — "Account 쪽 이외에도" 라고 하셔서.
 }
 
-☐ 4. Update ui 개선{
+✅ 4. Update ui 개선{
     이것도 같음.
+
+    → 모든 상태에서 같은 말을 하고 있었음: 설치된 빌드 아래 빨간 "This is not a
+      valid release.", 그리고 업데이트가 없는데도 "cannot install this update".
+      두 문장 다 start_install 에서 온 것 — 서명된 스냅샷이 나올 때까지 막아둔
+      '설치'에 관한 사실인데, 사용자가 쓰는 빌드에 대한 판정처럼 찍히고 있었음.
+    → 상태별로 다시 씀(최신 / 확인 중 / 업데이트 있음 / 재시작 필요).
+    → Check Now 추가. suisei_engine_update_check 도 브리지 메서드도 있었는데
+      부르는 데가 한 군데도 없었음 — 실행되는 검사는 실행 시 스로틀된 것뿐이었음.
 }
 
-☐ 5. Command palette ui 개선{
+✅ 5. Command palette ui 개선{
     동일하게 애플스럽지 않음.
+
+    → 가짜 "Esc" 키 캡슐이 달린 헤더 바 + SF Rounded 필드였음. Spotlight 도
+      Open Quickly 도 헤더가 없고, macOS 는 크롬을 Rounded 로 안 씀. kind 는
+      필드의 placeholder 로 옮김.
+    → 선택 행 글자가 흰색 고정이었음. Appearance 에서 액센트를 노랑으로 잡을 수
+      있음. 깃 워크벤치가 이미 쓰던 휘도 규칙 적용.
 }
 
 ✅ 6. 에디터 편집시에, 가로 스크롤과 세로 스크롤이 제대로 따라오지 아니하는 문제.{
@@ -108,7 +137,32 @@
      → 아일랜드 위아래 12pt EdgeFade 둘 다 제거. 그게 부드럽게 하던 건 그냥
        읽히는 경계였고, 실제로 한 일은 모든 파일의 첫 줄과 끝 줄을 흐리게 만든 것.
 
-☐ 17. 세팅에 지금 옵션들이 너무 이상한곳에 혼재해있어서 세팅 좀 고쳐야하긴해.
+✅ 17. 세팅에 지금 옵션들이 너무 이상한곳에 혼재해있어서 세팅 좀 고쳐야하긴해.
+     → 한 페이지가 한 질문을 갖게. 행이 자기 페이지를 Core 에서 정하니까 거기서 고침.
+     · Tab Width / Line Numbers / Line Wrapping 이 General 의 "Editor Defaults" 에
+       있었고, 정작 Editor 페이지엔 Keep Undo History 랑 Use System Clipboard 만
+       있었음. "줄바꿈 어디서 켜지" 의 답이 두 개였고 뻔한 쪽이 틀린 답이었음.
+     · General 이 Appearance 가 이미 가진 Color Scheme 타일을 자기 것도 하나 갖고
+       있었음. Check for Updates 도 General + Software Update 양쪽 — 설정 키 하나를
+       두 군데서 답함.
+     · General 은 이제 Core 행을 하나도 안 씀. About + Software Update 로 가는 길.
+       general_is_not_a_junk_drawer 가 지킴.
+     · 뒤에 기능이 없는 스위치 제거(설정 자체는 남김):
+       - Show Key Hints → which-key 오버레이가 없어졌음. key_hints 를 설정에서
+         읽어 다시 쓰기만 하고 그 사이에 쓰는 데가 없음.
+       - Terminal Rendering / Inline Terminal Graphics / Terminal Hyperlinks →
+         Suisei 가 Ghostty/Kitty 안에 자기를 그리는 얘기. 워크스페이스는 core,
+         engine, daemon 뿐이고 Mac 앱이 유일한 face. 그 페이지 각주가 이미
+         "The native Mac editor does not require them" 이라고 적어놓고
+         스위치 세 개를 세워두고 있었음.
+       ABI kind, 핸들러, 설정 왕복은 그대로 — 기존 ~/.suisei.toml 이 그대로 열림.
+     · Theme 피커가 아예 없었음. Core 에 테마 15개와 행이 다 있는데 Appearance 가
+       자기 섹션을 손으로 만들면서 한 번도 안 그림. themePreviewCard 랑
+       themeSwatches 도 부르는 데가 없었음. 카탈로그가 ~/.suisei.toml 직접
+       편집으로만 닿는 상태였음.
+     · 카탈로그 테마를 잡으면 **Automatic** 타일에 불이 들어왔음 — Core 의
+       value_index 가 light/dark 아닌 이름을 전부 0 으로 접어서. 창이 macOS 를
+       따르는 중이라고 말하면서 macOS 가 요청한 적 없는 팔레트를 보여줬음.
 
 ☐ 18. 에디터에서 긴 파일 보다가 cmd + - 할 때, 뷰어가 이상한곳으로 점프함.(미니맵엔 안 떠서 오른쪽 사이드바에서 점프시에 그래서 꼬임)
 
