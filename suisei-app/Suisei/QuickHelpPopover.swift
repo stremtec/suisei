@@ -175,6 +175,9 @@ struct QuickHelpBody: View {
                 case .prose(let text):
                     Text(text)
                         .font(QuickHelpFonts.body)
+                        // Paragraphs of running text need air between lines;
+                        // 11pt on default leading is a wall.
+                        .lineSpacing(2.5)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -223,14 +226,71 @@ struct QuickHelpBody: View {
         return blocks
     }
 
+    /// Set the `code` spans inside a sentence in the editor's own face.
+    ///
+    /// Markdown parsing marks them but chooses no font, so a `fn` written as
+    /// code in the middle of a paragraph arrived indistinguishable from the
+    /// words around it — the backticks had been resolved away and nothing took
+    /// their place. Ranges are collected before the edit: mutating an
+    /// `AttributedString` invalidates the run iteration that produced them.
+    private static func codeSpansInMono(_ input: AttributedString) -> AttributedString {
+        var out = input
+        let spans = out.runs.compactMap { run -> Range<AttributedString.Index>? in
+            run.inlinePresentationIntent?.contains(.code) == true ? run.range : nil
+        }
+        for span in spans {
+            out[span].font = QuickHelpFonts.inlineCode
+        }
+        return out
+    }
+
+    /// A line that has to start a line of its own: a list item, a heading, a
+    /// quote. Everything else in a paragraph is a soft wrap. See `unwrap`.
+    private static func startsItsOwnLine(_ line: Substring) -> Bool {
+        let t = line.drop { $0 == " " }
+        if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("+ ") { return true }
+        if t.hasPrefix("#") || t.hasPrefix(">") || t.hasPrefix("|") { return true }
+        // `1. ` and friends.
+        let digits = t.prefix { $0.isNumber }
+        return !digits.isEmpty && t.dropFirst(digits.count).hasPrefix(". ")
+    }
+
+    /// Undo the server's hard wrap.
+    ///
+    /// A language server writes its markdown wrapped for a terminal —
+    /// rust-analyzer's is broken at about 95 columns — and markdown says a
+    /// single newline inside a paragraph is a SOFT break. Preserving them, as
+    /// this did, made the text wrap twice: once at the server's column and
+    /// again at the card's width, which is where "Functions are the primary
+    /// way code is executed within Rust. / Function blocks, usually just /
+    /// called functions, can be defined…" comes from. The ragged short lines
+    /// are the whole of why it read badly.
+    ///
+    /// Blank lines still separate paragraphs, and a list item or heading keeps
+    /// its own line — those newlines are the author's, not the wrapper's.
+    private static func unwrap(_ paragraph: String) -> String {
+        var out: [String] = []
+        for line in paragraph.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            if out.isEmpty || startsItsOwnLine(line) {
+                out.append(trimmed)
+            } else {
+                out[out.count - 1] += " " + trimmed
+            }
+        }
+        return out.joined(separator: "\n")
+    }
+
     /// Split an LSP hover answer into blocks.
     ///
     /// Fences first, because everything inside one is literal — a `---` or a
     /// `*` in a code sample is code, not a rule and not emphasis. Prose runs
     /// go through `AttributedString(markdown:)`, which resolves the inline
     /// spelling (links, `code`, **bold**) that the raw text was showing.
-    /// `.inlineOnlyPreservingWhitespace` because paragraph parsing would
-    /// collapse the line breaks the server put there on purpose.
+    ///
+    /// One `.prose` per PARAGRAPH rather than per run, so the space between
+    /// paragraphs is the layout's to set and not a blank line inside a string.
     static func blocks(in markdown: String) -> [Block] {
         var out: [Block] = []
         var prose: [Substring] = []
@@ -239,14 +299,16 @@ struct QuickHelpBody: View {
 
         func flushProse() {
             let text = prose.joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
             prose.removeAll()
-            guard !text.isEmpty else { return }
-            let parsed = try? AttributedString(
-                markdown: text,
-                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-            )
-            out.append(.prose(parsed ?? AttributedString(text)))
+            for paragraph in text.components(separatedBy: "\n\n") {
+                let body = unwrap(paragraph)
+                guard !body.isEmpty else { continue }
+                let parsed = try? AttributedString(
+                    markdown: body,
+                    options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+                )
+                out.append(.prose(codeSpansInMono(parsed ?? AttributedString(body))))
+            }
         }
 
         for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -294,10 +356,20 @@ private struct QuickHelpHeightKey: PreferenceKey {
 
 /// The card's faces.
 ///
-/// JetBrains Mono for everything the server said, title included in spirit:
-/// this is an editor, the answer is about code, and the code samples inside it
-/// have to line up. Milker for the name itself, which is the one thing on the
-/// card that is a heading rather than text.
+/// JetBrains Mono for everything that IS code — the signature, the samples,
+/// and the inline spans inside a sentence — because those have to line up and
+/// because a `fn` in the middle of prose should look like the `fn` in the
+/// editor behind the card.
+///
+/// Running prose is the system text face. It was JetBrains Mono too, and that
+/// is half of why the explanation read badly: a monospace face gives every
+/// letter the same width, which is what makes columns line up and what takes
+/// word shapes away from a reader. It is the right tool for four lines of
+/// sample and the wrong one for four paragraphs about them. Xcode's Quick
+/// Help, and every documentation viewer, splits it the same way.
+///
+/// Milker for the name, which is the one thing on the card that is a heading
+/// rather than text.
 ///
 /// `WelcomeView` says Milker "carries A–Z/a–z only", which would have made a
 /// title a patchwork the moment a name had an underscore in it. Checked
@@ -320,8 +392,11 @@ enum QuickHelpFonts {
         return .system(size: 19, weight: .semibold, design: .rounded)
     }()
 
-    /// Prose. Monospaced on purpose — see the type comment.
-    static let body = Font(EditorMetrics.monospaced(11, weight: .regular))
+    /// Running text. Proportional — see the type comment.
+    static let body = Font.system(size: 12)
+    /// A `code` span inside a sentence, sized to sit on the prose's baseline
+    /// without standing off it: JetBrains Mono runs large for its point size.
+    static let inlineCode = Font(EditorMetrics.monospaced(11, weight: .regular))
     /// Samples, a shade smaller so a wide line fits before it has to scroll.
     static let code = Font(EditorMetrics.monospaced(10.5, weight: .regular))
 }
