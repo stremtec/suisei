@@ -3676,6 +3676,21 @@ final class EngineBridge: ObservableObject {
         refreshEditorPaintOnly()
     }
 
+    /// The same, addressed by UTF-16 offset into the drawn line.
+    ///
+    /// What a left-click already uses. The cell-grid version floors
+    /// `(x - gutter) / cellWidth`, which is a different answer wherever a
+    /// glyph is not one cell wide — and Quick Help asks the language server
+    /// about the CARET while naming the word under the POINTER, so on a line
+    /// with CJK or an emoji the card's title and its answer described two
+    /// different symbols.
+    func placeCaretUTF16(row: UInt32, utf16: UInt32) {
+        guard let engine else { return }
+        suisei_engine_click_utf16(engine, row, utf16, 0)
+        suisei_engine_mouse_up(engine)
+        refreshEditorPaintOnly()
+    }
+
     /// Route keys to the PTY (clicking the terminal) or back to the editor.
     /// Point the keyboard at a terminal **pane**.
     ///

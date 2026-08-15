@@ -3681,9 +3681,20 @@ final class EditorCanvasView: NSView {
         contextMenuPoint = p
         contextMenuSymbol = symbolUnderPointer(p) ?? ""
         // Click outside a selection moves the caret there first (Xcode behavior).
+        //
+        // By the SAME hit test the symbol above was read with. This used to use
+        // the cell grid, which floors `(x - gutter) / cellWidth` and lands
+        // elsewhere wherever a glyph is not one cell wide — so Quick Help named
+        // the word under the pointer in its title and asked the language server
+        // about whatever the caret hit, and on a line with CJK those are two
+        // different symbols.
         if !selectionActive {
-            let (row, col) = absoluteHit(p)
-            engine.placeCaret(row: row, col: col)
+            if let (row, u16) = absoluteHitUTF16(p) {
+                engine.placeCaretUTF16(row: row, utf16: u16)
+            } else {
+                let (row, col) = absoluteHit(p)
+                engine.placeCaret(row: row, col: col)
+            }
         }
 
         let menu = NSMenu()
