@@ -95,6 +95,18 @@ enum PaneKind: UInt8 {
         case .image, .pdf, .audio, .binary: return true
         }
     }
+
+    /// What to call this on the status bar.
+    var statusName: String {
+        switch self {
+        case .text: return "Text"
+        case .terminal: return "Terminal"
+        case .image: return "Image"
+        case .pdf: return "PDF"
+        case .audio: return "Audio"
+        case .binary: return "Binary"
+        }
+    }
 }
 
 /// One editor split surface (or the single full editor when unsplit).

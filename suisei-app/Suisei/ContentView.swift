@@ -6115,6 +6115,31 @@ struct ContentView: View {
         PerfProbe.measure("  body.statusLine") { statusLineBody }
     }
 
+    /// What the focused pane actually is. `.text` when there is no split to
+    /// ask, which is what an editor with one document is.
+    private var focusedPaneKind: PaneKind {
+        let split = engine.editorSplit
+        guard split.panes.indices.contains(split.focus) else { return .text }
+        return split.panes[split.focus].kind
+    }
+
+    /// What a non-text pane can truthfully say.
+    ///
+    /// `viewerControls` is claimed by whichever viewer is on screen, so a split
+    /// showing two of them has one set of controls between them. Its page and
+    /// zoom are only read when it belongs to the same kind as the focused pane
+    /// — the guard `ViewerControls.release` uses, for the same reason. The kind
+    /// name is always true and needs nobody's permission.
+    private var viewerStatusText: String {
+        let kind = focusedPaneKind
+        var parts = [kind.statusName]
+        if viewerControls.kind == kind {
+            if !viewerControls.pageLabel.isEmpty { parts.append(viewerControls.pageLabel) }
+            if !viewerControls.zoomLabel.isEmpty { parts.append(viewerControls.zoomLabel) }
+        }
+        return parts.joined(separator: " · ")
+    }
+
     @ViewBuilder
     private var statusLineBody: some View {
         HStack(spacing: 10) {
@@ -6172,23 +6197,46 @@ struct ContentView: View {
                 .help("Git branch")
             }
 
-            if !engine.wrapLines {
-                Text("No Wrap")
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .help("Soft-wrap off — trackpad pans horizontally")
-            }
+            // The right end used to be unconditional, so an image pane reported
+            // "No Wrap · Ln 1, Col 1 · 0%" — three facts about a document that
+            // has no lines to be on, no wrapping to be off, and no line to be a
+            // percentage through. Core has named the pane's kind the whole
+            // time; the bar never asked.
+            switch focusedPaneKind {
+            case .text:
+                if !engine.wrapLines {
+                    Text("No Wrap")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .help("Soft-wrap off — trackpad pans horizontally")
+                }
 
-            Text(String(format: "Ln %d, Col %d", engine.chrome.cursorRow, engine.chrome.cursorCol))
+                Text(String(
+                    format: "Ln %d, Col %d",
+                    engine.chrome.cursorRow, engine.chrome.cursorCol
+                ))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
 
-            if engine.chrome.lineCount > 0 {
-                Text("\(engine.chrome.pct)%")
-                    .font(.system(size: 10, design: .monospaced))
+                if engine.chrome.lineCount > 0 {
+                    Text("\(engine.chrome.pct)%")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 28, alignment: .trailing)
+                        .help("Scroll position")
+                }
+
+            case .terminal:
+                // The focus chip on the left already says Terminal, and a shell
+                // has no position this bar could report — the grid scrolls
+                // itself and the caret belongs to the program running in it.
+                EmptyView()
+
+            default:
+                Text(viewerStatusText)
+                    .font(.system(size: 10, design: .rounded))
                     .foregroundStyle(.secondary)
-                    .frame(minWidth: 28, alignment: .trailing)
-                    .help("Scroll position")
+                    .lineLimit(1)
             }
         }
         // Stops before the inspector instead of sliding under it — that column
