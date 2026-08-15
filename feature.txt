@@ -84,8 +84,9 @@
 
 ☐ 15. 함수나 뭐 등등 우클릭해서 info 버튼 보이게 하고, info 버튼에 설명 있도록!
 
-☐ 16. 에디터 내부로 들어오는 블러 싹 지우자. 이쁘지도 않고 에디팅경험도 별로.
-     (지금은 터미널 페인 위에서만 안 그림 — 01f725b. 전부 지우는 건 아직.)
+✅ 16. 에디터 내부로 들어오는 블러 싹 지우자. 이쁘지도 않고 에디팅경험도 별로.
+     → 아일랜드 위아래 12pt EdgeFade 둘 다 제거. 그게 부드럽게 하던 건 그냥
+       읽히는 경계였고, 실제로 한 일은 모든 파일의 첫 줄과 끝 줄을 흐리게 만든 것.
 
 ☐ 17. 세팅에 지금 옵션들이 너무 이상한곳에 혼재해있어서 세팅 좀 고쳐야하긴해.
 
@@ -123,6 +124,48 @@
     페인에(f39bb2c) · 포커스 바꾸면 다른 페인 스크롤이 튐(6fbc3da)
 
 ✅ 터미널 페인 헤더에 분할 메뉴 (c408295)
+
+---
+**prime-agent-session-019ff931 (2026-08-13, HEAD 2f09b55) 에서 나온 것**
+
+그 세션은 두 가지였음: 120fps 성능 감사, 그리고 실시간 협업 설계.
+
+성능 감사 — 여섯 개 중 확인해보니 셋은 이미 고쳐져 있음:
+  ✅ 식별자 타이핑마다 도는 completion scope walk (20k에서 28.5ms/키)
+     → 팝업이 떠 있으면 walk 전에 refine 먼저. gui_edit.rs:567 주석이 그 얘기.
+  ✅ band 의 행 루프 안에서 버퍼 전체를 복제하던 bracket matching
+     (캐럿이 닫는 괄호 앞이면 6k=17.5ms, 20k=43.6ms)
+     → 루프 밖으로 올림. scene.rs:2310 주석이 그 얘기.
+  ✅ Enter 가 docLineCount 로 editorSplit 발행을 유발하던 것
+     → EditorPaneSnap 의 == 에서 빠짐.
+
+  ☐ 스마트 Enter 의 optimistic 하이라이팅이 틀림. nudge_for_split(row, col) 은
+    "한 줄이 한 자리에서 갈라진다"만 표현하는데, 실제 Enter 는 들여쓰기를 복사하고
+    `{|}` 는 두 줄을 넣음. 워커 결과가 올 때까지 아래 토큰이 한 줄씩 밀림.
+  ☐ tick 스케줄이 아직 횟수 기반. runtime.rs:688 이 _dt_ms 를 버리고 tick_count % N
+    을 씀 — 타이머가 20Hz 에서 120Hz 로 바뀌면서 LSP 는 150ms→25ms, 외부파일 검사는
+    1s→167ms 로 여섯 배 잦아짐. 상수는 50ms tick 을 그대로 가정.
+  ☐ 워커 큐가 가득 차면 '가장 새 요청'을 버림(replace-latest 가 아니라). 같은 레인에
+    2.4MB prewarm 셋이 있으면 라이브 파싱이 1.4초 밀린 측정 있음.
+  ☐ WAL 이 메인 틱에서 전체 텍스트 구성 + fsync + rename. 10MiB=13.7ms, 30MiB=34.3ms.
+  ☐ 벤치마크 자체가 틀린 답을 줌 — typing_latency 는 warm 트리 없이 재고, Enter 를
+    U+000A 로 보내 스마트 Enter 를 우회하고, 6k 에서 멈추고, assertion 이 없음.
+
+실시간 협업 설계 (위 **feature** 1번의 답) — 요지:
+  · gh 로그인과 Suisei Cloud 로그인을 UX 는 한 화면, 인증은 완전 분리.
+    gh 는 로컬 개발 도구고 권한이 훨씬 넓음. Cloud 로그아웃이 gh auth logout 을
+    부르면 안 됨.
+  · project.suiseiprj 에 멤버를 적지 말 것 — 파일 고쳐서 자기 권한 올릴 수 있고,
+    merge conflict 로 꼬이고, GitHub username 은 바뀜. 파일엔 project_id 만.
+    권한의 정본은 서버.
+  · 역할 Owner / Admin / Editor / Viewer. "Hand over admin" 은 역할이 아니라
+    소유권 이전 액션. Admin 은 자기보다 낮은 역할만 관리.
+  · 서버는 역할이 아니라 capability 로 검사 (document.write, member.invite …).
+  · presence: 편집은 즉시·순서보장·ACK, 마우스는 움직일 때만 8~12Hz latest-only,
+    300ms 멈추면 중단. 받는 쪽에서 80ms jitter buffer + 120fps 보간.
+  · 좌표는 화면 픽셀이 아니라 문서 기준 (byte_offset + affinity + at_revision).
+  · 편집 채널과 presence 채널 분리, 큐 우선순위 edit > control > presence.
+  · 불변식: 키 입력은 GitHub·인터넷·서버 ACK 를 절대 기다리지 않는다.
 
 ---
 **알려진 것, 안 고침**

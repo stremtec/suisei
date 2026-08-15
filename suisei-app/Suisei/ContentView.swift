@@ -451,27 +451,6 @@ struct ContentView: View {
         // No pane at all is the empty editor, which is still text.
         return (engine.editorSplit.panes.first?.kind ?? .text) == .text
     }
-    /// Whether every pane meeting one edge of the island is painted in the
-    /// editor's own background.
-    ///
-    /// The island's 12pt edge fades soften document text sliding under its
-    /// top and bottom — they are `editorBg` ramped to transparent, which only
-    /// disappears over `editorBg`. A terminal pane is the one surface in the
-    /// editor that wears something else: its grid is dark in both themes, so
-    /// the fade laid a pale band across the shell's last row. (Image, PDF,
-    /// audio and binary panes all take the editor background, so they need no
-    /// exception here.)
-    ///
-    /// Asked of the panes at that edge rather than of the focused one: the
-    /// fade spans the island's full width, so in a side-by-side split it
-    /// crosses the terminal whether or not the terminal has focus.
-    private func islandEdgeIsEditorBackground(bottom: Bool) -> Bool {
-        !engine.editorSplit.panes.contains { pane in
-            guard pane.isTerminal else { return false }
-            // Normalised rects, so the island's edges are 0 and 1.
-            return bottom ? pane.rect.maxY > 0.999 : pane.rect.minY < 0.001
-        }
-    }
     /// The minimap's width when it is not scaled to the pane. Also its ceiling
     /// when it is: proportional makes the strip narrower in a narrow pane, and
     /// never wider than the fixed setting would have been. Fixed is the widest
@@ -5154,21 +5133,17 @@ struct ContentView: View {
                     .transition(.opacity)
                 }
             }
-            // Top fade only once content actually slides under (the always-on
-            // material veil looked like a blur glued to the jump bar).
-            .overlay(alignment: .top) {
-                if engine.chrome.scroll > 0, islandEdgeIsEditorBackground(bottom: false) {
-                    EdgeFade(color: editorBg, top: true)
-                        .frame(height: 12)
-                        .transition(.opacity)
-                }
-            }
-            .overlay(alignment: .bottom) {
-                if islandEdgeIsEditorBackground(bottom: true) {
-                    EdgeFade(color: editorBg, top: false).frame(height: 12)
-                }
-            }
-            .animation(.easeOut(duration: 0.15), value: engine.chrome.scroll > 0)
+            // Two 12pt `EdgeFade`s used to sit here, one at each edge, ramping
+            // `editorBg` over the text so a line sliding under the island's
+            // boundary dissolved instead of being cut. They are gone: the thing
+            // they softened is a hard edge that reads perfectly well, and what
+            // they actually did was wash out the top and bottom lines of every
+            // file you read. "에디터 내부로 들어오는 블러 싹 지우자. 이쁘지도
+            // 않고 에디팅경험도 별로."
+            //
+            // `islandEdgeIsEditorBackground` went with them — it existed to
+            // keep the bottom fade off a terminal pane, and there is no fade to
+            // keep off anything now.
             .overlay(alignment: .topTrailing) {
                 if engine.chrome.search.open {
                     findBar
@@ -6599,22 +6574,6 @@ struct WithinWindowBlur: NSViewRepresentable {
         } else {
             v.appearance = nil
         }
-    }
-}
-
-/// Soft fade where content slides under a pane edge — a plain editorBg
-/// gradient (materials over the AppKit canvas are veils, not blurs).
-struct EdgeFade: View {
-    var color: Color
-    var top: Bool
-
-    var body: some View {
-        LinearGradient(
-            colors: top ? [color, color.opacity(0)] : [color.opacity(0), color],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .allowsHitTesting(false)
     }
 }
 
