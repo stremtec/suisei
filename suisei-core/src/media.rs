@@ -29,6 +29,28 @@ pub fn is_audio_ext(ext: &str) -> bool {
     )
 }
 
+/// A 3D asset the face can put in a viewer.
+///
+/// The list is what macOS reads without a third-party importer, which is what
+/// keeps this a classification question rather than a parsing project:
+/// SceneKit reads `.scn` and `.dae` directly, and Model I/O — which SceneKit
+/// defers to — reads USD in all four of its spellings plus `.obj`, `.ply`,
+/// `.stl` and Alembic.
+///
+/// `.abc` is deliberately absent even though Model I/O lists it: an Alembic
+/// file is a baked animation cache, routinely gigabytes, and opening one by
+/// double-clicking it in a file tree is not a preview.
+///
+/// `.blend`, `.fbx`, `.max` are absent because nothing on the system reads
+/// them. Routing them here would give the user an empty viewer instead of the
+/// binary placeholder that at least says what the file is.
+pub fn is_model_ext(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "usdz" | "usda" | "usdc" | "usd" | "obj" | "dae" | "scn" | "stl" | "ply"
+    )
+}
+
 pub fn is_media_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -56,6 +78,11 @@ pub enum FileKind {
     Pdf = 3,
     Audio = 4,
     Binary = 5,
+    /// A 3D asset — USD, OBJ, DAE, STL, PLY. Appended, never inserted: this
+    /// number crosses the ABI as `EditorPaneSnap.kind`, and a face built
+    /// against an older engine reads an unknown value as `Text` rather than
+    /// as whatever used to be 6.
+    Model = 6,
 }
 
 impl FileKind {
@@ -73,6 +100,7 @@ impl FileKind {
             FileKind::Pdf => "PDF",
             FileKind::Audio => "Audio",
             FileKind::Binary => "Binary file",
+            FileKind::Model => "3D model",
         }
     }
 }
@@ -105,6 +133,8 @@ fn classify_ext(path: &Path) -> Option<FileKind> {
         Some(FileKind::Pdf)
     } else if is_audio_ext(ext) {
         Some(FileKind::Audio)
+    } else if is_model_ext(ext) {
+        Some(FileKind::Model)
     } else {
         None
     }
@@ -704,4 +734,53 @@ pub fn audio_info_lines(path: &Path, playing: bool) -> Vec<PreviewLine> {
 
 fn pl(spans: Vec<(String, PreviewStyle)>) -> PreviewLine {
     PreviewLine { spans, image: None }
+}
+
+#[cfg(test)]
+mod model_kind_tests {
+    use super::*;
+
+    #[test]
+    fn the_formats_macos_can_read_are_models() {
+        for ext in ["usdz", "USDZ", "usda", "usdc", "usd", "obj", "dae", "scn", "stl", "ply"] {
+            assert!(is_model_ext(ext), "{ext} should open in the model viewer");
+            assert_eq!(
+                classify_path(Path::new(&format!("/tmp/asset.{ext}"))),
+                FileKind::Model
+            );
+        }
+    }
+
+    /// A format nothing on the system reads must NOT come here. Routing it to
+    /// the viewer would give the user an empty stage; the binary placeholder
+    /// at least names the file and offers to open it elsewhere.
+    #[test]
+    fn a_format_nothing_can_read_is_not_a_model() {
+        for ext in ["blend", "fbx", "max", "c4d", "abc"] {
+            assert!(!is_model_ext(ext), "{ext} has no importer on macOS");
+        }
+    }
+
+    /// A model's buffer stays empty, which is what stops ⌘S writing an empty
+    /// document over a binary asset. `is_viewer` is the gate, and it answers
+    /// from the variant rather than from a list that has to be kept in step.
+    #[test]
+    fn a_model_is_a_viewer_and_not_text() {
+        assert!(FileKind::Model.is_viewer());
+        assert_eq!(FileKind::Model.noun(), "3D model");
+    }
+
+    /// The number crosses the ABI. Appending is the whole discipline: a face
+    /// built against an older engine reads an unknown value as `Text`, and
+    /// re-using 6 for something else would make it read a model as one.
+    #[test]
+    fn the_kind_numbers_are_stable() {
+        assert_eq!(FileKind::Text as u8, 0);
+        assert_eq!(FileKind::Terminal as u8, 1);
+        assert_eq!(FileKind::Image as u8, 2);
+        assert_eq!(FileKind::Pdf as u8, 3);
+        assert_eq!(FileKind::Audio as u8, 4);
+        assert_eq!(FileKind::Binary as u8, 5);
+        assert_eq!(FileKind::Model as u8, 6);
+    }
 }

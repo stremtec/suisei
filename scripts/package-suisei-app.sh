@@ -71,6 +71,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/TerminalSurface.swift"
   "$ROOT/suisei-app/Suisei/AudioViewer.swift"
   "$ROOT/suisei-app/Suisei/ImagePDFViewers.swift"
+  "$ROOT/suisei-app/Suisei/ModelViewer.swift"
   "$ROOT/suisei-app/Suisei/MetalTextRenderer.swift"
   "$ROOT/suisei-app/Suisei/TabStripLayout.swift"
   "$ROOT/suisei-app/Suisei/TabStripModel.swift"

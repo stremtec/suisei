@@ -129,7 +129,7 @@ struct ImagePaneViewer: View {
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil)
               as? [CFString: Any]
         else {
-            return (.zero, [fileSection(url)])
+            return (.zero, [ViewerInfoSection.file(url)])
         }
         let w = props[kCGImagePropertyPixelWidth] as? Int ?? 0
         let h = props[kCGImagePropertyPixelHeight] as? Int ?? 0
@@ -158,26 +158,10 @@ struct ImagePaneViewer: View {
 
         return (CGSize(width: w, height: h), [
             ViewerInfoSection("Image", rows),
-            fileSection(url),
+            ViewerInfoSection.file(url),
         ])
     }
 
-    fileprivate nonisolated static func fileSection(_ url: URL) -> ViewerInfoSection {
-        let v = try? url.resourceValues(forKeys: [
-            .fileSizeKey, .contentTypeKey, .creationDateKey, .contentModificationDateKey,
-        ])
-        let df = DateFormatter()
-        df.dateStyle = .medium
-        df.timeStyle = .short
-        return ViewerInfoSection("File", [
-            ("Kind", v?.contentType?.localizedDescription),
-            ("Size", v?.fileSize.map {
-                ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file)
-            }),
-            ("Created", v?.creationDate.map { df.string(from: $0) }),
-            ("Modified", v?.contentModificationDate.map { df.string(from: $0) }),
-        ])
-    }
 }
 
 /// `NSScrollView`'s own magnification, which brings pinch-to-zoom, momentum
@@ -577,7 +561,7 @@ struct PDFPaneViewer: View {
             priority: .userInitiated
         ) {
             guard let doc = PDFDocument(url: url) else {
-                return (nil, [ImagePaneViewer.fileSection(url)])
+                return (nil, [ViewerInfoSection.file(url)])
             }
             return (doc, Self.describe(doc, url: url))
         }.value
@@ -625,7 +609,7 @@ struct PDFPaneViewer: View {
 
         return [
             ViewerInfoSection("Document", docRows),
-            ImagePaneViewer.fileSection(url),
+            ViewerInfoSection.file(url),
         ]
     }
 }

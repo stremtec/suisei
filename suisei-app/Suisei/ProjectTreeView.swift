@@ -797,6 +797,11 @@ struct ProjectTreeView: View {
         case "json", "toml", "yaml", "yml": return "doc.badge.gearshape"
         case "md", "txt", "rst": return "doc.plaintext"
         case "png", "jpg", "jpeg", "gif", "svg", "webp": return "photo"
+        // Kept in step with `suisei_core::media::is_model_ext`, which is the
+        // authority on what opens in the model viewer. A tree icon promising a
+        // viewer that will not open is worse than a plain document.
+        case "usdz", "usda", "usdc", "usd", "obj", "dae", "scn", "stl", "ply":
+            return "cube"
         case "sh", "bash", "zsh": return "terminal"
         case "html", "css", "scss": return "globe"
         case "lock": return "lock.doc"
@@ -840,6 +845,8 @@ struct ProjectTreeView: View {
         case "md": return dim
         case "json", "toml", "yaml", "yml": return Color(nsColor: .systemGreen)
         case "png", "jpg", "jpeg", "gif", "svg": return Color(nsColor: .systemPink)
+        case "usdz", "usda", "usdc", "usd", "obj", "dae", "scn", "stl", "ply":
+            return Color(nsColor: .systemTeal)
         default: return dim.opacity(0.9)
         }
     }

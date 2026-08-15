@@ -40,6 +40,8 @@ struct PaneViewer: View {
             ImagePaneViewer(path: path, palette: palette)
         case .pdf:
             PDFPaneViewer(path: path, palette: palette)
+        case .model:
+            ModelPaneViewer(path: path, palette: palette)
         case .binary:
             FilePlaceholderView(path: path, kind: kind, palette: palette)
         }
@@ -202,6 +204,29 @@ struct ViewerInfoSection: Identifiable, Equatable {
     var id: String { title }
     let title: String
     let rows: [ViewerInfoRow]
+
+    /// What the file system knows about any file, for the inspector.
+    ///
+    /// Every viewer's last section, so it lives with the section rather than
+    /// on whichever viewer needed it first — it was `fileprivate` on
+    /// `ImagePaneViewer`, which made it unreachable the moment a third viewer
+    /// wanted the same four rows.
+    nonisolated static func file(_ url: URL) -> ViewerInfoSection {
+        let v = try? url.resourceValues(forKeys: [
+            .fileSizeKey, .contentTypeKey, .creationDateKey, .contentModificationDateKey,
+        ])
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        return ViewerInfoSection("File", [
+            ("Kind", v?.contentType?.localizedDescription),
+            ("Size", v?.fileSize.map {
+                ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file)
+            }),
+            ("Created", v?.creationDate.map { df.string(from: $0) }),
+            ("Modified", v?.contentModificationDate.map { df.string(from: $0) }),
+        ])
+    }
 
     /// Skips rows with nothing in them, so a caller can list everything it
     /// might know without guarding each line.
@@ -400,6 +425,7 @@ extension PaneKind {
         case .image: return "Image"
         case .pdf: return "PDF Document"
         case .audio: return "Audio"
+        case .model: return "3D Model"
         case .binary: return "Binary File"
         }
     }

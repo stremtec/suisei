@@ -81,6 +81,7 @@ enum PaneKind: UInt8 {
     case pdf = 3
     case audio = 4
     case binary = 5
+    case model = 6
 
     /// An unknown value can only come from an engine newer than this face.
     /// Fall back to the editor: showing text for something we cannot name is
@@ -92,7 +93,7 @@ enum PaneKind: UInt8 {
     var isViewer: Bool {
         switch self {
         case .text, .terminal: return false
-        case .image, .pdf, .audio, .binary: return true
+        case .image, .pdf, .audio, .binary, .model: return true
         }
     }
 
@@ -105,6 +106,7 @@ enum PaneKind: UInt8 {
         case .pdf: return "PDF"
         case .audio: return "Audio"
         case .binary: return "Binary"
+        case .model: return "3D Model"
         }
     }
 }

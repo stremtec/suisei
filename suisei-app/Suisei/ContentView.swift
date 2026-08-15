@@ -5952,6 +5952,7 @@ struct ContentView: View {
         case .image: return "photo.fill"
         case .pdf: return "doc.richtext.fill"
         case .audio: return "waveform"
+        case .model: return "cube.fill"
         case .binary: return "doc.fill"
         }
     }
