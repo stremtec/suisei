@@ -18,6 +18,42 @@ enum EditorDiagnostics {
 
     static let bandGaps = modes.contains("band") || modes.contains("all")
     static let metal = modes.contains("metal") || modes.contains("all")
+    static let wrap = modes.contains("wrap") || modes.contains("all")
+
+    /// Where a wrapped row's right edge comes from.
+    ///
+    /// "It wraps with room to spare" has three candidate causes that look the
+    /// same on screen: the pane is narrower than it appears, something is
+    /// subtracted from it that is not really in the way, or the break rule
+    /// gives up a column early. They are three different fixes, so each number
+    /// that went into the answer is printed rather than inferred from a
+    /// screenshot.
+    ///
+    /// Reported only when the width changes — this runs on every layout pass.
+    static func reportWrap(
+        pane: Int,
+        clipWidth: CGFloat,
+        gutter: CGFloat,
+        rightInset: CGFloat,
+        advance: CGFloat,
+        cols: Int
+    ) {
+        guard wrap else { return }
+        let usable = clipWidth - gutter - rightInset
+        NSLog(
+            """
+            [suisei/wrap] pane=\(pane) clip=\(fmt(clipWidth)) \
+            − gutter \(fmt(gutter)) − inset \(fmt(rightInset)) = \(fmt(usable))pt \
+            ÷ advance \(fmt(advance)) → \(cols) cols \
+            (row paints \(fmt(CGFloat(cols) * advance))pt, \
+            leaves \(fmt(usable - CGFloat(cols) * advance))pt)
+            """
+        )
+    }
+
+    private static func fmt(_ v: CGFloat) -> String {
+        String(format: "%.1f", v)
+    }
 
     /// Reported only when the slice fails to cover what the draw asked for —
     /// a full band is the normal case and would drown the interesting one.

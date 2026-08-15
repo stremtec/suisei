@@ -309,6 +309,14 @@ final class EditorScrollView: NSScrollView {
     private func syncWrapColumns() {
         let cols = wrapColumns(wrapLines: lastWrap)
         guard cols != canvas.wrapCols else { return }
+        EditorDiagnostics.reportWrap(
+            pane: paneIndex,
+            clipWidth: contentView.bounds.width,
+            gutter: EditorMetrics.gutter,
+            rightInset: rightInset,
+            advance: EditorMetrics.textAdvance,
+            cols: cols
+        )
         canvas.setWrapCols(cols)
         lastWrapCols = cols
         // Different chunking: the band in hand is the old shape.
