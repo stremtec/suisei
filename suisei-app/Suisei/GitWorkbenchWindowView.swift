@@ -35,8 +35,12 @@ struct GitWorkbenchWindowView: View {
     @State private var modeFrom = 0
     @State private var modeTo = 0
     @State private var modeProgress: CGFloat = 1
-    @State private var modeDragX: CGFloat?
-    @State private var modeDragOrigin: CGFloat?
+    /// Drag position in SLOT FRACTIONS (0 = first slot, 1 = second, …), not
+    /// points. Points tied every reader of this state to the rail's current
+    /// width, which is the dependency that made a sidebar collapse re-measure
+    /// the whole rail on every frame.
+    @State private var modeDragFraction: Double?
+    @State private var modeDragOriginFraction: Double?
     @State private var modeDragCommitting = false
     @State private var commitMessage = ""
     @State private var amend = false
@@ -432,11 +436,26 @@ struct GitWorkbenchWindowView: View {
             ZStack(alignment: .leading) {
                 TravellingPill(
                     progress: modeProgress,
-                    from: modeDragX ?? modeDragOrigin ?? CGFloat(modeFrom) * slot,
-                    to: modeDragX ?? CGFloat(modeTo) * slot,
+                    from: CGFloat(modeDragFraction ?? modeDragOriginFraction
+                                  ?? Double(modeFrom)) * slot,
+                    to: CGFloat(modeDragFraction ?? Double(modeTo)) * slot,
                     width: slot
                 )
                 .fill(accent)
+                // The pill FOLLOWS a width change; it does not animate to it.
+                //
+                // `TravellingPill` animates all four of its values, which is
+                // right where the slots resize on a discrete toggle — the
+                // editor's navigator rail, which it was written for. Here the
+                // container is a NavigationSplitView sidebar, and collapsing it
+                // sweeps the width continuously. Every frame handed the Shape a
+                // new `from`/`to`/`width` and it began a fresh interpolation
+                // toward them: an animation chasing an animation, which is what
+                // the pill rubber-banding behind the collapsing column was.
+                //
+                // Scoped to `slot`, so a mode switch — driven by `modeProgress`
+                // under `withAnimation` — still travels.
+                .animation(nil, value: slot)
 
                 HStack(spacing: 0) {
                     ForEach(Array(modes.enumerated()), id: \.element.id) { index, mode in
@@ -450,12 +469,19 @@ struct GitWorkbenchWindowView: View {
                                 Text(mode.rawValue)
                             }
                             .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(modeRailForeground(index: index, slot: slot))
+                            .foregroundStyle(modeRailForeground(index: index))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .frame(width: slot)
+                        // Equal division by layout rather than by `slot`. Two
+                        // buttons in an HStack split the width evenly on their
+                        // own, and asking for `slot` made every label's body
+                        // depend on the geometry — so a width sweep invalidated
+                        // and re-measured both of them on every frame of the
+                        // collapse, for a result identical to what the stack
+                        // was already going to do.
+                        .frame(maxWidth: .infinity)
                     }
                 }
             }
@@ -463,18 +489,20 @@ struct GitWorkbenchWindowView: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 3, coordinateSpace: .local)
                     .onChanged { value in
-                        modeDragX = min(
+                        guard slot > 0 else { return }
+                        let points = min(
                             max(value.location.x - slot / 2, 0),
                             geometry.size.width - slot
                         )
+                        modeDragFraction = Double(points / slot)
                     }
                     .onEnded { value in
                         let index = min(
                             modes.count - 1,
                             max(0, Int(value.location.x / slot))
                         )
-                        modeDragOrigin = modeDragX
-                        modeDragX = nil
+                        modeDragOriginFraction = modeDragFraction
+                        modeDragFraction = nil
                         modeDragCommitting = true
                         sourceMode = modes[index]
                         modeDragCommitting = false
@@ -484,7 +512,7 @@ struct GitWorkbenchWindowView: View {
                         withAnimation(.smooth(duration: 0.24)) {
                             modeProgress = 1
                         } completion: {
-                            modeDragOrigin = nil
+                            modeDragOriginFraction = nil
                         }
                     }
             )
@@ -511,16 +539,22 @@ struct GitWorkbenchWindowView: View {
         withAnimation(.smooth(duration: 0.24)) {
             modeProgress = 1
         } completion: {
-            modeDragOrigin = nil
+            modeDragOriginFraction = nil
         }
     }
 
-    private func modeRailForeground(index: Int, slot: CGFloat) -> Color {
+    /// How selected this label reads, 0…1.
+    ///
+    /// The drag case measures overlap in FRACTIONS of a slot rather than in
+    /// points, so the function no longer needs the slot width at all — which is
+    /// what let the labels stop depending on the container's geometry.
+    /// `modeDragFraction` is the drag position expressed the same way.
+    private func modeRailForeground(index: Int) -> Color {
         let selected: Double
-        if let drag = modeDragX, slot > 0 {
-            let lo = max(drag, CGFloat(index) * slot)
-            let hi = min(drag + slot, CGFloat(index + 1) * slot)
-            selected = Double(max(0, hi - lo) / slot)
+        if let drag = modeDragFraction {
+            let lo = max(drag, Double(index))
+            let hi = min(drag + 1, Double(index + 1))
+            selected = max(0, hi - lo)
         } else if modeTo == modeFrom {
             selected = modeTo == index ? 1 : 0
         } else {

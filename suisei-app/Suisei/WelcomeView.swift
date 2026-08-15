@@ -579,65 +579,45 @@ struct WelcomeView: View {
         title: String,
         action: @escaping () -> Void
     ) -> some View {
-        WelcomeActionButton(
-            systemImage: systemImage,
-            title: title,
-            fill: Color.white.opacity(0.07),
-            label: label,
-            action: action
-        )
+        WelcomeActionButton(systemImage: systemImage, title: title, action: action)
     }
 }
 
-/// Capsule action with an iOS-quality hover lift + press scale.
+/// A launch action, on the system's own button material.
+///
+/// This was a hand-drawn capsule: `Color.white.opacity(0.07)`, lifted to `0.12`
+/// on hover, a 1pt white border faded in with it, and a 0.985 press scale
+/// driven by a `DragGesture` — four hand-tuned numbers imitating what
+/// `.buttonStyle(.bordered)` already is. The imitation cannot follow the system:
+/// it does not change with Increase Contrast or Reduce Transparency, it draws
+/// no focus ring for keyboard navigation, and its press state came from a drag
+/// gesture rather than from the button, so it stayed pressed if the pointer
+/// left while held.
+///
+/// The rail is a fixed near-black regardless of the system appearance, so the
+/// colour scheme is forced dark for the controls on it. Without that, a Mac in
+/// light mode draws light buttons on a black panel.
 private struct WelcomeActionButton: View {
     var systemImage: String
     var title: String
-    var fill: Color
-    var label: Color
     var action: () -> Void
-    @State private var hovering = false
-    @State private var pressed = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 11) {
+            HStack(spacing: 10) {
                 Image(systemName: systemImage)
                     .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(Color.white.opacity(hovering ? 0.92 : 0.70))
                     .frame(width: 18, alignment: .center)
                 Text(title)
-                    .font(.system(size: 13, weight: .regular, design: .default))
-                    .foregroundStyle(label)
+                    .font(.system(size: 13))
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.45))
-                    .opacity(hovering ? 1 : 0)
-                    .offset(x: hovering ? 0 : -4)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(Color.white.opacity(hovering ? 0.12 : 0.07))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(Color.white.opacity(hovering ? 0.14 : 0.0), lineWidth: 1)
-            )
-            .scaleEffect(pressed ? 0.985 : 1)
-            .contentShape(Capsule(style: .continuous))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 3)
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.snappy(duration: 0.18), value: hovering)
-        .animation(.snappy(duration: 0.12), value: pressed)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in pressed = true }
-                .onEnded { _ in pressed = false }
-        )
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .environment(\.colorScheme, .dark)
     }
 }
 
