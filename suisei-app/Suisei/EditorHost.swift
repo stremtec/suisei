@@ -3164,6 +3164,21 @@ final class EditorCanvasView: NSView {
         commitMarkedTextForDocumentAction()
         window?.makeFirstResponder(self)
         guard let engine else { return }
+        // Whatever part of this pane was hit, the click is a statement about
+        // THIS pane. Core has to agree before anything below runs, because
+        // everything below acts on the live document: `toggleBreakpointLine`
+        // sets a breakpoint in it, and the hunk menu shows and discards its
+        // changes.
+        //
+        // This used to sit after both gutter branches, and both of them
+        // `return`. So the focus moved for a click on the text and not for a
+        // click on the gutter: clicking line 1's number in an unfocused pane
+        // put a breakpoint on line 1 of the pane you were already in, and a
+        // click on its change bar offered you the other file's hunk — with
+        // Discard on the menu.
+        if engine.editorSplit.isSplit, paneIndex != engine.editorSplit.focus {
+            engine.focusPane(paneIndex)
+        }
         let p = convert(event.locationInWindow, from: nil)
         // The gutter has two targets, and they used to be one.
         //
@@ -3175,7 +3190,6 @@ final class EditorCanvasView: NSView {
             // The change bar's own column. Deliberately handled here rather
             // than falling through — falling through is what set a breakpoint
             // on every press meant for a hunk.
-            let lineH = max(1, EditorMetrics.lineHeight)
             if let h = hunkExtent(atRow: nearestBufferRow(atY: p.y)) {
                 showHunkMenu(h, at: p)
             }
@@ -3186,9 +3200,6 @@ final class EditorCanvasView: NSView {
             guard let row = bufferRow(atY: p.y) else { return }
             engine.toggleBreakpointLine(UInt32(row) + 1)
             return
-        }
-        if engine.editorSplit.isSplit, paneIndex != engine.editorSplit.focus {
-            engine.focusPane(paneIndex)
         }
         tracking = true
         isTrackingDrag = true
