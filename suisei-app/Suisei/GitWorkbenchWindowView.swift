@@ -440,6 +440,21 @@ struct GitWorkbenchWindowView: View {
     /// Blank space kept under the last sidebar row. Measured from the window,
     /// clamped so it is neither useless on a short one nor most of a tall one.
     @State private var sidebarHeight: CGFloat = 600
+    /// What lifts a file box off the column behind it.
+    ///
+    /// A 1pt hairline is the whole separation these cards had, and stacked ten
+    /// deep in one scroll that reads as a ruled list rather than as ten
+    /// objects. The shadow is what says "these are separate things", which is
+    /// the question being asked when you are scanning a diff for where one file
+    /// ends and the next begins.
+    ///
+    /// Cast in the palette's ink, not black — same reason as the editor
+    /// island's — and small enough to fade out inside the 10pt gap between
+    /// cards, or it stops being depth and becomes grime.
+    private var cardShadow: Color {
+        theme.shadowInk.opacity(isLightTheme ? 0.10 : 0.30)
+    }
+
     /// Blank space under the last file box. Most of a screenful, because the
     /// point is to bring the END of the list into the middle of the pane
     /// rather than to leave a comfortable margin at it.
@@ -1095,6 +1110,7 @@ struct GitWorkbenchWindowView: View {
         .animation(.easeOut(duration: 0.14), value: expanded)
         .background(theme.panelSurface)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .shadow(color: cardShadow, radius: 5, y: 2)
         .overlay {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .stroke(theme.separator.opacity(0.7), lineWidth: 1)
@@ -1351,6 +1367,7 @@ struct GitWorkbenchWindowView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.panelSurface)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .shadow(color: cardShadow, radius: 5, y: 2)
         .overlay {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .stroke(theme.separator.opacity(0.7), lineWidth: 1)
@@ -1409,6 +1426,7 @@ struct GitWorkbenchWindowView: View {
         .animation(.easeOut(duration: 0.14), value: expanded)
         .background(theme.panelSurface)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .shadow(color: cardShadow, radius: 5, y: 2)
         .overlay {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .stroke(theme.separator.opacity(0.7), lineWidth: 1)

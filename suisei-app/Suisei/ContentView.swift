@@ -2663,9 +2663,10 @@ struct ContentView: View {
                     )
 
                     if !engine.chrome.scm.graph.isEmpty {
-                        Text("HISTORY")
-                            .font(.system(size: 10, weight: .bold))
+                        Text("History")
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 10)
                             .padding(.top, 12)
                             .padding(.bottom, 4)
@@ -2708,15 +2709,64 @@ struct ContentView: View {
         }
     }
 
+    /// `M`, `A`, `D`… in a chip whose colour says staged or not.
+    private func scmBadge(_ row: ScmEntryItem) -> some View {
+        let mark = row.mark.trimmingCharacters(in: .whitespaces)
+        let ink = row.staged ? theme.successColor : theme.warningColor
+        return Text(mark.isEmpty ? "•" : mark)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .foregroundStyle(ink)
+            .frame(width: 15, height: 15)
+            .background(
+                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                    .fill(ink.opacity(0.16))
+            )
+    }
+
+    private func scmFileName(_ path: String) -> String {
+        (path as NSString).lastPathComponent
+    }
+
+    /// The folder, or nothing when the file sits at the repository root —
+    /// "." beside a filename is noise pretending to be information.
+    private func scmFolder(_ path: String) -> String? {
+        let parent = (path as NSString).deletingLastPathComponent
+        return parent.isEmpty || parent == "." ? nil : parent
+    }
+
+    private func scmFileSymbol(_ path: String) -> String {
+        switch (path as NSString).pathExtension.lowercased() {
+        case "swift": "swift"
+        case "rs", "c", "cpp", "h", "hpp", "go", "java", "kt", "cs": "chevron.left.forwardslash.chevron.right"
+        case "js", "ts", "jsx", "tsx", "py", "rb", "sh", "lua": "curlybraces"
+        case "json", "toml", "yaml", "yml", "plist", "xml": "list.bullet.rectangle"
+        case "md", "txt", "rst": "doc.text"
+        case "png", "jpg", "jpeg", "gif", "svg", "pdf": "photo"
+        default: "doc"
+        }
+    }
+
     @ViewBuilder
     private func scmSection(title: String, rows: [ScmEntryItem], empty: String?) -> some View {
         if !rows.isEmpty || empty != nil {
-            Text(title.uppercased())
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.top, 8)
-                .padding(.bottom, 3)
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                if !rows.isEmpty {
+                    Text("\(rows.count)")
+                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            // Sentence case, not SHOUTED. Xcode's source list labels its
+            // groups the way the rest of the system does; an all-caps 10pt
+            // header is a VS Code idiom and it was the loudest text in a
+            // column whose job is to be scanned past.
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
             if rows.isEmpty, let empty {
                 Text(empty)
                     .font(.system(size: 11))
@@ -3091,23 +3141,37 @@ struct ContentView: View {
             focused = true
         } label: {
             HoverRow(corner: 4) {
-                HStack(spacing: 8) {
-                    Text(row.mark)
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .foregroundStyle(
-                            row.staged
-                                ? Color(nsColor: .systemGreen).opacity(0.9)
-                                : Color(nsColor: .systemOrange).opacity(0.9)
-                        )
-                        .frame(width: 16)
-                    Text(row.path)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.primary)
+                HStack(spacing: 7) {
+                    Image(systemName: scmFileSymbol(row.path))
+                        .font(.system(size: 11))
+                        .foregroundStyle(row.selected ? accentForeground : .secondary)
+                        .frame(width: 15)
+                    // The NAME first and the folder after it, quietly. It was
+                    // the whole relative path in monospace, middle-truncated,
+                    // which in a 240pt column turns `src/…/main.rs` into a
+                    // puzzle — the filename is what you are looking for and it
+                    // was the part being elided.
+                    Text(scmFileName(row.path))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(row.selected ? accentForeground : .primary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 0)
+                    if let folder = scmFolder(row.path) {
+                        Text(folder)
+                            .font(.system(size: 10))
+                            .foregroundStyle(
+                                row.selected ? accentForeground.opacity(0.7) : .secondary
+                            )
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                            .layoutPriority(-1)
+                    }
+                    Spacer(minLength: 4)
+                    // A letter in a chip on the right, the way every source
+                    // list on this platform marks a row's state — not a bare
+                    // glyph in the leading column competing with the icon.
+                    scmBadge(row)
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
