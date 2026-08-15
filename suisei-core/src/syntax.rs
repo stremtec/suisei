@@ -474,7 +474,7 @@ impl SyntaxEngine {
         }
     }
 
-    /// A line was SPLIT at `row`/`col`: everything below moves down one row.
+    /// A line was SPLIT at `row`/`col`, adding `added` rows below it.
     ///
     /// The column nudges above cover an edit inside one line, which is every
     /// keystroke except the one that changes how many lines there are. Return
@@ -483,23 +483,38 @@ impl SyntaxEngine {
     /// keep going were suddenly the wrong stale colours, and the file appeared
     /// to lose its highlighting until the worker's next frame landed.
     ///
-    /// The split row's own tokens are divided at `col`: what was left of the
-    /// break stays, what was right of it moves to the new row and back to
-    /// column zero.
-    pub fn nudge_for_split(&mut self, row: usize, col: usize) {
+    /// `added` and `tail_col` are the caller's, because only the caller can see
+    /// what the editor actually did:
+    ///
+    /// * **`added`** is one for a plain Return and two for Return between
+    ///   braces, which opens a body and puts the closer on its own line. Fixed
+    ///   at one, the two-line case renumbered nothing and every token below the
+    ///   caret painted two rows high.
+    /// * **`tail_col`** is where `col`'s text landed on the last added row.
+    ///   This used to be zero, and smart Return copies the indentation — so on
+    ///   every indented line, which is most lines, the tokens after the caret
+    ///   were painted one indent to the left of the text they were colouring.
+    ///
+    /// Neither is a guess: the caller measures both against the buffer after
+    /// the edit. See `editing_with_optimistic_colour`.
+    pub fn nudge_for_split(&mut self, row: usize, col: usize, added: usize, tail_col: usize) {
+        if added == 0 {
+            return;
+        }
         for t in &mut self.tokens {
             if t.3 > row {
-                t.3 += 1;
+                t.3 += added;
                 continue;
             }
             if t.3 != row {
                 continue;
             }
             if t.1 >= col {
-                // Wholly after the break: it belongs to the new row.
-                t.1 -= col;
-                t.2 -= col;
-                t.3 += 1;
+                // Wholly after the break: it belongs to the last added row,
+                // rebased to wherever the tail actually starts there.
+                t.1 = t.1 - col + tail_col;
+                t.2 = t.2 - col + tail_col;
+                t.3 += added;
             } else if t.2 > col {
                 // Straddles it. Truncate here rather than splitting in two:
                 // this is a one-frame approximation, and the worker's answer
@@ -902,8 +917,45 @@ mod nudge_tests {
             (TokenKind::Keyword, 0, 3, 5),
             (TokenKind::Function, 0, 4, 9),
         ]);
-        e.nudge_for_split(5, 3);
+        e.nudge_for_split(5, 3, 1, 0);
         assert_eq!(e.tokens[1].3, 10, "the row below followed the new line");
+    }
+
+    /// Smart Return copies the indentation, so the tail does not land at
+    /// column zero. Hardcoded there, every indented line — which is most of
+    /// them — painted the tokens after the caret one indent to the left.
+    #[test]
+    fn a_split_puts_the_tail_where_the_indent_put_it() {
+        // `    let x = 1;` broken after `let `, re-indented to four spaces.
+        let mut e = engine_with(vec![
+            (TokenKind::Keyword, 4, 7, 5),   // `let`, before the break
+            (TokenKind::Variable, 8, 9, 5),  // `x`, after it
+        ]);
+        e.nudge_for_split(5, 8, 1, 4);
+        assert_eq!(e.tokens[0], (TokenKind::Keyword, 4, 7, 5), "stays put");
+        assert_eq!(
+            e.tokens[1],
+            (TokenKind::Variable, 4, 5, 6),
+            "the tail is where the new line's indent put it, not at zero"
+        );
+    }
+
+    /// Return between braces opens a body and puts the closer on its own line:
+    /// two rows, not one. The nudge only ran for one, so everything below the
+    /// caret kept its old row number and painted two rows high.
+    #[test]
+    fn a_split_can_add_more_than_one_row() {
+        let mut e = engine_with(vec![
+            (TokenKind::Punctuation, 7, 8, 5), // `}` after the caret
+            (TokenKind::Function, 0, 4, 9),    // some row below
+        ]);
+        e.nudge_for_split(5, 7, 2, 0);
+        assert_eq!(
+            e.tokens[0],
+            (TokenKind::Punctuation, 0, 1, 7),
+            "the closer went to the LAST added row"
+        );
+        assert_eq!(e.tokens[1].3, 11, "the row below moved down by both");
     }
 
     #[test]
@@ -913,7 +965,7 @@ mod nudge_tests {
             (TokenKind::Function, 6, 9, 5),     // after it
             (TokenKind::String, 2, 8, 5),    // straddling it
         ]);
-        e.nudge_for_split(5, 4);
+        e.nudge_for_split(5, 4, 1, 0);
         assert_eq!(e.tokens[0], (TokenKind::Keyword, 0, 3, 5), "stays put");
         assert_eq!(
             e.tokens[1],
@@ -935,7 +987,7 @@ mod nudge_tests {
             (TokenKind::Comment, 0, 2, 8),
         ];
         let mut e = engine_with(original.clone());
-        e.nudge_for_split(5, 4);
+        e.nudge_for_split(5, 4, 1, 0);
         e.nudge_for_join(5, 4);
         assert_eq!(
             e.tokens, original,

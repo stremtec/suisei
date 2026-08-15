@@ -360,17 +360,18 @@ impl Engine {
     /// typing case and one row's arithmetic cannot describe them.
     fn editing_with_optimistic_colour(&mut self, edit: impl FnOnce(&mut Self)) {
         let before = (self.app.sel.len() == 1).then(|| {
-            let at = self.app.sel.primary().head;
+            let sel = self.app.sel.primary();
             (
-                at,
-                self.app.buffer.line(at.row).chars().count(),
+                sel.head,
+                self.app.buffer.line(sel.head.row).chars().count(),
                 self.app.buffer.line_count(),
+                sel.is_empty(),
             )
         });
 
         edit(self);
 
-        let Some((at, before_len, before_lines)) = before else {
+        let Some((at, before_len, before_lines, was_caret)) = before else {
             return;
         };
 
@@ -382,20 +383,46 @@ impl Engine {
         // beat on every Enter.
         let after_lines = self.app.buffer.line_count();
         match after_lines.cmp(&before_lines) {
-            std::cmp::Ordering::Greater if after_lines == before_lines + 1 => {
-                self.app.syntax.nudge_for_split(at.row, at.col);
+            // Rows were inserted at a caret. Describable however many, as long
+            // as the caret really was a caret: rows below shift by that many,
+            // and the text after the caret is now the end of the last added
+            // row. The rows in between are new and had no tokens to move.
+            //
+            // `was_caret` matters because a single selection can still be a
+            // RANGE, and replacing one deletes text this arithmetic never saw.
+            // The old code asked only for `sel.len() == 1`, so replacing a
+            // two-line selection with three lines took the split path and slid
+            // the file's tokens by one row for no reason.
+            std::cmp::Ordering::Greater if was_caret => {
+                let added = after_lines - before_lines;
+                // Where the tail actually went — measured, not assumed.
+                //
+                // This was hardcoded to column zero, and smart Return copies
+                // the indentation, so on every indented line the tokens after
+                // the caret painted one indent to the left of their text. And
+                // the arm only ran for `added == 1`, so Return between braces —
+                // which opens a body and puts the closer on its own line —
+                // renumbered nothing and every token below the caret painted
+                // two rows high.
+                let tail_len = before_len.saturating_sub(at.col);
+                let last = self.app.buffer.line(at.row + added);
+                let tail_col = last.chars().count().saturating_sub(tail_len);
+                self.app
+                    .syntax
+                    .nudge_for_split(at.row, at.col, added, tail_col);
                 return;
             }
-            std::cmp::Ordering::Less if after_lines + 1 == before_lines => {
+            std::cmp::Ordering::Less if was_caret && after_lines + 1 == before_lines => {
                 // Backspace at a line start joins this row onto the one above,
                 // and the caret has already moved there.
                 let head = self.app.sel.primary().head;
                 self.app.syntax.nudge_for_join(head.row, head.col);
                 return;
             }
-            // A paste or a block delete moves more rows than one nudge can
-            // describe. The worker's next frame is the answer; guessing would
-            // paint confident nonsense until it arrives.
+            // A block delete, or any line-count change that started from a
+            // selection, moves more rows than one nudge can describe. The
+            // worker's next frame is the answer; guessing would paint confident
+            // nonsense until it arrives.
             std::cmp::Ordering::Greater | std::cmp::Ordering::Less => return,
             std::cmp::Ordering::Equal => {}
         }
