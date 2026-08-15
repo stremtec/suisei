@@ -89,6 +89,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/DaemonLauncher.swift"
   "$ROOT/suisei-app/Suisei/PerfProbe.swift"
   "$ROOT/suisei-app/Suisei/AnimationTrace.swift"
+  "$ROOT/suisei-app/Suisei/SidebarTrace.swift"
 )
 
 need_engine=0

@@ -452,27 +452,11 @@ struct GitWorkbenchWindowView: View {
             ideal: Self.sidebarWidth,
             max: 350
         )
-        // `SUISEI_DIAG=sidebar`. Nothing is read or formatted when off.
-        .background {
-            GeometryReader { geo in
-                Color.clear.onChange(of: geo.frame(in: .global), initial: true) { _, f in
-                    EditorDiagnostics.reportSidebar(
-                        width: f.width,
-                        originY: f.minY,
-                        safeTop: geo.safeAreaInsets.top,
-                        rowY: sidebarFirstRowY
-                    )
-                }
-            }
-        }
+        // `SUISEI_DIAG=sidebar`. Samples Core Animation's presentation layers
+        // on the display link, because the collapse is an AppKit animation and
+        // a SwiftUI `GeometryReader` never sees its intermediate frames.
+        .background(SidebarPresentationTrace())
     }
-
-    /// Global Y of the sidebar's first row, published by the row itself.
-    ///
-    /// Reported next to the container's own origin so the two can be told
-    /// apart: if this moves and the container does not, the list relaid out; if
-    /// both move together, the container did.
-    @State private var sidebarFirstRowY: CGFloat?
 
     /// Same explicit-geometry pill used by the editor navigator: one authority
     /// owns placement, hit testing and drag travel, so the highlight cannot
@@ -721,13 +705,6 @@ struct GitWorkbenchWindowView: View {
             Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
-        .background {
-            GeometryReader { geo in
-                Color.clear.onChange(of: geo.frame(in: .global).minY, initial: true) { _, y in
-                    if EditorDiagnostics.sidebar { sidebarFirstRowY = y }
-                }
-            }
-        }
     }
 
     private func outlineGroupLabel(_ title: String, symbol: String, count: Int) -> some View {

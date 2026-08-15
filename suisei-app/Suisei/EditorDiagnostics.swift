@@ -22,41 +22,6 @@ enum EditorDiagnostics {
     static let ime = modes.contains("ime") || modes.contains("all")
     static let sidebar = modes.contains("sidebar") || modes.contains("all")
 
-    /// Where the Git workbench's sidebar and its first row actually are, per
-    /// layout pass.
-    ///
-    /// "It opens and about halfway it pops upward" has candidate causes that
-    /// are indistinguishable on screen and need different fixes:
-    ///
-    /// * the LIST relaid out — a label unwrapped, a row changed height — and
-    ///   everything below it moved. Row Y steps; the container does not.
-    /// * the container's top inset changed, because AppKit flipped the titlebar
-    ///   between the full-height-sidebar arrangement and the plain one partway
-    ///   through the animation. Container Y or safe-top steps, and the row
-    ///   follows it by the same amount.
-    /// * the column is not sweeping at all but arriving in a couple of jumps.
-    ///   Width steps.
-    ///
-    /// Printing width, the container's origin, the safe-area top and the first
-    /// row's origin together makes those three different pictures rather than
-    /// one shrug. Logged only when a value moves, since this runs on every
-    /// layout pass of an animating view.
-    private nonisolated(unsafe) static var lastSidebarSample = ""
-
-    static func reportSidebar(
-        width: CGFloat,
-        originY: CGFloat,
-        safeTop: CGFloat,
-        rowY: CGFloat?
-    ) {
-        guard sidebar else { return }
-        let line =
-            "w=\(fmt(width)) y=\(fmt(originY)) safeTop=\(fmt(safeTop)) "
-            + "row1=\(rowY.map(fmt) ?? "-")"
-        guard line != lastSidebarSample else { return }
-        lastSidebarSample = line
-        NSLog("[suisei/sidebar] \(line)")
-    }
 
     /// Every `NSTextInputClient` call, in order, with the state it left.
     ///
