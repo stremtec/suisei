@@ -29,6 +29,11 @@ struct EditorHost: NSViewRepresentable {
     var engine: EngineBridge
     var paneIndex: Int
     var showFocusRing: Bool
+    /// Points along this pane's right edge that something is drawn over —
+    /// today, the minimap. The strip is a SwiftUI overlay, so AppKit's idea of
+    /// what is visible includes the band underneath it: `scrollToVisible`
+    /// happily declared a caret "shown" while the minimap was covering it.
+    var rightInset: CGFloat = 0
 
     /// Last resolved palette, keyed by the SwiftUI colours it came from.
     ///
@@ -137,6 +142,7 @@ struct EditorHost: NSViewRepresentable {
             theme: theme
         )
         view.canvas.ghostSuffix = Self.ghostSuffix(engine, paneIndex: paneIndex)
+        view.rightInset = rightInset
         let tick = editorTick.tick(for: paneIndex)
         view.apply(
             hScroll: tick.hscroll,
@@ -237,6 +243,9 @@ final class EditorScrollView: NSScrollView {
 
     override var isFlipped: Bool { true }
     override class var isCompatibleWithResponsiveScrolling: Bool { true }
+
+    /// Points of this pane's right edge covered by an overlay (the minimap).
+    var rightInset: CGFloat = 0
 
     /// Document width in columns as of the last `apply`.
     private var lastContentCols: Int = 0
@@ -499,13 +508,27 @@ final class EditorScrollView: NSScrollView {
         // to a cell estimate only if the caret line can't be fetched.
         let x: CGFloat = canvas.liveCaretGlyphX(row: row)
             ?? (EditorMetrics.gutter + CGFloat(vcol) * cell)
-        // A couple of columns of horizontal lead and half a line above/below so
-        // the caret never sits flush against an edge.
+        // What has to be on screen, not just the caret.
+        //
+        // DOWN a whole line past the caret's own. Typing `{` gives you `{}`
+        // with the caret between them, and Enter turns that into three lines
+        // with the caret on the middle one — so revealing only the caret line
+        // leaves the closing brace off the bottom, which is the one thing you
+        // wanted to see move. One line of lead is also what an editor wants in
+        // general: the next line is where you are about to be.
+        //
+        // RIGHT past the minimap, plus four columns. The strip is an overlay,
+        // so the scroll view counts the band under it as visible and would
+        // stop scrolling with the caret hidden behind the thumbnail.
+        //
+        // Half a line up and two columns left, unchanged: behind the caret
+        // there is nothing you are about to need, only what you can already
+        // read.
         let rect = CGRect(
             x: max(0, x - cell * 2),
             y: y - lineH * 0.5,
-            width: cell * 4,
-            height: lineH * 2
+            width: cell * 2 + rightInset + cell * 4,
+            height: lineH * 2.5
         )
         canvas.scrollToVisible(rect)
         // Core paints the visible-line window from `app.scroll`; tell it where

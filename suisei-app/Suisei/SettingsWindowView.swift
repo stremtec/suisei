@@ -734,8 +734,8 @@ struct SettingsWindowView: View {
         } footer: {
             Text(
                 minimapProportional
-                    ? "The strip is 12% of its pane, between 44 and 120 points."
-                    : "The strip is 62 points wide in every pane."
+                    ? "The strip is 12% of its pane, between 44 and 62 points."
+                    : "The strip is 62 points wide in every pane — its widest."
             )
         }
     }

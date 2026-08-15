@@ -472,13 +472,32 @@ struct ContentView: View {
             return bottom ? pane.rect.maxY > 0.999 : pane.rect.minY < 0.001
         }
     }
+    /// The minimap's width when it is not scaled to the pane. Also its ceiling
+    /// when it is: proportional makes the strip narrower in a narrow pane, and
+    /// never wider than the fixed setting would have been. Fixed is the widest
+    /// the minimap gets.
+    private static let minimapFixedWidth: CGFloat = 62
+    /// Floor of the proportional strip. Below this the thumbnail stops
+    /// resembling the code it is a picture of.
+    private static let minimapMinWidth: CGFloat = 44
+
     /// How wide the minimap is over a pane this wide.
-    ///
-    /// Clamped at both ends: below ~44pt the thumbnail stops resembling the
-    /// code, and above ~120pt it is taking room from the thing it summarises.
     private func minimapWidth(paneWidth: CGFloat) -> CGFloat {
-        guard minimapProportional, paneWidth > 0 else { return 62 }
-        return min(120, max(44, paneWidth * 0.12))
+        guard minimapProportional, paneWidth > 0 else { return Self.minimapFixedWidth }
+        return min(Self.minimapFixedWidth, max(Self.minimapMinWidth, paneWidth * 0.12))
+    }
+
+    /// Points of a pane's right edge the minimap is drawn over, so the caret
+    /// reveal can scroll past it. Zero when this pane has no strip.
+    ///
+    /// The minimap is an overlay: it does not take the space, it covers it. So
+    /// nothing in AppKit's geometry knows the caret can be behind it, and
+    /// `scrollToVisible` has to be told.
+    private func minimapInset(for pane: EditorPaneSnap) -> CGFloat {
+        guard minimapEnabled, pane.kind == .text,
+              pane.focused || minimapAllPanes
+        else { return 0 }
+        return minimapWidth(paneWidth: editorAreaSize.width * pane.rect.width)
     }
     private var gutterFg: Color { isLightTheme ? Color.black.opacity(0.32) : dim.opacity(0.9) }
     /// Xcode-level current-line wash — barely visible, not a gray slab.
@@ -5894,7 +5913,13 @@ struct ContentView: View {
             theme: theme,
             engine: engine,
             paneIndex: paneIndex,
-            showFocusRing: showFocusRing
+            showFocusRing: showFocusRing,
+            // The unsplit editor has no `EditorPaneSnap` here; its strip is the
+            // island's and covers the whole width.
+            rightInset: pane.map(minimapInset(for:))
+                ?? (islandShowsMinimap
+                    ? minimapWidth(paneWidth: editorAreaSize.width)
+                    : 0)
         )
         // Stable identity per pane — do NOT include tab id (was recreating NSScrollView
         // and wiping native scroll state on every file switch).
