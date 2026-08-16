@@ -87,6 +87,7 @@ fn token_keys_are_stable() {
         // test is what caught exactly that.
         "current_line",
         "invisibles",
+        "model_bg",
     ];
     let actual: Vec<&str> = ThemeToken::ALL.iter().map(|t| t.key()).collect();
     assert_eq!(

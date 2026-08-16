@@ -251,6 +251,9 @@ pub struct ThemeScene {
     pub git_add_bg: u32,
     pub git_del_bg: u32,
     pub git_hunk: u32,
+    /// The 3D workbench's stage. Appended, like every token after it — the
+    /// face reads this struct by field, and the ABI order is the contract.
+    pub model_bg: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1539,6 +1542,7 @@ fn build_theme(app: &App) -> ThemeScene {
         git_add_bg: color_u32(t.git_add_bg),
         git_del_bg: color_u32(t.git_del_bg),
         git_hunk: color_u32(t.git_hunk),
+        model_bg: color_u32(t.model_bg),
     }
 }
 

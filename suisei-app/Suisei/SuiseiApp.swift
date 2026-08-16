@@ -380,8 +380,6 @@ private struct WelcomeSceneRoot: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var recents: [RecentItem] = RecentStore.load()
 
-    private let panelBg = Color(red: 0.13, green: 0.13, blue: 0.135)
-
     var body: some View {
         WelcomeView(
             onCreate: {
@@ -444,7 +442,10 @@ private struct WelcomeSceneRoot: View {
         .windowFullScreenBehavior(.disabled)
         // Clear host so continuous corners + shadow show (content paints the fill).
         .containerBackground(.clear, for: .window)
-        .preferredColorScheme(.dark)
+        // Follows the palette, like every other window. It used to be
+        // pinned dark, which is why a Mac in Light mode opened to a black
+        // card — the one surface in the app that ignored the appearance.
+        .preferredColorScheme(engine.chrome.theme.isLight ? .light : .dark)
         .onAppear {
             recents = RecentStore.load()
             engine.activateInput()

@@ -60,6 +60,16 @@ pub struct Theme {
     /// Tabs and trailing spaces, when they are shown.
     pub invisibles: Rgba,
     pub editor_bg: Rgba,
+    /// The 3D workbench's stage.
+    ///
+    /// White in every palette that ships, on purpose. A model arrives with
+    /// its own materials and its own lighting, and the one thing a viewer
+    /// must not do is change what they look like — a dark stage makes an
+    /// unlit mesh read as a silhouette and a light one as a form. It is a
+    /// theme token rather than a constant so a theme CAN move it; it is not
+    /// derived from `editor_bg` so that switching to a dark theme does not
+    /// silently move it.
+    pub model_bg: Rgba,
     pub status_bg: Rgba,
     pub status_fg: Rgba,
     pub border: Rgba,
@@ -155,6 +165,7 @@ pub static LIGHT: Theme = Theme {
     current_line: rgba(35, 40, 47, 16),
     invisibles: rgb(192, 197, 202),
     editor_bg: rgb(252, 253, 254),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(243, 246, 249),
     status_fg: rgb(75, 82, 90),
     border: rgb(219, 224, 230),
@@ -239,6 +250,7 @@ pub static DARK: Theme = Theme {
     current_line: rgba(233, 233, 233, 16),
     invisibles: rgb(65, 64, 64),
     editor_bg: rgb(27, 26, 24),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(18, 17, 16),
     status_fg: rgb(164, 164, 164),
     border: rgba(255, 255, 255, 20),
@@ -313,6 +325,7 @@ pub static OCEAN: Theme = Theme {
     current_line: rgba(200, 210, 220, 16),
     invisibles: rgb(52, 58, 74),
     editor_bg: rgb(15, 17, 26),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(10, 12, 20),
     status_fg: rgb(180, 190, 200),
     border: rgb(58, 66, 88),
@@ -399,6 +412,7 @@ pub static CATPPUCCIN: Theme = Theme {
     current_line: rgba(205, 214, 244, 16),
     invisibles: rgb(58, 60, 78),
     editor_bg: rgb(30, 30, 46),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(24, 24, 37),
     status_fg: rgb(166, 173, 200),
     border: rgb(49, 50, 68),
@@ -463,6 +477,7 @@ pub static MONOKAI: Theme = Theme {
     current_line: rgba(248, 248, 242, 16),
     invisibles: rgb(62, 62, 54),
     editor_bg: rgb(39, 40, 34),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(30, 31, 26),
     status_fg: rgb(200, 200, 195),
     border: rgb(70, 70, 60),
@@ -527,6 +542,7 @@ pub static NORD: Theme = Theme {
     current_line: rgba(216, 222, 233, 16),
     invisibles: rgb(62, 71, 87),
     editor_bg: rgb(46, 52, 64),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(36, 41, 51),
     status_fg: rgb(200, 207, 218),
     border: rgb(67, 76, 94),
@@ -591,6 +607,7 @@ pub static SOLARIZED: Theme = Theme {
     current_line: rgba(131, 148, 150, 16),
     invisibles: rgb(28, 61, 71),
     editor_bg: rgb(0, 43, 54),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(0, 35, 44),
     status_fg: rgb(120, 135, 138),
     border: rgb(0, 55, 70),
@@ -655,6 +672,7 @@ pub static GRUVBOX: Theme = Theme {
     current_line: rgba(235, 219, 178, 16),
     invisibles: rgb(62, 58, 53),
     editor_bg: rgb(40, 40, 40),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(32, 32, 32),
     status_fg: rgb(220, 205, 165),
     border: rgb(60, 56, 50),
@@ -719,6 +737,7 @@ pub static EVERFOREST: Theme = Theme {
     current_line: rgba(211, 198, 170, 16),
     invisibles: rgb(59, 67, 57),
     editor_bg: rgb(39, 46, 44),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(31, 37, 35),
     status_fg: rgb(200, 188, 160),
     border: rgb(58, 66, 60),
@@ -783,6 +802,7 @@ pub static SAKURA: Theme = Theme {
     current_line: rgba(60, 20, 40, 16),
     invisibles: rgb(225, 202, 212),
     editor_bg: rgb(255, 240, 245),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(255, 225, 235),
     status_fg: rgb(60, 20, 40),
     border: rgb(240, 200, 215),
@@ -847,6 +867,7 @@ pub static NEWSPAPER: Theme = Theme {
     current_line: rgba(125, 130, 172, 16),
     invisibles: rgb(225, 217, 213),
     editor_bg: rgb(255, 243, 229),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(254, 249, 244),
     status_fg: rgb(125, 130, 172),
     border: rgb(228, 223, 225),
@@ -911,6 +932,7 @@ pub static MONO: Theme = Theme {
     current_line: rgba(30, 30, 30, 16),
     invisibles: rgb(219, 219, 219),
     editor_bg: rgb(255, 255, 255),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(245, 245, 245),
     status_fg: rgb(30, 30, 30),
     border: rgb(220, 220, 220),
@@ -977,6 +999,7 @@ pub static MONO_DARK: Theme = Theme {
     current_line: rgba(230, 230, 230, 16),
     invisibles: rgb(48, 48, 48),
     editor_bg: rgb(20, 20, 20),
+    model_bg: rgb(255, 255, 255),
     status_bg: rgb(28, 28, 28),
     status_fg: rgb(230, 230, 230),
     border: rgb(50, 50, 50),
@@ -1063,6 +1086,7 @@ pub enum ThemeToken {
     // elsewhere in a list. Display order is the face's business.
     CurrentLine,
     Invisibles,
+    ModelBg,
 }
 
 impl ThemeToken {
@@ -1089,6 +1113,7 @@ impl ThemeToken {
         Self::Accent,
         Self::CurrentLine,
         Self::Invisibles,
+        Self::ModelBg,
     ];
 
     /// Key written into `~/.suisei.toml`. Stable — renaming one orphans a
@@ -1111,6 +1136,7 @@ impl ThemeToken {
             Self::Punctuation => "punctuation",
             Self::LineNo => "line_no",
             Self::EditorBg => "editor_bg",
+            Self::ModelBg => "model_bg",
             Self::SelectionBg => "selection_bg",
             Self::Cursor => "cursor",
             Self::StatusBg => "status_bg",
@@ -1144,6 +1170,7 @@ impl ThemeToken {
             Self::Accent => "Accent",
             Self::CurrentLine => "Current Line",
             Self::Invisibles => "Invisibles",
+            Self::ModelBg => "3D Stage",
         }
     }
 
@@ -1194,6 +1221,7 @@ impl ThemeToken {
             Self::Punctuation => theme.punctuation,
             Self::LineNo => theme.line_no,
             Self::EditorBg => theme.editor_bg,
+            Self::ModelBg => theme.model_bg,
             Self::SelectionBg => theme.selection_bg,
             Self::Cursor => theme.cursor,
             Self::StatusBg => theme.status_bg,
@@ -1229,6 +1257,7 @@ impl ThemeToken {
             Self::Punctuation => theme.punctuation = color,
             Self::LineNo => theme.line_no = color,
             Self::EditorBg => theme.editor_bg = color,
+            Self::ModelBg => theme.model_bg = color,
             Self::SelectionBg => theme.selection_bg = color,
             Self::Cursor => theme.cursor = color,
             Self::StatusBg => theme.status_bg = color,

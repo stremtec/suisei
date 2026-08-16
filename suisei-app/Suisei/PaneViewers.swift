@@ -108,6 +108,34 @@ struct ViewerPalette: Equatable {
     var dim: Color
     var accent: Color
     var bg: Color
+    /// The 3D stage, which is NOT `bg`.
+    ///
+    /// A model brings its own materials and its own lighting, and the stage
+    /// behind it decides what they look like: the same unlit mesh reads as a
+    /// silhouette on a dark ground and as a form on a light one. So the stage
+    /// does not follow the editor theme — it is white in every shipped
+    /// palette, its own `model_bg` token so a theme can still move it, and
+    /// overridable per-scene from the workbench.
+    var stage: Color = .white
+
+    /// The same palette with text that reads against the STAGE.
+    ///
+    /// The controls floating over the model — the view menu, the transport —
+    /// are on the stage, not on the editor. With the stage pinned to white a
+    /// dark theme's `fg` is white on white, so the overlays get ink chosen
+    /// from what is actually behind them. `override` is the workbench's
+    /// per-scene background, which moves the same question.
+    func overStage(_ override: Color? = nil) -> ViewerPalette {
+        let ground = override ?? stage
+        let c = NSColor(ground).usingColorSpace(.sRGB) ?? .white
+        let luma =
+            0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
+        var out = self
+        out.bg = ground
+        out.fg = luma > 0.55 ? Color(white: 0.13) : Color(white: 0.94)
+        out.dim = luma > 0.55 ? Color(white: 0.42) : Color(white: 0.66)
+        return out
+    }
 }
 
 // MARK: - Controls, hoisted to the window's toolbar

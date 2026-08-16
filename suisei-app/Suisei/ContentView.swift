@@ -372,13 +372,7 @@ struct ContentView: View {
     }
 
     /// GUI contrast boost: TUI colors wash out on Retina; push fg/dim for readability.
-    private var isLightTheme: Bool {
-        let c = theme.editorBg
-        let r = Double((c >> 16) & 0xFF)
-        let g = Double((c >> 8) & 0xFF)
-        let b = Double(c & 0xFF)
-        return (0.299 * r + 0.587 * g + 0.114 * b) > 150
-    }
+    private var isLightTheme: Bool { theme.isLight }
     private var fg: Color {
         let base = theme.color(theme.fg)
         // Darker on light themes for Retina contrast.
@@ -421,7 +415,9 @@ struct ContentView: View {
     /// The theme, handed to the non-text viewers, which live outside this file
     /// and so cannot reach `theme` themselves.
     private var viewerPalette: ViewerPalette {
-        ViewerPalette(fg: fg, dim: dim, accent: accent, bg: editorBg)
+        ViewerPalette(
+            fg: fg, dim: dim, accent: accent, bg: editorBg,
+            stage: theme.color(theme.modelBg))
     }
 
     /// The File tab is on screen right now — so the ⓘ button is showing

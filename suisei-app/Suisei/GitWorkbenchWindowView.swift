@@ -125,13 +125,7 @@ struct GitWorkbenchWindowView: View {
         return luminance > 0.58 ? .black : .white
     }
 
-    private var isLightTheme: Bool {
-        let color = theme.editorBg
-        let r = Double((color >> 16) & 0xFF)
-        let g = Double((color >> 8) & 0xFF)
-        let b = Double(color & 0xFF)
-        return (0.299 * r + 0.587 * g + 0.114 * b) > 150
-    }
+    private var isLightTheme: Bool { theme.isLight }
 
     private var repositoryName: String {
         if !model.repositoryName.isEmpty { return model.repositoryName }

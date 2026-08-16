@@ -63,16 +63,13 @@ struct WelcomeView: View {
 
     @Environment(\.colorScheme) private var scheme
 
-    /// Near-black control rail — solid on purpose so the art reads as the
-    /// only “hero” surface (glass on both sides made the card muddy).
-    private var controlBg: Color {
-        scheme == .dark
-            ? Color(red: 0.06, green: 0.06, blue: 0.07)
-            : Color(red: 0.08, green: 0.08, blue: 0.09)
-    }
-    private let label = Color.white.opacity(0.92)
-    private let muted = Color.white.opacity(0.48)
-    private let hairline = Color.white.opacity(0.08)
+    private var ink: WelcomeInk { .of(scheme) }
+    /// Solid control rail on purpose, so the art reads as the only “hero”
+    /// surface (glass on both sides made the card muddy).
+    private var controlBg: Color { ink.rail }
+    private var label: Color { ink.label }
+    private var muted: Color { ink.muted }
+    private var hairline: Color { ink.hairline }
 
     @State private var appeared = false
     /// Boot has warmed enough to reveal the launch actions. Until then the
@@ -139,7 +136,7 @@ struct WelcomeView: View {
                 Image(systemName: "xmark.circle.fill")
                     .symbolRenderingMode(.hierarchical)
                     .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(ink.muted)
             }
             .buttonStyle(.plain)
             .help("Close")
@@ -161,9 +158,9 @@ struct WelcomeView: View {
         .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                .strokeBorder(ink.hairline, lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.45), radius: 28, y: 14)
+        .shadow(color: .black.opacity(scheme == .dark ? 0.45 : 0.22), radius: 28, y: 14)
         .gesture(WindowDragGesture())
         .background(WelcomeWindowChrome(cornerRadius: Self.cornerRadius))
         .onAppear {
@@ -236,7 +233,7 @@ struct WelcomeView: View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Suisei")
                 .font(brandWordmarkFont)
-                .foregroundStyle(Color.white)
+                .foregroundStyle(ink.brand)
                 .lineLimit(1)
             VStack(alignment: .leading, spacing: 3) {
                 Text("© 2025–2026 Stemtec. All rights reserved.")
@@ -348,7 +345,7 @@ struct WelcomeView: View {
         HStack(spacing: 10) {
             ProgressView()
                 .controlSize(.small)
-                .tint(.white.opacity(0.55))
+                .tint(ink.muted)
             Text(bootLabel.isEmpty ? "Loading…" : bootLabel)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(muted)
@@ -511,8 +508,7 @@ struct WelcomeView: View {
                                 item: folder,
                                 fileCount: recentFiles(in: folder).count,
                                 expanded: expandedRecents.contains(folder.path),
-                                label: label,
-                                muted: muted,
+                                ink: ink,
                                 onToggle: {
                                     withAnimation(.snappy(duration: 0.22)) {
                                         if expandedRecents.contains(folder.path) {
@@ -537,8 +533,7 @@ struct WelcomeView: View {
                                     ForEach(files) { file in
                                         RecentRow(
                                             item: file,
-                                            label: label,
-                                            muted: muted,
+                                            ink: ink,
                                             indented: true
                                         ) {
                                             onOpenRecent(file.path)
@@ -560,7 +555,7 @@ struct WelcomeView: View {
                                     .padding(.bottom, 2)
                             }
                             ForEach(loose) { item in
-                                RecentRow(item: item, label: label, muted: muted) {
+                                RecentRow(item: item, ink: ink) {
                                     onOpenRecent(item.path)
                                 }
                             }
@@ -593,9 +588,10 @@ struct WelcomeView: View {
 /// gesture rather than from the button, so it stayed pressed if the pointer
 /// left while held.
 ///
-/// The rail is a fixed near-black regardless of the system appearance, so the
-/// colour scheme is forced dark for the controls on it. Without that, a Mac in
-/// light mode draws light buttons on a black panel.
+/// The rail follows the system appearance, and so do the controls on it. It
+/// used to be a fixed near-black with the scheme forced dark on top, which is
+/// why a Mac in Light mode still opened to a black window — the fix is one
+/// palette that moves, not two that disagree.
 private struct WelcomeActionButton: View {
     var systemImage: String
     var title: String
@@ -616,7 +612,59 @@ private struct WelcomeActionButton: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.large)
-        .environment(\.colorScheme, .dark)
+    }
+}
+
+/// The welcome rail's colours.
+///
+/// The left column is a solid panel with the hero art beside it, and it was a
+/// near-black in BOTH appearances with white ink on it — so a Mac in Light
+/// mode opened to a black window with white text, which is the one surface in
+/// the app that never followed the system.
+///
+/// The art does not follow. A nebula is a photograph: its caption is white
+/// because the image behind it is dark, and lightening the plate under it
+/// would only make the credit unreadable.
+struct WelcomeInk {
+    var rail: Color
+    /// The wordmark, which carries more weight than body text.
+    var brand: Color
+    var label: Color
+    var muted: Color
+    var hairline: Color
+    /// Row hover, and the file-count chip.
+    var hover: Color
+    var chip: Color
+    var icon: Color
+    var iconStrong: Color
+
+    static func of(_ scheme: ColorScheme) -> WelcomeInk {
+        scheme == .dark
+            ? WelcomeInk(
+                rail: Color(red: 0.06, green: 0.06, blue: 0.07),
+                brand: .white,
+                label: .white.opacity(0.92),
+                muted: .white.opacity(0.48),
+                hairline: .white.opacity(0.08),
+                hover: .white.opacity(0.08),
+                chip: .white.opacity(0.08),
+                icon: .white.opacity(0.52),
+                iconStrong: .white.opacity(0.85)
+            )
+            : WelcomeInk(
+                // Not pure white: the card sits over the desktop with a
+                // shadow, and a #FFF panel beside a photograph reads as a
+                // hole rather than as a surface.
+                rail: Color(red: 0.965, green: 0.965, blue: 0.972),
+                brand: Color(white: 0.09),
+                label: .black.opacity(0.88),
+                muted: .black.opacity(0.52),
+                hairline: .black.opacity(0.12),
+                hover: .black.opacity(0.06),
+                chip: .black.opacity(0.07),
+                icon: .black.opacity(0.55),
+                iconStrong: .black.opacity(0.82)
+            )
     }
 }
 
@@ -624,8 +672,7 @@ private struct RecentFolderRow: View {
     var item: RecentItem
     var fileCount: Int
     var expanded: Bool
-    var label: Color
-    var muted: Color
+    var ink: WelcomeInk
     var onToggle: () -> Void
     var onOpen: () -> Void
     @State private var hovering = false
@@ -636,7 +683,7 @@ private struct RecentFolderRow: View {
                 Button(action: onToggle) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(muted)
+                        .foregroundStyle(ink.muted)
                         .frame(width: 12, height: 12)
                 }
                 .buttonStyle(.plain)
@@ -646,35 +693,33 @@ private struct RecentFolderRow: View {
                 // column.
                 Image(systemName: item.isProject ? "shippingbox.fill" : "folder.fill")
                     .font(.system(size: 12))
-                    .foregroundStyle(
-                        Color.white.opacity(item.isProject ? 0.85 : 0.55)
-                    )
+                    .foregroundStyle(item.isProject ? ink.iconStrong : ink.icon)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(label)
+                        .foregroundStyle(ink.label)
                         .lineLimit(1)
                     Text(item.subtitle)
                         .font(.system(size: 10))
-                        .foregroundStyle(muted)
+                        .foregroundStyle(ink.muted)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 if fileCount > 0 {
                     Text("\(fileCount)")
                         .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(muted)
+                        .foregroundStyle(ink.muted)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.white.opacity(0.08)))
+                        .background(Capsule().fill(ink.chip))
                 }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                    .fill(hovering ? Color.white.opacity(0.08) : Color.clear)
+                    .fill(hovering ? ink.hover : Color.clear)
             )
             .contentShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
         }
@@ -686,8 +731,7 @@ private struct RecentFolderRow: View {
 
 private struct RecentRow: View {
     var item: RecentItem
-    var label: Color
-    var muted: Color
+    var ink: WelcomeInk
     var indented: Bool = false
     var onOpen: () -> Void
     @State private var hovering = false
@@ -697,15 +741,15 @@ private struct RecentRow: View {
             HStack(spacing: 10) {
                 Image(systemName: "doc.text")
                     .font(.system(size: 12))
-                    .foregroundStyle(Color.white.opacity(0.50))
+                    .foregroundStyle(ink.icon)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(label)
+                        .foregroundStyle(ink.label)
                         .lineLimit(1)
                     Text(item.subtitle)
                         .font(.system(size: 10))
-                        .foregroundStyle(muted)
+                        .foregroundStyle(ink.muted)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
@@ -715,7 +759,7 @@ private struct RecentRow: View {
             .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
-                    .fill(hovering ? Color.white.opacity(0.08) : Color.clear)
+                    .fill(hovering ? ink.hover : Color.clear)
             )
             .contentShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
         }

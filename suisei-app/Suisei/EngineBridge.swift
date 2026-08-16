@@ -751,6 +751,23 @@ struct ThemeSnap: Equatable {
     var gitAddBg: UInt32
     var gitDelBg: UInt32
     var gitHunk: UInt32
+    /// The 3D workbench's stage. White in every shipped palette on purpose —
+    /// a model carries its own materials and lighting, and a stage that
+    /// changed with the editor theme would change what they look like.
+    var modelBg: UInt32
+
+    /// Whether this palette is a LIGHT one.
+    ///
+    /// Perceived luminance of the editor surface, which is the one colour that
+    /// covers most of the window. Every window that has to pick an AppKit
+    /// appearance asks this — the editor, the Git workbench, and the welcome
+    /// card — and it was written out three times before it lived here.
+    var isLight: Bool {
+        let r = Double((editorBg >> 16) & 0xFF)
+        let g = Double((editorBg >> 8) & 0xFF)
+        let b = Double(editorBg & 0xFF)
+        return (0.299 * r + 0.587 * g + 0.114 * b) > 150
+    }
 
     static let empty = ThemeSnap(
         name: "ocean",
@@ -760,7 +777,7 @@ struct ThemeSnap: Equatable {
         keyword: 0x00DCFF, string: 0x96E6B4, comment: 0x606C7A,
         number: 0xFFB482, typeName: 0x64C8FF, function: 0xFFDC78,
         macroName: 0xFD8F3F, namespace: 0x9EF1DD, parameter: 0xC8C8CD, property: 0x78C3B4, constant: 0xD0BF69, operatorColor: 0xDDDDDD, punctuation: 0x94949B,
-        windowBg_: 0x0F111A, border: 0x3A4258, panelBg: 0x191C26, panelBorder: 0x4682C8, panelSelBg: 0x2D4664, panelSelFg: 0xE6EBFF, explorerBg: 0x0C0E16, explorerFg: 0xBEC8D2, explorerSelected: 0x00DCFF, statusFg: 0xB4BEC8, muted: 0x646E82, success: 0x64C88C, warning: 0xDCB450, errorColor: 0xF07878, accentFg: 0x000000, searchBg: 0x68581A, completionBg: 0x191C26, completionSelected: 0x00DCFF, completionBorder: 0x00DCFF, terminalBg: 0x080C08, gitAddBg: 0x142820, gitDelBg: 0x2D1618, gitHunk: 0x64B4FF
+        windowBg_: 0x0F111A, border: 0x3A4258, panelBg: 0x191C26, panelBorder: 0x4682C8, panelSelBg: 0x2D4664, panelSelFg: 0xE6EBFF, explorerBg: 0x0C0E16, explorerFg: 0xBEC8D2, explorerSelected: 0x00DCFF, statusFg: 0xB4BEC8, muted: 0x646E82, success: 0x64C88C, warning: 0xDCB450, errorColor: 0xF07878, accentFg: 0x000000, searchBg: 0x68581A, completionBg: 0x191C26, completionSelected: 0x00DCFF, completionBorder: 0x00DCFF, terminalBg: 0x080C08, gitAddBg: 0x142820, gitDelBg: 0x2D1618, gitHunk: 0x64B4FF, modelBg: 0xFFFFFF
     )
 
 
@@ -6198,7 +6215,8 @@ final class EngineBridge: ObservableObject {
             terminalBg: snap.terminal_bg,
             gitAddBg: snap.git_add_bg,
             gitDelBg: snap.git_del_bg,
-            gitHunk: snap.git_hunk
+            gitHunk: snap.git_hunk,
+            modelBg: snap.model_bg
         )
     }
 
