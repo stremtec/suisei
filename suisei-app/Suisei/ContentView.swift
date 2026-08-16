@@ -655,34 +655,7 @@ struct ContentView: View {
         // editor plane that continues into the detail column. Painting the
         // chrome colour here made the navigator and renderer two unrelated
         // islands even when their frames touched.
-        //
-        // Except under the inspector, and that exception is the whole of "the
-        // toolbar area is a different colour from the window". The titlebar is
-        // transparent, so what shows through it is this plane — but the
-        // inspector paints `windowBg` inside its own frame, which starts below
-        // the titlebar. So the band over that column was the EDITOR's surface
-        // and the column under it was the WINDOW's, meeting at a hard
-        // horizontal edge with nothing between them.
-        //
-        // Visible on the two default palettes and on no others, because they
-        // are the ones where those surfaces differ — light 252,253,254 against
-        // 246,248,251, dark 27,26,24 against 18,17,16, the editor lighter in
-        // both. Nine of the thirteen have `bg == editor_bg` and show nothing.
-        //
-        // The fix belongs HERE rather than on the inspector: extending that
-        // column's own background upward was tried and did not reach, because
-        // the row it sits in already ignores the top safe area and there was
-        // no further to go. What was missing is that the plane underneath
-        // changes colour at that column's edge.
-        .background(
-            ZStack(alignment: .trailing) {
-                editorBg
-                if outlineVisible {
-                    shellBase.frame(width: CGFloat(inspectorW))
-                }
-            }
-            .ignoresSafeArea()
-        )
+        .background(editorBg.ignoresSafeArea())
         // Source Control's chrome, verbatim. It re-applies on every SwiftUI
         // update, which is what stops AppKit from quietly restoring an opaque
         // titlebar band, and it un-hides the REAL traffic lights — the split
