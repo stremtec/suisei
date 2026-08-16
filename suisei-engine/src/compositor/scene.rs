@@ -77,6 +77,8 @@ pub struct SpanScene {
 #[derive(Debug, Clone)]
 pub struct EditorLineScene {
     pub line_no: u32,
+    /// Debugger marks for this row — see [`DEBUG_STOPPED`].
+    pub debug_sign: u8,
     pub text: String,
     pub is_cursor: bool,
     pub caret_vcol: u32,
@@ -2370,23 +2372,30 @@ fn build_lines_at(
     // doc comment names this caller but which takes `&mut self` for its canon
     // cache. The band holds `&App`. Matching the two keys here is what the
     // breakpoint block already does one screen up.
-    let stopped_line: Option<usize> = if is_current {
-        app.dap.current_line.and_then(|line| {
-            let cur = app.dap.current_path.as_deref()?;
-            let path_str = app
-                .tabs
-                .buffers
-                .get(tab)
-                .and_then(|t| t.filename.as_ref())
-                .map(|p| p.to_string_lossy().to_string())?;
-            let same = path_str == cur
-                || std::fs::canonicalize(&path_str).ok().map(|c| c.to_string_lossy().to_string())
-                    == std::fs::canonicalize(cur).ok().map(|c| c.to_string_lossy().to_string());
-            same.then_some(line)
-        })
+    let pane_path: Option<String> = if is_current {
+        app.tabs
+            .buffers
+            .get(tab)
+            .and_then(|t| t.filename.as_ref())
+            .map(|p| p.to_string_lossy().to_string())
     } else {
         None
     };
+    let same_file = |other: &str| -> bool {
+        let Some(ref mine) = pane_path else { return false };
+        mine == other
+            || std::fs::canonicalize(mine).ok().map(|c| c.to_string_lossy().to_string())
+                == std::fs::canonicalize(other).ok().map(|c| c.to_string_lossy().to_string())
+    };
+    let stopped_line: Option<usize> = app.dap.current_line.and_then(|line| {
+        let cur = app.dap.current_path.as_deref()?;
+        same_file(cur).then_some(line)
+    });
+    // The frame being READ, marked only when it differs from the stop —
+    // otherwise every stop would draw a hollow arrow under its own solid one.
+    let frame_line: Option<usize> = app.dap.frame_location().and_then(|(p, line)| {
+        (same_file(&p) && Some(line) != stopped_line).then_some(line)
+    });
     // GUI multi-cursor: every caret in `app.sel` except the primary (the
     // primary is painted through caret_*/sel_*). Resolved once for the whole
     // band, not per row/chunk. Empty in the single-cursor case, so the hot
@@ -2630,8 +2639,14 @@ fn build_lines_at(
                         gsign |= 0x40;
                     }
                 }
+            }
+            let mut dsign = 0u8;
+            if !wrap_cont {
                 if stopped_line == Some(row) {
-                    gsign |= DEBUG_STOPPED;
+                    dsign |= DEBUG_STOPPED;
+                }
+                if frame_line == Some(row) {
+                    dsign |= DEBUG_FRAME;
                 }
             }
             // Cap at the FFI limit (SUISEI_MAX_SPANS = 24), markers first:
@@ -2672,6 +2687,7 @@ fn build_lines_at(
                 sel_v1: sv1,
                 spans,
                 git_sign: gsign,
+                debug_sign: dsign,
                 visual_row,
             });
             visual_row = visual_row.saturating_add(1);
@@ -2717,20 +2733,27 @@ fn visual_width_str(s: &str) -> usize {
 /// ```text
 ///   0x03  kind: 0 none, 1 added, 2 modified, 3 deleted (the face's
 ///         `gitSignKind` masks with this)
-///   0x04  the program is STOPPED on this line (owned by the DAP path)
+///   0x04  (free — the debugger's marks moved to `debug_sign`)
 ///   0x08  the hunk is staged        → bar is filled rather than hollow
 ///   0x10  first row of its hunk     → the bar caps here
 ///   0x20  last row of its hunk      → the bar caps here
 ///   0x40  breakpoint on this line   (owned by the DAP path)
 ///   0x80  soft-wrap continuation    (owned by the line builder)
 /// ```
-/// The debugger is stopped on this row.
+/// The program is stopped on this row — the top of the call stack.
 ///
-/// It rides the git-sign byte because the breakpoint bit already does, so the
-/// face's per-row draw reads one byte for both — and because a pane field
-/// would be the wrong shape: two panes can show the same document, and the
-/// answer is per ROW, not per pane.
-pub const DEBUG_STOPPED: u8 = 0x04;
+/// In `debug_sign` and no longer in the git byte. It started there because the
+/// breakpoint bit is there, and that was one bit's worth of thinking: the
+/// moment the SELECTED frame needed its own mark, the git byte had none spare
+/// and the debugger's two facts would have lived in two different fields.
+/// `debug_sign` costs nothing — it is the line struct's reserved `_pad`.
+pub const DEBUG_STOPPED: u8 = 0x01;
+/// The frame the user has SELECTED in the call stack, when it is not the stop.
+///
+/// Drawn hollow. Solid means "execution is here"; hollow means "you are reading
+/// this one" — and conflating them is what let clicking a caller convince the
+/// editor that the program had moved.
+pub const DEBUG_FRAME: u8 = 0x02;
 pub const GIT_HUNK_STAGED: u8 = 0x08;
 pub const GIT_HUNK_FIRST: u8 = 0x10;
 pub const GIT_HUNK_LAST: u8 = 0x20;

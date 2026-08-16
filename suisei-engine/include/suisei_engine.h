@@ -58,7 +58,7 @@ typedef struct SuiseiEditorLineC {
   uint8_t is_cursor;
   uint8_t git_sign; /* 0 none, 1 add, 2 mod, 3 del */
   uint8_t span_count;
-  uint8_t _pad;
+  uint8_t debug_sign; /* 0x01 stopped here, 0x02 the frame being read */
   uint32_t caret_vcol;
   uint32_t caret_utf16;
   uint32_t sel_v0; /* UINT32_MAX = none */

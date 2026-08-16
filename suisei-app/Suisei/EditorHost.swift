@@ -1623,11 +1623,20 @@ final class EditorCanvasView: NSView {
             // After the caret wash on purpose: the two are frequently the same
             // row, and the one that has to win is the one saying where the
             // PROGRAM is.
-            if line.isStoppedLine {
-                renderer.addRect(Self.stopBandRect(rowRect), colors.debugStop)
-                for bar in Self.stopArrowBars(atY: y, lineH: lineH) {
-                    renderer.addRect(bar, colors.debugStopInk)
-                }
+            if line.isStoppedLine || line.isFrameLine {
+                // The frame you are READING gets a fainter band and a hollow
+                // arrow. Same information, said quieter, because the loud one
+                // has to stay reserved for where execution actually is.
+                let solid = line.isStoppedLine
+                renderer.addRect(
+                    Self.stopBandRect(rowRect),
+                    solid ? colors.debugStop : colors.debugStop.withAlphaComponent(
+                        colors.debugStop.alphaComponent * 0.45)
+                )
+                let bars = solid
+                    ? Self.stopArrowBars(atY: y, lineH: lineH)
+                    : Self.frameArrowBars(atY: y, lineH: lineH)
+                for bar in bars { renderer.addRect(bar, colors.debugStopInk) }
             }
             let flash = liveFlash(line.lineNo)
             if flash > 0.01 {
@@ -1921,11 +1930,25 @@ final class EditorCanvasView: NSView {
                 colors.cursorLine.setFill()
                 rowRect.fill()
             }
-            if line.isStoppedLine {
-                colors.debugStop.setFill()
+            if line.isStoppedLine || line.isFrameLine {
+                let solid = line.isStoppedLine
+                (solid
+                    ? colors.debugStop
+                    : colors.debugStop.withAlphaComponent(
+                        colors.debugStop.alphaComponent * 0.45)).setFill()
                 Self.stopBandRect(rowRect).fill()
+                let arrow = Self.stopArrowPath(atY: y, lineH: lineH)
                 colors.debugStopInk.setFill()
-                Self.stopArrowPath(atY: y, lineH: lineH).fill()
+                if solid {
+                    arrow.fill()
+                } else {
+                    // Hollow: the same outline, stroked. A different SHAPE
+                    // would be a second thing to learn; the same shape emptied
+                    // out reads as "this one, but not the live one".
+                    arrow.lineWidth = 1.5
+                    colors.debugStopInk.setStroke()
+                    arrow.stroke()
+                }
             }
             // A row someone else just wrote. Behind the text, ahead of nothing
             // else: it has to be legible under the glyphs, and it fades out.
@@ -2864,6 +2887,28 @@ final class EditorCanvasView: NSView {
         path.line(to: CGPoint(x: f.minX, y: f.maxY))
         path.close()
         return path
+    }
+
+    /// The hollow arrow, for the Metal path: the outline as four thin bars.
+    ///
+    /// A stroked triangle is not available where only rectangles are, so the
+    /// outline is drawn as its edges — a left bar for the back, and a stepped
+    /// diagonal for each of the two sides.
+    static func frameArrowBars(atY y: CGFloat, lineH: CGFloat) -> [CGRect] {
+        let f = stopArrowFrame(atY: y, lineH: lineH)
+        let t: CGFloat = 1.5
+        var bars: [CGRect] = [
+            CGRect(x: f.minX, y: f.minY, width: t, height: f.height)
+        ]
+        let steps = max(3, Int(f.height / 2))
+        let dy = f.height / CGFloat(steps * 2)
+        let dx = f.width / CGFloat(steps)
+        for i in 0..<steps {
+            let x = f.minX + dx * CGFloat(i)
+            bars.append(CGRect(x: x, y: f.minY + dy * CGFloat(i), width: dx + t, height: t))
+            bars.append(CGRect(x: x, y: f.maxY - dy * CGFloat(i) - t, width: dx + t, height: t))
+        }
+        return bars
     }
 
     /// The same arrow for the Metal path, which has rectangles and nothing

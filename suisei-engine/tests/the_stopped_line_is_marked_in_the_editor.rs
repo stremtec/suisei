@@ -19,7 +19,7 @@
 //! ```
 
 use suisei_engine::Engine;
-use suisei_engine::compositor::{DEBUG_STOPPED, build_editor_band};
+use suisei_engine::compositor::{DEBUG_FRAME, DEBUG_STOPPED, build_editor_band};
 
 const SRC: &str = "\
 fn first() {}
@@ -55,7 +55,7 @@ fn stopped_rows(engine: &Engine) -> Vec<usize> {
     let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0, 200);
     lines
         .iter()
-        .filter(|l| l.git_sign & DEBUG_STOPPED != 0)
+        .filter(|l| l.debug_sign & DEBUG_STOPPED != 0)
         .map(|l| l.line_no as usize - 1)
         .collect()
 }
@@ -107,6 +107,64 @@ fn a_breakpoint_and_a_stop_on_one_row_do_not_erase_each_other() {
         .find(|l| l.line_no == 4)  // display number of buffer row 3
         .expect("the row is in the band");
 
-    assert!(row.git_sign & DEBUG_STOPPED != 0, "stopped");
+    assert!(row.debug_sign & DEBUG_STOPPED != 0, "stopped");
     assert!(row.git_sign & 0x40 != 0, "and breakpointed");
+}
+
+/// Reading a caller must not move where the program is.
+///
+/// `select_frame` used to write the chosen frame into `current_path` /
+/// `current_line`, so clicking the second frame of a recursion made the editor
+/// claim execution had moved there — and the real stop became unfindable. The
+/// stop stays solid; the frame being read is marked hollow, separately.
+#[test]
+fn selecting_a_caller_marks_it_without_moving_the_stop() {
+    let (mut engine, path) = engine_at("frames.rs");
+    engine.app.dap.current_path = Some(path.clone());
+    engine.app.dap.current_line = Some(3);
+    engine.app.dap.stack = vec![
+        frame(1, &path, 3),
+        frame(2, &path, 6),
+    ];
+    engine.app.dap.selected_frame = 1;
+
+    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0, 200);
+    let mark = |row: u32| {
+        lines
+            .iter()
+            .find(|l| l.line_no == row + 1)
+            .map(|l| l.debug_sign)
+            .unwrap_or(0)
+    };
+
+    assert!(mark(3) & DEBUG_STOPPED != 0, "the stop is still the stop");
+    assert!(mark(3) & DEBUG_FRAME == 0, "and is not also drawn as a frame");
+    assert!(mark(6) & DEBUG_FRAME != 0, "the caller is marked");
+    assert!(mark(6) & DEBUG_STOPPED == 0, "but not as execution");
+}
+
+/// Selecting the TOP frame — which is what a fresh stop does — must not draw a
+/// hollow arrow underneath its own solid one.
+#[test]
+fn the_top_frame_is_not_drawn_twice() {
+    let (mut engine, path) = engine_at("top.rs");
+    engine.app.dap.current_path = Some(path.clone());
+    engine.app.dap.current_line = Some(3);
+    engine.app.dap.stack = vec![frame(1, &path, 3)];
+    engine.app.dap.selected_frame = 0;
+
+    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0, 200);
+    let row = lines.iter().find(|l| l.line_no == 4).expect("in band");
+    assert!(row.debug_sign & DEBUG_STOPPED != 0);
+    assert!(row.debug_sign & DEBUG_FRAME == 0);
+}
+
+fn frame(id: i64, path: &str, line: usize) -> suisei_core::dap::StackFrameInfo {
+    suisei_core::dap::StackFrameInfo {
+        id,
+        name: format!("f{id}"),
+        path: path.to_string(),
+        line,
+        column: 0,
+    }
 }

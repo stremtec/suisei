@@ -49,16 +49,20 @@ struct EditorLine: Equatable, Identifiable {
     var selU1: UInt32
     /// Git gutter: low 7 bits 0 none / 1 add / 2 mod / 3 del; bit 0x80 = soft-wrap continuation.
     var gitSign: UInt8
+    var debugSign: UInt8 = 0
     var spans: [SyntaxSpan]
     var hasSelection: Bool { selV0 != UInt32.max && selV1 != UInt32.max && selV1 > selV0 }
     var isWrapContinuation: Bool { (gitSign & 0x80) != 0 }
     /// DAP breakpoint on this buffer line (first visual segment only).
     var hasBreakpoint: Bool { (gitSign & 0x40) != 0 }
-    /// The debugger is stopped on this row.
+    /// The program is stopped on this row — the top of the call stack.
+    var isStoppedLine: Bool { (debugSign & 0x01) != 0 }
+    /// The frame the user selected in the call stack, when it is NOT the stop.
     ///
-    /// Rides the same byte as the breakpoint bit so a row's draw reads one
-    /// value for both. `suisei_engine::compositor::scene::DEBUG_STOPPED`.
-    var isStoppedLine: Bool { (gitSign & 0x04) != 0 }
+    /// Solid means "execution is here"; hollow means "you are reading this
+    /// one". Conflating them let clicking a caller convince the editor the
+    /// program had moved.
+    var isFrameLine: Bool { (debugSign & 0x02) != 0 }
     /// Kind alone: 0 none, 1 added, 2 modified, 3 deleted.
     ///
     /// `& 0x03`, not `& 0x3F`. The wider mask let the hunk flags through into
@@ -3497,6 +3501,9 @@ final class EngineBridge: ObservableObject {
                 let isCursor = base.load(fromByteOffset: 4, as: UInt8.self) != 0
                 let gitSign = base.load(fromByteOffset: 5, as: UInt8.self)
                 let spanCount = Int(base.load(fromByteOffset: 6, as: UInt8.self))
+                // Byte 7 was the struct's reserved `_pad`; it carries the
+                // debugger's marks now, so this costs no bytes on the wire.
+                let debugSign = base.load(fromByteOffset: 7, as: UInt8.self)
                 let caret = base.load(fromByteOffset: 8, as: UInt32.self)
                 let caretU16 = base.load(fromByteOffset: 12, as: UInt32.self)
                 let sel0 = base.load(fromByteOffset: 16, as: UInt32.self)
@@ -3520,7 +3527,7 @@ final class EngineBridge: ObservableObject {
                     paneId: UInt8(pane), lineNo: lineNo, text: text, isCursor: isCursor,
                     caretVCol: caret, caretUTF16: caretU16, selV0: sel0, selV1: sel1,
                     selU0: selU0, selU1: selU1,
-                    gitSign: gitSign, spans: spans
+                    gitSign: gitSign, debugSign: debugSign, spans: spans
                 ))
             }
         }

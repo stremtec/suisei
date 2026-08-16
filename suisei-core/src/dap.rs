@@ -529,6 +529,17 @@ impl DapClient {
             .unwrap_or_default()
     }
 
+    /// Where the user is LOOKING: the selected frame's file and line.
+    ///
+    /// Distinct from `current_path`/`current_line`, which are where the
+    /// program is stopped. They are the same frame until you click another one
+    /// in the call stack, and the editor has to be able to draw both — solid
+    /// for execution, hollow for the frame being read.
+    pub fn frame_location(&self) -> Option<(String, usize)> {
+        let f = self.stack.get(self.selected_frame)?;
+        (!f.path.is_empty()).then(|| (f.path.clone(), f.line))
+    }
+
     /// Stopped line if the session is currently stopped in `path`.
     pub fn current_line_for(&mut self, path: &str) -> Option<usize> {
         let line = self.current_line?;
@@ -1618,8 +1629,15 @@ impl DapClient {
         self.selected_frame = idx;
         self.focus_row = idx;
         let frame = &self.stack[idx];
-        self.current_path = Some(frame.path.clone());
-        self.current_line = Some(frame.line);
+        // `current_path` / `current_line` are NOT touched. They mean "where the
+        // program is stopped", which is the top of the stack and does not move
+        // while you read the stack — writing the selected frame into them made
+        // the editor claim execution was in the caller you had just clicked,
+        // and the real stop became unfindable.
+        //
+        // Where you are LOOKING is `selected_frame`, and the editor reads it
+        // through `frame_location`.
+        let _ = frame;
         // Take the editor there. Selecting a frame moved the location and did
         // not ask anyone to follow it, so the variables changed to a frame the
         // user could not see — and in every debugger, clicking a frame in the

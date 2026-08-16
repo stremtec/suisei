@@ -49,7 +49,8 @@ pub struct SuiseiEditorLineC {
     pub is_cursor: u8,
     pub git_sign: u8,
     pub span_count: u8,
-    pub _pad: u8,
+    /// Debugger marks — was `_pad`. See `compositor::DEBUG_STOPPED`.
+    pub debug_sign: u8,
     pub caret_vcol: u32,
     /// Caret as a UTF-16 offset into `text` — the GUI places the caret with
     /// real glyph advances, not the core's terminal cell grid.
@@ -688,6 +689,7 @@ fn write_editor_line(dst: &mut SuiseiEditorLineC, line: &crate::compositor::Edit
     dst.line_no = line.line_no;
     dst.is_cursor = u8::from(line.is_cursor);
     dst.git_sign = line.git_sign;
+    dst.debug_sign = line.debug_sign;
     dst.caret_vcol = line.caret_vcol;
     dst.caret_utf16 = line.caret_utf16;
     dst.sel_u0 = line.sel_u0;
@@ -4533,26 +4535,46 @@ mod tests {
         assert_eq!(field_text(&dap_snapshot(&engine).status), "failed to launch");
     }
 
-    /// Selecting a frame asks the editor to follow it. It set the location and
-    /// told nobody, so the variables changed to a frame the user could not
-    /// see; in every debugger, clicking a frame is how you go and look at it.
+    /// Selecting a frame asks the editor to follow it — WITHOUT moving the
+    /// stop.
+    ///
+    /// It used to write the chosen frame into `current_path`/`current_line`,
+    /// and this test asserted that. Those two mean "where the program is
+    /// stopped", so clicking the second frame of a recursion made the editor
+    /// claim execution had moved into the caller and the real stop became
+    /// unfindable. Where you are LOOKING is `selected_frame`, read through
+    /// `frame_location`; where the program IS does not move while you read.
     #[test]
-    fn selecting_a_frame_takes_the_editor_there() {
+    fn selecting_a_frame_takes_the_editor_there_without_moving_the_stop() {
         use suisei_core::dap::StackFrameInfo;
         let mut engine = Box::new(SuiseiEngine(Engine::new()));
-        engine.0.app_mut().dap.stack = vec![
-            StackFrameInfo { id: 1, name: "main".into(), path: "/tmp/a.rs".into(), line: 3, column: 0 },
-            StackFrameInfo { id: 2, name: "inner".into(), path: "/tmp/b.rs".into(), line: 9, column: 0 },
-        ];
-        engine.0.app_mut().dap.location_dirty = false;
+        {
+            let dap = &mut engine.0.app_mut().dap;
+            dap.stack = vec![
+                StackFrameInfo { id: 1, name: "main".into(), path: "/tmp/a.rs".into(), line: 3, column: 0 },
+                StackFrameInfo { id: 2, name: "inner".into(), path: "/tmp/b.rs".into(), line: 9, column: 0 },
+            ];
+            // The stop, as a real one arrives: the top of the stack.
+            dap.current_path = Some("/tmp/a.rs".into());
+            dap.current_line = Some(3);
+            dap.location_dirty = false;
+        }
 
         suisei_engine_dap_select_frame(&mut *engine, 1);
 
         let dap = &engine.0.app().dap;
         assert_eq!(dap.selected_frame, 1);
-        assert_eq!(dap.current_path.as_deref(), Some("/tmp/b.rs"));
-        assert_eq!(dap.current_line, Some(9));
         assert!(dap.location_dirty, "the editor is asked to follow");
+        assert_eq!(
+            dap.frame_location(),
+            Some(("/tmp/b.rs".to_string(), 9)),
+            "and follows to the frame being read"
+        );
+        assert_eq!(
+            (dap.current_path.as_deref(), dap.current_line),
+            (Some("/tmp/a.rs"), Some(3)),
+            "while the stop stays where the program actually is"
+        );
     }
 
     /// Frames and their lines survive the crossing, 0-based as core stores them.

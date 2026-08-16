@@ -325,11 +325,16 @@ impl App {
             return;
         }
         self.dap.location_dirty = false;
-        let Some(path) = self.dap.current_path.clone() else {
-            return;
-        };
-        let Some(line) = self.dap.current_line else {
-            return;
+        // The frame you selected, falling back to the stop. Clicking a caller
+        // in the call stack is how every debugger says "take me there", and
+        // the stop itself is frame 0 — so one path serves both and there is no
+        // second rule to keep in step.
+        let (path, line) = match self.dap.frame_location() {
+            Some(pair) => pair,
+            None => match (self.dap.current_path.clone(), self.dap.current_line) {
+                (Some(p), Some(l)) => (p, l),
+                _ => return,
+            },
         };
         // Open / switch to file if needed
         let same = self
