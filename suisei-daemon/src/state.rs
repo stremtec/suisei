@@ -14,7 +14,7 @@
 //! ages out of the aggregate until it reports again.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,6 +46,14 @@ struct EditorReport {
     project: String,
     /// When this editor last reported — the per-client stall clock.
     last_seen: Instant,
+    /// Which report came last, when two arrive inside one clock tick.
+    ///
+    /// `Instant` has finite resolution, and two windows reporting microseconds
+    /// apart compare EQUAL. "Latest wins" then fell through to `HashMap`
+    /// iteration order, so the aggregate showed an arbitrary one of the two
+    /// projects — reproduced as a test that failed roughly two runs in five.
+    /// A counter has no ties.
+    seq: u64,
 }
 
 pub struct DaemonState {
@@ -55,6 +63,9 @@ pub struct DaemonState {
     /// sources). Disconnect removes the entry — that is the primary
     /// lifecycle; [`REPORT_TTL`] only ages out the wedged.
     editors: Mutex<HashMap<u64, EditorReport>>,
+    /// Handed out to each report so "latest" is an ordering rather than a
+    /// clock reading. See [`EditorReport::seq`].
+    reports: AtomicU64,
 }
 
 impl DaemonState {
@@ -62,6 +73,7 @@ impl DaemonState {
         Arc::new(DaemonState {
             started: Instant::now(),
             health: AtomicU8::new(health::HEALTHY),
+            reports: AtomicU64::new(0),
             editors: Mutex::new(HashMap::new()),
         })
     }
@@ -82,7 +94,7 @@ impl DaemonState {
         let mut lsp_state: u8 = 0;
         let mut dap_state: u8 = 0;
         let mut project = String::new();
-        let mut project_seen: Option<Instant> = None;
+        let mut project_seq: Option<u64> = None;
         for r in editors
             .values()
             .filter(|r| r.last_seen.elapsed() < REPORT_TTL)
@@ -90,9 +102,9 @@ impl DaemonState {
             sessions = sessions.saturating_add(r.lsp_sessions);
             lsp_state = lsp_state.max(r.lsp_state);
             dap_state = dap_state.max(r.dap_state);
-            if !r.project.is_empty() && project_seen.map(|t| r.last_seen > t).unwrap_or(true) {
+            if !r.project.is_empty() && project_seq.is_none_or(|n| r.seq > n) {
                 project.clone_from(&r.project);
-                project_seen = Some(r.last_seen);
+                project_seq = Some(r.seq);
             }
         }
         Status {
@@ -127,12 +139,19 @@ impl DaemonState {
             dap_state: 0,
             project: String::new(),
             last_seen: Instant::now(),
+            seq: 0,
         });
         slot.lsp_sessions = reported.lsp_sessions;
         slot.lsp_state = reported.lsp_state;
         slot.dap_state = reported.dap_state;
         slot.project.clone_from(&reported.project);
         slot.last_seen = Instant::now();
+        slot.seq = self.next_seq();
+    }
+
+    /// The next report's place in the order.
+    fn next_seq(&self) -> u64 {
+        self.reports.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// An editor disconnected: its state leaves the aggregate at once.
@@ -151,16 +170,19 @@ impl DaemonState {
             dap_state: 0,
             project: String::new(),
             last_seen: Instant::now(),
+            seq: 0,
         });
         slot.lsp_sessions = sessions;
         slot.lsp_state = state;
         slot.last_seen = Instant::now();
+        slot.seq = self.next_seq();
     }
     pub fn set_dap(&self, state: u8) {
         let mut editors = lock(&self.editors);
         if let Some(slot) = editors.get_mut(&LOCAL_CLIENT) {
             slot.dap_state = state;
             slot.last_seen = Instant::now();
+        slot.seq = self.next_seq();
         }
     }
     pub fn set_project(&self, path: &str) {
@@ -171,10 +193,12 @@ impl DaemonState {
             dap_state: 0,
             project: String::new(),
             last_seen: Instant::now(),
+            seq: 0,
         });
         slot.project.clear();
         slot.project.push_str(path);
         slot.last_seen = Instant::now();
+        slot.seq = self.next_seq();
     }
     /// Health is the daemon's own liveness, not a reported field — it never
     /// expires.

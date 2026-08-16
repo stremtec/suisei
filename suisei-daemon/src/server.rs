@@ -378,6 +378,12 @@ mod tests {
         .to_report_frame()
         .write_to(&mut w1)
         .unwrap();
+        // Wait for alpha to land BEFORE sending beta. Two sockets are served
+        // by two threads and nothing orders them, so writing both and then
+        // asserting which was "latest" was asserting a coin toss — it failed
+        // about two runs in five. The aggregate genuinely follows the last
+        // report the daemon SAW, and this is how a test says which that is.
+        wait_for_status(&mut w1, |s| s.project == "/tmp/alpha");
         Status {
             lsp_sessions: 2,
             lsp_state: 3,

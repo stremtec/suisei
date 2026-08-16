@@ -114,20 +114,21 @@ struct WelcomeView: View {
                             width: max(0, geo.size.width - Self.leftWidth),
                             height: geo.size.height
                         )
-                        // Soft bleed of the control rail into the art so the
-                        // seam is a dissolve, not a hard cut.
+                        // A hairline, not a dissolve.
+                        //
+                        // This was a 48pt bleed of the rail into the art. On a
+                        // near-black rail it read as the photograph fading in;
+                        // on a light one it is a white veil smeared over the
+                        // left eighth of a nebula, which is a smudge and not a
+                        // transition. A panel meeting an image is an edge —
+                        // every app that puts one beside the other draws it as
+                        // one — and an edge does not have to be told which
+                        // appearance it is in.
                         .overlay(alignment: .leading) {
-                            LinearGradient(
-                                colors: [
-                                    controlBg.opacity(0.95),
-                                    controlBg.opacity(0.35),
-                                    .clear,
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                            .frame(width: 48)
-                            .allowsHitTesting(false)
+                            Rectangle()
+                                .fill(ink.hairline)
+                                .frame(width: 1)
+                                .allowsHitTesting(false)
                         }
                 }
             }
