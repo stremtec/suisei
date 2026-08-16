@@ -351,8 +351,15 @@ struct SettingsWindowView: View {
         // A toolbar participant makes SwiftUI use the modern full-height
         // sidebar/titlebar arrangement on macOS 26. It is intentionally
         // invisible and carries no interaction or accessibility surface.
+        //
+        // Sized, because a bare `Rectangle` has no intrinsic size and expands
+        // to whatever it is offered — and in a `NavigationSplitView` this
+        // shares the LEADING toolbar region with the root's
+        // `.navigation`-placed history control. A participant that only has
+        // to exist should not also be claiming that region's width.
         .toolbar {
             Rectangle()
+                .frame(width: 1, height: 1)
                 .hidden()
                 .accessibilityHidden(true)
         }

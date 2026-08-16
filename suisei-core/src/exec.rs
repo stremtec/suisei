@@ -45,6 +45,41 @@ const EXTRA_DIRS: &[&str] = &[
     "/opt/local/bin",        // MacPorts
 ];
 
+/// Apple's own toolchain, which is on nobody's `PATH`.
+///
+/// `lldb-dap` — the debug adapter for Rust, C and C++ — ships inside Xcode and
+/// inside the Command Line Tools, and **neither directory is on `PATH` even in
+/// a terminal**. Developers reach these through `xcrun`, so a search that only
+/// walks `PATH` concludes the debugger is not installed on a Mac that has had
+/// it all along. Measured on this machine: `which lldb-dap` finds nothing while
+/// both `/Applications/Xcode.app/Contents/Developer/usr/bin/lldb-dap` and
+/// `/Library/Developer/CommandLineTools/usr/bin/lldb-dap` exist.
+///
+/// `xcode-select -p` is asked rather than assumed, because it is the thing that
+/// decides WHICH toolchain is active — a machine with both installed can have
+/// either selected, and hard-coding the Xcode path would silently use the one
+/// the user switched away from. The literal Command Line Tools directory is
+/// still appended: `xcode-select` can point at an Xcode that has since been
+/// deleted, and then the CLT copy is the one that works.
+fn developer_dirs() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    // Absolute path deliberately: this runs while we are still working out
+    // where anything is, so it cannot depend on the search it is feeding.
+    if let Ok(o) = Command::new("/usr/bin/xcode-select").arg("-p").output() {
+        if o.status.success() {
+            let selected = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if !selected.is_empty() {
+                out.push(PathBuf::from(&selected).join("usr/bin"));
+            }
+        }
+    }
+    let clt = PathBuf::from("/Library/Developer/CommandLineTools/usr/bin");
+    if !out.contains(&clt) {
+        out.push(clt);
+    }
+    out
+}
+
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -71,6 +106,12 @@ fn search_dirs() -> &'static [PathBuf] {
                 if !out.contains(&p) {
                     out.push(p);
                 }
+            }
+        }
+        // Last: a tool the user installed themselves outranks Apple's copy.
+        for p in developer_dirs() {
+            if !out.contains(&p) {
+                out.push(p);
             }
         }
         out
@@ -161,6 +202,42 @@ mod tests {
         for (a, b) in inherited.iter().zip(dirs.iter()) {
             assert_eq!(a, b, "in the order the user wrote it");
         }
+    }
+
+    /// Apple's toolchain is not on `PATH` — not even in a terminal — and
+    /// `lldb-dap`, the debug adapter for Rust, C and C++, lives only there on a
+    /// stock Mac. Measured: `which lldb-dap` finds nothing while the file
+    /// exists under both Xcode and the Command Line Tools.
+    #[test]
+    fn the_developer_toolchain_is_searched() {
+        let clt = Path::new("/Library/Developer/CommandLineTools/usr/bin");
+        assert!(
+            search_dirs().iter().any(|d| d == clt),
+            "the Command Line Tools bin is searched: {:?}",
+            search_dirs()
+        );
+    }
+
+    /// And the toolchain `xcode-select` actually points at, which on a machine
+    /// with both installed is not necessarily the one a hard-coded path would
+    /// have guessed.
+    #[test]
+    fn the_selected_toolchain_is_searched_when_there_is_one() {
+        let Ok(out) = Command::new("/usr/bin/xcode-select").arg("-p").output() else {
+            return;
+        };
+        if !out.status.success() {
+            return;
+        }
+        let selected = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if selected.is_empty() {
+            return;
+        }
+        let bin = PathBuf::from(selected).join("usr/bin");
+        assert!(
+            search_dirs().contains(&bin),
+            "the selected toolchain is searched: {bin:?}"
+        );
     }
 
     /// The whole point: the directories Finder's environment leaves out are in

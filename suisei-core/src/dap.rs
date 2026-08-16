@@ -2377,25 +2377,20 @@ fn install_hint(lang: &str) -> String {
     }
 }
 
+/// Whether an adapter can actually be run.
+///
+/// **`crate::exec`, not `PATH`.** This used to walk `std::env::var("PATH")`
+/// itself, which is the exact failure `exec` was written to end: an app
+/// launched from Finder inherits `/usr/bin:/bin:/usr/sbin:/sbin`, so Homebrew,
+/// cargo and Apple's own toolchain are all invisible. The adapters were already
+/// SPAWNED through `exec::tool` — the note at the top of this file says so —
+/// and this gate was refusing to reach that line, so the debugger reported
+/// "install lldb-dap" on machines where `exec::tool` would have started it.
+///
+/// The gate and the spawn have to agree about what "installed" means, and now
+/// they ask the same function.
 fn command_exists(cmd: &str) -> bool {
-    if cmd.contains('/') {
-        return Path::new(cmd).is_file();
-    }
-    let Ok(path) = std::env::var("PATH") else {
-        return false;
-    };
-    for dir in std::env::split_paths(&path) {
-        let p = dir.join(cmd);
-        if p.is_file() {
-            return true;
-        }
-        // Windows
-        let p_exe = dir.join(format!("{cmd}.exe"));
-        if p_exe.is_file() {
-            return true;
-        }
-    }
-    false
+    crate::exec::is_available(cmd)
 }
 
 fn drain_stderr(stderr: Option<std::process::ChildStderr>) {
@@ -2621,6 +2616,27 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    /// A tool that exists but is not on `PATH` must still count as installed.
+    ///
+    /// `lldb-dap` is the real case and the reported one: it ships inside Xcode
+    /// and inside the Command Line Tools, neither of which is on anyone's
+    /// `PATH`, so a Finder-launched Suisei — whose `PATH` is
+    /// `/usr/bin:/bin:/usr/sbin:/sbin` — told the user to install a debugger
+    /// their Mac already had. The gate walked `PATH` while the spawn went
+    /// through `exec::tool`; the two have to ask the same question.
+    ///
+    /// Skips rather than fails where no Apple toolchain is installed.
+    #[test]
+    fn a_tool_off_path_still_counts_as_installed() {
+        let Some(found) = crate::exec::find("lldb-dap") else {
+            return;
+        };
+        assert!(
+            command_exists("lldb-dap"),
+            "exec found it at {found:?} but the adapter gate said no"
+        );
+    }
+
     use super::*;
 
     fn response(seq: u64, command: &str, body: Value) -> Value {

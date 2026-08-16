@@ -59,30 +59,62 @@ enum WindowChrome {
     /// editor's custom 48pt chrome, but not for a conventional Settings window.
     /// Keeping AppKit's real buttons in their native hierarchy preserves the
     /// system's placement, focus and accessibility behavior.
+    /// **Every write here is guarded, and that is the point.**
+    ///
+    /// This runs from `ThemedWindowChrome`, which used to re-run it on every
+    /// SwiftUI update of the view it was attached to. Two of these properties
+    /// are not idempotent from AppKit's side:
+    ///
+    /// - Assigning `styleMask` — even inserting a flag the window already has,
+    ///   because `insert` is get-modify-set on a computed property — makes
+    ///   AppKit rebuild the window's frame view, and **the toolbar is inside
+    ///   it**. Every item is destroyed and made again.
+    /// - Assigning `appearance` a fresh `NSAppearance` object with the same
+    ///   name re-resolves the effective appearance through the entire view
+    ///   tree, toolbar included.
+    ///
+    /// Do either while the pointer is over a toolbar button and the button
+    /// under the pointer is replaced: its hover highlight restarts (a pill
+    /// that flickers) and a click never completes, because the view that took
+    /// the `mouseDown` is gone before the `mouseUp` arrives. That is the
+    /// Settings window's back/forward arrows, reported as "클릭이 안 됨".
+    ///
+    /// Writing a window property that already holds the value is waste even
+    /// when it is harmless, so the guards are not a workaround for that one
+    /// symptom — they are what this function should always have done.
     static func applyThemedTitlebar(
         to window: NSWindow,
         background: NSColor,
         light: Bool,
         opaque: Bool = false
     ) {
-        window.appearance = NSAppearance(named: themedAppearanceName(light: light))
+        let appearance = themedAppearanceName(light: light)
+        if window.appearance?.name != appearance {
+            window.appearance = NSAppearance(named: appearance)
+        }
         // The detail view paints its own semantic background. Keeping the
         // window itself transparent is what lets NavigationSplitView's native
         // sidebar material continue through the titlebar and blend like System
         // Settings; an opaque window flattened it into a mismatched dark slab.
-        window.backgroundColor = opaque ? background : .clear
-        window.isOpaque = opaque
-        window.titlebarAppearsTransparent = true
-        window.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
-        window.titlebarSeparatorStyle = .none
-        window.isMovableByWindowBackground = false
+        let wantBackground: NSColor = opaque ? background : .clear
+        if window.backgroundColor != wantBackground {
+            window.backgroundColor = wantBackground
+        }
+        if window.isOpaque != opaque { window.isOpaque = opaque }
+        if !window.titlebarAppearsTransparent { window.titlebarAppearsTransparent = true }
+        let mask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
+        if !window.styleMask.isSuperset(of: mask) { window.styleMask.insert(mask) }
+        if window.titlebarSeparatorStyle != .none { window.titlebarSeparatorStyle = .none }
+        if window.isMovableByWindowBackground { window.isMovableByWindowBackground = false }
         if window.identifier == settingsIdentifier {
             // System Settings grows in height, not width. The sidebar +
             // grouped detail are composed for one column; stretching it
             // sideways just pads empty glass.
             let width: CGFloat = 780
-            window.minSize = NSSize(width: width, height: 520)
-            window.maxSize = NSSize(width: width, height: 12_000)
+            let min = NSSize(width: width, height: 520)
+            let max = NSSize(width: width, height: 12_000)
+            if window.minSize != min { window.minSize = min }
+            if window.maxSize != max { window.maxSize = max }
             if window.frame.width != width {
                 var frame = window.frame
                 frame.size.width = width
@@ -92,9 +124,9 @@ enum WindowChrome {
 
         for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
             guard let button = window.standardWindowButton(kind) else { continue }
-            button.isHidden = false
-            button.alphaValue = 1
-            button.isEnabled = true
+            if button.isHidden { button.isHidden = false }
+            if button.alphaValue != 1 { button.alphaValue = 1 }
+            if !button.isEnabled { button.isEnabled = true }
         }
 
         if opaque {
@@ -216,12 +248,53 @@ struct ThemedWindowChrome: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let v = NSView(frame: .zero)
         v.isHidden = true
-        DispatchQueue.main.async { apply(v) }
+        DispatchQueue.main.async { apply(v, context.coordinator) }
         return v
     }
 
+    /// Re-apply only when what we would apply has actually changed.
+    ///
+    /// This used to schedule `apply` on every update, and this view is
+    /// attached to windows whose bodies re-render whenever core publishes —
+    /// the Settings window shows live core state, so that is often. Even with
+    /// `applyThemedTitlebar` now guarded property by property, asking the
+    /// question once per SwiftUI pass is work with a known answer.
+    ///
+    /// The window is part of the key: an `NSViewRepresentable` can be moved to
+    /// another window, and the chrome has not been applied to that one.
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { apply(nsView) }
+        let want = Applied(
+            background: background, light: light, opaque: opaque,
+            identifier: identifier, minContentSize: minContentSize
+        )
+        let coordinator = context.coordinator
+        guard coordinator.applied != want || coordinator.window !== nsView.window else { return }
+        DispatchQueue.main.async { apply(nsView, coordinator) }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    /// What was last written, and where.
+    struct Applied: Equatable {
+        var background: NSColor
+        var light: Bool
+        var opaque: Bool
+        var identifier: NSUserInterfaceItemIdentifier?
+        var minContentSize: NSSize?
+    }
+
+    final class Coordinator {
+        var applied: Applied?
+        weak var window: NSWindow?
+    }
+
+    private func apply(_ nsView: NSView, _ coordinator: Coordinator) {
+        coordinator.applied = Applied(
+            background: background, light: light, opaque: opaque,
+            identifier: identifier, minContentSize: minContentSize
+        )
+        coordinator.window = nsView.window
+        apply(nsView)
     }
 
     private func apply(_ nsView: NSView) {
