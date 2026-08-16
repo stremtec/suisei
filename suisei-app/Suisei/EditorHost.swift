@@ -953,6 +953,7 @@ final class EditorCanvasView: NSView {
     private var quickHelpPopover: NSPopover?
     private var datatipPopover: NSPopover?
     private var datatipWork: DispatchWorkItem?
+    private var datatipAsk: DispatchWorkItem?
     private var datatipSymbol: String?
     var colors = Colors(
         bg: .textBackgroundColor, fg: .labelColor, dim: .secondaryLabelColor,
@@ -2857,27 +2858,34 @@ final class EditorCanvasView: NSView {
     /// none of them legible, which is most of what read as "UI가 좀 구린디".
     /// The gutter already has its own vocabulary; the band belongs to the code.
     static func stopBandRect(_ row: CGRect) -> CGRect {
-        let left = max(row.minX, EditorMetrics.gutter - EditorMetrics.gutterTextGap / 2)
+        // Starts at the code, which is now also where the arrow stops — the
+        // band must not wash over the mark that points into it.
+        let left = max(row.minX, EditorMetrics.gutter)
         return CGRect(x: left, y: row.minY, width: max(0, row.maxX - left), height: row.height)
     }
 
-    /// The instruction pointer: a solid right-pointing triangle, in the change
-    /// bar's lane at the very left of the gutter.
+    /// The instruction pointer: a right-pointing triangle in the air gap
+    /// between the line number and the code.
     ///
-    /// A SHAPE and not a colour, deliberately. That strip already spends its
+    /// A SHAPE and not a colour, deliberately. The gutter already spends its
     /// colours on git — added, deleted, staged — so a debugger arguing in hue
     /// would be a fourth meaning for the same pixels, and colour alone is what
-    /// Increase Contrast and a colour-blind reader cannot use. An arrow means
-    /// "execution is here" whatever it is painted.
+    /// Increase Contrast and a colour-blind reader cannot use.
     ///
-    /// Left of the breakpoint chip so the two coexist: a breakpoint you are
-    /// stopped ON is the normal case, and one hiding the other would make the
-    /// most common moment in a debugger the one the gutter cannot describe.
+    /// **In the text gap, not in the change bar's lane.** It started at
+    /// `gitBarX`, which is exactly where the git stripe is drawn, so a line
+    /// that was both modified and stopped had the arrow sitting on top of its
+    /// hunk bar — two marks fighting for six points. `gutterTextGap` is the
+    /// twelve points of air the layout already leaves between the number and
+    /// the code, it belongs to nothing else, and an arrow there points AT the
+    /// line rather than merely being beside it.
     static func stopArrowFrame(atY y: CGFloat, lineH: CGFloat) -> CGRect {
-        let h = min(lineH - 4, 11)
-        let w = h * 0.72
+        let h = min(lineH - 4, 10)
+        let w = h * 0.7
+        // Right-aligned in the gap, two points clear of the text.
+        let right = EditorMetrics.gutter - 2
         return CGRect(
-            x: gitBarX, y: (y + (lineH - h) / 2).rounded(),
+            x: right - w, y: (y + (lineH - h) / 2).rounded(),
             width: w, height: h
         )
     }
@@ -3423,12 +3431,31 @@ final class EditorCanvasView: NSView {
             cancelDatatip()
             return
         }
-        // Already showing this one: leave it alone. Re-asking on every mouse
-        // move within a word would restart the popover under the pointer.
-        if symbol == datatipSymbol, datatipPopover?.isShown == true { return }
+        // Already on this one: leave it alone. Re-asking on every mouse move
+        // within a word would restart the popover under the pointer.
+        if symbol == datatipSymbol { return }
 
+        datatipAsk?.cancel()
         datatipWork?.cancel()
+        datatipSymbol = symbol
         let point = p
+
+        // ASK early, SHOW later — two clocks, because they are two different
+        // decisions. Asking is invisible and cheap, so it can happen almost at
+        // once; showing is the commitment and needs the dwell that stops a
+        // pointer crossing a line from strobing popovers.
+        //
+        // With one clock the delays ADDED: the card opened after the dwell and
+        // only then went to the adapter, so what the user waited through was
+        // dwell + round-trip and it read as "팝오버가 넘 늦게뜸". Now the
+        // answer is usually already in by the time the card appears.
+        let ask = DispatchWorkItem { [weak self] in
+            guard let self, let engine = self.engine, engine.dap.state == .stopped else { return }
+            engine.requestDatatip(symbol)
+        }
+        datatipAsk = ask
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.datatipAskDelay, execute: ask)
+
         let work = DispatchWorkItem { [weak self] in
             self?.showDatatip(symbol, at: point)
         }
@@ -3436,14 +3463,20 @@ final class EditorCanvasView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.datatipDwell, execute: work)
     }
 
-    /// Long enough that crossing a line does not fire, short enough that
-    /// deliberately resting on a word feels answered rather than ignored.
-    private static let datatipDwell: TimeInterval = 0.45
+    /// Long enough not to fire on a pointer that is merely passing through,
+    /// short enough that the answer is in flight before the card is due.
+    private static let datatipAskDelay: TimeInterval = 0.10
+    /// When the card appears. Xcode's is about this; past ~0.4s a datatip stops
+    /// feeling like an answer and starts feeling like a wait.
+    private static let datatipDwell: TimeInterval = 0.28
 
     private func showDatatip(_ symbol: String, at p: CGPoint) {
         guard let engine, engine.dap.state == .stopped else { return }
-        engine.requestDatatip(symbol)
-        datatipSymbol = symbol
+        // Normally the ask already went out on the earlier clock; this covers
+        // the case where it was cancelled or the state changed under it.
+        if engine.datatip == nil, !engine.datatipPending {
+            engine.requestDatatip(symbol)
+        }
 
         let popover = NSPopover()
         popover.behavior = .transient
@@ -3461,6 +3494,8 @@ final class EditorCanvasView: NSView {
     }
 
     private func cancelDatatip() {
+        datatipAsk?.cancel()
+        datatipAsk = nil
         datatipWork?.cancel()
         datatipWork = nil
         guard datatipSymbol != nil else { return }

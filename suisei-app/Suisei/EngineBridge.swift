@@ -4241,16 +4241,20 @@ final class EngineBridge: ObservableObject {
             datatipPending = false
             return
         }
-        // Two seconds at 40ms. An adapter that has not answered by then is one
+        // Roughly two seconds. An adapter that has not answered by then is one
         // that is not going to, and a spinner that never stops is worse than a
         // popover that says nothing is here.
-        guard status == 2, attempt < 50 else {
+        guard status == 2, attempt < 90 else {
             datatipPending = false
             return
         }
+        // Tight at first, then back off. A local adapter answers in a few
+        // milliseconds and a fixed 40ms grid added up to 40ms of nothing to
+        // every datatip — which is felt, because this races a 280ms dwell.
+        let delay = attempt < 12 ? 0.008 : 0.05
         let work = DispatchWorkItem { [weak self] in self?.pollDatatip(attempt: attempt + 1) }
         datatipPoll = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     func refreshHover() {
