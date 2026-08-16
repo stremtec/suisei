@@ -1456,7 +1456,18 @@ struct ContentView: View {
         // sake: it is what swallows the editor card's shadow on this side, and
         // it covers the status bar's strip so the column runs unbroken from
         // the very top of the window to its floor.
-        .background(shellBase)
+        //
+        // The background ignores the top safe area, and that is what makes the
+        // sentence above true rather than intended. The titlebar is
+        // transparent, so whatever is beneath it shows through; beneath it on
+        // this side was the ROOT's window-wide `editorBg` rather than this
+        // column, so the band over the inspector was the editor's surface and
+        // the column under it was the window's. Light and dark are exactly the
+        // palettes where those two differ — 252,253,254 against 246,248,251,
+        // and 27,26,24 against 18,17,16 — which is why the step showed on the
+        // defaults and on none of the nine palettes whose `bg` IS their
+        // `editor_bg`.
+        .background(shellBase.ignoresSafeArea(edges: .top))
     }
 
     /// Editor and terminal as one surface.
