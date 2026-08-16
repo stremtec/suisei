@@ -454,6 +454,45 @@
        · 네비게이터 모드 버튼들이 무조건 같은 짓을 함. 어떤 목록을 보여줄지는
          키보드를 누가 갖는지에 대한 진술이 아님.
 
+☐ 20. 3D 뷰어 후속 — glb/gltf·fbx 지원, 애니메이션 클립 셀렉터 + 재생바
+     (사용자 chamchi 요청. #8 이 열어놓은 자리에 붙는 것들.)
+
+     ── 포맷 ─────────────────────────────────────────────────────────────
+     · glTF / GLB: **macOS 가 못 읽음. 측정함.** 최소 유효 glTF 2.0 삼각형
+       하나(.gltf 와 .glb 양쪽)를 만들어 SCNScene(url:) 에 물렸더니 둘 다
+       "could not be opened" 로 거부. /System/Library/Frameworks 에 glTF
+       프레임워크도 없음(ModelIO, SceneKit 뿐).
+       → 방법 둘:
+         (a) GLTFKit2 를 벤더링. Apple 이 만든 오픈소스고 SCNScene 을 내줌.
+             SwiftTerm 을 third_party 에 벤더링한 것과 같은 모양이라 전례는 있음.
+             비용: 의존성 하나 + VENDOR.md.
+         (b) 열 때 usdz 로 변환. Reality Composer 나 usdzconvert 가 필요하고,
+             사용자 머신에 있으리라 가정할 수 없음.
+       → (a) 가 맞아 보임. glTF 는 게임 에셋 파이프라인의 사실상 교환 포맷이라
+         "3D 뷰어인데 glb 를 못 연다" 는 빈칸이 큼.
+     · FBX: **아무것도 없음.** Autodesk FBX SDK 가 필요하고 그건 재배포 조건이
+       붙는 상용 SDK임. #8 에서 .blend/.max 와 같은 이유로 뺐고, 그 판단은 그대로.
+       → 현실적인 답은 "FBX 는 안 됨" 을 placeholder 가 말해주는 것.
+         지금도 Binary 로 떨어져서 파일이 뭔지는 말해줌.
+
+     ── 애니메이션 ───────────────────────────────────────────────────────
+     · 클립을 셀 수 있는지도 측정함. macOS 에 딸려 오는 실제 애니메이션 DAE 로:
+         B389_loop.dae    meshes=1 clips=1  clip "square_GEP-anim"  6.00s
+         shaderball.usdz  meshes=4 clips=0
+       node.animationKeys + animationPlayer(forKey:) 로 **이름과 길이**가 나옴.
+       셀렉터 드롭다운(이름)과 재생바(길이)가 설 자리는 이미 있음.
+     · SCNAnimationPlayer 가 play()/stop()/paused/speed 를 줌 → 재생·일시정지·
+       속도까지는 바로 됨.
+     · **불확실한 것 하나**: 스크럽(재생바를 끌어 특정 시각으로 이동). 플레이어에
+       위치를 직접 쓰는 API 가 없음. CAAnimation 백엔드면 timeOffset 으로 되지만
+       모든 클립이 그렇다고 가정하면 안 됨 — 만들기 전에 재봐야 함.
+     · #8 의 ModelStats 가 이미 animations 개수를 세고 있음(인스펙터에 표시).
+       클립 목록으로 바꾸면 그 카운트가 셀렉터의 재료가 됨.
+
+     ── 정리 ─────────────────────────────────────────────────────────────
+     glb/gltf = 벤더링 하나로 열림 · fbx = 라이선스 때문에 못 함 ·
+     애니메이션 셀렉터/재생 = 재료 있음, 스크럽만 미확인.
+
 새로운 이슈2. 설정에서 상단 네이티브 화살표 툴바 클릭이 안됨. 호버링하면 호버링시에 뜨는 회색 알약이 깜빡거림.
 
 **feature**
