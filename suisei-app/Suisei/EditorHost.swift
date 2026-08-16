@@ -951,6 +951,9 @@ final class EditorCanvasView: NSView {
     private var contextMenuSymbol: String = ""
     /// Held so a second Quick Help replaces the first rather than stacking.
     private var quickHelpPopover: NSPopover?
+    private var datatipPopover: NSPopover?
+    private var datatipWork: DispatchWorkItem?
+    private var datatipSymbol: String?
     var colors = Colors(
         bg: .textBackgroundColor, fg: .labelColor, dim: .secondaryLabelColor,
         accent: .controlAccentColor, sel: .selectedTextBackgroundColor,
@@ -3382,12 +3385,89 @@ final class EditorCanvasView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        updateHunkHover(convert(event.locationInWindow, from: nil))
+        let p = convert(event.locationInWindow, from: nil)
+        updateHunkHover(p)
+        updateDatatipHover(p)
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         setHoveredHunk(nil)
+        cancelDatatip()
+    }
+
+    // MARK: - Datatips
+
+    /// Point at a variable while stopped and it says what it is worth.
+    ///
+    /// Only while STOPPED: a running program has no frame to evaluate in, and
+    /// a datatip over a program that is not paused would be asking a question
+    /// that has no answer yet. Xcode behaves the same way, for the same reason.
+    ///
+    /// The dwell is what keeps this from being a nuisance. Moving the pointer
+    /// across a line crosses a dozen identifiers, and a popover that opened on
+    /// each of them would be a strobe — so nothing is asked until the pointer
+    /// has been still on one word.
+    private func updateDatatipHover(_ p: CGPoint) {
+        guard let engine, engine.dap.state == .stopped else {
+            cancelDatatip()
+            return
+        }
+        // Gutter presses belong to the change bar and the breakpoint column.
+        guard p.x > EditorMetrics.gutter else {
+            cancelDatatip()
+            return
+        }
+        let symbol = symbolUnderPointer(p)
+        guard let symbol, !symbol.isEmpty else {
+            cancelDatatip()
+            return
+        }
+        // Already showing this one: leave it alone. Re-asking on every mouse
+        // move within a word would restart the popover under the pointer.
+        if symbol == datatipSymbol, datatipPopover?.isShown == true { return }
+
+        datatipWork?.cancel()
+        let point = p
+        let work = DispatchWorkItem { [weak self] in
+            self?.showDatatip(symbol, at: point)
+        }
+        datatipWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.datatipDwell, execute: work)
+    }
+
+    /// Long enough that crossing a line does not fire, short enough that
+    /// deliberately resting on a word feels answered rather than ignored.
+    private static let datatipDwell: TimeInterval = 0.45
+
+    private func showDatatip(_ symbol: String, at p: CGPoint) {
+        guard let engine, engine.dap.state == .stopped else { return }
+        engine.requestDatatip(symbol)
+        datatipSymbol = symbol
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = false
+        let host = NSHostingController(rootView: DatatipCard(engine: engine, symbol: symbol))
+        // The card opens on the dwell and fills in when the adapter answers, so
+        // its size is not known when it appears — the same reason Quick Help
+        // asks for this.
+        host.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = host
+        let anchor = NSRect(x: p.x - 1, y: p.y - 1, width: 2, height: 2)
+        datatipPopover?.close()
+        datatipPopover = popover
+        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
+    }
+
+    private func cancelDatatip() {
+        datatipWork?.cancel()
+        datatipWork = nil
+        guard datatipSymbol != nil else { return }
+        datatipSymbol = nil
+        datatipPopover?.close()
+        datatipPopover = nil
+        engine?.clearDatatip()
     }
 
     private func updateHunkHover(_ p: CGPoint) {

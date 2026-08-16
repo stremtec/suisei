@@ -4998,6 +4998,57 @@ pub extern "C" fn suisei_engine_dap_evaluate(ptr: *mut SuiseiEngine, expr: *cons
     }
 }
 
+/// Ask what the identifier under the pointer is worth.
+///
+/// Separate from `suisei_engine_dap_evaluate`, which is the console's: this
+/// answer goes to a popover and nothing is logged, because a hover crossing a
+/// file would otherwise write the pointer's path into the console.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_request_datatip(
+    ptr: *mut SuiseiEngine,
+    expr: *const c_char,
+) {
+    if ptr.is_null() || expr.is_null() {
+        return;
+    }
+    let Ok(expr) = unsafe { std::ffi::CStr::from_ptr(expr) }.to_str() else {
+        return;
+    };
+    unsafe {
+        (*ptr).0.app_mut().dap.request_datatip(expr);
+    }
+}
+
+/// The datatip, if one has arrived.
+///
+/// Returns 1 when `out_*` were filled, 2 while a request is still in flight,
+/// and 0 when there is nothing — three answers because the popover shows a
+/// different thing for each, and collapsing "waiting" into "nothing" makes it
+/// flicker closed between the ask and the reply.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_datatip(
+    ptr: *const SuiseiEngine,
+    out_expr: *mut c_char,
+    out_value: *mut c_char,
+    out_type: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if ptr.is_null() || out_expr.is_null() || out_value.is_null() || out_type.is_null() {
+        return 0;
+    }
+    let dap = unsafe { &(*ptr).0.app().dap };
+    let Some((expr, value, ty)) = dap.datatip.as_ref() else {
+        return u8::from(dap.datatip_pending) * 2;
+    };
+    let n = cap as usize;
+    unsafe {
+        write_cstr_raw(out_expr, n, expr);
+        write_cstr_raw(out_value, n, value);
+        write_cstr_raw(out_type, n, ty);
+    }
+    1
+}
+
 /// Select a stack frame. Core re-reads that frame's variables, which is the
 /// point of selecting one.
 #[unsafe(no_mangle)]

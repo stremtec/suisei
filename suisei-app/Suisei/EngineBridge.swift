@@ -4201,6 +4201,58 @@ final class EngineBridge: ObservableObject {
     private static let hoverDeadline: TimeInterval = 4
     private static let hoverReadInterval: TimeInterval = 0.08
 
+    /// What the pointer is over, while stopped.
+    ///
+    /// The identifier, its value and its type — published the way `hoverText`
+    /// is, and polled for the same reason: the adapter answers on its own
+    /// schedule and the popover is already open by then.
+    @Published private(set) var datatip: (expr: String, value: String, type: String)?
+    @Published private(set) var datatipPending = false
+    private var datatipPoll: DispatchWorkItem?
+
+    func requestDatatip(_ expression: String) {
+        guard let engine else { return }
+        datatipPoll?.cancel()
+        // Cleared before the question. A value left under the previous word is
+        // a wrong answer wearing a right one's clothes — the same rule
+        // `refreshHover` states for documentation.
+        datatip = nil
+        datatipPending = true
+        expression.withCString { suisei_engine_dap_request_datatip(engine, $0) }
+        pollDatatip(attempt: 0)
+    }
+
+    func clearDatatip() {
+        datatipPoll?.cancel()
+        datatipPoll = nil
+        datatip = nil
+        datatipPending = false
+    }
+
+    private func pollDatatip(attempt: Int) {
+        guard let engine else { return }
+        let cap = 512
+        var e = [CChar](repeating: 0, count: cap)
+        var v = [CChar](repeating: 0, count: cap)
+        var t = [CChar](repeating: 0, count: cap)
+        let status = suisei_engine_dap_datatip(engine, &e, &v, &t, UInt32(cap))
+        if status == 1 {
+            datatip = (String(cString: e), String(cString: v), String(cString: t))
+            datatipPending = false
+            return
+        }
+        // Two seconds at 40ms. An adapter that has not answered by then is one
+        // that is not going to, and a spinner that never stops is worse than a
+        // popover that says nothing is here.
+        guard status == 2, attempt < 50 else {
+            datatipPending = false
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in self?.pollDatatip(attempt: attempt + 1) }
+        datatipPoll = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
+    }
+
     func refreshHover() {
         guard let engine else {
             hoverText = ""

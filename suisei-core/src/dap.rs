@@ -146,6 +146,10 @@ enum PendingKind {
     /// variablesReference the children belong to
     Variables(i64),
     Threads,
+    /// A hover datatip. Its own kind, not `Evaluate`, because the answer goes
+    /// to a popover instead of the console — a hover that logged would fill
+    /// the console with every word the pointer crossed.
+    Datatip,
     Continue,
     Next,
     StepIn,
@@ -165,6 +169,9 @@ pub struct DapClient {
     child: Option<Child>,
     next_id: u64,
     pending: HashMap<u64, PendingKind>,
+    /// What each in-flight datatip asked about, so the answer can be shown
+    /// under the right word.
+    pending_datatip: HashMap<u64, String>,
 
     pub state: DapState,
     pub adapter_name: String,
@@ -182,6 +189,14 @@ pub struct DapClient {
     pub threads: Vec<(i64, String)>,
 
     pub selected_frame: usize,
+    /// The last hover datatip: what was asked, and what came back.
+    ///
+    /// The expression is kept beside the value because the answer arrives
+    /// asynchronously and the pointer has usually moved on — a value shown
+    /// under the wrong identifier is a wrong answer that looks like a right
+    /// one, which is the same reason `refreshHover` clears before it asks.
+    pub datatip: Option<(String, String, String)>,
+    pub datatip_pending: bool,
     pub selected_bp: usize,
     pub pane: DebugPane,
     pub focus_row: usize,
@@ -264,6 +279,7 @@ impl DapClient {
             child: None,
             next_id: 1,
             pending: HashMap::new(),
+            pending_datatip: HashMap::new(),
             state: DapState::Idle,
             adapter_name: String::new(),
             error: None,
@@ -274,6 +290,8 @@ impl DapClient {
             console: Vec::new(),
             threads: Vec::new(),
             selected_frame: 0,
+            datatip: None,
+            datatip_pending: false,
             selected_bp: 0,
             pane: DebugPane::Stack,
             focus_row: 0,
@@ -1541,6 +1559,43 @@ impl DapClient {
         self.eval_input.clear();
     }
 
+    /// Ask what an expression is worth, for a hover datatip.
+    ///
+    /// `context: "hover"` is the DAP spec's own name for this, and adapters
+    /// use it to be conservative — a hover must not call functions or mutate
+    /// anything, because the user only pointed at a word.
+    ///
+    /// Nothing is logged. The console belongs to what the user typed.
+    pub fn request_datatip(&mut self, expression: &str) {
+        let expr = expression.trim();
+        if expr.is_empty() || self.state != DapState::Stopped {
+            self.datatip = None;
+            self.datatip_pending = false;
+            return;
+        }
+        let frame_id = self
+            .stack
+            .get(self.selected_frame)
+            .map(|f| f.id)
+            .unwrap_or(0);
+        // Cleared before asking, like the LSP hover: a stale value under a new
+        // identifier reads as an answer.
+        self.datatip = None;
+        self.datatip_pending = true;
+        let id = self.alloc(PendingKind::Datatip);
+        self.pending_datatip.insert(id, expr.to_string());
+        self.send_json(&json!({
+            "seq": id,
+            "type": "request",
+            "command": "evaluate",
+            "arguments": {
+                "expression": expr,
+                "frameId": frame_id,
+                "context": "hover"
+            }
+        }));
+    }
+
     /// setBreakpoints* → setExceptionBreakpoints → configurationDone.
     /// Responses may arrive later; ordering of the requests is what matters.
     fn send_configuration(&mut self) {
@@ -1645,6 +1700,8 @@ impl DapClient {
         // already opens another file when the frame is in one.
         self.location_dirty = true;
         let fid = frame.id;
+        self.datatip = None;
+        self.datatip_pending = false;
         self.vars.clear();
         self.request_scopes(fid);
     }
@@ -1973,6 +2030,18 @@ impl DapClient {
                 .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("request failed");
+            // A datatip that failed is not news. The pointer crosses keywords,
+            // comments and punctuation constantly, and an adapter answers "no
+            // such variable" to every one of them — logging that would fill the
+            // console with the mouse's path across the file. It also has to
+            // clear the pending flag here, because this branch returns and the
+            // success arm below never runs.
+            if let (Some(PendingKind::Datatip), Some(i)) = (kind.as_ref(), id) {
+                self.pending_datatip.remove(&i);
+                self.datatip_pending = false;
+                self.datatip = None;
+                return;
+            }
             self.log(format!("✗ {command}: {msg}"));
             match kind {
                 Some(PendingKind::Initialize | PendingKind::Launch) => {
@@ -2216,6 +2285,25 @@ impl DapClient {
                     self.log(format!("= {result}"));
                 } else {
                     self.log(format!("= {result}  ({typ})"));
+                }
+            }
+            Some(PendingKind::Datatip) => {
+                self.datatip_pending = false;
+                let expr = id
+                    .and_then(|i| self.pending_datatip.remove(&i))
+                    .unwrap_or_default();
+                let result = body
+                    .get("result")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let typ = body
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !result.is_empty() {
+                    self.datatip = Some((expr, result, typ));
                 }
             }
             Some(PendingKind::ExceptionBreakpoints | PendingKind::ConfigDone) | None => {}
@@ -2839,6 +2927,119 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    /// A hover asks the adapter with the spec's own `hover` context, and says
+    /// nothing in the console.
+    ///
+    /// The console belongs to what the user TYPED. A pointer crossing a line
+    /// touches a dozen identifiers and the adapter refuses most of them, so a
+    /// datatip that logged would write the mouse's path into the transcript.
+    #[test]
+    fn a_datatip_asks_quietly_and_in_the_hover_context() {
+        let mut d = DapClient::default();
+        d.state = DapState::Stopped;
+        d.stack = vec![StackFrameInfo {
+            id: 7,
+            name: "f".into(),
+            path: "/tmp/x.rs".into(),
+            line: 1,
+            column: 0,
+        }];
+        let console_before = d.console.len();
+
+        d.request_datatip("bottom");
+
+        assert!(d.datatip_pending);
+        assert_eq!(d.console.len(), console_before, "nothing is logged");
+        let sent = d.sent.last().expect("a request went out");
+        assert_eq!(sent["command"], "evaluate");
+        assert_eq!(sent["arguments"]["context"], "hover");
+        assert_eq!(sent["arguments"]["expression"], "bottom");
+        assert_eq!(sent["arguments"]["frameId"], 7, "in the SELECTED frame");
+    }
+
+    /// A running program has no frame to evaluate in, so there is nothing to
+    /// ask and the previous answer must not linger.
+    #[test]
+    fn a_datatip_is_refused_while_the_program_runs() {
+        let mut d = DapClient::default();
+        d.state = DapState::Running;
+        d.datatip = Some(("old".into(), "1".into(), "int".into()));
+        d.datatip_pending = true;
+
+        d.request_datatip("bottom");
+
+        assert!(d.datatip.is_none());
+        assert!(!d.datatip_pending);
+        assert!(d.sent.is_empty(), "and nothing was sent");
+    }
+
+    /// The answer arrives under the word that was asked about.
+    ///
+    /// The pointer has usually moved by the time an adapter replies, so the
+    /// expression rides along with the value — a value shown under the wrong
+    /// identifier is a wrong answer that looks like a right one.
+    #[test]
+    fn a_datatip_answer_carries_the_word_it_was_asked_about() {
+        let mut d = DapClient::default();
+        d.state = DapState::Stopped;
+        d.stack = vec![StackFrameInfo {
+            id: 1,
+            name: "f".into(),
+            path: "/tmp/x.rs".into(),
+            line: 1,
+            column: 0,
+        }];
+        d.request_datatip("bottom");
+        let seq = d.sent.last().unwrap()["seq"].as_u64().unwrap();
+
+        d.handle_response(&json!({
+            "type": "response",
+            "request_seq": seq,
+            "success": true,
+            "command": "evaluate",
+            "body": { "result": "1234", "type": "unsigned int" }
+        }));
+
+        assert_eq!(
+            d.datatip,
+            Some(("bottom".into(), "1234".into(), "unsigned int".into()))
+        );
+        assert!(!d.datatip_pending);
+    }
+
+    /// A refusal clears the spinner and stays out of the console.
+    ///
+    /// The failure branch of `handle_response` returns early, so without its
+    /// own arm there the pending flag stayed set forever and the popover span
+    /// on a keyword that was never going to have a value.
+    #[test]
+    fn a_refused_datatip_stops_waiting_and_says_nothing() {
+        let mut d = DapClient::default();
+        d.state = DapState::Stopped;
+        d.stack = vec![StackFrameInfo {
+            id: 1,
+            name: "f".into(),
+            path: "/tmp/x.rs".into(),
+            line: 1,
+            column: 0,
+        }];
+        d.request_datatip("if");
+        let seq = d.sent.last().unwrap()["seq"].as_u64().unwrap();
+        let console_before = d.console.len();
+
+        d.handle_response(&json!({
+            "type": "response",
+            "request_seq": seq,
+            "success": false,
+            "command": "evaluate",
+            "message": "no variable named 'if'"
+        }));
+
+        assert!(!d.datatip_pending, "the spinner stops");
+        assert!(d.datatip.is_none());
+        assert_eq!(d.console.len(), console_before, "and the console is untouched");
+    }
+
     /// A call stack that reads. lldb-dap names Rust frames with the
     /// compiler's disambiguating hash, and three recursive frames arrived as
     /// three identical `test::recursive_test::h78d59b0538fe2034`.

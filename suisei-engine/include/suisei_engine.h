@@ -1088,6 +1088,13 @@ void suisei_engine_dap_command(SuiseiEngine *ptr, uint32_t verb);
 void suisei_engine_dap_launch(SuiseiEngine *ptr, const char *name);
 void suisei_engine_dap_attach(SuiseiEngine *ptr, const char *spec);
 void suisei_engine_dap_evaluate(SuiseiEngine *ptr, const char *expr);
+
+/* Hover datatip. `request` asks; `dap_datatip` returns 1 when filled, 2 while
+   a request is in flight, 0 when there is nothing. */
+void suisei_engine_dap_request_datatip(SuiseiEngine *e, const char *expr);
+uint8_t suisei_engine_dap_datatip(const SuiseiEngine *e, char *out_expr,
+                                  char *out_value, char *out_type,
+                                  uint32_t cap);
 void suisei_engine_dap_select_frame(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_dap_toggle_var(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_dap_set_panel(SuiseiEngine *ptr, uint8_t open);
