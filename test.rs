@@ -127,7 +127,7 @@ fn main() {
 
     // ★ BREAKPOINT 2
     // Step Into / Step Over 후 값 변화 확인
-    println!("total score: {5}", total);
+    println!("total score: {}", total);
 
     let recursive_result = recursive_test(4);
 

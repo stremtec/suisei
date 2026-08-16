@@ -1364,14 +1364,12 @@ impl DapClient {
                     }
                 }
                 Ok(o) => {
+                    // Was the LAST non-empty line, which for a cargo build is
+                    // always "error: could not compile … due to N previous
+                    // errors" — a sentence that names nothing anyone can go
+                    // and look at.
                     let err = String::from_utf8_lossy(&o.stderr);
-                    let msg = err
-                        .lines()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or("cargo build failed")
-                        .to_string();
-                    let _ = tx.send(Err(msg));
+                    let _ = tx.send(Err(first_compile_error(&err, "cargo build failed")));
                 }
                 Err(e) => {
                     let _ = tx.send(Err(format!("cargo spawn: {e}")));
@@ -1443,17 +1441,8 @@ impl DapClient {
                     )));
                 }
                 Ok(o) => {
-                    // rustc's own first error, which names the line. The last
-                    // line is "error: aborting due to N previous errors",
-                    // which says nothing a person can act on.
                     let err = String::from_utf8_lossy(&o.stderr);
-                    let msg = err
-                        .lines()
-                        .find(|l| l.trim_start().starts_with("error"))
-                        .or_else(|| err.lines().find(|l| !l.trim().is_empty()))
-                        .unwrap_or("rustc failed")
-                        .to_string();
-                    let _ = tx.send(Err(msg));
+                    let _ = tx.send(Err(first_compile_error(&err, "rustc failed")));
                 }
                 Err(e) => {
                     let _ = tx.send(Err(format!("rustc spawn: {e}")));
@@ -2647,6 +2636,49 @@ fn parse_cargo_name(toml: &str) -> Option<String> {
     None
 }
 
+/// The first real compiler error, WITH the place it happened.
+///
+/// rustc prints the message and the location on separate lines:
+///
+/// ```text
+/// error: invalid reference to positional argument 5 (there is 1 argument)
+///    --> test.rs:130:29
+/// ```
+///
+/// Taking only the first line — which is what this did — threw the location
+/// away, so the debug panel said what was wrong and left the user to find
+/// where. Taking the LAST line, which the cargo path did, is worse still: that
+/// is always "aborting due to N previous errors".
+///
+/// The two are joined so the panel's one line is worth reading on its own.
+/// The file is shortened to its name: the panel is narrow, the directory is
+/// almost always the project you are looking at, and the line number is the
+/// part being navigated to.
+fn first_compile_error(stderr: &str, fallback: &str) -> String {
+    let mut lines = stderr.lines();
+    let Some(msg) = lines.find(|l| l.trim_start().starts_with("error")) else {
+        return stderr
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or(fallback)
+            .to_string();
+    };
+    let msg = msg.trim();
+    // The arrow line follows immediately, unless the error has no location
+    // (a link failure, a bad flag) — in which case there is nothing to add.
+    let Some(at) = lines.next().and_then(|l| l.trim().strip_prefix("--> ")) else {
+        return msg.to_string();
+    };
+    // `path:line:col` → `name:line`.
+    let mut parts = at.rsplitn(3, ':');
+    let (_col, line, path) = (parts.next(), parts.next(), parts.next());
+    let (Some(line), Some(path)) = (line, path) else {
+        return msg.to_string();
+    };
+    let name = path.rsplit('/').next().unwrap_or(path);
+    format!("{name}:{line} · {msg}")
+}
+
 /// The frame name a person reads.
 ///
 /// `lldb-dap` reports Rust frames as `test::recursive_test::h78d59b0538fe2034`.
@@ -2927,6 +2959,66 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    /// A build failure has to say WHERE.
+    ///
+    /// The real report: `println!("total score: {5}", total)` on line 130 of a
+    /// file the user had just edited. The panel said "invalid reference to
+    /// positional argument 5" and nothing else, so it read as the debugger
+    /// having broken rather than as a typo three screens down.
+    #[test]
+    fn a_compile_error_carries_the_place_it_happened() {
+        let stderr = "\
+error: invalid reference to positional argument 5 (there is 1 argument)
+   --> test.rs:130:29
+    |
+130 |     println!(\"total score: {5}\", total);
+    |                             ^
+    |
+    = note: positional arguments are zero-based
+
+error: aborting due to 2 previous errors
+";
+        assert_eq!(
+            first_compile_error(stderr, "rustc failed"),
+            "test.rs:130 · error: invalid reference to positional argument 5 (there is 1 argument)"
+        );
+    }
+
+    /// The path is shortened to its name: the panel is narrow and the
+    /// directory is almost always the project already on screen.
+    #[test]
+    fn a_long_path_is_shortened_to_the_file() {
+        let stderr = "error: cannot find value `x`\n   --> /Users/a/proj/src/deep/mod.rs:7:3\n";
+        assert_eq!(
+            first_compile_error(stderr, "f"),
+            "mod.rs:7 · error: cannot find value `x`"
+        );
+    }
+
+    /// Some failures have no location — a link error, a bad flag. The message
+    /// still has to arrive, without an invented file.
+    #[test]
+    fn an_error_without_a_location_is_still_reported() {
+        assert_eq!(
+            first_compile_error("error: linking with `cc` failed\n", "f"),
+            "error: linking with `cc` failed"
+        );
+        assert_eq!(first_compile_error("", "rustc failed"), "rustc failed");
+    }
+
+    /// NOT the last line. For cargo that is always "aborting due to N previous
+    /// errors", which names nothing anyone can go and look at — and taking it
+    /// is what the cargo path used to do.
+    #[test]
+    fn the_summary_line_is_not_the_error() {
+        let stderr = "\
+error[E0308]: mismatched types
+   --> src/main.rs:4:5
+error: aborting due to 1 previous error
+";
+        assert!(first_compile_error(stderr, "f").starts_with("main.rs:4 ·"));
+    }
+
     /// A hover asks the adapter with the spec's own `hover` context, and says
     /// nothing in the console.
     ///
