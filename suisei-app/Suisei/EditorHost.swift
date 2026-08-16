@@ -1624,7 +1624,7 @@ final class EditorCanvasView: NSView {
             // row, and the one that has to win is the one saying where the
             // PROGRAM is.
             if line.isStoppedLine {
-                renderer.addRect(rowRect, colors.debugStop)
+                renderer.addRect(Self.stopBandRect(rowRect), colors.debugStop)
                 for bar in Self.stopArrowBars(atY: y, lineH: lineH) {
                     renderer.addRect(bar, colors.debugStopInk)
                 }
@@ -1923,7 +1923,7 @@ final class EditorCanvasView: NSView {
             }
             if line.isStoppedLine {
                 colors.debugStop.setFill()
-                rowRect.fill()
+                Self.stopBandRect(rowRect).fill()
                 colors.debugStopInk.setFill()
                 Self.stopArrowPath(atY: y, lineH: lineH).fill()
             }
@@ -2824,6 +2824,17 @@ final class EditorCanvasView: NSView {
     /// two markers sat on top of each other. They are separate targets now:
     /// the bar is pressed for its hunk, the number is pressed for its
     /// breakpoint, and neither can be hit by accident.
+    /// The band is over the TEXT, not over the gutter.
+    ///
+    /// Washing the whole row put a green tint under the line number, the change
+    /// bar and the amber breakpoint chip — three colours inside fifteen points,
+    /// none of them legible, which is most of what read as "UI가 좀 구린디".
+    /// The gutter already has its own vocabulary; the band belongs to the code.
+    static func stopBandRect(_ row: CGRect) -> CGRect {
+        let left = max(row.minX, EditorMetrics.gutter - EditorMetrics.gutterTextGap / 2)
+        return CGRect(x: left, y: row.minY, width: max(0, row.maxX - left), height: row.height)
+    }
+
     /// The instruction pointer: a solid right-pointing triangle, in the change
     /// bar's lane at the very left of the gutter.
     ///

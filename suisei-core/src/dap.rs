@@ -2071,11 +2071,9 @@ impl DapClient {
                     for f in arr {
                         self.stack.push(StackFrameInfo {
                             id: f.get("id").and_then(|x| x.as_i64()).unwrap_or(0),
-                            name: f
-                                .get("name")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("??")
-                                .to_string(),
+                            name: frame_label(
+                                f.get("name").and_then(|x| x.as_str()).unwrap_or("??"),
+                            ),
                             path: f
                                 .get("source")
                                 .and_then(|s| s.get("path"))
@@ -2543,6 +2541,33 @@ fn parse_cargo_name(toml: &str) -> Option<String> {
     None
 }
 
+/// The frame name a person reads.
+///
+/// `lldb-dap` reports Rust frames as `test::recursive_test::h78d59b0538fe2034`.
+/// That trailing segment is the compiler's disambiguating hash — it exists so
+/// two monomorphisations do not collide in the symbol table, and it means
+/// nothing to the person reading a call stack. Three recursive frames rendered
+/// as three identical hashes was most of what made the panel unreadable.
+///
+/// The length is the whole discrimination and it must be exact: legacy Rust
+/// mangling writes `h` followed by **sixteen** hex digits, so `mem::h64` is a
+/// function called `h64` and keeps its name. Writing this as "h then any hex"
+/// ate that case, which the test caught immediately.
+///
+/// Everything else passes through untouched. This is a display nicety, not a
+/// demangler, and a name it does not recognise must arrive intact rather than
+/// half-eaten.
+fn frame_label(raw: &str) -> String {
+    const HASH_LEN: usize = 1 + 16;
+    let Some((head, last)) = raw.rsplit_once("::") else {
+        return raw.to_string();
+    };
+    let is_hash = last.len() == HASH_LEN
+        && last.starts_with('h')
+        && last[1..].chars().all(|c| c.is_ascii_hexdigit());
+    if is_hash { head.to_string() } else { raw.to_string() }
+}
+
 fn install_hint(lang: &str) -> String {
     match lang {
         "python" => "No Python DAP adapter. Install: pip install debugpy".into(),
@@ -2796,6 +2821,26 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    /// A call stack that reads. lldb-dap names Rust frames with the
+    /// compiler's disambiguating hash, and three recursive frames arrived as
+    /// three identical `test::recursive_test::h78d59b0538fe2034`.
+    #[test]
+    fn a_frame_name_loses_the_symbol_hash_and_nothing_else() {
+        assert_eq!(
+            frame_label("test::recursive_test::h78d59b0538fe2034"),
+            "test::recursive_test"
+        );
+        // Not a demangler. A name it does not recognise arrives intact rather
+        // than half-eaten.
+        assert_eq!(frame_label("main"), "main");
+        assert_eq!(frame_label("core::ptr::drop_in_place"), "core::ptr::drop_in_place");
+        assert_eq!(frame_label("std::io::Write::write_all"), "std::io::Write::write_all");
+        // A real function whose name merely looks like the hash keeps it.
+        assert_eq!(frame_label("crypto::hash"), "crypto::hash");
+        assert_eq!(frame_label("mem::h64"), "mem::h64");
+        assert_eq!(frame_label("??"), "??");
+    }
+
     /// The build's placeholder state must not block the launch it exists to
     /// reach.
     ///

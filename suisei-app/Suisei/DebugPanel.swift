@@ -226,19 +226,42 @@ struct DebugPanelView: View {
         }
     }
 
+    /// A pane, with a header that reads as one.
+    ///
+    /// Uppercase and tracked, which is the same header the model workbench's
+    /// `WBSection` uses — one typographic language for "this is a section",
+    /// rather than a second one invented here. It also sits on a faint band so
+    /// the three panes read as three panes: side by side with only a divider,
+    /// their titles floated in the same field as their contents and the whole
+    /// strip read as one grey list.
     private func column<Content: View>(
         _ title: String, width: CGFloat?, @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(title)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(dim)
-                .padding(.horizontal, 10)
-                .padding(.top, 6)
-                .padding(.bottom, 3)
+            sectionHeader(title)
             content()
         }
         .frame(maxWidth: width ?? .infinity, alignment: .leading)
+    }
+
+    private func sectionHeader(
+        _ title: String, @ViewBuilder trailing: () -> some View = { EmptyView() }
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(dim)
+            trailing()
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.035))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(separator).frame(height: 1)
+        }
     }
 
     private var stackList: some View {
@@ -314,13 +337,19 @@ struct DebugPanelView: View {
                                     .lineLimit(1)
                                     .truncationMode(.tail)
                             }
+                            Spacer(minLength: 6)
+                            // Trailing, not tucked in behind the value. A type
+                            // is what a value IS, not part of reading it, and
+                            // inline it turned every row into three unaligned
+                            // runs of text — "depth 0 unsigned int".
                             if !node.type.isEmpty, !node.isScope {
                                 Text(node.type)
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(dim)
+                                    .font(.system(size: 9.5, design: .monospaced))
+                                    .foregroundStyle(dim.opacity(0.75))
                                     .lineLimit(1)
+                                    .truncationMode(.head)
+                                    .layoutPriority(-1)
                             }
-                            Spacer(minLength: 0)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 2.5)
@@ -338,10 +367,7 @@ struct DebugPanelView: View {
 
     private var consoleSection: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Text("Console")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(dim)
+            sectionHeader("Console") {
                 if dap.consoleTotal > dap.console.count {
                     // Say what is missing rather than let the scrollback imply
                     // the session started where it does.
@@ -349,11 +375,7 @@ struct DebugPanelView: View {
                         .font(.system(size: 9.5))
                         .foregroundStyle(dim.opacity(0.8))
                 }
-                Spacer()
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .padding(.bottom, 3)
 
             consoleList.frame(maxHeight: 160)
 
