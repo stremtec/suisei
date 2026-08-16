@@ -954,6 +954,9 @@ final class EditorCanvasView: NSView {
     private var datatipPopover: NSPopover?
     private var datatipWork: DispatchWorkItem?
     private var datatipAsk: DispatchWorkItem?
+    /// Where the pointer's word is, so it can be marked the instant it is
+    /// under the pointer rather than when the adapter answers.
+    private var datatipTokenRect: CGRect?
     private var datatipSymbol: String?
     var colors = Colors(
         bg: .textBackgroundColor, fg: .labelColor, dim: .secondaryLabelColor,
@@ -1627,6 +1630,12 @@ final class EditorCanvasView: NSView {
             // After the caret wash on purpose: the two are frequently the same
             // row, and the one that has to win is the one saying where the
             // PROGRAM is.
+            if let t = datatipTokenRect, t.midY >= y, t.midY < y + lineH {
+                renderer.addRect(
+                    t.insetBy(dx: -2, dy: 1),
+                    colors.debugStopInk.withAlphaComponent(0.16)
+                )
+            }
             if line.isStoppedLine || line.isFrameLine {
                 // The frame you are READING gets a fainter band and a hollow
                 // arrow. Same information, said quieter, because the loud one
@@ -1933,6 +1942,12 @@ final class EditorCanvasView: NSView {
             if line.isCursor {
                 colors.cursorLine.setFill()
                 rowRect.fill()
+            }
+            if let t = datatipTokenRect, t.midY >= y, t.midY < y + lineH {
+                colors.debugStopInk.withAlphaComponent(0.16).setFill()
+                NSBezierPath(
+                    roundedRect: t.insetBy(dx: -2, dy: 1), xRadius: 3, yRadius: 3
+                ).fill()
             }
             if line.isStoppedLine || line.isFrameLine {
                 let solid = line.isStoppedLine
@@ -3422,23 +3437,24 @@ final class EditorCanvasView: NSView {
             return
         }
         // Gutter presses belong to the change bar and the breakpoint column.
-        guard p.x > EditorMetrics.gutter else {
-            cancelDatatip()
-            return
-        }
-        let symbol = symbolUnderPointer(p)
-        guard let symbol, !symbol.isEmpty else {
+        guard p.x > EditorMetrics.gutter, let token = tokenUnderPointer(p) else {
             cancelDatatip()
             return
         }
         // Already on this one: leave it alone. Re-asking on every mouse move
         // within a word would restart the popover under the pointer.
-        if symbol == datatipSymbol { return }
+        if token.symbol == datatipSymbol { return }
 
         datatipAsk?.cancel()
         datatipWork?.cancel()
-        datatipSymbol = symbol
-        let point = p
+        datatipSymbol = token.symbol
+        // IMMEDIATELY. Nothing else here is instant — the ask is a tenth of a
+        // second away and the card two tenths — so without a mark the editor
+        // looks dead on contact: "딱 갔다대자마자 뭔가 반응이 없잖아". This is
+        // also what says WHICH word is about to be asked about, before anything
+        // is asked.
+        setDatatipToken(token.rect)
+        let anchor = token.rect
 
         // ASK early, SHOW later — two clocks, because they are two different
         // decisions. Asking is invisible and cheap, so it can happen almost at
@@ -3451,13 +3467,13 @@ final class EditorCanvasView: NSView {
         // answer is usually already in by the time the card appears.
         let ask = DispatchWorkItem { [weak self] in
             guard let self, let engine = self.engine, engine.dap.state == .stopped else { return }
-            engine.requestDatatip(symbol)
+            engine.requestDatatip(token.symbol)
         }
         datatipAsk = ask
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.datatipAskDelay, execute: ask)
 
         let work = DispatchWorkItem { [weak self] in
-            self?.showDatatip(symbol, at: point)
+            self?.showDatatip(token.symbol, at: anchor)
         }
         datatipWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.datatipDwell, execute: work)
@@ -3468,9 +3484,9 @@ final class EditorCanvasView: NSView {
     private static let datatipAskDelay: TimeInterval = 0.10
     /// When the card appears. Xcode's is about this; past ~0.4s a datatip stops
     /// feeling like an answer and starts feeling like a wait.
-    private static let datatipDwell: TimeInterval = 0.28
+    private static let datatipDwell: TimeInterval = 0.20
 
-    private func showDatatip(_ symbol: String, at p: CGPoint) {
+    private func showDatatip(_ symbol: String, at token: CGRect) {
         guard let engine, engine.dap.state == .stopped else { return }
         // Normally the ask already went out on the earlier clock; this covers
         // the case where it was cancelled or the state changed under it.
@@ -3487,13 +3503,28 @@ final class EditorCanvasView: NSView {
         // asks for this.
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
-        let anchor = NSRect(x: p.x - 1, y: p.y - 1, width: 2, height: 2)
         datatipPopover?.close()
         datatipPopover = popover
-        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
+        // ABOVE the token, and anchored to the TOKEN. The view is flipped, so
+        // `.minY` is the top edge. Above rather than below because a datatip
+        // below covers the lines you are about to step through — the ones the
+        // value is on its way to — and Xcode puts it above for the same
+        // reason. AppKit flips it down on its own when there is no room.
+        popover.show(relativeTo: token, of: self, preferredEdge: .minY)
+    }
+
+    /// The word the pointer is on, marked at once.
+    private func setDatatipToken(_ rect: CGRect?) {
+        let old = datatipTokenRect
+        guard old != rect else { return }
+        datatipTokenRect = rect
+        for r in [old, rect].compactMap({ $0 }) {
+            setNeedsDisplay(r.insetBy(dx: -3, dy: -1))
+        }
     }
 
     private func cancelDatatip() {
+        setDatatipToken(nil)
         datatipAsk?.cancel()
         datatipAsk = nil
         datatipWork?.cancel()
@@ -4118,6 +4149,86 @@ final class EditorCanvasView: NSView {
     /// cells wide in the core, one glyph on screen — drifted badly.
     /// `CTLineGetStringIndexForPosition` snaps to the nearest boundary and uses
     /// the real advances.
+    /// The identifier under `p`, WHERE IT IS, and whether it is worth asking
+    /// about.
+    ///
+    /// Three things `symbolUnderPointer` did not give, each one a reported
+    /// defect:
+    ///
+    /// - **the rect.** The popover was anchored to a two-point box at the
+    ///   POINTER, so where it landed depended on where inside the word the
+    ///   mouse happened to be, and it covered the code it was describing.
+    ///   Anchored to the token, it is always in the same place relative to the
+    ///   word — which is the difference between a datatip and a thing that
+    ///   appears somewhere.
+    /// - **the syntax kind.** A word inside a comment is not a variable, and
+    ///   asking an adapter about it produced a popover on prose.
+    /// - **the segment**, so a wrapped line measures against the chunk that was
+    ///   actually drawn rather than against the joined line.
+    func tokenUnderPointer(_ p: CGPoint) -> (symbol: String, rect: CGRect)? {
+        let lineH = max(1, EditorMetrics.lineHeight)
+        let row = nearestBufferRow(atY: p.y)
+        let segment = max(0, Int(floor(p.y / lineH)) - visualRowOf(row))
+        let ofRow = rows(row, row).filter { Int($0.lineNo) - 1 == row }
+        guard !ofRow.isEmpty else { return nil }
+        let line = ofRow[min(segment, ofRow.count - 1)]
+
+        let font = EditorMetrics.monospaced(EditorMetrics.fontSize, weight: .regular)
+        let ct = ctLine(for: line, font: font)
+        let localX = p.x - EditorMetrics.gutter
+        guard localX >= 0 else { return nil }
+        let idx = CTLineGetStringIndexForPosition(ct, CGPoint(x: localX, y: 0))
+        guard idx != kCFNotFound else { return nil }
+
+        let ns = line.text as NSString
+        guard let range = Self.identifierRange(in: ns, atUTF16: Int(idx)) else { return nil }
+        // A word in a comment or a string is prose, not a variable. The kinds
+        // are the wire codes `colorForKind` switches on: 2 string, 3 comment.
+        if let span = line.spans.first(where: {
+            Int($0.start) <= range.location && range.location < Int($0.end)
+        }), span.kind == 2 || span.kind == 3 {
+            return nil
+        }
+
+        let x0 = CTLineGetOffsetForStringIndex(ct, CFIndex(range.location), nil)
+        let x1 = CTLineGetOffsetForStringIndex(ct, CFIndex(range.location + range.length), nil)
+        let top = CGFloat(visualRowOf(row) + min(segment, ofRow.count - 1)) * lineH
+        return (
+            ns.substring(with: range),
+            CGRect(
+                x: EditorMetrics.gutter + x0, y: top,
+                width: max(2, x1 - x0), height: lineH
+            )
+        )
+    }
+
+    /// The word around `idx`, as a range. `identifier(in:atUTF16:)` is this
+    /// with the substring taken; the range is what a caller that has to DRAW
+    /// the word needs.
+    static func identifierRange(in ns: NSString, atUTF16 idx: Int) -> NSRange? {
+        guard ns.length > 0 else { return nil }
+        func isWord(_ at: Int) -> Bool {
+            guard at >= 0, at < ns.length,
+                  let scalar = UnicodeScalar(ns.character(at: at)) else { return false }
+            let c = Character(scalar)
+            return c.isLetter || c.isNumber || c == "_"
+        }
+        // One past the end still means that word — where the pointer lands on
+        // the right half of the last letter.
+        var i = min(max(0, idx), ns.length)
+        if !isWord(i), isWord(i - 1) { i -= 1 }
+        guard isWord(i) else { return nil }
+        var start = i
+        while isWord(start - 1) { start -= 1 }
+        var end = i
+        while isWord(end + 1) { end += 1 }
+        // A word that is all digits is a literal, not something to evaluate.
+        let range = NSRange(location: start, length: end - start + 1)
+        let text = ns.substring(with: range)
+        guard text.contains(where: { $0.isLetter || $0 == "_" }) else { return nil }
+        return range
+    }
+
     private func absoluteHitUTF16(_ docPoint: CGPoint) -> (UInt32, UInt32)? {
         let lineH = max(1, EditorMetrics.lineHeight)
         let row = nearestBufferRow(atY: docPoint.y)
