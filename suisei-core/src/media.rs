@@ -69,6 +69,10 @@ pub fn is_model_ext(ext: &str) -> bool {
             | "gltf"
             | "glb"
             | "fbx"
+            // A SceneKit particle system. Not a mesh, but it opens in the same
+            // pane for the same reason: it is a thing you look at and tune, and
+            // the workbench that tunes a scene's particles is already there.
+            | "scnp"
     )
 }
 
@@ -765,7 +769,7 @@ mod model_kind_tests {
     fn the_formats_macos_can_read_are_models() {
         for ext in [
             "usdz", "USDZ", "usda", "usdc", "usd", "obj", "dae", "scn", "stl", "ply", "gltf",
-            "GLB", "glb", "fbx", "FBX",
+            "GLB", "glb", "fbx", "FBX", "scnp", "SCNP",
         ] {
             assert!(is_model_ext(ext), "{ext} should open in the model viewer");
             assert_eq!(
