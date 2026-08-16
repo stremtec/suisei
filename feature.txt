@@ -16,8 +16,7 @@
        workspace_search.rs 에 replace_in_file / replace_all_in_file /
        replace_hits 가 다 있는데 search.rs 엔 replace 가 없음. 프로젝트 전체
        치환은 되고 지금 보는 파일은 안 됨 — 거꾸로고, 기계는 옆 모듈에 있음.
-   ☐ 설정 상단 네이티브 화살표 툴바 클릭 안 됨 → '새로운 이슈2'
-       사용자가 이미 보고한 버그. 기능보다 앞.
+   (설정 화살표 버그와 디버거 "다운로드" 버그는 해결됨 — 새로운 이슈2·3 참조.)
 
  P2 · 제품의 격을 정하는 것
    ☐ 에디터 캔버스 접근성        → 아래 '상용 IDE' 절
@@ -39,6 +38,9 @@
    ☐ 단축키 변경        Shortcuts 페이지는 목록으로 다시 짰지만 읽기 전용.
                         core 에 바인딩을 바꾸는 API 자체가 없음.
    ☐ 열 선택(블록 선택) 멀티커서는 있음.
+   ☐ 21. 컴포넌트 다운로드  설계 완료 → docs/SUISEI-COMPONENTS-PLAN.md.
+                        C0(히어로 jpeg 19MB 재인코딩)은 아키텍처 없이 지금 가능.
+                        나머지는 서명/노터라이즈 파이프라인이 선행 조건.
    ☐ 12. Docking        설계 완료 → docs/SUISEI-DOCK-PLAN.md. 5단계로 쪼갰고
                         D3(메뉴로 새 창 빼기)까지가 단독 출시 가능한 MVP.
                         막는 것 하나: ABI 가 판을 시각 인덱스로 부름.
@@ -619,7 +621,74 @@
        백엔드면 timeOffset 으로 되지만 모든 클립이 그렇다고 가정하면 안 됨.
 
 
-새로운 이슈2. 설정에서 상단 네이티브 화살표 툴바 클릭이 안됨. 호버링하면 호버링시에 뜨는 회색 알약이 깜빡거림.
+✅ 새로운 이슈2. 설정에서 상단 네이티브 화살표 툴바 클릭이 안됨 — 해결.
+     히스토리 로직은 멀쩡했음(기록도 이동도 맞음). ThemedWindowChrome 이 붙어 있는
+     뷰가 업데이트될 때마다 창 크롬을 통째로 다시 발랐고, 그 중 둘은 AppKit 쪽에서
+     멱등이 아님:
+       · styleMask 대입(insert 도 get-modify-set 이라 이미 있는 플래그여도 대입함)
+         → AppKit 이 창의 frame view 를 다시 만듦. **툴바가 그 안에 있음.**
+       · appearance 에 같은 이름의 새 NSAppearance 객체 대입
+         → 같은 트리 전체에 effective appearance 재해석.
+     포인터가 툴바 버튼 위에 있을 때 둘 중 하나만 일어나도 그 버튼이 교체됨 —
+     호버 하이라이트가 다시 시작하니까 **알약이 깜빡거리고**, mouseDown 을 받은
+     뷰가 mouseUp 전에 사라지니까 **클릭이 완료되지 않음.**
+     → 모든 쓰기를 가드. 그리고 representable 은 바를 내용이 실제로 바뀌었을 때만
+       다시 바름. 사이드바의 투명 툴바 참가자도 크기를 줌 — 맨 Rectangle 은 고유
+       크기가 없어서 주는 만큼 늘어나는데, NavigationSplitView 에서 그건 루트의
+       .navigation 배치 히스토리 컨트롤과 같은 선행 영역임.
+
+✅ 새로운 이슈3. 디버거가 "다운로드가 안 됨" — 해결. 다운로드할 게 없었음.
+     lldb-dap 이 이 맥에 두 벌 있음(Xcode, Command Line Tools). 그런데 dap.rs 가
+     자기만의 command_exists 로 std::env::var("PATH") 만 훑었고, Finder 로 띄운
+     앱의 PATH 는 /usr/bin:/bin:/usr/sbin:/sbin 임 → "install lldb-dap" 라고 함.
+     어댑터는 **이미 exec::tool 로 띄우고 있었음**(dap.rs 맨 위 주석이 그렇게
+     적혀 있음). 게이트가 통과시켰으면 실행됐을 줄에 못 가고 있었던 것 —
+     게이트와 실행이 "설치됨" 의 뜻에 대해 합의해야 함.
+     · exec 도 못 찾았을 것임: 애플 툴체인은 터미널에서도 PATH 에 없음(xcrun 으로
+       씀). search_dirs 가 xcode-select -p 로 **선택된** 툴체인을 묻고(둘 다 깔린
+       기계는 어느 쪽이든 될 수 있어서 Xcode 경로를 박아두면 사용자가 바꿔놓은 걸
+       조용히 무시함), CLT 디렉터리도 붙임(xcode-select 가 지워진 Xcode 를 가리킬
+       때 동작하는 게 그쪽).
+     · 앱이 실제로 받는 환경으로 증명함:
+       env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin →
+       lldb-dap = Xcode 것, cargo = ~/.cargo/bin, gh = /opt/homebrew/bin.
+     · 테스트 셋: CLT 가 검색됨 / 선택된 툴체인이 검색됨 / PATH 밖에 있지만 설치된
+       도구가 dap 게이트를 통과함.
+
+☐ 21. 다운로드 가능한 컴포넌트 (Xcode 의 Components/Platforms 모양)
+     (사용자 요청: 처음엔 에디터 본체만, 설치시 선택, 나중에도 변경 가능.)
+     → 설계 docs/SUISEI-COMPONENTS-PLAN.md. **측정이 질문을 뒤집음:**
+
+     앱 140MB 중 —
+       · **언어 문법 ~38MB** ← 엔진 dylib 의 __const. 코드(__text)는 5.3MB 뿐.
+         objc 5.4 · c# 5.4 · swift 5.0 · scala 4.3 · haskell 3.9 · cpp 3.6 …
+       · 웰컴 히어로 이미지 19MB
+       · Assimp(FBX) 6.0MB — **정적 링크라 지금은 뺄 수 없음**
+       · GLTFKit2 5.4MB — 이미 동적 프레임워크
+       · **디버거 0MB** — 시스템 lldb-dap 을 씀. 우리가 배포하는 게 없음.
+       (실행파일 67MB 는 -Onone 개발 빌드 숫자임. 출시 숫자로 인용 금지.)
+
+     · 디버거는 번들이 아님. 오늘 버그가 그거였고, 우리가 lldb-dap 사본을 호스팅하면
+       애플이 이미 업데이트하는 걸 하나 더 들고 다니는 것. debugpy/dlv/js-debug 도
+       pip/go/npm 이 정본 — "호스팅" 이 아니라 "찾아주고 설치를 도와주는 행" 이 맞음.
+       LSP 서버도 같은 논리.
+     · **언어가 번들임.** 30개 중 아무도 30개를 다 안 씀. 기본 탑재(작고, 첫 실행이
+       네트워크 없이 돌아야 하는 것): rust/python/js/ts/json/md/toml/yaml/html/css/
+       c/bash/go/java — 다 합쳐 10MB 미만. 나머지는 다운로드 → 기본이 ~28MB 가벼워짐.
+       swift(5.0MB)는 판단 필요 — 맥 에디터라서.
+     · 기술 비용: 지금 문법은 컴파일된 러스트 크레이트. 런타임 로드하려면 언어당
+       dylib + tree_sitter_<lang>() 엔트리포인트 + dlopen (Zed/nvim-treesitter 방식).
+     · **일정을 결정하는 제약**: 받아서 프로세스에 로드하는 건 전부 서명 + 노터라이즈
+       돼야 함. hardened runtime 의 library validation 이 막고, 그걸 끄는 건 다운로드
+       하나와 앱 보안 태세를 바꾸는 것. → 우리 서명/노터라이즈/호스팅 파이프라인이
+       이 기능의 진짜 비용이고, 목록 UI 는 제일 쉬운 부분임.
+       (헬퍼 프로세스로 우회 가능 — 3D 임포터는 됨, 문법은 안 됨: 구문 파스는 키마다
+        도는데 키마다 RPC 는 이 에디터가 지키려는 예산 그 자체임.)
+     · 규칙 하나: **없는 컴포넌트는 기능을 낮출 뿐 깨뜨리지 않음.** 3D 없는 .fbx 는
+       파일 이름을 말해주는 플레이스홀더(Assimp 이전 동작), 문법 없는 언어는 하이라이팅
+       없는 편집 가능한 문서. core 가 이미 그렇게 동작함.
+     · 단계: C0 jpeg 19MB(아키텍처 0, 제일 싼 15MB) → C1 컴포넌트 하나로 파이프라인
+       증명 → C2 문법 전체 → C3 Components UI + 첫 실행 선택 → C4 툴링 행 → C5 3D.
 
 **feature**
 
