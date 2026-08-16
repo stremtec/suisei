@@ -279,6 +279,7 @@ struct ContentView: View {
     /// Measured shell-chip row width — the header scroller hugs it until the
     /// chips outgrow the cap, so a single session sits right beside the "+".
     @State private var terminalChipsWidth: CGFloat = 0
+    @State private var debugTab: DebugAreaTab = .terminal
 
     /// The right rail answers "what is THIS", about the one thing selected —
     /// as against the navigator's "where do I go". Xcode keeps the tab and
@@ -1136,6 +1137,18 @@ struct ContentView: View {
             if open {
                 navMode = .scm
                 engine.uiNavVisible = true
+            }
+        }
+        .onChange(of: engine.dap.session) { _, live in
+            // A session starting brings the debugger forward, and its ending
+            // leaves it where it is. Pressing Start and getting the terminal
+            // is the panel not answering what was asked; being thrown back to
+            // the terminal the moment a program exits is the panel deciding
+            // you are finished reading.
+            guard live else { return }
+            debugTab = .debug
+            if !engine.uiDebugVisible {
+                animatePanels { withAnimation(NavStrip.settle) { engine.uiDebugVisible = true } }
             }
         }
         .onChange(of: engine.chrome.terminal.open) { _, open in
@@ -2907,18 +2920,16 @@ struct ContentView: View {
     private var debugArea: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "terminal.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(terminalFocused ? accent : dockHeaderDim)
-                Text("Terminal")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(terminalFocused ? dockHeaderFg : dockHeaderDim)
-                if terminalFocused {
+                // The bottom area holds two things now, so it says which one
+                // it is showing. Xcode's arrangement: the debugger and the
+                // console share the floor and neither owns it.
+                debugAreaTabs
+                if debugTab == .terminal, terminalFocused {
                     Text("keys → shell · Esc or click editor to leave")
                         .font(.system(size: 10))
                         .foregroundStyle(dockHeaderDim)
                         .transition(.opacity)
-                } else if engine.chrome.terminal.open {
+                } else if debugTab == .terminal, engine.chrome.terminal.open {
                     Text("click to type")
                         .font(.system(size: 10))
                         .foregroundStyle(dockHeaderDim)
@@ -2926,7 +2937,7 @@ struct ContentView: View {
                 }
                 Spacer()
                 // Shell sessions (VS Code-style): chips + new-session.
-                if engine.chrome.terminal.open {
+                if debugTab == .terminal, engine.chrome.terminal.open {
                     HStack(spacing: 3) {
                         // Chips scroll once they outgrow the header; the "+"
                         // stays pinned outside the scroller so it never drifts
@@ -2998,7 +3009,12 @@ struct ContentView: View {
             .animation(.easeOut(duration: 0.15), value: terminalFocused)
 
             Group {
-                if engine.chrome.terminal.open {
+                if debugTab == .debug {
+                    DebugPanelView(
+                        engine: engine, accent: accent, fg: fg, dim: dim,
+                        separator: theme.separator
+                    )
+                } else if engine.chrome.terminal.open {
                     terminalPanelInner
                 } else {
                     Button {
@@ -3026,6 +3042,50 @@ struct ContentView: View {
 
     private var terminalFocused: Bool {
         engine.focus == .terminal
+    }
+
+    /// Which half of the bottom area is showing.
+    enum DebugAreaTab: String, CaseIterable {
+        case terminal, debug
+        var title: String { self == .terminal ? "Terminal" : "Debug" }
+        var symbol: String { self == .terminal ? "terminal.fill" : "ladybug.fill" }
+    }
+
+    /// Two words and two glyphs, not a segmented control.
+    ///
+    /// The header is 28pt and already carries the shell chips, a "+" and a
+    /// close button; a bordered segmented control at that height is taller
+    /// than the row it sits in. This is the same treatment the navigator's
+    /// mode strip uses — the lit one is the one you are looking at.
+    private var debugAreaTabs: some View {
+        HStack(spacing: 2) {
+            ForEach(DebugAreaTab.allCases, id: \.self) { tab in
+                let on = debugTab == tab
+                Button {
+                    debugTab = tab
+                    // Core owns the flag: the breakpoint gutter and the TUI
+                    // layout both read it, and it must not drift from what is
+                    // on screen here.
+                    engine.dapSetPanel(tab == .debug)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: tab.symbol)
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text(tab.title)
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(on ? dockHeaderFg : dockHeaderDim)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(on ? Color.primary.opacity(0.10) : .clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     private func terminalSessionChip(_ i: Int) -> some View {

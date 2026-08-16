@@ -4422,6 +4422,162 @@ mod tests {
         assert_eq!(vcol_for_utf16(&engine, 0, 6), 8, "르 takes two more");
     }
 
+    // ── Debugger bridge ───────────────────────────────────────────────
+    //
+    // core's DAP client is 2,995 lines and none of it crossed this boundary
+    // until now, so what is worth pinning is the boundary rather than the
+    // protocol. Driving a real adapter needs one installed and a program to
+    // stop inside it; these poke the client's own state and check that what
+    // the face would draw is what core holds.
+
+    fn dap_snapshot(engine: &SuiseiEngine) -> SuiseiDapSnapshot {
+        let mut out: SuiseiDapSnapshot = unsafe { std::mem::zeroed() };
+        assert_eq!(suisei_engine_dap(engine, &mut out), 1);
+        out
+    }
+
+    fn field_text(field: &[c_char]) -> String {
+        let bytes: Vec<u8> = field.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// An engine with no session still answers, and says it has none. The face
+    /// asks every tick; "no debugger is running" has to be a snapshot rather
+    /// than a failure, or the panel cannot draw its idle screen.
+    #[test]
+    fn an_idle_engine_reports_an_idle_debugger() {
+        let engine = Box::new(SuiseiEngine(Engine::new()));
+        let snap = dap_snapshot(&engine);
+        assert_eq!(snap.state, 0);
+        assert_eq!(snap.session, 0);
+        assert_eq!(snap.frame_count, 0);
+        assert_eq!(snap.var_count, 0);
+        assert_eq!(snap.has_location, 0);
+    }
+
+    /// The fingerprint is what stops a hundred-kilobyte copy per frame, so it
+    /// has to move when the thing it stands for does — and stay put otherwise.
+    #[test]
+    fn the_dap_fingerprint_tracks_the_session() {
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        let quiet = suisei_engine_dap_fingerprint(&*engine);
+        assert_eq!(quiet, suisei_engine_dap_fingerprint(&*engine));
+
+        engine.0.app_mut().dap.log("Launching…");
+        let after_output = suisei_engine_dap_fingerprint(&*engine);
+        assert_ne!(quiet, after_output, "a console line is a change");
+
+        engine.0.app_mut().dap.state = suisei_core::dap::DapState::Stopped;
+        assert_ne!(after_output, suisei_engine_dap_fingerprint(&*engine));
+    }
+
+    /// Expanding a variable changes the tree without changing its length —
+    /// exactly the case a length-only fingerprint would miss.
+    #[test]
+    fn expanding_a_variable_moves_the_dap_fingerprint() {
+        use suisei_core::dap::VarNode;
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        engine.0.app_mut().dap.vars = vec![VarNode {
+            name: "locals".into(),
+            value: String::new(),
+            typ: String::new(),
+            var_ref: 7,
+            depth: 0,
+            expanded: false,
+            is_scope: true,
+        }];
+        let collapsed = suisei_engine_dap_fingerprint(&*engine);
+        engine.0.app_mut().dap.vars[0].expanded = true;
+        assert_ne!(collapsed, suisei_engine_dap_fingerprint(&*engine));
+    }
+
+    /// A console is read from the bottom. Core keeps 400 lines and this
+    /// carries 200, so it must carry the NEWEST 200 and report the true total
+    /// — a face showing the oldest 200 would describe the launch forever.
+    #[test]
+    fn the_dap_console_carries_its_tail_and_says_so() {
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        for i in 0..350 {
+            engine.0.app_mut().dap.log(format!("line {i}"));
+        }
+        let total = engine.0.app().dap.console.len();
+        let snap = dap_snapshot(&engine);
+        assert_eq!(snap.console_total as usize, total);
+        assert_eq!(snap.console_count as usize, SUISEI_MAX_DAP_CONSOLE);
+        assert_eq!(
+            field_text(&snap.console[SUISEI_MAX_DAP_CONSOLE - 1]),
+            "line 349",
+            "the newest line is the last one carried"
+        );
+    }
+
+    /// One line of status, chosen here. A hard error outranks a hint, and a
+    /// hint outranks the reason it stopped; the face should not have to know
+    /// that order to show one sentence.
+    #[test]
+    fn the_dap_status_line_prefers_the_error() {
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        engine.0.app_mut().dap.stopped_reason = Some("breakpoint".into());
+        assert_eq!(field_text(&dap_snapshot(&engine).status), "breakpoint");
+
+        engine.0.app_mut().dap.soft_error = Some("adapter not installed".into());
+        assert_eq!(field_text(&dap_snapshot(&engine).status), "adapter not installed");
+
+        engine.0.app_mut().dap.error = Some("failed to launch".into());
+        assert_eq!(field_text(&dap_snapshot(&engine).status), "failed to launch");
+    }
+
+    /// Selecting a frame asks the editor to follow it. It set the location and
+    /// told nobody, so the variables changed to a frame the user could not
+    /// see; in every debugger, clicking a frame is how you go and look at it.
+    #[test]
+    fn selecting_a_frame_takes_the_editor_there() {
+        use suisei_core::dap::StackFrameInfo;
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        engine.0.app_mut().dap.stack = vec![
+            StackFrameInfo { id: 1, name: "main".into(), path: "/tmp/a.rs".into(), line: 3, column: 0 },
+            StackFrameInfo { id: 2, name: "inner".into(), path: "/tmp/b.rs".into(), line: 9, column: 0 },
+        ];
+        engine.0.app_mut().dap.location_dirty = false;
+
+        suisei_engine_dap_select_frame(&mut *engine, 1);
+
+        let dap = &engine.0.app().dap;
+        assert_eq!(dap.selected_frame, 1);
+        assert_eq!(dap.current_path.as_deref(), Some("/tmp/b.rs"));
+        assert_eq!(dap.current_line, Some(9));
+        assert!(dap.location_dirty, "the editor is asked to follow");
+    }
+
+    /// Frames and their lines survive the crossing, 0-based as core stores them.
+    #[test]
+    fn the_dap_stack_crosses_intact() {
+        use suisei_core::dap::StackFrameInfo;
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        engine.0.app_mut().dap.stack = (0..3)
+            .map(|i| StackFrameInfo {
+                id: i,
+                name: format!("frame_{i}"),
+                path: format!("/tmp/f{i}.rs"),
+                line: (i as usize) * 10,
+                column: 0,
+            })
+            .collect();
+        let snap = dap_snapshot(&engine);
+        assert_eq!(snap.frame_count, 3);
+        assert_eq!(field_text(&snap.frame_names[2]), "frame_2");
+        assert_eq!(field_text(&snap.frame_paths[2]), "/tmp/f2.rs");
+        assert_eq!(snap.frame_lines[2], 20);
+    }
+
+    /// An unknown verb does nothing rather than something.
+    #[test]
+    fn an_unknown_dap_command_is_ignored() {
+        let mut engine = Box::new(SuiseiEngine(Engine::new()));
+        suisei_engine_dap_command(&mut *engine, 999);
+        assert_eq!(dap_snapshot(&engine).state, 0);
+    }
+
     #[test]
     fn git_diff_copy_preserves_all_lines_and_long_utf8_content() {
         use suisei_core::git_ops::{DiffLine, DiffLineKind};

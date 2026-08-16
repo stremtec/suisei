@@ -243,6 +243,30 @@ struct SuiseiApp: App {
         }
 
         // Terminal — shell surfaces (not only buried chords).
+        CommandMenu("Debug") {
+            // The debugger's own shortcuts, which are the same five keys in
+            // every tool that has one. Core has had all of this since before
+            // this face existed; until now there was no way to press it.
+            Button("Start / Continue") { engine.dapCommand(.startOrContinue) }
+                .keyboardShortcut(.functionKey(5), modifiers: [])
+            Button("Pause") { engine.dapCommand(.pause) }
+                .keyboardShortcut(.functionKey(6), modifiers: [])
+            Button("Stop") { engine.dapCommand(.stop) }
+                .keyboardShortcut(.functionKey(5), modifiers: .shift)
+            Divider()
+            Button("Step Over") { engine.dapCommand(.stepOver) }
+                .keyboardShortcut(.functionKey(10), modifiers: [])
+            Button("Step Into") { engine.dapCommand(.stepInto) }
+                .keyboardShortcut(.functionKey(11), modifiers: [])
+            Button("Step Out") { engine.dapCommand(.stepOut) }
+                .keyboardShortcut(.functionKey(11), modifiers: .shift)
+            Divider()
+            Button("Restart") { engine.dapCommand(.restart) }
+            Button("Toggle Breakpoint") { engine.toggleBreakpointAtCursor() }
+                .keyboardShortcut("\\", modifiers: .command)
+            Button("Remove All Breakpoints") { engine.dapCommand(.clearBreakpoints) }
+        }
+
         CommandMenu("Terminal") {
             // "Toggle Debug Area" used to lead this menu. It was View's
             // Show/Hide Debug Area under a second name, on the SAME ⇧⌘Y — two
@@ -827,5 +851,22 @@ private struct SplitCommands: View {
         .disabled(!menu.facts.hasActiveLayout)
 
         Divider()
+    }
+}
+
+extension KeyEquivalent {
+    /// F1…F12, which SwiftUI does not name.
+    ///
+    /// AppKit puts the function keys in the Unicode private-use area —
+    /// `NSF1FunctionKey` is 0xF704 — and a `KeyEquivalent` is a `Character`,
+    /// so the number is the whole of the translation. Without this a debugger
+    /// menu can be built with every other shortcut and none of the five keys
+    /// people actually press.
+    static func functionKey(_ n: Int) -> KeyEquivalent {
+        let base = 0xF704
+        guard (1...12).contains(n), let scalar = UnicodeScalar(base + n - 1) else {
+            return KeyEquivalent(" ")
+        }
+        return KeyEquivalent(Character(scalar))
     }
 }

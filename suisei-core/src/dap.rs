@@ -1502,6 +1502,12 @@ impl DapClient {
         let frame = &self.stack[idx];
         self.current_path = Some(frame.path.clone());
         self.current_line = Some(frame.line);
+        // Take the editor there. Selecting a frame moved the location and did
+        // not ask anyone to follow it, so the variables changed to a frame the
+        // user could not see — and in every debugger, clicking a frame in the
+        // call stack is how you go and look at it. `dap_apply_stopped_location`
+        // already opens another file when the frame is in one.
+        self.location_dirty = true;
         let fid = frame.id;
         self.vars.clear();
         self.request_scopes(fid);
