@@ -72,6 +72,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/AudioViewer.swift"
   "$ROOT/suisei-app/Suisei/ImagePDFViewers.swift"
   "$ROOT/suisei-app/Suisei/ModelViewer.swift"
+  "$ROOT/suisei-app/Suisei/FBXScene.swift"
   "$ROOT/suisei-app/Suisei/DebugPanel.swift"
   "$ROOT/suisei-app/Suisei/MetalTextRenderer.swift"
   "$ROOT/suisei-app/Suisei/TabStripLayout.swift"
@@ -114,6 +115,12 @@ OPT_STAMP="$BUILD/.swift-opt"
 # third_party/GLTFKit2/VENDOR.md for why.
 GLTF_DIR="$ROOT/third_party/GLTFKit2"
 
+# Vendored Assimp — the FBX reader, static, FBX importer only. Nothing on the
+# system reads FBX and Autodesk's own SDK is commercial; see
+# third_party/Assimp/VENDOR.md. Its module map is upstream's own, which is why
+# the module is `libassimp` and not a name of ours.
+ASSIMP_DIR="$ROOT/third_party/Assimp"
+
 ST_DIR="$ROOT/third_party/SwiftTerm"
 ST_BUILD="$ST_DIR/.build/release"
 ST_LIB="$STAGE/libSwiftTerm.a"
@@ -151,7 +158,8 @@ else
     need_swift=1
   else
     for f in "${SWIFT_FILES[@]}" "$HDR" "$DYLIB_STAGE" "$ST_LIB" \
-             "$GLTF_DIR/GLTFKit2.framework/Versions/A/GLTFKit2"; do
+             "$GLTF_DIR/GLTFKit2.framework/Versions/A/GLTFKit2" \
+             "$ASSIMP_DIR/libassimp.a"; do
       if [[ -e "$f" && "$f" -nt "$BIN" ]]; then need_swift=1; break; fi
     done
   fi
@@ -236,6 +244,11 @@ if [[ "$need_swift" == "1" ]]; then
     -framework Combine \
     -F "$GLTF_DIR" \
     -framework GLTFKit2 \
+    -Xcc -I"$ASSIMP_DIR/include" \
+    -Xcc -fmodule-map-file="$ASSIMP_DIR/include/assimp/module.modulemap" \
+    "$ASSIMP_DIR/libassimp.a" \
+    -lz \
+    -lc++ \
     -import-objc-header "$STAGE/suisei_engine.h" \
     -I "$ST_BUILD/Modules" \
     "$ST_LIB" \
@@ -379,6 +392,8 @@ cp -f "$ROOT/LICENSE" "$RES/LICENSE"
 cp -f "$ROOT/third_party/SwiftTerm/LICENSE" "$RES/LICENSE-SwiftTerm"
 # GLTFKit2 is MIT for the same reason.
 cp -f "$ROOT/third_party/GLTFKit2/LICENSE" "$RES/LICENSE-GLTFKit2"
+# Assimp is BSD-3 and its notice has to travel too.
+cp -f "$ROOT/third_party/Assimp/LICENSE" "$RES/LICENSE-Assimp"
 
 ICON_SRC_DIR="$ROOT/suisei-app/Resources"
 if [[ "$need_icon" == "1" || ! -f "$RES/Suisei.icns" ]]; then

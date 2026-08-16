@@ -68,6 +68,7 @@ pub fn is_model_ext(ext: &str) -> bool {
             | "ply"
             | "gltf"
             | "glb"
+            | "fbx"
     )
 }
 
@@ -764,7 +765,7 @@ mod model_kind_tests {
     fn the_formats_macos_can_read_are_models() {
         for ext in [
             "usdz", "USDZ", "usda", "usdc", "usd", "obj", "dae", "scn", "stl", "ply", "gltf",
-            "GLB", "glb",
+            "GLB", "glb", "fbx", "FBX",
         ] {
             assert!(is_model_ext(ext), "{ext} should open in the model viewer");
             assert_eq!(
@@ -779,8 +780,8 @@ mod model_kind_tests {
     /// at least names the file and offers to open it elsewhere.
     #[test]
     fn a_format_nothing_can_read_is_not_a_model() {
-        for ext in ["blend", "fbx", "max", "c4d", "abc"] {
-            assert!(!is_model_ext(ext), "{ext} has no importer on macOS");
+        for ext in ["blend", "max", "c4d", "abc"] {
+            assert!(!is_model_ext(ext), "{ext} has no reader we ship");
         }
     }
 

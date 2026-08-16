@@ -33,6 +33,7 @@ struct ModelPaneViewer: View {
     @State private var stats: ModelStats?
     @State private var command: ModelCommand?
     @State private var loading = true
+    @State private var view = ModelViewOptions()
     @State private var clips: [ModelClip] = []
     @State private var selectedClip: String = ""
     @State private var playing = false
@@ -43,11 +44,23 @@ struct ModelPaneViewer: View {
         ZStack {
             palette.bg
             if let scene {
-                ModelStage(scene: scene, palette: palette, command: $command)
+                ModelStage(scene: scene, palette: palette, command: $command, options: view)
             } else if loading {
                 ProgressView().controlSize(.small)
             } else {
                 unreadable
+            }
+
+            if scene != nil {
+                VStack {
+                    HStack {
+                        Spacer()
+                        ModelViewMenu(options: $view, palette: palette)
+                            .padding(.trailing, 12)
+                            .padding(.top, 10)
+                    }
+                    Spacer()
+                }
             }
 
             if !clips.isEmpty, scene != nil {
@@ -134,7 +147,7 @@ struct ModelPaneViewer: View {
             // Paused on arrival. An asset that starts moving the instant it
             // opens is answering a question nobody asked — the first one is
             // "is this the right mesh", and a spinning one is harder to judge.
-            for clip in clips { clip.player.stop() }
+            for clip in clips { clip.stop() }
             selectedClip = clips.first?.id ?? ""
         case .failure(let message):
             failure = message
@@ -155,22 +168,45 @@ enum ModelCommand: Equatable {
 ///
 /// Name and duration come straight from SceneKit, measured on a real animated
 /// asset that ships with macOS (`B389_loop.dae`: one clip, "square_GEP-anim",
-/// 6.00s). The player is the thing that plays it — held rather than looked up
-/// again, because `animationPlayer(forKey:)` walks the node it belongs to.
+/// 6.00s).
+///
+/// **Players, plural.** A rigged animation is one clip with a channel per
+/// bone, and each channel becomes a player on the node it drives. Keyed by
+/// player, `animation_with_skeleton.fbx` came back as fifteen clips all called
+/// "Armature|ArmatureAction" — a picker with fifteen identical rows, of which
+/// choosing any one moved a single bone. A clip is a NAME, and playing it
+/// plays everything under it.
 struct ModelClip: Identifiable, Equatable {
     static func == (a: ModelClip, b: ModelClip) -> Bool { a.id == b.id }
     let id: String
     let name: String
     let duration: Double
-    let player: SCNAnimationPlayer
+    let players: [SCNAnimationPlayer]
+
+    func play() { players.forEach { $0.paused = false; $0.play() } }
+    func pause() { players.forEach { $0.paused = true } }
+    func stop() { players.forEach { $0.stop() } }
+    func setSpeed(_ rate: CGFloat) { players.forEach { $0.speed = rate } }
 }
 
 /// Counts worth reading off a mesh before opening it in a real tool.
 struct ModelStats: Equatable {
     var meshes: Int
     var vertices: Int
+    /// Triangles. The number an artist asks for first — a budget is quoted in
+    /// polygons, never in vertices, and after triangulation these are the same
+    /// question.
+    var triangles: Int
     var materials: Int
     var animations: Int
+    /// Nodes in the graph, and how deep it goes. A model that is one mesh in
+    /// forty nested transforms behaves differently from one that is forty
+    /// meshes side by side, and nothing else in the panel would say so.
+    var nodes: Int
+    var depth: Int
+    var hasNormals: Bool
+    var hasUVs: Bool
+    var skinned: Bool
     /// The model's bounding box in its own units.
     var extent: SIMD3<Float>
 }
@@ -222,8 +258,14 @@ private struct ModelLoad {
         let s = ModelStats(
             meshes: counted.meshes,
             vertices: counted.vertices,
+            triangles: counted.triangles,
             materials: counted.materials,
             animations: counted.animations,
+            nodes: counted.nodes,
+            depth: counted.depth,
+            hasNormals: counted.hasNormals,
+            hasUVs: counted.hasUVs,
+            skinned: counted.skinned,
             extent: extent
         )
         stats = s
@@ -231,17 +273,36 @@ private struct ModelLoad {
         let dims = NumberFormatter()
         dims.maximumFractionDigits = 2
         func size(_ v: Float) -> String { dims.string(from: NSNumber(value: v)) ?? "—" }
+        // What a 3D file is asked about, in the order it is asked. The polygon
+        // count leads because a budget is quoted in polygons; the attribute
+        // line is next because "why is it flat" and "why is the texture
+        // missing" are both answered by whether the mesh carries normals and
+        // UVs at all.
         sections = [
-            ViewerInfoSection("Model", [
-                ("Meshes", "\(s.meshes)"),
+            ViewerInfoSection("Geometry", [
+                ("Polygons", s.triangles.formatted()),
                 ("Vertices", s.vertices.formatted()),
+                ("Meshes", "\(s.meshes)"),
                 ("Materials", "\(s.materials)"),
-                ("Animations", s.animations > 0 ? "\(s.animations)" : nil),
+                ("Attributes", [
+                    s.hasNormals ? "normals" : nil,
+                    s.hasUVs ? "UVs" : nil,
+                    s.skinned ? "skinned" : nil,
+                ].compactMap { $0 }.joined(separator: " · ")),
+            ]),
+            ViewerInfoSection("Scene", [
+                ("Nodes", "\(s.nodes)"),
+                ("Depth", "\(s.depth)"),
+                ("Animations", s.animations > 0 ? "\(s.animations)" : "none"),
             ]),
             ViewerInfoSection("Bounds", [
                 ("Width", size(extent.x)),
                 ("Height", size(extent.y)),
                 ("Depth", size(extent.z)),
+                // Its own units, said out loud. A model is authored in metres
+                // or centimetres and the file rarely says which; a number with
+                // no unit beside it invites the wrong one to be assumed.
+                ("Units", "file units"),
             ]),
             ViewerInfoSection.file(url),
         ]
@@ -255,6 +316,8 @@ private struct ModelLoad {
     /// about the file, not about the pane.
     private static func read(_ url: URL) throws -> SCNScene {
         switch url.pathExtension.lowercased() {
+        case "fbx":
+            return try FBXScene.read(url)
         case "gltf", "glb":
             let asset = try GLTFAsset(url: url)
             let source = GLTFSCNSceneSource(asset: asset)
@@ -276,28 +339,36 @@ private struct ModelLoad {
         }
     }
 
-    /// Every animation in the scene, with the player that runs it.
+    /// Every animation in the scene, grouped by name.
     ///
-    /// A clip's key is unique within its node but not within the file, so the
-    /// identity carries the node's name too — two meshes each animating
-    /// "Take 001" is the ordinary case in an exported rig, and a picker whose
-    /// entries collide picks the wrong one.
+    /// By NAME, not by player: a rigged clip has a channel per bone and each
+    /// becomes a player on its own node. Measured on
+    /// `animation_with_skeleton.fbx` — fifteen players, one name — so keying
+    /// by player produced fifteen identical picker rows, each moving one bone.
+    ///
+    /// The duration is the longest channel's. They should agree, and when they
+    /// do not the clip lasts as long as its slowest part.
     static func clips(in root: SCNNode) -> [ModelClip] {
-        var out: [ModelClip] = []
+        var byName: [String: [SCNAnimationPlayer]] = [:]
+        var order: [String] = []
         func walk(_ node: SCNNode) {
             for key in node.animationKeys {
                 guard let player = node.animationPlayer(forKey: key) else { continue }
-                out.append(ModelClip(
-                    id: "\(node.name ?? "node")/\(key)",
-                    name: key,
-                    duration: player.animation.duration,
-                    player: player
-                ))
+                if byName[key] == nil { order.append(key) }
+                byName[key, default: []].append(player)
             }
             node.childNodes.forEach(walk)
         }
         walk(root)
-        return out
+        return order.map { name in
+            let players = byName[name] ?? []
+            return ModelClip(
+                id: name,
+                name: name,
+                duration: players.map(\.animation.duration).max() ?? 0,
+                players: players
+            )
+        }
     }
 
     /// Walk the scene once for everything worth counting.
@@ -306,30 +377,56 @@ private struct ModelLoad {
     /// same question four times is four traversals for one answer.
     private static func count(
         _ root: SCNNode
-    ) -> (meshes: Int, vertices: Int, materials: Int, animations: Int) {
+    ) -> (
+        meshes: Int, vertices: Int, triangles: Int, materials: Int, animations: Int,
+        nodes: Int, depth: Int, hasNormals: Bool, hasUVs: Bool, skinned: Bool
+    ) {
         var meshes = 0
         var vertices = 0
+        var triangles = 0
         var animations = 0
+        var nodes = 0
+        var depth = 0
+        var hasNormals = false
+        var hasUVs = false
+        var skinned = false
         // Materials are shared between nodes far more often than not, so they
         // are counted by identity — a cube with one material on six faces has
         // one material, not six.
         var materials: Set<ObjectIdentifier> = []
 
-        func walk(_ node: SCNNode) {
+        func walk(_ node: SCNNode, _ level: Int) {
+            nodes += 1
+            depth = max(depth, level)
             if let geometry = node.geometry {
                 meshes += 1
-                for source in geometry.sources where source.semantic == .vertex {
-                    vertices += source.vectorCount
+                for source in geometry.sources {
+                    switch source.semantic {
+                    case .vertex: vertices += source.vectorCount
+                    case .normal: hasNormals = true
+                    case .texcoord: hasUVs = true
+                    default: break
+                    }
+                }
+                // Every element, because a mesh can carry more than one and a
+                // count that stopped at the first would under-report exactly
+                // the models with the most in them.
+                for element in geometry.elements where element.primitiveType == .triangles {
+                    triangles += element.primitiveCount
                 }
                 for material in geometry.materials {
                     materials.insert(ObjectIdentifier(material))
                 }
             }
+            if node.skinner != nil { skinned = true }
             animations += node.animationKeys.count
-            for child in node.childNodes { walk(child) }
+            for child in node.childNodes { walk(child, level + 1) }
         }
-        walk(root)
-        return (meshes, vertices, materials.count, animations)
+        walk(root, 0)
+        return (
+            meshes, vertices, triangles, materials.count, animations,
+            nodes, depth, hasNormals, hasUVs, skinned
+        )
     }
 }
 
@@ -343,6 +440,7 @@ private struct ModelStage: NSViewRepresentable {
     let scene: SCNScene
     let palette: ViewerPalette
     @Binding var command: ModelCommand?
+    let options: ModelViewOptions
 
     func makeNSView(context: Context) -> SCNView {
         let view = SCNView()
@@ -364,6 +462,8 @@ private struct ModelStage: NSViewRepresentable {
             context.coordinator.framed = false
         }
         view.backgroundColor = NSColor(palette.bg)
+        view.debugOptions = options.debugOptions
+        view.showsStatistics = options.statistics
 
         if !context.coordinator.framed {
             context.coordinator.framed = true
@@ -427,11 +527,7 @@ struct ModelAnimationBar: View {
             Button {
                 guard let clip else { return }
                 playing.toggle()
-                if playing {
-                    clip.player.play()
-                } else {
-                    clip.player.paused = true
-                }
+                if playing { clip.play() } else { clip.pause() }
             } label: {
                 Image(systemName: playing ? "pause.fill" : "play.fill")
                     .font(.system(size: 19, weight: .medium))
@@ -443,7 +539,7 @@ struct ModelAnimationBar: View {
 
             Button {
                 guard let clip else { return }
-                clip.player.stop()
+                clip.stop()
                 playing = false
             } label: {
                 Image(systemName: "stop.fill")
@@ -467,7 +563,7 @@ struct ModelAnimationBar: View {
                 .onChange(of: selected) { old, _ in
                     // Switching clips stops the one that was running. Two
                     // animations on one rig at once is not a preview of either.
-                    clips.first { $0.id == old }?.player.stop()
+                    clips.first { $0.id == old }?.stop()
                     playing = false
                 }
             } else if let clip {
@@ -504,7 +600,7 @@ struct ModelAnimationBar: View {
         Menu {
             ForEach([0.25, 0.5, 1.0, 2.0], id: \.self) { rate in
                 Button(rate == 1 ? "Normal" : "\(rate)×") {
-                    clip?.player.speed = CGFloat(rate)
+                    clip?.setSpeed(CGFloat(rate))
                 }
             }
         } label: {
@@ -522,5 +618,68 @@ struct ModelAnimationBar: View {
         guard s.isFinite, s > 0 else { return "—" }
         let total = Int(s.rounded())
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// What the stage is showing besides the model.
+///
+/// The names are SceneKit's own — read off `SCNSceneRenderer.h` rather than
+/// from a tutorial, because that header is the authoritative list and it has
+/// eleven entries, most of which mean nothing for a static asset (physics
+/// fields, light extents, slider constraints). These four are the ones a
+/// person looking at a mesh asks for, and they are the ones Xcode's own scene
+/// editor puts on its toolbar.
+struct ModelViewOptions: Equatable {
+    /// `SCNDebugOptionShowWireframe` — the mesh drawn OVER the shaded surface,
+    /// which is what shows topology. `RenderAsWireframe` replaces the surface
+    /// instead, and then a dense mesh is a grey blob.
+    var wireframe = false
+    /// `SCNDebugOptionShowBoundingBoxes`.
+    var boundingBoxes = false
+    /// `SCNDebugOptionShowSkeletons` — nothing at all on an unskinned model,
+    /// which is why the menu says what it is rather than hiding it.
+    var skeletons = false
+    /// SceneKit's own frame/draw-call meter.
+    var statistics = false
+
+    var debugOptions: SCNDebugOptions {
+        var out: SCNDebugOptions = []
+        if wireframe { out.insert(.showWireframe) }
+        if boundingBoxes { out.insert(.showBoundingBoxes) }
+        if skeletons { out.insert(.showSkeletons) }
+        return out
+    }
+}
+
+/// The view toggles, as a menu in the stage's corner.
+///
+/// Not in the window toolbar with zoom and reset: those act on the model and
+/// this changes how it is drawn, and the toolbar is shared with every other
+/// viewer. A corner menu also keeps them out of the way of the thing they are
+/// about, which is the whole stage.
+struct ModelViewMenu: View {
+    @Binding var options: ModelViewOptions
+    let palette: ViewerPalette
+
+    var body: some View {
+        Menu {
+            Toggle("Wireframe", isOn: $options.wireframe)
+            Toggle("Bounding Boxes", isOn: $options.boundingBoxes)
+            Toggle("Skeleton", isOn: $options.skeletons)
+            Divider()
+            Toggle("Statistics", isOn: $options.statistics)
+        } label: {
+            Image(systemName: "square.3.layers.3d")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(palette.fg)
+                .frame(width: 26, height: 22)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .padding(.horizontal, 4)
+        .padding(.vertical, 3)
+        .glassEffect(.regular, in: Capsule())
+        .help("View options")
     }
 }
