@@ -88,6 +88,7 @@ fn token_keys_are_stable() {
         "current_line",
         "invisibles",
         "model_bg",
+        "debug_stop",
     ];
     let actual: Vec<&str> = ThemeToken::ALL.iter().map(|t| t.key()).collect();
     assert_eq!(

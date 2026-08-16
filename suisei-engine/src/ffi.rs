@@ -2186,6 +2186,7 @@ pub struct SuiseiThemeSnapshot {
     /// Appended. The struct is `#[repr(C)]` and the face reads it by field
     /// offset, so a new colour goes on the END — the same rule as `ThemeToken`.
     pub model_bg: u32,
+    pub debug_stop: u32,
 }
 
 #[unsafe(no_mangle)]
@@ -2299,6 +2300,7 @@ pub extern "C" fn suisei_engine_theme(
     o.git_del_bg = t.git_del_bg;
     o.git_hunk = t.git_hunk;
     o.model_bg = t.model_bg;
+    o.debug_stop = t.debug_stop;
     1
 }
 

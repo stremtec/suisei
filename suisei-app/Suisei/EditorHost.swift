@@ -94,6 +94,8 @@ struct EditorHost: NSViewRepresentable {
             removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
             breakpoint: .systemYellow,
             breakpointInk: .black,
+            debugStop: NSColor(theme.color(theme.debugStop)),
+            debugStopInk: .systemGreen,
             liveFlash: NSColor(accent).withAlphaComponent(0.22),
             bracketFill: EditorCanvasView.bracketYellow,
             bracketInk: .black
@@ -882,6 +884,15 @@ final class EditorCanvasView: NSView {
         /// gutter is yellow.
         var breakpoint: NSColor
         var breakpointInk: NSColor
+        /// The row the program is stopped on, and the arrow that points at it.
+        ///
+        /// A band rather than the caret's wash, and green rather than the
+        /// gutter's other colours: the git bar already spends red and blue in
+        /// that strip, and the arrow is a SHAPE so it stays legible under
+        /// Increase Contrast and to a colour-blind reader who sees the band
+        /// and the caret row as the same grey.
+        var debugStop: NSColor
+        var debugStopInk: NSColor
         /// The wash over a row a live reload just replaced. The accent, faint
         /// — this is a notice that something arrived, not an error and not a
         /// change the reader made. It fades to nothing within about a second,
@@ -954,6 +965,8 @@ final class EditorCanvasView: NSView {
         removedFg: NSColor.labelColor.withAlphaComponent(0.82),
         removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
         breakpoint: .systemYellow, breakpointInk: .black,
+        debugStop: NSColor.systemGreen.withAlphaComponent(0.18),
+        debugStopInk: .systemGreen,
         liveFlash: NSColor.systemBlue.withAlphaComponent(0.22),
         bracketFill: bracketYellow,
         bracketInk: .black
@@ -1607,6 +1620,15 @@ final class EditorCanvasView: NSView {
             let rowRect = CGRect(x: viewport.minX, y: y, width: viewport.width, height: lineH)
 
             if line.isCursor { renderer.addRect(rowRect, colors.cursorLine) }
+            // After the caret wash on purpose: the two are frequently the same
+            // row, and the one that has to win is the one saying where the
+            // PROGRAM is.
+            if line.isStoppedLine {
+                renderer.addRect(rowRect, colors.debugStop)
+                for bar in Self.stopArrowBars(atY: y, lineH: lineH) {
+                    renderer.addRect(bar, colors.debugStopInk)
+                }
+            }
             let flash = liveFlash(line.lineNo)
             if flash > 0.01 {
                 let ink = liveFlashColor(line.lineNo)
@@ -1898,6 +1920,12 @@ final class EditorCanvasView: NSView {
             if line.isCursor {
                 colors.cursorLine.setFill()
                 rowRect.fill()
+            }
+            if line.isStoppedLine {
+                colors.debugStop.setFill()
+                rowRect.fill()
+                colors.debugStopInk.setFill()
+                Self.stopArrowPath(atY: y, lineH: lineH).fill()
             }
             // A row someone else just wrote. Behind the text, ahead of nothing
             // else: it has to be legible under the glyphs, and it fades out.
@@ -2796,6 +2824,57 @@ final class EditorCanvasView: NSView {
     /// two markers sat on top of each other. They are separate targets now:
     /// the bar is pressed for its hunk, the number is pressed for its
     /// breakpoint, and neither can be hit by accident.
+    /// The instruction pointer: a solid right-pointing triangle, in the change
+    /// bar's lane at the very left of the gutter.
+    ///
+    /// A SHAPE and not a colour, deliberately. That strip already spends its
+    /// colours on git — added, deleted, staged — so a debugger arguing in hue
+    /// would be a fourth meaning for the same pixels, and colour alone is what
+    /// Increase Contrast and a colour-blind reader cannot use. An arrow means
+    /// "execution is here" whatever it is painted.
+    ///
+    /// Left of the breakpoint chip so the two coexist: a breakpoint you are
+    /// stopped ON is the normal case, and one hiding the other would make the
+    /// most common moment in a debugger the one the gutter cannot describe.
+    static func stopArrowFrame(atY y: CGFloat, lineH: CGFloat) -> CGRect {
+        let h = min(lineH - 4, 11)
+        let w = h * 0.72
+        return CGRect(
+            x: gitBarX, y: (y + (lineH - h) / 2).rounded(),
+            width: w, height: h
+        )
+    }
+
+    static func stopArrowPath(atY y: CGFloat, lineH: CGFloat) -> NSBezierPath {
+        let f = stopArrowFrame(atY: y, lineH: lineH)
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: f.minX, y: f.minY))
+        path.line(to: CGPoint(x: f.maxX, y: f.midY))
+        path.line(to: CGPoint(x: f.minX, y: f.maxY))
+        path.close()
+        return path
+    }
+
+    /// The same arrow for the Metal path, which has rectangles and nothing
+    /// else. Horizontal bars of shrinking width — at eleven points that is six
+    /// of them, and the staircase reads as a triangle at any sane font size.
+    static func stopArrowBars(atY y: CGFloat, lineH: CGFloat) -> [CGRect] {
+        let f = stopArrowFrame(atY: y, lineH: lineH)
+        let steps = max(3, Int(f.height / 2))
+        let step = f.height / CGFloat(steps * 2)
+        var bars: [CGRect] = []
+        bars.reserveCapacity(steps)
+        for i in 0..<steps {
+            let inset = step * CGFloat(i)
+            let width = f.width * (1 - CGFloat(i) / CGFloat(steps))
+            bars.append(CGRect(
+                x: f.minX, y: f.minY + inset,
+                width: max(1, width), height: max(1, f.height - inset * 2)
+            ))
+        }
+        return bars
+    }
+
     static func breakpointChip(
         atY y: CGFloat, lineH: CGFloat, numberWidth: CGFloat,
         phase: CGFloat = 1

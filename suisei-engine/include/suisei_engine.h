@@ -561,6 +561,7 @@ typedef struct SuiseiThemeSnapshot {
   uint32_t git_del_bg;
   uint32_t git_hunk;
   uint32_t model_bg;
+  uint32_t debug_stop;
 } SuiseiThemeSnapshot;
 
 uint8_t suisei_engine_completions(const SuiseiEngine *ptr, SuiseiCompletionsSnapshot *out);

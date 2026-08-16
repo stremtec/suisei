@@ -4,8 +4,9 @@
 mod scene;
 
 pub use scene::{
-    ChromeScene, EditorLineScene, FrameDiff, OutlineItemScene, PaneScene, ShellState, Viewport,
-    build_editor_band, build_outline_public, compose, patch_chrome_editor_scroll,
+    ChromeScene, DEBUG_STOPPED, EditorLineScene, FrameDiff, OutlineItemScene, PaneScene,
+    ShellState, Viewport, build_editor_band, build_outline_public, compose,
+    patch_chrome_editor_scroll,
 };
 // Caret placement, for the FFI's cheap caret pull. The same two functions the
 // chrome snapshot uses, so the face cannot be told two different caret columns

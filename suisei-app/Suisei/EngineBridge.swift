@@ -54,6 +54,11 @@ struct EditorLine: Equatable, Identifiable {
     var isWrapContinuation: Bool { (gitSign & 0x80) != 0 }
     /// DAP breakpoint on this buffer line (first visual segment only).
     var hasBreakpoint: Bool { (gitSign & 0x40) != 0 }
+    /// The debugger is stopped on this row.
+    ///
+    /// Rides the same byte as the breakpoint bit so a row's draw reads one
+    /// value for both. `suisei_engine::compositor::scene::DEBUG_STOPPED`.
+    var isStoppedLine: Bool { (gitSign & 0x04) != 0 }
     /// Kind alone: 0 none, 1 added, 2 modified, 3 deleted.
     ///
     /// `& 0x03`, not `& 0x3F`. The wider mask let the hunk flags through into
@@ -755,6 +760,9 @@ struct ThemeSnap: Equatable {
     /// a model carries its own materials and lighting, and a stage that
     /// changed with the editor theme would change what they look like.
     var modelBg: UInt32
+    /// The row the debugger is stopped on — NOT `currentLine`, which is the
+    /// caret's wash. See `Theme::debug_stop`.
+    var debugStop: UInt32
 
     /// Whether this palette is a LIGHT one.
     ///
@@ -777,7 +785,7 @@ struct ThemeSnap: Equatable {
         keyword: 0x00DCFF, string: 0x96E6B4, comment: 0x606C7A,
         number: 0xFFB482, typeName: 0x64C8FF, function: 0xFFDC78,
         macroName: 0xFD8F3F, namespace: 0x9EF1DD, parameter: 0xC8C8CD, property: 0x78C3B4, constant: 0xD0BF69, operatorColor: 0xDDDDDD, punctuation: 0x94949B,
-        windowBg_: 0x0F111A, border: 0x3A4258, panelBg: 0x191C26, panelBorder: 0x4682C8, panelSelBg: 0x2D4664, panelSelFg: 0xE6EBFF, explorerBg: 0x0C0E16, explorerFg: 0xBEC8D2, explorerSelected: 0x00DCFF, statusFg: 0xB4BEC8, muted: 0x646E82, success: 0x64C88C, warning: 0xDCB450, errorColor: 0xF07878, accentFg: 0x000000, searchBg: 0x68581A, completionBg: 0x191C26, completionSelected: 0x00DCFF, completionBorder: 0x00DCFF, terminalBg: 0x080C08, gitAddBg: 0x142820, gitDelBg: 0x2D1618, gitHunk: 0x64B4FF, modelBg: 0xFFFFFF
+        windowBg_: 0x0F111A, border: 0x3A4258, panelBg: 0x191C26, panelBorder: 0x4682C8, panelSelBg: 0x2D4664, panelSelFg: 0xE6EBFF, explorerBg: 0x0C0E16, explorerFg: 0xBEC8D2, explorerSelected: 0x00DCFF, statusFg: 0xB4BEC8, muted: 0x646E82, success: 0x64C88C, warning: 0xDCB450, errorColor: 0xF07878, accentFg: 0x000000, searchBg: 0x68581A, completionBg: 0x191C26, completionSelected: 0x00DCFF, completionBorder: 0x00DCFF, terminalBg: 0x080C08, gitAddBg: 0x142820, gitDelBg: 0x2D1618, gitHunk: 0x64B4FF, modelBg: 0xFFFFFF, debugStop: 0x2E34C759
     )
 
 
@@ -6216,7 +6224,8 @@ final class EngineBridge: ObservableObject {
             gitAddBg: snap.git_add_bg,
             gitDelBg: snap.git_del_bg,
             gitHunk: snap.git_hunk,
-            modelBg: snap.model_bg
+            modelBg: snap.model_bg,
+            debugStop: snap.debug_stop
         )
     }
 

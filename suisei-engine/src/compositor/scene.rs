@@ -254,6 +254,7 @@ pub struct ThemeScene {
     /// The 3D workbench's stage. Appended, like every token after it — the
     /// face reads this struct by field, and the ABI order is the contract.
     pub model_bg: u32,
+    pub debug_stop: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1543,6 +1544,7 @@ fn build_theme(app: &App) -> ThemeScene {
         git_del_bg: color_u32(t.git_del_bg),
         git_hunk: color_u32(t.git_hunk),
         model_bg: color_u32(t.model_bg),
+        debug_stop: color_u32(t.debug_stop),
     }
 }
 
@@ -2360,6 +2362,31 @@ fn build_lines_at(
     } else {
         None
     };
+    // The row the program is stopped on — resolved once, exactly like the
+    // breakpoint set above and for the same reason: this is the scroll hot
+    // path and it must never canonicalize per row.
+    //
+    // Read immutably rather than through `DapClient::current_line_for`, whose
+    // doc comment names this caller but which takes `&mut self` for its canon
+    // cache. The band holds `&App`. Matching the two keys here is what the
+    // breakpoint block already does one screen up.
+    let stopped_line: Option<usize> = if is_current {
+        app.dap.current_line.and_then(|line| {
+            let cur = app.dap.current_path.as_deref()?;
+            let path_str = app
+                .tabs
+                .buffers
+                .get(tab)
+                .and_then(|t| t.filename.as_ref())
+                .map(|p| p.to_string_lossy().to_string())?;
+            let same = path_str == cur
+                || std::fs::canonicalize(&path_str).ok().map(|c| c.to_string_lossy().to_string())
+                    == std::fs::canonicalize(cur).ok().map(|c| c.to_string_lossy().to_string());
+            same.then_some(line)
+        })
+    } else {
+        None
+    };
     // GUI multi-cursor: every caret in `app.sel` except the primary (the
     // primary is painted through caret_*/sel_*). Resolved once for the whole
     // band, not per row/chunk. Empty in the single-cursor case, so the hot
@@ -2603,6 +2630,9 @@ fn build_lines_at(
                         gsign |= 0x40;
                     }
                 }
+                if stopped_line == Some(row) {
+                    gsign |= DEBUG_STOPPED;
+                }
             }
             // Cap at the FFI limit (SUISEI_MAX_SPANS = 24), markers first:
             // kinds >= 248 are find / caret / diagnostics / bracket overlays —
@@ -2687,13 +2717,20 @@ fn visual_width_str(s: &str) -> usize {
 /// ```text
 ///   0x03  kind: 0 none, 1 added, 2 modified, 3 deleted (the face's
 ///         `gitSignKind` masks with this)
-///   0x04  (free — live-reload marks are pulled, see suisei_engine_live_marks)
+///   0x04  the program is STOPPED on this line (owned by the DAP path)
 ///   0x08  the hunk is staged        → bar is filled rather than hollow
 ///   0x10  first row of its hunk     → the bar caps here
 ///   0x20  last row of its hunk      → the bar caps here
 ///   0x40  breakpoint on this line   (owned by the DAP path)
 ///   0x80  soft-wrap continuation    (owned by the line builder)
 /// ```
+/// The debugger is stopped on this row.
+///
+/// It rides the git-sign byte because the breakpoint bit already does, so the
+/// face's per-row draw reads one byte for both — and because a pane field
+/// would be the wrong shape: two panes can show the same document, and the
+/// answer is per ROW, not per pane.
+pub const DEBUG_STOPPED: u8 = 0x04;
 pub const GIT_HUNK_STAGED: u8 = 0x08;
 pub const GIT_HUNK_FIRST: u8 = 0x10;
 pub const GIT_HUNK_LAST: u8 = 0x20;
