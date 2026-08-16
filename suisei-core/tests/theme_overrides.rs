@@ -527,13 +527,12 @@ fn an_override_still_reaches_a_named_palette() {
 /// violet. The bound is on PERCEIVED difference rather than on equality, so a
 /// palette that wants Dark's elevation ramp can still have it.
 #[test]
-fn the_floor_and_the_editor_surface_do_not_show_a_seam() {
+fn the_floor_and_the_editor_surface_are_one_surface() {
     for t in theme::all_themes() {
-        let ratio = theme::contrast_ratio(t.bg, t.editor_bg);
-        assert!(
-            ratio < 1.20,
-            "{}: the window floor and the editor surface differ enough to read \
-             as a seam under the transparent titlebar (contrast {ratio:.3})",
+        assert_eq!(
+            (t.bg.r, t.bg.g, t.bg.b),
+            (t.editor_bg.r, t.editor_bg.g, t.editor_bg.b),
+            "{}: the window floor is not the editor's surface",
             t.name
         );
     }

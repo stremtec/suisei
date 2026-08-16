@@ -128,7 +128,15 @@ static THEMES: &[Theme] = &[
 // separated by role rather than by maximum saturation.
 pub static LIGHT: Theme = Theme {
     name: "light",
-    bg: rgb(246, 248, 251),
+    // The editor's own surface, not a shade under it. Eleven of the thirteen
+    // palettes set these two the same and show nothing where the window floor
+    // meets the editor; light and dark were the only two that split them, by
+    // six and nine units — too small to read as intentional, large enough to
+    // see as a rendering fault, and visible anywhere the two surfaces touch:
+    // beside the inspector, under the transparent titlebar, along the status
+    // bar. Every one of those was a separate hunt for a seam the palette was
+    // creating on purpose.
+    bg: rgb(252, 253, 254),
     fg: rgb(35, 40, 47),
     keyword: rgb(137, 46, 147),
     string: rgb(177, 45, 36),
@@ -211,7 +219,8 @@ pub static LIGHT: Theme = Theme {
 /// only in accents and selection now, never in a surface. Syntax hues unchanged.
 pub static DARK: Theme = Theme {
     name: "dark",
-    bg: rgb(18, 17, 16),
+    // See `light` — its floor is its editor surface for the same reason.
+    bg: rgb(27, 26, 24),
     fg: rgb(233, 233, 233),
     keyword: rgb(207, 121, 207),
     string: rgb(219, 143, 121),
