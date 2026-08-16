@@ -1261,7 +1261,11 @@ impl DapClient {
         }
     }
 
-    /// Spawn `cargo build` in the background; on success `poll` re-enters `start`.
+    /// Spawn the build in the background; on success `poll` re-enters `start`.
+    ///
+    /// Which build depends on what the file IS. See [`RustBuild`] — a loose
+    /// `.rs` file is not a cargo target, and building the workspace it happens
+    /// to sit in produces every binary except the one that was asked for.
     fn begin_cargo_build(
         &mut self,
         cwd: &Path,
@@ -1269,6 +1273,10 @@ impl DapClient {
         lang: String,
         args: Vec<String>,
     ) -> Result<(), String> {
+        let plan = RustBuild::of(Path::new(&program), cwd);
+        if let RustBuild::Rustc { out } = plan {
+            return self.begin_rustc_build(cwd, program, out, lang, args);
+        }
         if !command_exists("cargo") {
             return Err(format!(
                 "Binary missing and cargo not found — build the project first"
@@ -1323,6 +1331,87 @@ impl DapClient {
         self.last_lang = Some(lang);
         self.last_args = args;
         self.log("⚙ cargo build… (will launch when done)");
+        Ok(())
+    }
+
+    /// Compile ONE `.rs` file with `rustc` and debug that.
+    ///
+    /// The reported case: `test.rs` sitting at the root of a cargo WORKSPACE.
+    /// `cargo build` succeeded — it built the workspace's members — and then
+    /// the binary the debugger wanted was not there, because a loose file is
+    /// not a target of anything. "cargo build ok but binary not found" was an
+    /// accurate report of a build that was never going to produce it.
+    ///
+    /// `--edition 2021` because a file handed straight to `rustc` defaults to
+    /// 2015, where `async`, `dyn` and array `IntoIterator` all behave
+    /// differently — a single file would fail to compile for reasons that have
+    /// nothing to do with what the user wrote.
+    fn begin_rustc_build(
+        &mut self,
+        cwd: &Path,
+        program: String,
+        out: PathBuf,
+        lang: String,
+        args: Vec<String>,
+    ) -> Result<(), String> {
+        if !command_exists("rustc") {
+            return Err("rustc not found — install Rust to debug a single file".into());
+        }
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("could not make a build directory: {e}"))?;
+        }
+        let (tx, rx) = mpsc::channel();
+        let cwd_b = cwd.to_path_buf();
+        let src = program.clone();
+        let out_c = out.clone();
+        let lang_c = lang.clone();
+        let args_c = args.clone();
+        thread::spawn(move || {
+            let result = crate::exec::tool("rustc")
+                .args(["-g", "--edition", "2021", "-o"])
+                .arg(&out_c)
+                .arg(&src)
+                .current_dir(&cwd_b)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output();
+            match result {
+                Ok(o) if o.status.success() && out_c.is_file() => {
+                    let _ = tx.send(Ok((
+                        out_c.display().to_string(),
+                        cwd_b,
+                        lang_c,
+                        args_c,
+                    )));
+                }
+                Ok(o) => {
+                    // rustc's own first error, which names the line. The last
+                    // line is "error: aborting due to N previous errors",
+                    // which says nothing a person can act on.
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    let msg = err
+                        .lines()
+                        .find(|l| l.trim_start().starts_with("error"))
+                        .or_else(|| err.lines().find(|l| !l.trim().is_empty()))
+                        .unwrap_or("rustc failed")
+                        .to_string();
+                    let _ = tx.send(Err(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(format!("rustc spawn: {e}")));
+                }
+            }
+        });
+        self.build_rx = Some(rx);
+        self.build_message = Some("rustc…".into());
+        self.panel_open = true;
+        self.state = DapState::Starting;
+        self.last_program = Some(program);
+        self.last_cwd = Some(cwd.display().to_string());
+        self.last_lang = Some(lang);
+        self.last_args = args;
+        self.log("⚙ rustc (single file)… (will launch when done)");
         Ok(())
     }
 
@@ -2321,6 +2410,57 @@ fn pick_adapter(
     }
 }
 
+/// How a `.rs` file becomes something a debugger can launch.
+///
+/// A file is only a cargo target if a package CLAIMS it, and the check that
+/// matters is the one that was missing: **a workspace root has no
+/// `[package]`.** `/Users/asill/suisei/test.rs` sits beside a `Cargo.toml`
+/// that is nothing but `[workspace]`, so there is no package name to build,
+/// no `target/debug/test` to launch, and `cargo build` cheerfully succeeds
+/// having built every member crate and nothing that was asked for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RustBuild {
+    /// Inside a package's `src/` — cargo owns it.
+    Cargo,
+    /// Anything else: one file, compiled on its own.
+    Rustc { out: PathBuf },
+}
+
+impl RustBuild {
+    pub fn of(src: &Path, cwd: &Path) -> Self {
+        // From the SOURCE, not from the working directory. The two differ
+        // exactly when it matters — a loose file's cwd is the project root,
+        // whose manifest belongs to something else entirely.
+        let mut dir = src.parent().map(|p| p.to_path_buf());
+        while let Some(d) = dir {
+            let manifest = d.join("Cargo.toml");
+            if manifest.is_file() {
+                let has_package = std::fs::read_to_string(&manifest)
+                    .ok()
+                    .and_then(|t| parse_cargo_name(&t))
+                    .is_some();
+                // Claimed only if there is a package AND the file is under its
+                // `src/`. A `build.rs`, an example pasted at the package root
+                // or a scratch file beside `Cargo.toml` is not a target, and
+                // parsing `[[bin]]` to find out would be answering a harder
+                // question than this needs.
+                if has_package && src.starts_with(d.join("src")) {
+                    return RustBuild::Cargo;
+                }
+                // A manifest that does not claim it ends the walk: the next
+                // one up belongs to something this file is not part of.
+                break;
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
+        let _ = cwd;
+        RustBuild::Rustc {
+            out: std::env::temp_dir().join("suisei-debug").join(stem),
+        }
+    }
+}
+
 fn resolve_rust_bin(cwd: &Path, src: &Path) -> Option<String> {
     // Prefer package name from Cargo.toml
     let mut dir = cwd.to_path_buf();
@@ -2616,6 +2756,66 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    /// A loose `.rs` file beside a WORKSPACE manifest is not a cargo target.
+    ///
+    /// This repo is the reported case: `Cargo.toml` at the root is
+    /// `[workspace]` with no `[package]`, so there is no name to build and no
+    /// `target/debug/test` to launch — and `cargo build` still succeeds,
+    /// having built every member crate. "cargo build ok but binary not found"
+    /// was an accurate report of a build that could never produce it.
+    #[test]
+    fn a_loose_file_beside_a_workspace_manifest_is_built_by_rustc() {
+        let dir = std::env::temp_dir().join(format!("suisei-rb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let src = dir.join("test.rs");
+        std::fs::write(&src, "fn main() {}\n").unwrap();
+
+        match RustBuild::of(&src, &dir) {
+            RustBuild::Rustc { out } => {
+                assert!(out.ends_with("test"), "named for the file: {out:?}");
+            }
+            RustBuild::Cargo => panic!("a workspace root claims no source file"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And a file that a package really does own still goes through cargo —
+    /// building one file with rustc would lose the dependencies.
+    #[test]
+    fn a_file_under_a_packages_src_is_built_by_cargo() {
+        let dir = std::env::temp_dir().join(format!("suisei-rb-pkg-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src = dir.join("src/main.rs");
+        std::fs::write(&src, "fn main() {}\n").unwrap();
+
+        assert_eq!(RustBuild::of(&src, &dir), RustBuild::Cargo);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scratch file at the package root is NOT under `src/`, so it is not a
+    /// target either — same answer as the workspace case, for the same reason.
+    #[test]
+    fn a_scratch_file_beside_a_package_manifest_is_not_a_target() {
+        let dir = std::env::temp_dir().join(format!("suisei-rb-scr-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src = dir.join("scratch.rs");
+        std::fs::write(&src, "fn main() {}\n").unwrap();
+
+        assert!(matches!(RustBuild::of(&src, &dir), RustBuild::Rustc { .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A tool that exists but is not on `PATH` must still count as installed.
     ///
     /// `lldb-dap` is the real case and the reported one: it ships inside Xcode

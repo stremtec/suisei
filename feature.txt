@@ -16,7 +16,11 @@
        workspace_search.rs 에 replace_in_file / replace_all_in_file /
        replace_hits 가 다 있는데 search.rs 엔 replace 가 없음. 프로젝트 전체
        치환은 되고 지금 보는 파일은 안 됨 — 거꾸로고, 기계는 옆 모듈에 있음.
-   (설정 화살표 버그와 디버거 "다운로드" 버그는 해결됨 — 새로운 이슈2·3 참조.)
+   (설정 화살표 · 디버거 "다운로드" · 라이트모드 디버그 패널 · 단일 .rs 디버그는
+    해결됨 — 새로운 이슈2·3·4·5 참조.)
+   ☐ 22. project.suiseiprj 설정 화면   재료 다 있음. 뷰어 페인 규칙만 지키면 됨.
+   ☐ 23. 파일 종류별 아이콘            트리/탭/페인헤더가 각자 판별 중 → core 의
+                                        classify_path 에서 끌어오는 게 답.
 
  P2 · 제품의 격을 정하는 것
    ☐ 에디터 캔버스 접근성        → 아래 '상용 IDE' 절
@@ -655,6 +659,38 @@
      · 테스트 셋: CLT 가 검색됨 / 선택된 툴체인이 검색됨 / PATH 밖에 있지만 설치된
        도구가 dap 게이트를 통과함.
 
+✅ 새로운 이슈4. 라이트 모드인데 디버그 패널만 까맣게 뜸 — 해결.
+     독은 자기 영역 전체를 **한 색으로** 칠함(그리드가 몇 pt 모자라도 이음매가
+     생길 수 없게 — 그 산수는 이미 두 번 틀렸었음). 그런데 그 색을 고르는 조건이
+     `terminal.open` 이었음. 그건 "셸이 어딘가에 있다" 지 "지금 터미널 탭을 보고
+     있다" 가 아님.
+     터미널 그리드는 라이트 테마에서도 일부러 어두움(Xcode·VS Code·iTerm 다 그럼).
+     디버거는 에디터 팔레트에서 잉크를 받는 평범한 패널임. 셸이 하나라도 살아
+     있으면 Debug 탭을 보고 있어도 독 전체가 터미널색으로 칠해졌고, 그래서
+     디버거가 거의-검정 위에 거의-검정 잉크를 그림.
+     → showingTerminalGrid = (debugTab == .terminal && terminal.open).
+     이 앱에서 이미 두 번 고친 것과 같은 모양: **존재하느냐가 아니라 지금 앞에
+     있느냐를 물어야 함.**
+
+✅ 새로운 이슈5. "cargo build ok but binary not found: target/debug/test" — 해결.
+     정확한 보고였음. 절대 그 바이너리를 만들 수 없는 빌드였던 것.
+     test.rs 가 카고 **워크스페이스** 루트에 놓인 헐렁한 파일임. 루트 Cargo.toml 은
+     [workspace] 뿐이라 [package] 이름이 없음 → parse_cargo_name 이 None →
+     파일 이름으로 추측해서 target/debug/test 를 기대함. 그리고 cargo build 는
+     멤버 크레이트를 다 빌드하고 **성공함.** 요청된 것만 빼고.
+     → RustBuild::of 가 소스에서(작업 디렉터리가 아니라 — 헐렁한 파일은 이 둘이
+       바로 그럴 때 다름) 위로 걸어서 판단함: [package] 가 있고 그 src/ 아래에
+       있으면 Cargo, 아니면 Rustc. 자기를 주장하지 않는 매니페스트에서 걸음을
+       멈춤 — 그 위의 매니페스트는 이 파일과 상관없는 물건임.
+     → 단일 파일은 rustc -g --edition 2021 로 컴파일해서 그걸 디버그함.
+       (에디션을 안 주면 2015 라서 async·dyn·배열 IntoIterator 가 다르게 굴고,
+        사용자가 쓴 것과 무관한 이유로 컴파일이 깨짐.)
+     → 에러도 rustc 의 첫 error 줄을 고름. 마지막 줄("aborting due to N previous
+       errors")은 사람이 할 수 있는 게 없는 문장임.
+     검증: 유효한 단일 파일 → 컴파일·실행·디버그 가능한 바이너리. 사용자의
+     test.rs → "error[E0015]: cannot call non-const function `godddddd` in
+     constant functions" (line 8). 테스트 셋 3개.
+
 ☐ 21. 다운로드 가능한 컴포넌트 (Xcode 의 Components/Platforms 모양)
      (사용자 요청: 처음엔 에디터 본체만, 설치시 선택, 나중에도 변경 가능.)
      → 설계 docs/SUISEI-COMPONENTS-PLAN.md. **측정이 질문을 뒤집음:**
@@ -941,6 +977,39 @@ grep 으로 확인한 것만 적음. 순서는 '값어치 대비 싼 것' 순.
   
   
   
-project.suiseiprj 를 열면 그 프로젝트 설정이 보였음 좋겠어. 그냥 json 형식이 아니라.
+☐ 22. project.suiseiprj 를 열면 프로젝트 설정 화면이 뜨게 (원시 JSON 말고)
+     (사용자 요청.)
+     · 재료는 있음: suisei-core/src/project.rs 가 이미 이 파일의 주인이고
+       (MARKER = "project.suiseiprj"), 파일 트리는 이미 이 파일만 보라색 + 맨
+       아래로 특별 취급함. 없는 건 "열었을 때 뭘 보여주나" 하나뿐.
+     · 모양은 이미 앱 안에 두 번 있음 — Settings 의 섹션 목록, 그리고 3D
+       워크벤치의 인스펙터. 새 위젯 언어를 만들 필요가 없다는 뜻.
+     · 주의: 이건 **뷰어 페인**임(FileKind 를 하나 더 쓰거나 텍스트 페인을
+       특수화). 뷰어 페인은 버퍼가 비어 있어서 ⌘S 가 빈 문서로 덮어쓰지 못함 —
+       그게 지금 이미지/PDF 를 지키는 규칙이고 여기서도 같은 게 필요함.
+       대신 저장은 core 가 project.rs 를 통해 써야 함, 페인이 텍스트로 쓰면 안 됨.
+     · 그리고 "원시 JSON 으로 보기" 는 남겨두는 게 맞음. 설정 화면이 아직 모르는
+       키를 사람이 고쳐야 할 때가 반드시 옴.
 
-파일들 파일트리에서, 탭바에서 아이콘이 좀 구분되면 좋겠음. 터미널은 터미널답게. 뭐 코드는 코드답게 pdf 는 pdf 답게.
+☐ 23. 파일 아이콘이 종류별로 구분되게 (파일 트리 · 탭바)
+     (사용자 요청: "터미널은 터미널답게, 코드는 코드답게, pdf 는 pdf 답게".)
+     · 지금 상태를 읽어봤음:
+       – 파일 트리(ProjectTreeView.iconName)는 확장자 스위치가 하나 있는데
+         rs/swift/js/json/md/이미지/셸/html/lock/모델 정도까지만임. **pdf 없음,
+         오디오 없음, c/cpp/h·py·go·java 없음** → 전부 "doc" 로 떨어짐.
+       – 그 스위치의 모델 케이스가 "is_model_ext 와 맞춰둔다" 고 주석에 적혀
+         있는데 **실제로는 어긋나 있었음** — gltf/glb/fbx/scnp 가 빠져서, 모델
+         뷰어에서 열리는 파일이 트리에서는 일반 문서로 보였음. (지금 고침.)
+       – 탭 스트립에는 **파일별 아이콘이 아예 없음.**
+       – 페인 헤더(paneHeaderSymbol)에는 이미 PaneKind 별 글리프가 있음:
+         doc.text.fill / terminal.fill / photo.fill / doc.richtext.fill /
+         waveform / cube.fill / doc.fill.
+     · 그래서 옳은 모양은 "스위치를 하나 더 늘리는 것" 이 아니라, **아이콘을
+       PaneKind/FileKind 에서 끌어오는 것.** core 의 classify_path 가 이미
+       권위임 — 트리·탭·페인 헤더가 각자 확장자를 다시 판별하고 있으면 이번처럼
+       또 어긋남. 이번 세션 내내 나온 그 패턴("core 가 가진 사실이 아무 데도
+       안 건너감")의 또 다른 사례.
+     · 언어 구분(rs vs py vs go)은 FileKind 보다 잘게 필요하니 확장자 표가 남긴
+       하는데, 그 표도 한 군데여야 함.
+
+터미널 pane 말고 그 사이드바에서 여는 터미널 여전히 입력 안됨.

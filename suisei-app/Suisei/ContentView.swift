@@ -1560,7 +1560,24 @@ struct ContentView: View {
         // dock painted terminal-dark left its "Open Terminal · ⌃T" prompt as
         // `.tertiary` ink on near-black — legible in the light theme it was
         // designed against, invisible once the grid went dark.
-        engine.chrome.terminal.open ? terminalGridBg : editorBg
+        showingTerminalGrid ? terminalGridBg : editorBg
+    }
+
+    /// Whether the dock is CURRENTLY showing a terminal grid.
+    ///
+    /// Not `terminal.open`, which only says a shell exists somewhere. The dock
+    /// has two tabs and they want opposite colours: the grid is deliberately
+    /// dark even in a light theme (Xcode, VS Code and iTerm all do that), while
+    /// the debugger is an ordinary panel whose ink comes from the editor
+    /// palette. Asking whether a shell exists painted the whole dock
+    /// terminal-dark while the Debug tab was showing, so the debugger drew its
+    /// near-black editor ink on near-black — reported as "라이트모드인데
+    /// 이거 왜이래".
+    ///
+    /// Same shape as two focus bugs already fixed in this app: gating on
+    /// whether a thing EXISTS rather than on whether it is the thing in front.
+    private var showingTerminalGrid: Bool {
+        debugTab == .terminal && engine.chrome.terminal.open
     }
 
     /// Xcode 26 navigator row: the mode icons in a bordered group
@@ -2901,15 +2918,16 @@ struct ContentView: View {
     ///
     /// The dock paints ONE colour across its whole region — deliberately, so a
     /// grid that falls a few points short can never show a seam — and that
-    /// colour is now the terminal's dark one while a shell is running. The
-    /// header sits on top of it, so its ink has to follow the fill instead of
-    /// the editor theme, or it is dark-on-dark.
+    /// colour is the terminal's dark one while the terminal tab is SHOWING.
+    /// The header sits on top of it, so its ink has to follow the fill instead
+    /// of the editor theme, or it is dark-on-dark. See `showingTerminalGrid`
+    /// for why "showing" and not "open".
     private var dockHeaderFg: Color {
-        engine.chrome.terminal.open ? terminalGridFg : fg
+        showingTerminalGrid ? terminalGridFg : fg
     }
 
     private var dockHeaderDim: Color {
-        engine.chrome.terminal.open ? terminalGridFg.opacity(0.55) : dim
+        showingTerminalGrid ? terminalGridFg.opacity(0.55) : dim
     }
 
     /// Debug area — Xcode-style bottom console hosting the shell (no modes, no XLC).
