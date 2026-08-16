@@ -39,7 +39,9 @@
    ☐ 단축키 변경        Shortcuts 페이지는 목록으로 다시 짰지만 읽기 전용.
                         core 에 바인딩을 바꾸는 API 자체가 없음.
    ☐ 열 선택(블록 선택) 멀티커서는 있음.
-   ☐ 12. Docking        본문 스펙이 "제목과 같음" 한 줄. 크기를 재려면 스펙 먼저.
+   ☐ 12. Docking        설계 완료 → docs/SUISEI-DOCK-PLAN.md. 5단계로 쪼갰고
+                        D3(메뉴로 새 창 빼기)까지가 단독 출시 가능한 MVP.
+                        막는 것 하나: ABI 가 판을 시각 인덱스로 부름.
 
  P4 · 큰 것, 별도 사이클
    ☐ feature 1. 실시간 협업   설계는 이미 있음(아래 prime-agent 절). 서버가 필요함.
@@ -299,7 +301,38 @@
 }
 
 ☐ 12. Docking 기능 구현 {
-    제목과 같음.
+    제목과 같음 + 도킹에는 **독립창으로 빼는 기능까지 포함**.
+    → 설계는 docs/SUISEI-DOCK-PLAN.md 에 씀. 요지만:
+
+    · 아키텍처를 정하는 사실 하나: EngineBridge.shared 가 싱글턴이고 엔진이
+      하나임. WindowGroup("editor") 은 이미 있어서 창을 하나 더 열 수는 있는데,
+      둘 다 같은 엔진의 EditorSceneRoot 라서 **거울**이 됨 — 같은 트리, 같은 포커스.
+    · 답: 엔진 하나 · desk 여럿. desk = 레이아웃 루트. 버퍼·LSP·git·터미널은 계속
+      하나. 빼내기 = Pane 을 desk A 트리에서 새 desk B 트리로 옮기는 것.
+    · 트리가 이미 그 모양임 —
+        Pane.buffer 가 BufferId(위치 아님, S1 에서 고침) → 판이 어디로 가든 문서는
+          모름. SPLIT-PLAN §1.1 이 안 그랬을 때 무슨 일이 나는지의 기록.
+        LayoutTab 이 이미 트리+판을 통째로 들어내서 주차했다 되돌림 = 빼내기와
+          같은 연산, 목적지만 다름.
+        TerminalSessions 가 .tab(tabId) 로 키를 잡음 — 판도 창도 안 들어감.
+          셸은 이미 창을 안 탐.
+        세션이 이미 split 배치를 저장/복원함(SessionSplit/SessionPane).
+          **SuiseiApp.swift:95 의 "restore_session 이 unwired" 주석은 낡았음** —
+          EngineBridge.init 이 이미 부름. 배치 복원은 SessionPane 에 desk 하나 더.
+    · 바꿔야 하는 것: ABI 가 판을 **시각 인덱스**로 부름(pane_path(idx) 등,
+      panes[4] 고정 배열). desk 둘이면 "판 2번" 이 모호해짐 — core 가 S1 에서
+      고친 그 병이 한 겹 밖에 아직 살아 있음. 그리고 MAX_PANES=4 가 앱 전체가
+      아니라 desk 당이 돼야 함.
+    · 제스처는 하나: 탭 칩을 끌어서 — 제자리면 순서, 다른 판이면 이동(가장자리
+      4 + 가운데 5구역 오버레이), 창 밖이면 새 창. 되돌리기도 같은 드래그.
+      지금 face 에 드래그가 아예 없음(유일한 onDrag 는 분할 구분선).
+    · 조심할 것: 창 N 개에 키보드는 하나 — desk 별 포커스 + 앱 레벨 '키 desk'.
+      이 세션에 이미 두 번 나온 버그 종류. 그리고 뷰어 판의 상태(ModelDocument
+      등)가 @StateObject 라서 창을 옮기면 날아감 → TerminalSessions 처럼 탭 id
+      레지스트리로.
+    · 단계: D1 core 에 desk(창 없음) → D2 ABI 가 desk 를 받음 → **D3 메뉴로
+      "새 창으로 빼기" (여기까지가 정직한 MVP, 단독 출시 가능)** → D4 드래그 →
+      D5 복원.
 }
 
 ✅ 13. Welcome 화면에서 이미 존재하는 프로젝트를 열려고 맨 아래 버튼을 누르면, 파일창이 에디터 크기와 동일하게 떠버리는 이슈. 웰컴 화면에 create new project 기능이 없는것...
@@ -836,3 +869,9 @@ grep 으로 확인한 것만 적음. 순서는 '값어치 대비 싼 것' 순.
   이제 같은 방식으로 펼치고 셀 폭을 더함 = 화면 열 그 자체(펼친 텍스트가 곧 화면
   행이라 되돌릴 게 없음). Buffer 의 두 열 변환이 탭 스톱 4를 하드코딩하고 있던 것도
   같이 고침 — 컴포지터는 app.tab_width 로 펼치니까 다른 설정에선 서로 달랐음.
+  
+  
+  
+project.suiseiprj 를 열면 그 프로젝트 설정이 보였음 좋겠어. 그냥 json 형식이 아니라.
+
+파일들 파일트리에서, 탭바에서 아이콘이 좀 구분되면 좋겠음. 터미널은 터미널답게. 뭐 코드는 코드답게 pdf 는 pdf 답게.
