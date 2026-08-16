@@ -41,13 +41,33 @@ pub fn is_audio_ext(ext: &str) -> bool {
 /// file is a baked animation cache, routinely gigabytes, and opening one by
 /// double-clicking it in a file tree is not a preview.
 ///
-/// `.blend`, `.fbx`, `.max` are absent because nothing on the system reads
-/// them. Routing them here would give the user an empty viewer instead of the
-/// binary placeholder that at least says what the file is.
+/// glTF and GLB are here because the face carries a reader for them, not
+/// because macOS grew one: measured, `SCNScene` refuses a minimal valid glTF
+/// 2.0 triangle in both spellings, and there is no glTF framework on the
+/// system. `third_party/GLTFKit2` supplies it, and glTF is the interchange
+/// format of the game-asset pipeline — a 3D viewer that cannot open a `.glb`
+/// has a hole in the middle of it.
+///
+/// `.blend`, `.fbx`, `.max` are absent because nothing available reads them.
+/// FBX in particular needs Autodesk's own SDK, which is commercial and carries
+/// redistribution terms; the open alternative is Assimp, which is a large C++
+/// library and a scene converter written by hand. Routing them here would give
+/// the user an empty viewer instead of the binary placeholder that at least
+/// says what the file is.
 pub fn is_model_ext(ext: &str) -> bool {
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "usdz" | "usda" | "usdc" | "usd" | "obj" | "dae" | "scn" | "stl" | "ply"
+        "usdz"
+            | "usda"
+            | "usdc"
+            | "usd"
+            | "obj"
+            | "dae"
+            | "scn"
+            | "stl"
+            | "ply"
+            | "gltf"
+            | "glb"
     )
 }
 
@@ -742,7 +762,10 @@ mod model_kind_tests {
 
     #[test]
     fn the_formats_macos_can_read_are_models() {
-        for ext in ["usdz", "USDZ", "usda", "usdc", "usd", "obj", "dae", "scn", "stl", "ply"] {
+        for ext in [
+            "usdz", "USDZ", "usda", "usdc", "usd", "obj", "dae", "scn", "stl", "ply", "gltf",
+            "GLB", "glb",
+        ] {
             assert!(is_model_ext(ext), "{ext} should open in the model viewer");
             assert_eq!(
                 classify_path(Path::new(&format!("/tmp/asset.{ext}"))),

@@ -107,6 +107,13 @@ HDR="$ROOT/suisei-engine/include/suisei_engine.h"
 OPT_STAMP="$BUILD/.swift-opt"
 # Vendored SwiftTerm — the terminal emulator and its AppKit view. Built once
 # into a static library and linked like any other; see third_party/SwiftTerm.
+# Vendored GLTFKit2 — the glTF reader. macOS cannot read glTF at all (measured:
+# SCNScene refuses a minimal valid .gltf AND .glb, and there is no glTF
+# framework on the system), and glTF is the game-asset pipeline's interchange
+# format. It is the published binary rather than a source build; see
+# third_party/GLTFKit2/VENDOR.md for why.
+GLTF_DIR="$ROOT/third_party/GLTFKit2"
+
 ST_DIR="$ROOT/third_party/SwiftTerm"
 ST_BUILD="$ST_DIR/.build/release"
 ST_LIB="$STAGE/libSwiftTerm.a"
@@ -143,7 +150,8 @@ else
   if [[ ! -f "$BIN" ]]; then
     need_swift=1
   else
-    for f in "${SWIFT_FILES[@]}" "$HDR" "$DYLIB_STAGE" "$ST_LIB"; do
+    for f in "${SWIFT_FILES[@]}" "$HDR" "$DYLIB_STAGE" "$ST_LIB" \
+             "$GLTF_DIR/GLTFKit2.framework/Versions/A/GLTFKit2"; do
       if [[ -e "$f" && "$f" -nt "$BIN" ]]; then need_swift=1; break; fi
     done
   fi
@@ -226,6 +234,8 @@ if [[ "$need_swift" == "1" ]]; then
     -framework SwiftUI \
     -framework AppKit \
     -framework Combine \
+    -F "$GLTF_DIR" \
+    -framework GLTFKit2 \
     -import-objc-header "$STAGE/suisei_engine.h" \
     -I "$ST_BUILD/Modules" \
     "$ST_LIB" \
@@ -236,6 +246,10 @@ if [[ "$need_swift" == "1" ]]; then
   mv -f "$TMP_BIN" "$BIN"
   chmod +x "$BIN"
   printf '%s' "$SWIFT_BUILD_MODE" > "$OPT_STAMP"
+
+  echo "→ embed GLTFKit2.framework"
+  rm -rf "$FW/GLTFKit2.framework"
+  cp -R "$GLTF_DIR/GLTFKit2.framework" "$FW/"
 
   echo "→ embed libsuisei_engine.dylib"
   cp -f "$STAGE/libsuisei_engine.dylib" "$FW/"
@@ -363,6 +377,8 @@ cp -f "$ROOT/LICENSE" "$RES/LICENSE"
 # SwiftTerm is MIT and its notice has to travel with the binary that contains
 # it. Named for what it covers, beside our own licence rather than replacing it.
 cp -f "$ROOT/third_party/SwiftTerm/LICENSE" "$RES/LICENSE-SwiftTerm"
+# GLTFKit2 is MIT for the same reason.
+cp -f "$ROOT/third_party/GLTFKit2/LICENSE" "$RES/LICENSE-GLTFKit2"
 
 ICON_SRC_DIR="$ROOT/suisei-app/Resources"
 if [[ "$need_icon" == "1" || ! -f "$RES/Suisei.icns" ]]; then

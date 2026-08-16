@@ -1,0 +1,319 @@
+{
+  "ABIRoot": {
+    "kind": "Root",
+    "name": "GLTFKit2",
+    "printedName": "GLTFKit2",
+    "children": [
+      {
+        "kind": "Import",
+        "name": "simd",
+        "printedName": "simd",
+        "declKind": "Import",
+        "moduleName": "GLTFKit2"
+      },
+      {
+        "kind": "Import",
+        "name": "RealityKit",
+        "printedName": "RealityKit",
+        "declKind": "Import",
+        "moduleName": "GLTFKit2"
+      },
+      {
+        "kind": "Import",
+        "name": "Accelerate",
+        "printedName": "Accelerate",
+        "declKind": "Import",
+        "moduleName": "GLTFKit2"
+      },
+      {
+        "kind": "Import",
+        "name": "ModelIO",
+        "printedName": "ModelIO",
+        "declKind": "Import",
+        "moduleName": "GLTFKit2"
+      },
+      {
+        "kind": "TypeDecl",
+        "name": "GLTFRealityKitLoader",
+        "printedName": "GLTFRealityKitLoader",
+        "children": [
+          {
+            "kind": "Function",
+            "name": "load",
+            "printedName": "load(from:)",
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Entity",
+                "printedName": "RealityKit.Entity",
+                "usr": "s:17RealityFoundation6EntityC"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "URL",
+                "printedName": "Foundation.URL",
+                "usr": "s:10Foundation3URLV"
+              }
+            ],
+            "declKind": "Func",
+            "usr": "s:8GLTFKit220GLTFRealityKitLoaderC4load4from17RealityFoundation6EntityC0H03URLV_tYaKFZ",
+            "mangledName": "$s8GLTFKit220GLTFRealityKitLoaderC4load4from07RealityC06EntityC10Foundation3URLV_tYaKFZ",
+            "moduleName": "GLTFKit2",
+            "static": true,
+            "declAttributes": [
+              "Final",
+              "AccessControl"
+            ],
+            "throwing": true,
+            "funcSelfKind": "NonMutating"
+          },
+          {
+            "kind": "Function",
+            "name": "convert",
+            "printedName": "convert(scene:)",
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Entity",
+                "printedName": "RealityKit.Entity",
+                "usr": "s:17RealityFoundation6EntityC"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "GLTFScene",
+                "printedName": "GLTFKit2.GLTFScene",
+                "usr": "c:objc(cs)GLTFScene"
+              }
+            ],
+            "declKind": "Func",
+            "usr": "s:8GLTFKit220GLTFRealityKitLoaderC7convert5scene17RealityFoundation6EntityCSo9GLTFSceneC_tFZ",
+            "mangledName": "$s8GLTFKit220GLTFRealityKitLoaderC7convert5scene07RealityC06EntityCSo9GLTFSceneC_tFZ",
+            "moduleName": "GLTFKit2",
+            "static": true,
+            "declAttributes": [
+              "Final",
+              "AccessControl",
+              "Custom"
+            ],
+            "funcSelfKind": "NonMutating"
+          },
+          {
+            "kind": "Function",
+            "name": "convert",
+            "printedName": "convert(scene:asset:)",
+            "children": [
+              {
+                "kind": "TypeNominal",
+                "name": "Entity",
+                "printedName": "RealityKit.Entity",
+                "usr": "s:17RealityFoundation6EntityC"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "GLTFScene",
+                "printedName": "GLTFKit2.GLTFScene",
+                "usr": "c:objc(cs)GLTFScene"
+              },
+              {
+                "kind": "TypeNominal",
+                "name": "Optional",
+                "printedName": "GLTFKit2.GLTFAsset?",
+                "children": [
+                  {
+                    "kind": "TypeNominal",
+                    "name": "GLTFAsset",
+                    "printedName": "GLTFKit2.GLTFAsset",
+                    "usr": "c:objc(cs)GLTFAsset"
+                  }
+                ],
+                "usr": "s:Sq"
+              }
+            ],
+            "declKind": "Func",
+            "usr": "s:8GLTFKit220GLTFRealityKitLoaderC7convert5scene5asset17RealityFoundation6EntityCSo9GLTFSceneC_So9GLTFAssetCSgtFZ",
+            "mangledName": "$s8GLTFKit220GLTFRealityKitLoaderC7convert5scene5asset07RealityC06EntityCSo9GLTFSceneC_So9GLTFAssetCSgtFZ",
+            "moduleName": "GLTFKit2",
+            "static": true,
+            "declAttributes": [
+              "Final",
+              "AccessControl",
+              "Custom"
+            ],
+            "funcSelfKind": "NonMutating"
+          }
+        ],
+        "declKind": "Class",
+        "usr": "s:8GLTFKit220GLTFRealityKitLoaderC",
+        "mangledName": "$s8GLTFKit220GLTFRealityKitLoaderC",
+        "moduleName": "GLTFKit2",
+        "intro_Macosx": "12.0",
+        "intro_iOS": "15.0",
+        "declAttributes": [
+          "AccessControl",
+          "Available",
+          "Available"
+        ],
+        "hasMissingDesignatedInitializers": true,
+        "conformances": [
+          {
+            "kind": "Conformance",
+            "name": "Copyable",
+            "printedName": "Copyable",
+            "usr": "s:s8CopyableP",
+            "mangledName": "$ss8CopyableP"
+          },
+          {
+            "kind": "Conformance",
+            "name": "Escapable",
+            "printedName": "Escapable",
+            "usr": "s:s9EscapableP",
+            "mangledName": "$ss9EscapableP"
+          }
+        ]
+      }
+    ],
+    "json_format_version": 8
+  },
+  "ConstValues": [
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "BooleanLiteral",
+      "offset": 2537,
+      "length": 5,
+      "value": "false"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 15032,
+      "length": 5,
+      "value": "1"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 15051,
+      "length": 4,
+      "value": "2"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 15069,
+      "length": 3,
+      "value": "3"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "Dictionary",
+      "offset": 25523,
+      "length": 3,
+      "value": "[]"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "Dictionary",
+      "offset": 25616,
+      "length": 3,
+      "value": "[]"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "Dictionary",
+      "offset": 25690,
+      "length": 3,
+      "value": "[]"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 32069,
+      "length": 1,
+      "value": "0"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 32507,
+      "length": 1,
+      "value": "1"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 32719,
+      "length": 1,
+      "value": "0"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "StringLiteral",
+      "offset": 33181,
+      "length": 6,
+      "value": "\"Mesh\""
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 33919,
+      "length": 1,
+      "value": "0"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "StringLiteral",
+      "offset": 45008,
+      "length": 11,
+      "value": "\"Animation\""
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 45196,
+      "length": 1,
+      "value": "0"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 45231,
+      "length": 1,
+      "value": "0"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 45273,
+      "length": 1,
+      "value": "1"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "FloatLiteral",
+      "offset": 45277,
+      "length": 4,
+      "value": "30.0"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 45559,
+      "length": 1,
+      "value": "1"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "IntegerLiteral",
+      "offset": 46570,
+      "length": 1,
+      "value": "1"
+    },
+    {
+      "filePath": "\/Users\/warrenm\/Projects\/GLTFKit2\/GLTFKit2\/GLTFKit2\/GLTFRealityKit.swift",
+      "kind": "FloatLiteral",
+      "offset": 46574,
+      "length": 4,
+      "value": "30.0"
+    }
+  ]
+}
