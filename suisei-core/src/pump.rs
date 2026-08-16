@@ -75,6 +75,8 @@ impl App {
         self.poll_call_hierarchy();
         self.poll_hook_messages();
 
+        self.refresh_value_extent();
+
         self.dap.poll();
         if self.dap.location_dirty {
             self.dap_apply_stopped_location();

@@ -168,3 +168,61 @@ fn frame(id: i64, path: &str, line: usize) -> suisei_core::dap::StackFrameInfo {
         column: 0,
     }
 }
+
+/// The value extent: a capped run from the symbol's first occurrence to its
+/// last, with the writes ticked.
+///
+/// The kind is the whole feature. A read is where a value is used; a write is
+/// where it moves, and only `documentHighlight` carries that — which is why
+/// core asks it rather than `references`, whose answer cannot tell them apart.
+#[test]
+fn the_value_extent_caps_its_ends_and_ticks_its_writes() {
+    use suisei_core::lsp::SymbolOccurrence;
+    use suisei_engine::compositor::{VALUE_EXTENT, VALUE_FIRST, VALUE_LAST, VALUE_WRITE};
+
+    let (mut engine, _) = engine_at("extent.rs");
+    engine.app.lsp.highlights = vec![
+        SymbolOccurrence { row: 2, write: true },
+        SymbolOccurrence { row: 4, write: false },
+        SymbolOccurrence { row: 6, write: true },
+    ];
+
+    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0, 200);
+    let sign = |row: u32| {
+        lines
+            .iter()
+            .find(|l| l.line_no == row + 1)
+            .map(|l| l.debug_sign)
+            .unwrap_or(0)
+    };
+
+    assert!(sign(1) & VALUE_EXTENT == 0, "before the first occurrence");
+    assert!(sign(2) & VALUE_FIRST != 0, "capped at the top");
+    assert!(sign(2) & VALUE_WRITE != 0, "and the declaration is a write");
+    // The rule runs THROUGH rows the symbol does not appear on — the extent is
+    // where the value lives, not a list of the lines that mention it.
+    assert!(sign(3) & VALUE_EXTENT != 0, "the run is continuous");
+    assert!(sign(3) & VALUE_WRITE == 0, "but nothing moves here");
+    assert!(sign(4) & VALUE_EXTENT != 0);
+    assert!(sign(4) & VALUE_WRITE == 0, "a read is not a write");
+    assert!(sign(6) & VALUE_LAST != 0, "capped at the bottom");
+    assert!(sign(7) & VALUE_EXTENT == 0, "after the last occurrence");
+}
+
+/// An extent that spans the whole file is noise, not information. Saying
+/// nothing beats drawing a rule down every screen of a `static` used in four
+/// hundred places.
+#[test]
+fn an_extent_longer_than_the_bound_is_not_drawn() {
+    use suisei_core::lsp::SymbolOccurrence;
+    use suisei_engine::compositor::VALUE_EXTENT;
+
+    let (mut engine, _) = engine_at("huge.rs");
+    engine.app.lsp.highlights = vec![
+        SymbolOccurrence { row: 0, write: true },
+        SymbolOccurrence { row: 5_000, write: false },
+    ];
+
+    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0, 200);
+    assert!(lines.iter().all(|l| l.debug_sign & VALUE_EXTENT == 0));
+}

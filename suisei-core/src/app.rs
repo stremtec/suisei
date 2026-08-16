@@ -102,6 +102,9 @@ pub enum ScrollIntent {
 }
 
 pub struct App {
+    /// What `refresh_value_extent` last asked about — (buffer version, row,
+    /// word). The guard that keeps a per-frame call to one request per word.
+    pub value_extent_key: Option<(u64, usize, String)>,
     pub running: bool,
     pub mode: Mode,
     pub buffer: Buffer,
@@ -565,6 +568,7 @@ impl Default for App {
     fn default() -> Self {
         let (hook_msg_tx, hook_msg_rx) = std::sync::mpsc::channel();
         let mut app = Self {
+            value_extent_key: None,
             running: true,
             mode: Mode::Editor,
             buffer: Buffer::new(),
@@ -3739,6 +3743,44 @@ impl App {
         } else {
             self.message = format!("/{}/  1/1", word);
         }
+    }
+
+    /// Ask where the caret's word is read and written, once per new word.
+    ///
+    /// Called from the per-frame pump, which is only safe because of the
+    /// guard: the key is (buffer version, row, the word itself), so moving
+    /// WITHIN a word asks nothing, and holding still asks nothing. One request
+    /// per word the caret arrives at is the whole budget — this session has
+    /// spent a long time removing per-keystroke O(file) work and this must not
+    /// add any back.
+    ///
+    /// `documentHighlight` and not `references`: one file, one round trip, and
+    /// it is the only one of the two that says read from write.
+    pub fn refresh_value_extent(&mut self) {
+        let Some(path) = self.filename.clone() else {
+            self.value_extent_key = None;
+            self.lsp.highlights.clear();
+            return;
+        };
+        let word = self.word_under_cursor();
+        let row = self.buffer.cursor.row;
+        // A caret on punctuation or whitespace is not on a value, and the
+        // previous word's bracket must not stay behind it.
+        if word.is_empty() {
+            if self.value_extent_key.is_some() {
+                self.value_extent_key = None;
+                self.lsp.highlights.clear();
+            }
+            return;
+        }
+        let key = (self.buffer.version(), row, word.clone());
+        if self.value_extent_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.value_extent_key = Some(key);
+        let path = path.to_string_lossy().to_string();
+        let col = self.buffer.cursor.col;
+        self.lsp.request_document_highlight(&path, row, col);
     }
 
     fn word_under_cursor(&self) -> String {

@@ -4,7 +4,8 @@
 mod scene;
 
 pub use scene::{
-    ChromeScene, DEBUG_FRAME, DEBUG_STOPPED, EditorLineScene, FrameDiff, OutlineItemScene, PaneScene,
+    ChromeScene, DEBUG_FRAME, DEBUG_STOPPED, EditorLineScene, VALUE_EXTENT, VALUE_FIRST,
+    VALUE_LAST, VALUE_WRITE, FrameDiff, OutlineItemScene, PaneScene,
     ShellState, Viewport, build_editor_band, build_outline_public, compose,
     patch_chrome_editor_scroll,
 };

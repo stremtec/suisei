@@ -63,6 +63,14 @@ struct EditorLine: Equatable, Identifiable {
     /// one". Conflating them let clicking a caller convince the editor the
     /// program had moved.
     var isFrameLine: Bool { (debugSign & 0x02) != 0 }
+    /// Inside the caret symbol's extent — where this value lives.
+    var inValueExtent: Bool { (debugSign & 0x04) != 0 }
+    /// The extent's ends, where the rule caps. Same vocabulary as the git
+    /// change bar's hunk caps, deliberately.
+    var valueExtentFirst: Bool { (debugSign & 0x08) != 0 }
+    var valueExtentLast: Bool { (debugSign & 0x10) != 0 }
+    /// The value MOVES on this row — `documentHighlight` called it a write.
+    var valueWrite: Bool { (debugSign & 0x20) != 0 }
     /// Kind alone: 0 none, 1 added, 2 modified, 3 deleted.
     ///
     /// `& 0x03`, not `& 0x3F`. The wider mask let the hunk flags through into

@@ -53,6 +53,17 @@ pub struct LspClient {
     pub pending_completions: Vec<CompletionItem>,
     pub pending_hover: Option<String>,
     pub pending_references: Vec<Location>,
+    /// Every occurrence of the symbol under the caret in this file, with the
+    /// kind LSP gives it.
+    ///
+    /// This is deliberately NOT `references`. That request is a workspace-wide
+    /// search built for "find every caller" — it pays a project scan and its
+    /// result cannot tell a read from a write. `documentHighlight` is one file,
+    /// one round trip, and the read/write kind is the whole reason to ask.
+    pub highlights: Vec<SymbolOccurrence>,
+    /// Which symbol `highlights` is about, so a stale answer under a new caret
+    /// can be dropped rather than drawn.
+    pub highlights_for: Option<(String, usize, usize)>,
     /// True once a references response has landed (distinguishes "still waiting"
     /// from "resolved, zero results" — a `Vec` alone cannot). Reset on request.
     pub references_ready: bool,
@@ -155,6 +166,9 @@ enum PendingReq {
     Completion,
     Hover,
     References,
+    /// textDocument/documentHighlight — occurrences of the symbol under the
+    /// caret IN THIS FILE, each tagged read or write.
+    DocumentHighlight,
     Rename,
     Initialize,
     SemanticTokens,
@@ -231,6 +245,8 @@ impl Default for LspClient {
             pending_completions: Vec::new(),
             pending_hover: None,
             pending_references: Vec::new(),
+            highlights: Vec::new(),
+            highlights_for: None,
             references_ready: false,
             pending_workspace_edit: None,
             pending_edits: Vec::new(),
@@ -736,6 +752,34 @@ impl LspClient {
         self.send_raw(&msg);
     }
 
+    /// Where the symbol under the caret is read and written, in this file.
+    ///
+    /// One round trip, no project scan — see [`Lsp::highlights`] for why this
+    /// and not `references`.
+    pub fn request_document_highlight(&mut self, path: &str, row: usize, col: usize) {
+        if !self.server_running {
+            self.highlights.clear();
+            self.highlights_for = None;
+            return;
+        }
+        // Cleared before the question. A bracket left over the previous symbol
+        // is a wrong answer that looks like a right one — the same rule the
+        // hover states.
+        self.highlights.clear();
+        self.highlights_for = Some((path.to_string(), row, col));
+        let uri = path_to_uri(&abs_path(path));
+        let col16 = self.char_col_to_utf16(row, col);
+        let id = self.alloc_id(PendingReq::DocumentHighlight);
+        let msg = format!(
+            r#"{{"jsonrpc":"2.0","id":{},"method":"textDocument/documentHighlight","params":{{"textDocument":{{"uri":"{}"}},"position":{{"line":{},"character":{}}}}}}}"#,
+            id,
+            escape_json(&uri),
+            row,
+            col16
+        );
+        self.send_raw(&msg);
+    }
+
     pub fn request_rename(&mut self, path: &str, row: usize, col: usize, new_name: &str) {
         if !self.server_running {
             return;
@@ -1165,6 +1209,9 @@ impl LspClient {
             PendingReq::References => {
                 self.pending_references = parse_locations(&msg.body);
                 self.references_ready = true;
+            }
+            PendingReq::DocumentHighlight => {
+                self.highlights = parse_document_highlights(&msg.body);
             }
             PendingReq::Rename => {
                 let edits =
@@ -1615,6 +1662,43 @@ fn parse_inlay_hints(text: &str, lines: &[&str]) -> Vec<InlayHint> {
         }
     }
     out.sort_by_key(|h| (h.row, h.col));
+    out
+}
+
+/// One occurrence of a symbol in this file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymbolOccurrence {
+    /// 0-based buffer row.
+    pub row: usize,
+    /// Whether this occurrence MOVES the value.
+    ///
+    /// LSP's `DocumentHighlightKind`: 1 Text, 2 Read, 3 Write. Only 3 is a
+    /// write, and that is the distinction the whole feature rests on — a read
+    /// is where a value is used, a write is where it moves. A server that
+    /// omits the kind is required by the spec to be treated as Text, so an
+    /// occurrence with no kind is not a write.
+    pub write: bool,
+}
+
+/// Occurrences from a `textDocument/documentHighlight` response.
+///
+/// Ranges only — no uri, because the request is per-file by definition and the
+/// answer never names another one.
+fn parse_document_highlights(text: &str) -> Vec<SymbolOccurrence> {
+    let mut out = Vec::new();
+    if text.contains("\"result\":null") {
+        return out;
+    }
+    // Each highlight is `{"range":{"start":{...},"end":{...}},"kind":n}`.
+    for chunk in text.split("\"range\":").skip(1) {
+        let Some(row) = extract_int(chunk, "\"line\":") else { continue };
+        // The kind follows the range in the same object. Bounded to this
+        // highlight by cutting at the next range, so a later one's kind cannot
+        // be read as this one's.
+        let scope = chunk.split("\"range\":").next().unwrap_or(chunk);
+        let write = extract_int(scope, "\"kind\":") == Some(3);
+        out.push(SymbolOccurrence { row: row.max(0) as usize, write });
+    }
     out
 }
 
@@ -2913,6 +2997,51 @@ fn lang_id(path: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// Read from write is the whole point, and it is one integer.
+    #[test]
+    fn a_highlight_is_a_write_only_at_kind_three() {
+        let body = r#"{"result":[
+            {"range":{"start":{"line":3,"character":8},"end":{"line":3,"character":14}},"kind":3},
+            {"range":{"start":{"line":9,"character":4},"end":{"line":9,"character":10}},"kind":2},
+            {"range":{"start":{"line":12,"character":4},"end":{"line":12,"character":10}},"kind":1}
+        ]}"#;
+        let got = parse_document_highlights(body);
+        assert_eq!(
+            got,
+            vec![
+                SymbolOccurrence { row: 3, write: true },
+                SymbolOccurrence { row: 9, write: false },
+                SymbolOccurrence { row: 12, write: false },
+            ]
+        );
+    }
+
+    /// A kind is optional, and the spec says a missing one means Text. Reading
+    /// the NEXT highlight's kind as this one's would turn a read into a write
+    /// — so each occurrence is bounded to its own object.
+    #[test]
+    fn a_missing_kind_is_not_a_write_and_does_not_borrow_the_next_one() {
+        let body = r#"{"result":[
+            {"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":3}}},
+            {"range":{"start":{"line":5,"character":0},"end":{"line":5,"character":3}},"kind":3}
+        ]}"#;
+        let got = parse_document_highlights(body);
+        assert_eq!(
+            got,
+            vec![
+                SymbolOccurrence { row: 1, write: false },
+                SymbolOccurrence { row: 5, write: true },
+            ]
+        );
+    }
+
+    /// A server with nothing to say says null, and that is not an error.
+    #[test]
+    fn a_null_result_is_no_occurrences() {
+        assert!(parse_document_highlights(r#"{"result":null}"#).is_empty());
+        assert!(parse_document_highlights(r#"{"result":[]}"#).is_empty());
+    }
+
     use super::*;
 
     #[test]

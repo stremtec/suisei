@@ -2391,6 +2391,23 @@ fn build_lines_at(
         let cur = app.dap.current_path.as_deref()?;
         same_file(cur).then_some(line)
     });
+    // The caret symbol's extent, resolved once per band. Rows between the
+    // first and last occurrence carry the rule; the two ends cap it; writes
+    // get a tick.
+    //
+    // An extent that runs the whole file is noise rather than information — a
+    // `static` used in four hundred places would draw a rule down every screen
+    // — so it is dropped past a bound. Better to say nothing than to say
+    // "everywhere".
+    const MAX_EXTENT_ROWS: usize = 400;
+    let extent: Option<(usize, usize)> = if is_current && !app.lsp.highlights.is_empty() {
+        let rows_hl = app.lsp.highlights.iter().map(|h| h.row);
+        let lo = rows_hl.clone().min().unwrap_or(0);
+        let hi = rows_hl.max().unwrap_or(0);
+        (hi.saturating_sub(lo) <= MAX_EXTENT_ROWS).then_some((lo, hi))
+    } else {
+        None
+    };
     // The frame being READ, marked only when it differs from the stop —
     // otherwise every stop would draw a hollow arrow under its own solid one.
     let frame_line: Option<usize> = app.dap.frame_location().and_then(|(p, line)| {
@@ -2648,6 +2665,20 @@ fn build_lines_at(
                 if frame_line == Some(row) {
                     dsign |= DEBUG_FRAME;
                 }
+                if let Some((lo, hi)) = extent {
+                    if row >= lo && row <= hi {
+                        dsign |= VALUE_EXTENT;
+                        if row == lo {
+                            dsign |= VALUE_FIRST;
+                        }
+                        if row == hi {
+                            dsign |= VALUE_LAST;
+                        }
+                        if app.lsp.highlights.iter().any(|h| h.row == row && h.write) {
+                            dsign |= VALUE_WRITE;
+                        }
+                    }
+                }
             }
             // Cap at the FFI limit (SUISEI_MAX_SPANS = 24), markers first:
             // kinds >= 248 are find / caret / diagnostics / bracket overlays —
@@ -2754,6 +2785,20 @@ pub const DEBUG_STOPPED: u8 = 0x01;
 /// this one" — and conflating them is what let clicking a caller convince the
 /// editor that the program had moved.
 pub const DEBUG_FRAME: u8 = 0x02;
+/// This row is inside the caret symbol's extent — where the value lives.
+pub const VALUE_EXTENT: u8 = 0x04;
+/// First and last row of that extent. The rule caps here, the same way the git
+/// change bar caps at its hunk's ends — that mark is already read as "this
+/// run, together", and a second vocabulary for the same idea would be one more
+/// thing to learn.
+pub const VALUE_FIRST: u8 = 0x08;
+pub const VALUE_LAST: u8 = 0x10;
+/// The value MOVES on this row: `documentHighlight` called it a write.
+///
+/// The distinction the feature rests on. A read is where a value is used; a
+/// write is where it changes, and only the write kind answers "how does this
+/// value move".
+pub const VALUE_WRITE: u8 = 0x20;
 pub const GIT_HUNK_STAGED: u8 = 0x08;
 pub const GIT_HUNK_FIRST: u8 = 0x10;
 pub const GIT_HUNK_LAST: u8 = 0x20;

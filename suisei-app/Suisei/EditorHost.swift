@@ -96,6 +96,7 @@ struct EditorHost: NSViewRepresentable {
             breakpointInk: .black,
             debugStop: NSColor(theme.color(theme.debugStop)),
             debugStopInk: .systemGreen,
+            valueExtent: NSColor(accent).withAlphaComponent(0.55),
             liveFlash: NSColor(accent).withAlphaComponent(0.22),
             bracketFill: EditorCanvasView.bracketYellow,
             bracketInk: .black
@@ -893,6 +894,9 @@ final class EditorCanvasView: NSView {
         /// and the caret row as the same grey.
         var debugStop: NSColor
         var debugStopInk: NSColor
+        /// The value-extent rule. The accent, faint: it is a note about the
+        /// symbol the caret is on, not a warning and not a change.
+        var valueExtent: NSColor
         /// The wash over a row a live reload just replaced. The accent, faint
         /// — this is a notice that something arrived, not an error and not a
         /// change the reader made. It fades to nothing within about a second,
@@ -974,6 +978,7 @@ final class EditorCanvasView: NSView {
         breakpoint: .systemYellow, breakpointInk: .black,
         debugStop: NSColor.systemGreen.withAlphaComponent(0.18),
         debugStopInk: .systemGreen,
+        valueExtent: NSColor.controlAccentColor.withAlphaComponent(0.55),
         liveFlash: NSColor.systemBlue.withAlphaComponent(0.22),
         bracketFill: bracketYellow,
         bracketInk: .black
@@ -1630,6 +1635,19 @@ final class EditorCanvasView: NSView {
             // After the caret wash on purpose: the two are frequently the same
             // row, and the one that has to win is the one saying where the
             // PROGRAM is.
+            if line.inValueExtent {
+                let ink = colors.valueExtent
+                renderer.addRect(
+                    Self.valueRuleRect(atY: y, lineH: lineH, write: line.valueWrite),
+                    line.valueWrite ? ink : ink.withAlphaComponent(ink.alphaComponent * 0.55)
+                )
+                if line.valueExtentFirst {
+                    renderer.addRect(Self.valueCapRect(atY: y, lineH: lineH, top: true), ink)
+                }
+                if line.valueExtentLast {
+                    renderer.addRect(Self.valueCapRect(atY: y, lineH: lineH, top: false), ink)
+                }
+            }
             if let t = datatipTokenRect, t.midY >= y, t.midY < y + lineH {
                 renderer.addRect(
                     t.insetBy(dx: -2, dy: 1),
@@ -1942,6 +1960,19 @@ final class EditorCanvasView: NSView {
             if line.isCursor {
                 colors.cursorLine.setFill()
                 rowRect.fill()
+            }
+            if line.inValueExtent {
+                let ink = colors.valueExtent
+                (line.valueWrite ? ink : ink.withAlphaComponent(ink.alphaComponent * 0.55))
+                    .setFill()
+                Self.valueRuleRect(atY: y, lineH: lineH, write: line.valueWrite).fill()
+                ink.setFill()
+                if line.valueExtentFirst {
+                    Self.valueCapRect(atY: y, lineH: lineH, top: true).fill()
+                }
+                if line.valueExtentLast {
+                    Self.valueCapRect(atY: y, lineH: lineH, top: false).fill()
+                }
             }
             if let t = datatipTokenRect, t.midY >= y, t.midY < y + lineH {
                 colors.debugStopInk.withAlphaComponent(0.16).setFill()
@@ -2866,6 +2897,34 @@ final class EditorCanvasView: NSView {
     /// two markers sat on top of each other. They are separate targets now:
     /// the bar is pressed for its hunk, the number is pressed for its
     /// breakpoint, and neither can be hit by accident.
+    /// The value-extent rule: a hairline at the code's left edge, capped at
+    /// the ends, with a wider tick where the value is written.
+    ///
+    /// **Inside the text, not in the gutter.** The gutter is full — git
+    /// stripe, breakpoint chip, line number, stop arrow — and this session
+    /// already had to move the stop arrow out of the change bar's lane after
+    /// exactly that collision. This mark is about the CODE rather than about
+    /// the file's git state, so it belongs on the code's side of the line, and
+    /// it costs the gutter nothing.
+    ///
+    /// The shape is the git change bar's: a rule with caps. That mark is
+    /// already read here as "this run, together", and inventing a second
+    /// vocabulary for the same idea would be one more thing to learn.
+    static func valueRuleRect(atY y: CGFloat, lineH: CGFloat, write: Bool) -> CGRect {
+        let w: CGFloat = write ? 3 : 1.5
+        return CGRect(x: EditorMetrics.gutter + 2, y: y, width: w, height: lineH)
+    }
+
+    /// The cap: a short horizontal foot, so the run has ends rather than
+    /// fading out at whatever row the viewport happens to stop at.
+    static func valueCapRect(atY y: CGFloat, lineH: CGFloat, top: Bool) -> CGRect {
+        CGRect(
+            x: EditorMetrics.gutter + 2,
+            y: top ? y + 1 : y + lineH - 2.5,
+            width: 6, height: 1.5
+        )
+    }
+
     /// The band is over the TEXT, not over the gutter.
     ///
     /// Washing the whole row put a green tint under the line number, the change
