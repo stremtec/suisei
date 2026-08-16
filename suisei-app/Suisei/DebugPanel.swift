@@ -73,7 +73,12 @@ struct DebugPanelView: View {
             transportButton("arrow.clockwise", help: "Restart", enabled: dap.session) {
                 engine.dapCommand(.restart)
             }
-            transportButton("stop.fill", help: "Stop · ⇧F5", enabled: dap.session) {
+            // Always enabled, unlike every other control here. Stop is the way
+            // OUT, and the moments it is most needed are exactly the ones the
+            // panel is confused about: a build in flight, or an error left
+            // over from a launch that failed. Greying it out in those states
+            // left no way to clear them — the reported "꼬였달까".
+            transportButton("stop.fill", help: "Stop · ⇧F5", enabled: true) {
                 engine.dapCommand(.stop)
             }
 

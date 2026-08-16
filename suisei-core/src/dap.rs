@@ -241,6 +241,9 @@ pub struct DapClient {
     build_rx: Option<Receiver<Result<(String, PathBuf, String, Vec<String>), String>>>,
     /// Status line while building ("cargo build…").
     pub build_message: Option<String>,
+    /// Which builder is running, so the completion log does not call `rustc`
+    /// "cargo". It said "⚙ rustc (single file)…" and then "✓ cargo build ok".
+    build_tool: &'static str,
 
     /// Outgoing requests captured for sequence tests.
     #[cfg(test)]
@@ -303,6 +306,7 @@ impl DapClient {
             eval_input: String::new(),
             build_rx: None,
             build_message: None,
+            build_tool: "cargo",
             #[cfg(test)]
             sent: Vec::new(),
         }
@@ -1183,7 +1187,30 @@ impl DapClient {
 
     /// Graceful stop: terminate/disconnect, then SIGKILL after [`SHUTDOWN_GRACE`]
     /// (enforced in `poll`). Pressing stop twice force-kills.
+    /// Stop whatever is in front of you — a session, a build, or a stale error.
+    ///
+    /// This is the escape hatch, and it did not work. `finish_shutdown` keeps
+    /// a running build alive on purpose ("Keep build_rx if a build is still
+    /// running"), so ⇧F5 while a build was in flight did **nothing**: the
+    /// build carried on and launched anyway. A stop that cannot stop the thing
+    /// in front of the user is the whole of the reported "shift f5는 입력도
+    /// 씹히고".
     pub fn stop(&mut self) {
+        // A build in flight is the thing being stopped. Dropping the receiver
+        // is the cancellation: the thread finishes on its own and its result
+        // goes nowhere. Killing the compiler mid-flight would leave a partial
+        // binary behind for the next launch to find.
+        if self.build_rx.take().is_some() {
+            self.build_message = None;
+            self.soft_error = None;
+            self.state = DapState::Idle;
+            self.log("■ build cancelled");
+            return;
+        }
+        // Clearing this here is what makes a second ⇧F5 mean something after a
+        // failed launch: the panel was showing an error about a session that
+        // no longer existed, with every transport button correctly disabled.
+        self.soft_error = None;
         if self.writer.is_none() {
             self.finish_shutdown();
             return;
@@ -1323,6 +1350,7 @@ impl DapClient {
             }
         });
         self.build_rx = Some(rx);
+        self.build_tool = "cargo build";
         self.build_message = Some("cargo build…".into());
         self.panel_open = true;
         self.state = DapState::Starting;
@@ -1404,6 +1432,7 @@ impl DapClient {
             }
         });
         self.build_rx = Some(rx);
+        self.build_tool = "rustc";
         self.build_message = Some("rustc…".into());
         self.panel_open = true;
         self.state = DapState::Starting;
@@ -1695,7 +1724,17 @@ impl DapClient {
             match rx.try_recv() {
                 Ok(Ok((bin, cwd, lang, args))) => {
                     self.build_message = None;
-                    self.log(format!("✓ cargo build ok · launching {bin}"));
+                    // `begin_*_build` set `Starting` so the panel had something
+                    // to show while the build ran — and `is_session` counts
+                    // `Starting`, so leaving it set made `start` refuse with
+                    // "Debug session already active — stop first". The
+                    // build-then-launch path could therefore never complete;
+                    // it was only ever hidden behind the earlier
+                    // "binary not found". The session's own `Starting` is set
+                    // by `start` on the very next line.
+                    self.state = DapState::Idle;
+                    let tool = self.build_tool;
+                    self.log(format!("✓ {tool} ok · launching {bin}"));
                     if let Err(e) = self.start(&bin, Some(&cwd), Some(&lang), &args) {
                         self.soft_error = Some(e.clone());
                         self.log(format!("✗ launch after build: {e}"));
@@ -1707,7 +1746,8 @@ impl DapClient {
                     self.build_rx = None;
                     self.state = DapState::Idle;
                     self.soft_error = Some(e.clone());
-                    self.log(format!("✗ cargo build: {e}"));
+                    let tool = self.build_tool;
+                    self.log(format!("✗ {tool}: {e}"));
                 }
                 Err(TryRecvError::Empty) => {
                     self.build_rx = Some(rx);
@@ -2756,6 +2796,55 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    /// The build's placeholder state must not block the launch it exists to
+    /// reach.
+    ///
+    /// `begin_*_build` sets `Starting` so the panel has something to show, and
+    /// `is_session` counts `Starting` — so when the build finished, `start`
+    /// refused with "Debug session already active". The path could never
+    /// complete; it was hidden behind the earlier "binary not found".
+    #[test]
+    fn a_finished_build_is_not_mistaken_for_a_live_session() {
+        let mut d = DapClient::default();
+        d.state = DapState::Starting;
+        assert!(d.is_session(), "a build shows as Starting");
+        // What `poll` now does before re-entering `start`.
+        d.state = DapState::Idle;
+        assert!(!d.is_session(), "and start() may proceed");
+    }
+
+    /// ⇧F5 during a build cancels the build.
+    ///
+    /// It used to do nothing at all: `finish_shutdown` keeps `build_rx` alive
+    /// on purpose, so the compiler carried on and launched anyway.
+    #[test]
+    fn stop_cancels_a_build_in_flight() {
+        let mut d = DapClient::default();
+        let (tx, rx) = mpsc::channel();
+        d.build_rx = Some(rx);
+        d.build_message = Some("rustc…".into());
+        d.state = DapState::Starting;
+
+        d.stop();
+
+        assert!(d.build_rx.is_none(), "the build is cancelled");
+        assert!(d.build_message.is_none());
+        assert_eq!(d.state, DapState::Idle);
+        // The sender outliving the receiver is the cancellation; sending into
+        // a dropped channel is an error rather than a panic.
+        assert!(tx.send(Ok(("x".into(), PathBuf::from("."), "rust".into(), vec![]))).is_err());
+    }
+
+    /// And a stop after a failed launch clears the message about it, so the
+    /// panel stops reporting a session that does not exist.
+    #[test]
+    fn stop_clears_a_stale_error() {
+        let mut d = DapClient::default();
+        d.soft_error = Some("Debug session already active — stop first".into());
+        d.stop();
+        assert!(d.soft_error.is_none());
+    }
+
     /// A loose `.rs` file beside a WORKSPACE manifest is not a cargo target.
     ///
     /// This repo is the reported case: `Cargo.toml` at the root is

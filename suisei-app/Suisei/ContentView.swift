@@ -1152,6 +1152,14 @@ struct ContentView: View {
             // pane-local content and never touch the debug strip.
             withAnimation(.snappy(duration: 0.28)) {
                 if open {
+                    // Bring the TERMINAL tab forward — the mirror of what a
+                    // starting debug session does above, and the line that was
+                    // missing. `debugTab` sticks at `.debug` once a session has
+                    // run, so a shell opened afterwards started, took the
+                    // keyboard and put the dock up STILL SHOWING THE DEBUGGER.
+                    // Every keystroke went to a terminal that was not on
+                    // screen: "사이드바에서 여는 터미널 여전히 입력 안됨".
+                    debugTab = .terminal
                     engine.uiDebugVisible = true
                 } else {
                     engine.uiDebugVisible = false
@@ -3150,6 +3158,11 @@ struct ContentView: View {
     /// Filter. Exactly the bug the tap handler below documents, still live at
     /// this one call site.
     private func openDebugTerminal() {
+        // Set here as well as in the `terminal.open` handler, because a shell
+        // that is ALREADY running does not change that flag — so opening the
+        // terminal while the debugger tab was showing published nothing and
+        // the tab never moved.
+        debugTab = .terminal
         engine.setDebugArea(true)
     }
 
