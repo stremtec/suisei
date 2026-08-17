@@ -51,7 +51,9 @@
    ☐ 26. Logic View        **L1·L2·L3·UI 완료** (표로 CFG · 계층과 접힘 · 런타임 · 페인).
                         표 방식이 통함 — 같은 추출기가 표만 바꿔서 Rust/Python/
                         JS/Go/C 를 읽음. ⌃⌘L 로 페인이 열림.
-                        남은 것: L4 추론 경로 · L5 Logic Diff · 파일 경계 넘기.
+                        **UI 재배치 계획**: 페인 → 오른쪽 레일 + 에디터 마크
+                        (§6b). 폭 반론의 답 = 열은 모양, 에디터는 텍스트.
+                        남은 것: U1~U5 · L4 추론 경로 · L5 Logic Diff · 파일 넘기.
                         → docs/SUISEI-LOGIC-VIEW-PLAN.md (§6a 에 UI 설계)
    ☐ 21. 컴포넌트 다운로드  설계 완료 → docs/SUISEI-COMPONENTS-PLAN.md.
                         C0(히어로 jpeg 19MB 재인코딩)은 아키텍처 없이 지금 가능.

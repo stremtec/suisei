@@ -285,6 +285,171 @@ not move.
 
 ---
 
+## 6b. Second placement: the right rail, and marks in the editor
+
+§6a put this in a pane and argued the inspector was too narrow. The user wants
+the right rail, and wants Logic View wired into the editor the way the debugger
+now is. Both are right, and the width objection has an answer §6a missed.
+
+### What §6a got wrong
+
+The objection was "a branch needs width". That is true **only if the column has
+to show the code**. In a pane it does — the code is not on screen, so the view
+must reproduce it, and reproducing indented source in 240pt is hopeless.
+
+In the right rail the editor is showing the same file **at the same time**. So
+the column does not carry the text at all: it carries the SHAPE, and the editor
+carries the TEXT. That is the division of labour the debugger already uses —
+the panel holds the tree of frames and variables, the editor holds the marks —
+and it makes the narrow column *better* than the wide pane rather than a
+compromise: two surfaces each doing the thing they are good at, instead of one
+surface doing both badly.
+
+Everything else in §6a stands: the spine, source text for labels, shape before
+colour, amber for runtime, and no auto-layout.
+
+### The column
+
+Compact, no title row (the mode strip already says which inspector this is —
+`inspectorPanel` makes that rule and it is right), rows at 22pt, depth indent
+10pt, and a right-aligned line number in 9pt mono like the Outline's, which
+also gives the eye a stable right edge.
+
+```
+▾ ƒ  process(n)              12
+  ◇  n > 10                  14
+  │ Y  total = n             15
+  │ N  ↩ 0                   17
+  ↻  for i in 0..n           19
+  │    total += i            20
+  ⤺  total                   22
+▸ ƒ  main()                  26
+```
+
+Labels are source text, truncated at the tail — the full line is one glance to
+the left, which is the entire argument for this placement. `Y`/`N` instead of
+`YES`/`NO`: at this width a two-letter chip costs a word of label.
+
+What the column does NOT get: the file name, the language, a "stopped here"
+banner. Those are either in the editor already or in the debug panel already,
+and a rail this narrow cannot afford to say anything twice.
+
+### The editor side — five marks, and who owns which lane
+
+"Integrated like the debugger" means marks on the code itself. The debugger
+draws five: the stop band, the breakpoint chips, the value bracket, the inline
+values, the datatip. Logic View's five, and the lane rules that keep them from
+fighting:
+
+1. **The selected node's body, as a guide.** A hairline down the node's own
+   indentation column, spanning its rows, with a small foot. Accent, not amber.
+2. **The selected node's first row**, faintly banded in the accent — the same
+   "you are pointing at this" the rail's selection means.
+3. **While stopped: the path you are inside.** Nested amber guides for every
+   branch and loop body the stop is within. This is the one genuinely new fact
+   in the editor — a debugger shows the line, never "you are inside this loop
+   inside this else" — and it is EXACT, read off ranges, not inferred.
+4. **On hover of a decision row**, both arms tinted for as long as the pointer
+   is there: consequence and alternative, so a branch can be read without
+   counting braces. Transient, so it can afford to be loud.
+5. **Right-click a line → Reveal in Logic**, which selects that row. The
+   editor's own way of asking the question the rail answers.
+
+**The lane rules.** `gutterTextGap` — the twelve points between the number and
+the code — belongs to the value bracket, which lives there because a mark at a
+fixed x cannot follow indentation. Logic's guides have the opposite property:
+a node's body has ONE indentation, its own, so the guide belongs *in the text
+column at that indent* and moves with the code by construction. Nothing of
+Logic's goes in the gutter lane, so the two never collide.
+
+Colour: **amber is the debugger's**, and Logic borrows it only for runtime
+facts, which ARE the debugger's facts. Structure is `dim`. Selection is the
+accent. Git keeps green/red/blue in the gutter. One family per subject, still.
+
+### Both directions, because it is one selection
+
+- **Caret → rail.** Moving the caret selects the row whose range holds it, and
+  reveals it if it is inside something closed. `logic::row_at` already answers
+  this; the Outline's version is `cursorRow == item.row`, an exact-match test
+  that lights nothing for 95% of lines, and this is the containment answer it
+  should have had.
+- **Rail → caret.** Clicking a row moves the caret, in the pane that is already
+  showing the file. `reveal_logic_row` already does this.
+
+### The ABI route, which is forced
+
+`SuiseiEditorLineC.debug_sign` is a byte and all eight bits are spent
+(stopped, frame, extent, first, last, write, breakpoint-disabled,
+breakpoint-decorated). So the marks do NOT ride the line struct.
+
+They come from a pull over the visible band — `logic_marks(first, count)` —
+the same shape `inline_values(first, count)` already uses for the editor's
+value annotations, and for the same reason: it costs nothing when the overlay
+is off, and it needs no ABI surgery. Each entry is a row, a flag byte, and the
+column to draw the guide at, computed in core from the text (a body's minimum
+indentation) so the face does no analysis.
+
+### What happens to the pane
+
+It stays, demoted. It is the same rows, the same row view and the same
+snapshot, so it costs one thin wrapper — and a wide read of a long function is
+a real thing to want. It loses ⌃⌘L to the rail and moves to "Open in a Pane"
+inside the rail. If nobody opens it in a month of use, delete it and keep
+`FileKind::Logic = 7` reserved.
+
+### Outline and Logic are two modes, for now
+
+They overlap and they are not the same list: the Outline covers types,
+constants and Markdown headings, and Logic covers control flow. The tempting
+merge — one mode where expanding a function reveals its logic — conflates
+"where things are" with "what happens", and would make the fast flat list pay
+for the deep one.
+
+Keep them separate, and take the by-product §0.1 promised anyway: the Outline
+is a line-by-line text scan with a 200-item cap, and the same tree Logic reads
+is a real foundation for it. That is a separate change and it stands on its
+own.
+
+### Cost, and the two ways to get it wrong
+
+The rail is ALWAYS visible, which the pane was not. Two consequences:
+
+- **Do not parse twice.** For the focused document the syntax engine already
+  holds a live, incrementally-reparsed tree. The session must use it and keep
+  its own parse only for a file that is not the focused one — otherwise every
+  file switch pays a second full parse on the main thread.
+- **Do not compute when nobody is looking.** The rail has four modes and three
+  of them are not this one. Everything here is gated on the mode being visible,
+  the same way the debug panel gates its own marks on `dap.panel_open`.
+
+### Staging
+
+**U1 — the mode.** Logic as a fourth inspector mode, drawing the column from
+the snapshot that already exists. Caret → rail follow. Nothing in the editor
+yet. This is the placement decision, testable in an afternoon.
+
+**U2 — selection in the editor.** The `logic_marks` pull, the selected node's
+guide and band. Rail → caret already works. This is where the two surfaces
+start behaving like one.
+
+**U3 — the stopped path.** Nested amber guides for the branch and loop bodies
+the stop is inside. Reads `LogicRuntime`, which is already built and tested.
+
+**U4 — the branch peek.** Hover a decision, both arms tint. Transient.
+
+**U5 — the Outline's foundation.** Replace the text scan with the same tree.
+Independent of the rest, and it removes a 200-item cap and a class of wrong
+answers (a call in a comment).
+
+### What would change my mind
+
+If the column at 200pt turns out to need the code after all — if reading the
+shape without the text is not actually possible while the eye is on the editor
+— then the division of labour is wrong and the pane was right. U1 is deliberately
+the cheapest possible test of exactly that, and it comes before any editor work.
+
+---
+
 ## 7. What this is not
 
 Not a flowchart generator. The spec says so and it is worth keeping in front:
