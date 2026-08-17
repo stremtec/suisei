@@ -5003,6 +5003,50 @@ pub extern "C" fn suisei_engine_dap_evaluate(ptr: *mut SuiseiEngine, expr: *cons
     }
 }
 
+pub const SUISEI_MAX_INLINE_VALUES: usize = 64;
+pub const SUISEI_INLINE_VALUE_CAP: usize = 128;
+
+#[repr(C)]
+pub struct SuiseiInlineValueSnapshot {
+    pub count: u32,
+    /// 0-based buffer rows.
+    pub rows: [u32; SUISEI_MAX_INLINE_VALUES],
+    pub texts: [[c_char; SUISEI_INLINE_VALUE_CAP]; SUISEI_MAX_INLINE_VALUES],
+}
+
+/// Inline values for the visible rows.
+///
+/// Its own call rather than a field on the editor band. The band is the scroll
+/// hot path and its per-line struct is packed 256 deep — a field there would
+/// be paid for on every frame of every file, debugging or not, to carry
+/// something that is empty except while stopped in this exact file.
+///
+/// Costs no adapter round trip: the frame's locals are already fetched for the
+/// Variables panel. See `Engine::inline_values`.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_inline_values(
+    ptr: *const SuiseiEngine,
+    first_row: u32,
+    row_count: u32,
+    out: *mut SuiseiInlineValueSnapshot,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    unsafe {
+        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiInlineValueSnapshot>());
+    }
+    let rows = unsafe { (*ptr).0.inline_values(first_row as usize, row_count as usize) };
+    let o = unsafe { &mut *out };
+    let n = rows.len().min(SUISEI_MAX_INLINE_VALUES);
+    o.count = n as u32;
+    for (i, (row, text)) in rows.iter().take(n).enumerate() {
+        o.rows[i] = *row;
+        write_cstr(&mut o.texts[i], text);
+    }
+    1
+}
+
 /// Set or clear a breakpoint's condition. An empty string clears it.
 ///
 /// Core has had `set_breakpoint_condition` since before this face existed and

@@ -1629,6 +1629,65 @@ impl DapClient {
         self.eval_input.clear();
     }
 
+    // ── Query surface ──────────────────────────────────────────────────
+    //
+    // What the debugger KNOWS, asked without disturbing what it is showing.
+    //
+    // Everything above this line is shaped for the panel: `vars` is a
+    // flattened tree with an expansion state, `selected_frame` is a cursor a
+    // person moved. A second reader — the inline values below, and Logic View
+    // after them — needs the same facts without owning that cursor, and
+    // without a request going out per question.
+    //
+    // These are all reads of state that is already here. They cost nothing and
+    // they are the seam a view sits on.
+
+    /// The current frame's local variables, by name.
+    ///
+    /// Free: the first scope is auto-expanded when a stop lands, so the panel
+    /// has already fetched these. A second consumer asking the adapter again
+    /// would be paying for an answer that is sitting in `vars`.
+    ///
+    /// Locals only — the scope roots and any expanded children below them are
+    /// left out. A child is `a.b`, which is not a name that appears in the
+    /// source as itself, and a scope is not a value.
+    pub fn frame_values(&self) -> Vec<(&str, &str)> {
+        let mut out = Vec::new();
+        let mut in_first_scope = false;
+        for v in &self.vars {
+            if v.is_scope {
+                // The first scope is the one that is auto-expanded — Locals
+                // for every adapter that has been looked at. Globals and
+                // Registers are not what a line of source is talking about.
+                if in_first_scope {
+                    break;
+                }
+                in_first_scope = true;
+                continue;
+            }
+            if in_first_scope && !v.value.is_empty() {
+                out.push((v.name.as_str(), v.value.as_str()));
+            }
+        }
+        out
+    }
+
+    /// Where the program is stopped: path and 0-based line.
+    pub fn stop_location(&self) -> Option<(&str, usize)> {
+        Some((self.current_path.as_deref()?, self.current_line?))
+    }
+
+    /// The call stack as (name, path, 0-based line), innermost first.
+    ///
+    /// The path through the program that is KNOWN rather than inferred — a
+    /// view drawing execution has this for free and has nothing else for free.
+    pub fn call_path(&self) -> Vec<(&str, &str, usize)> {
+        self.stack
+            .iter()
+            .map(|f| (f.name.as_str(), f.path.as_str(), f.line))
+            .collect()
+    }
+
     /// Ask the adapter whether a value can be watched, then watch it.
     ///
     /// Two steps because the spec is two steps, and the first one is the

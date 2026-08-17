@@ -2379,6 +2379,11 @@ fn build_lines_at(
     // doc comment names this caller but which takes `&mut self` for its canon
     // cache. The band holds `&App`. Matching the two keys here is what the
     // breakpoint block already does one screen up.
+    // All of the debugger's marks are gated on its panel being on screen —
+    // the band, the frame, the bracket. A reader who closed the panel is not
+    // debugging, and a stop band left behind is the editor still talking about
+    // a session nobody is watching.
+    let debugging = app.dap.panel_open;
     let pane_path: Option<String> = if is_current {
         app.tabs
             .buffers
@@ -2394,7 +2399,7 @@ fn build_lines_at(
             || std::fs::canonicalize(mine).ok().map(|c| c.to_string_lossy().to_string())
                 == std::fs::canonicalize(other).ok().map(|c| c.to_string_lossy().to_string())
     };
-    let stopped_line: Option<usize> = app.dap.current_line.and_then(|line| {
+    let stopped_line: Option<usize> = app.dap.current_line.filter(|_| debugging).and_then(|line| {
         let cur = app.dap.current_path.as_deref()?;
         same_file(cur).then_some(line)
     });
@@ -2407,7 +2412,8 @@ fn build_lines_at(
     // — so it is dropped past a bound. Better to say nothing than to say
     // "everywhere".
     const MAX_EXTENT_ROWS: usize = 400;
-    let extent: Option<(usize, usize)> = if is_current && !app.lsp.highlights.is_empty() {
+    let extent: Option<(usize, usize)> = if is_current && debugging && !app.lsp.highlights.is_empty()
+    {
         let rows_hl = app.lsp.highlights.iter().map(|h| h.row);
         let lo = rows_hl.clone().min().unwrap_or(0);
         let hi = rows_hl.max().unwrap_or(0);

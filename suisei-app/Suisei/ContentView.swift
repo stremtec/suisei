@@ -1135,6 +1135,17 @@ struct ContentView: View {
                 engine.uiNavVisible = true
             }
         }
+        // The debugger's panel is on screen, told to core from ONE place.
+        //
+        // `dapSetPanel` used to be called only from the tab button, so it
+        // tracked WHICH TAB rather than whether the dock was open — and
+        // closing the dock with its ✕ left core believing the panel was up.
+        // Everything gated on that flag stayed drawn: the stop band, the value
+        // bracket, the hover value. Reported as "디버그 패널 닫아도 다 사라지지
+        // 않음".
+        //
+        // Two inputs, one answer, and an observer on each so no path can
+        // forget to make the call.
         .onChange(of: engine.dap.session) { _, live in
             // A session starting brings the debugger forward, and its ending
             // leaves it where it is. Pressing Start and getting the terminal
@@ -2940,6 +2951,20 @@ struct ContentView: View {
 
     /// Debug area — Xcode-style bottom console hosting the shell (no modes, no XLC).
     private var debugArea: some View {
+        debugAreaBody
+            // Here rather than on the editor shell's chain: that one is at the
+            // type-checker's limit and one more modifier tips it over, which is
+            // the same wall `sidebarRow` documents. This is also the view the
+            // flag is ABOUT.
+            //
+            // The id is the answer itself, so `task` fires on appear and on
+            // every flip — exactly when core needs telling.
+            .task(id: engine.uiDebugVisible && debugTab == .debug) {
+                syncDebugPanel()
+            }
+    }
+
+    private var debugAreaBody: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 // The bottom area holds two things now, so it says which one
@@ -3084,11 +3109,10 @@ struct ContentView: View {
             ForEach(DebugAreaTab.allCases, id: \.self) { tab in
                 let on = debugTab == tab
                 Button {
+                    // Just the tab. `syncDebugPanel` tells core, from the one
+                    // place that watches BOTH inputs — see it for why this
+                    // used to set the flag here and was wrong.
                     debugTab = tab
-                    // Core owns the flag: the breakpoint gutter and the TUI
-                    // layout both read it, and it must not drift from what is
-                    // on screen here.
-                    engine.dapSetPanel(tab == .debug)
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: tab.symbol)
@@ -3157,6 +3181,15 @@ struct ContentView: View {
     /// handed the keyboard to the first field it could find — the navigator's
     /// Filter. Exactly the bug the tap handler below documents, still live at
     /// this one call site.
+    /// Tell core whether the debugger's panel is on screen.
+    ///
+    /// Both inputs: the dock has to be open AND the debug tab has to be the
+    /// one showing. Either alone is a lie, and core gates the stop band, the
+    /// value bracket and the inline values on the answer.
+    private func syncDebugPanel() {
+        engine.dapSetPanel(engine.uiDebugVisible && debugTab == .debug)
+    }
+
     private func openDebugTerminal() {
         // Set here as well as in the `terminal.open` handler, because a shell
         // that is ALREADY running does not change that flag — so opening the

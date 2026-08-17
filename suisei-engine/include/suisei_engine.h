@@ -1093,6 +1093,21 @@ void suisei_engine_dap_evaluate(SuiseiEngine *ptr, const char *expr);
 
 /* Hover datatip. `request` asks; `dap_datatip` returns 1 when filled, 2 while
    a request is in flight, 0 when there is nothing. */
+#define SUISEI_MAX_INLINE_VALUES 64
+#define SUISEI_INLINE_VALUE_CAP 128
+
+/* Inline values for the visible rows — `x = 5` at the end of a line.
+   Its own call, not a band field: empty except while stopped. */
+typedef struct SuiseiInlineValueSnapshot {
+  uint32_t count;
+  uint32_t rows[SUISEI_MAX_INLINE_VALUES]; /* 0-based */
+  char texts[SUISEI_MAX_INLINE_VALUES][SUISEI_INLINE_VALUE_CAP];
+} SuiseiInlineValueSnapshot;
+
+uint8_t suisei_engine_inline_values(const SuiseiEngine *e, uint32_t first_row,
+                                    uint32_t row_count,
+                                    SuiseiInlineValueSnapshot *out);
+
 /* Breakpoint properties. Lines are 1-based; an empty string clears. */
 void suisei_engine_dap_set_condition(SuiseiEngine *e, const char *path,
                                      uint32_t line_1based, const char *condition);

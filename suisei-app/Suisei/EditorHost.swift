@@ -95,8 +95,16 @@ struct EditorHost: NSViewRepresentable {
             breakpoint: .systemYellow,
             breakpointInk: .black,
             debugStop: NSColor(theme.color(theme.debugStop)),
-            debugStopInk: .systemGreen,
-            valueExtent: NSColor(accent).withAlphaComponent(0.8),
+            // Amber, like the breakpoint chip and the stop band. The
+            // debugger speaks in ONE colour and the gutter's other marks are
+            // git's — this used to be green, which was a second voice for the
+            // same subject.
+            debugStopInk: .systemYellow,
+            // The bracket is the debugger's too — it is gated on the panel
+            // and it says where a value lives while you step. The accent is
+            // the user's and means "Suisei is pointing at something"; this
+            // means "the debugger is".
+            valueExtent: NSColor.systemYellow.withAlphaComponent(0.85),
             liveFlash: NSColor(accent).withAlphaComponent(0.22),
             bracketFill: EditorCanvasView.bracketYellow,
             bracketInk: .black
@@ -977,8 +985,8 @@ final class EditorCanvasView: NSView {
         removedEdge: NSColor.systemYellow.withAlphaComponent(0.28),
         breakpoint: .systemYellow, breakpointInk: .black,
         debugStop: NSColor.systemGreen.withAlphaComponent(0.18),
-        debugStopInk: .systemGreen,
-        valueExtent: NSColor.controlAccentColor.withAlphaComponent(0.8),
+        debugStopInk: .systemYellow,
+        valueExtent: NSColor.systemYellow.withAlphaComponent(0.85),
         liveFlash: NSColor.systemBlue.withAlphaComponent(0.22),
         bracketFill: bracketYellow,
         bracketInk: .black
@@ -1061,6 +1069,12 @@ final class EditorCanvasView: NSView {
     /// no data and simply did not draw.
     private var bandEnd: Int = -1
     private var bandRows: [EditorLine] = []
+    /// Inline values for the rows on screen, by 0-based row.
+    ///
+    /// Refreshed with the band rather than published: it is empty except while
+    /// stopped in the file on screen, and a per-frame publish of an empty map
+    /// would be the whole cost of a feature that is usually off.
+    private var inlineValueNotes: [UInt32: String] = [:]
     private lazy var metalRenderer: MetalTextRenderer? = {
         RendererChoice.useMetal ? MetalTextRenderer() : nil
     }()
@@ -1387,6 +1401,18 @@ final class EditorCanvasView: NSView {
             bandStart = want0
             bandRows = pulled
             bandEnd = pulled.last.map { Int($0.lineNo) - 1 } ?? (want0 - 1)
+            // With the band, and only with the band: the pull is a no-op
+            // unless the debugger is stopped in this file, so it costs
+            // nothing on the scroll path the rest of the time.
+            inlineValueNotes = engine?.inlineValues(
+                first: bandStart, count: max(0, bandEnd - bandStart + 1)
+            ) ?? [:]
+            // A datatip that is already open when the panel closes has to go
+            // too. The hover CHECK looks at the panel, but a popover that was
+            // opened while it was up has nothing watching it.
+            if engine?.uiDebugVisible != true, datatipSymbol != nil {
+                cancelDatatip()
+            }
         }
         // Slice by lineNo bounds (wrap rows share lineNo with their primary).
         let lo = bandRows.firstIndex { Int($0.lineNo) - 1 >= start } ?? bandRows.endIndex
@@ -2213,6 +2239,28 @@ final class EditorCanvasView: NSView {
                     ))
                     ghost.draw(at: CGPoint(x: caretX, y: textY))
                     cg.restoreGState()
+                }
+            }
+            // The value at the end of the line.
+            //
+            // After the code and clipped to the pane, because it is an
+            // annotation ABOUT the row and must never be mistaken for part of
+            // it — it is not in the buffer, the caret cannot reach it and a
+            // selection does not include it.
+            if let note = inlineValueNotes[line.lineNo &- 1], !line.isWrapContinuation {
+                let width = CTLineGetTypographicBounds(ct, nil, nil, nil)
+                let at = CGPoint(x: gutter + CGFloat(width) + 22, y: textY)
+                if at.x < bounds.width - 30 {
+                    NSAttributedString(
+                        string: note,
+                        attributes: [
+                            .font: NSFont.monospacedSystemFont(
+                                ofSize: fontSize * 0.88, weight: .regular
+                            ),
+                            .foregroundColor: colors.debugStopInk
+                                .withAlphaComponent(0.85),
+                        ]
+                    ).draw(at: at)
                 }
             }
             for sp in line.spans where sp.kind == 254 {
@@ -3688,7 +3736,15 @@ final class EditorCanvasView: NSView {
         }
 
         let popover = NSPopover()
-        popover.behavior = .transient
+        // NOT `.transient`. That behaviour dismisses on the next click
+        // ANYWHERE and SWALLOWS it, so with a datatip open every click in the
+        // editor was spent closing the popover and the caret only moved on the
+        // second one: "클릭을 두번 해야됨".
+        //
+        // `.applicationDefined` means nobody closes it but us — and we already
+        // do, on leaving the word, on leaving the view, and now on mouseDown,
+        // which lets the click carry on to the caret.
+        popover.behavior = .applicationDefined
         popover.animates = false
         let host = NSHostingController(rootView: DatatipCard(engine: engine, symbol: symbol))
         // The card opens on the dwell and fills in when the adapter answers, so
@@ -3889,6 +3945,10 @@ final class EditorCanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         bracketKey = ""
+        // A datatip goes away on a press, and the press CARRIES ON. It is
+        // `.applicationDefined`, so nothing else would close it — and nothing
+        // else swallows the click either, which is the point.
+        cancelDatatip()
         // Commit any in-progress composition BEFORE the click moves the caret.
         // Otherwise the uncommitted marked text (e.g. Hangul just typed after a
         // ')') stays live and re-anchors to the new caret — it appears to

@@ -100,6 +100,55 @@ fn dap_state_code(state: suisei_core::dap::DapState) -> u8 {
 }
 
 /// One row in the Breakpoints navigator (face FFI).
+/// A whole-word occurrence of `word` in `line`.
+///
+/// Whole-word because `count` must not match inside `account`: an annotation
+/// naming a variable that is not on the line is worse than none, since it is
+/// read as a fact about that line.
+fn contains_word(line: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(at) = line[from..].find(word) {
+        let start = from + at;
+        let end = start + word.len();
+        let before = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let after = end >= bytes.len() || !is_ident_byte(bytes[end]);
+        if before && after {
+            return true;
+        }
+        from = end.max(start + 1);
+        if from >= line.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
+}
+
+/// A value on one line, short enough to sit at the end of a row of code.
+///
+/// An lldb struct prints over several lines and runs to hundreds of
+/// characters. Past this it stops being an annotation and becomes the thing
+/// you are reading instead of the code.
+fn one_line(value: &str) -> String {
+    let flat: String = value
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 40 {
+        return flat;
+    }
+    let cut: String = flat.chars().take(39).collect();
+    format!("{cut}…")
+}
+
 #[derive(Debug, Clone)]
 pub struct BreakpointRow {
     pub path: String,
@@ -1945,6 +1994,71 @@ impl Engine {
     }
 
     /// Flattened breakpoint list for the navigator panel (path, 1-based line, flags).
+    /// Inline values for rows `[first, first + count)` of the current file.
+    ///
+    /// VS Code's `x = 5` at the end of a line, and the cheapest version of it
+    /// there is: the frame's locals are ALREADY fetched — the first scope is
+    /// auto-expanded on every stop, for the panel — so this asks the adapter
+    /// nothing at all. The design note warned that inline values would cost an
+    /// evaluate per variable per visible line on every step; for locals, which
+    /// is what a line of source mostly mentions, that cost is zero.
+    ///
+    /// Only the locals a row actually NAMES, and only as whole words: a row
+    /// annotated with every local in scope is a second copy of the Variables
+    /// panel written across the code.
+    ///
+    /// Pulled separately rather than carried in the editor band. The band is
+    /// the scroll hot path and its per-line struct is packed 256 deep; a field
+    /// there would be paid for on every frame of every file, debugging or not,
+    /// to carry something that is empty except while stopped.
+    pub fn inline_values(&self, first: usize, count: usize) -> Vec<(u32, String)> {
+        if self.app.dap.state != suisei_core::dap::DapState::Stopped {
+            return Vec::new();
+        }
+        // Only in the file the program is actually stopped in. A local called
+        // `count` means nothing on a line of another file that happens to use
+        // the word.
+        let Some((stop_path, _)) = self.app.dap.stop_location() else {
+            return Vec::new();
+        };
+        let Some(open) = self.app.filename.as_ref().map(|p| p.to_string_lossy().to_string())
+        else {
+            return Vec::new();
+        };
+        let same = open == stop_path
+            || std::fs::canonicalize(&open).ok() == std::fs::canonicalize(stop_path).ok();
+        if !same {
+            return Vec::new();
+        }
+
+        let values = self.app.dap.frame_values();
+        if values.is_empty() {
+            return Vec::new();
+        }
+        let last = (first + count).min(self.app.buffer.line_count());
+        let mut out = Vec::new();
+        for row in first..last {
+            let line = self.app.buffer.line(row);
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut shown: Vec<String> = Vec::new();
+            for (name, value) in &values {
+                if shown.len() >= 3 {
+                    break;
+                }
+                if !contains_word(line, name) {
+                    continue;
+                }
+                shown.push(format!("{name} = {}", one_line(value)));
+            }
+            if !shown.is_empty() {
+                out.push((row as u32, shown.join("   ")));
+            }
+        }
+        out
+    }
+
     pub fn list_breakpoints(&self) -> Vec<BreakpointRow> {
         let mut rows = Vec::new();
         let mut keys: Vec<_> = self.app.dap.breakpoints.keys().cloned().collect();

@@ -41,6 +41,11 @@ fn engine_at(path_name: &str) -> (Engine, String) {
     engine.resize(1600.0, 1000.0, 18.0, 8.0, 2.0);
     engine.app = suisei_core::app::App::open_file(path.to_str().unwrap());
     engine.flush_syntax();
+    // The debugger's marks are gated on its panel being on screen — a stop
+    // band left behind after the panel closes is the editor still talking
+    // about a session nobody is watching. These tests are about what is drawn
+    // WHILE debugging, so they open it.
+    engine.app.dap.panel_open = true;
     let p = path.to_string_lossy().to_string();
     (engine, p)
 }
@@ -262,4 +267,30 @@ fn the_gutter_learns_whether_a_breakpoint_is_armed_and_decorated() {
     assert!(sign(5) & BREAKPOINT_DISABLED != 0);
     let plain = lines.iter().find(|l| l.line_no == 6).unwrap();
     assert!(plain.git_sign & 0x40 != 0, "and still HAS a breakpoint");
+}
+
+/// Closing the debugger's panel takes its marks with it.
+///
+/// `dapSetPanel` used to be called only from the tab button, so the flag
+/// tracked WHICH TAB rather than whether the dock was open — closing it with
+/// the ✕ left the stop band, the value bracket and the hover value all drawn.
+#[test]
+fn a_closed_panel_leaves_nothing_behind() {
+    use suisei_core::lsp::SymbolOccurrence;
+    use suisei_engine::compositor::{VALUE_EXTENT, build_editor_band};
+
+    let (mut engine, path) = engine_at("closed.rs");
+    engine.app.dap.current_path = Some(path);
+    engine.app.dap.current_line = Some(3);
+    engine.app.lsp.highlights = vec![SymbolOccurrence { row: 2, write: true }];
+    assert!(!stopped_rows(&engine).is_empty(), "drawn while the panel is up");
+
+    engine.app.dap.panel_open = false;
+
+    assert!(stopped_rows(&engine).is_empty(), "the stop band goes");
+    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0, 200);
+    assert!(
+        lines.iter().all(|l| l.debug_sign & VALUE_EXTENT == 0),
+        "and so does the bracket"
+    );
 }

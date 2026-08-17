@@ -4226,6 +4226,26 @@ final class EngineBridge: ObservableObject {
     @Published private(set) var datatipPending = false
     private var datatipPoll: DispatchWorkItem?
 
+    /// Inline values for rows `[first, first + count)`, keyed by 0-based row.
+    ///
+    /// Pulled on demand rather than published: it is empty except while
+    /// stopped in the file on screen, and republishing an empty map every
+    /// frame would be the whole cost of a feature that is usually off.
+    func inlineValues(first: Int, count: Int) -> [UInt32: String] {
+        guard let engine, dap.state == .stopped else { return [:] }
+        var snap = SuiseiInlineValueSnapshot()
+        guard suisei_engine_inline_values(
+            engine, UInt32(max(0, first)), UInt32(max(0, count)), &snap
+        ) != 0 else { return [:] }
+        let n = min(Int(snap.count), Int(SUISEI_MAX_INLINE_VALUES))
+        guard n > 0 else { return [:] }
+        let rows = Self.scalars(snap.rows, as: UInt32.self, count: n)
+        let texts = Self.cStrings(snap.texts, cap: Int(SUISEI_INLINE_VALUE_CAP), count: n)
+        var out: [UInt32: String] = [:]
+        for i in 0..<n { out[rows[i]] = texts[i] }
+        return out
+    }
+
     /// Set or clear a breakpoint's condition. Empty clears.
     ///
     /// Core has had `set_breakpoint_condition` since before this face existed,
@@ -6489,7 +6509,7 @@ final class EngineBridge: ObservableObject {
     }
 
     /// `count` strings out of a fixed C array of fixed-width buffers.
-    private static func cStrings<T>(_ tuple: T, cap: Int, count: Int) -> [String] {
+    static func cStrings<T>(_ tuple: T, cap: Int, count: Int) -> [String] {
         withUnsafeBytes(of: tuple) { raw in
             guard let base = raw.baseAddress else { return [] }
             return (0..<count).map { i in
@@ -6502,7 +6522,7 @@ final class EngineBridge: ObservableObject {
     }
 
     /// `count` scalars out of a fixed C array.
-    private static func scalars<T, V>(_ tuple: T, as: V.Type, count: Int) -> [V] {
+    static func scalars<T, V>(_ tuple: T, as: V.Type, count: Int) -> [V] {
         withUnsafeBytes(of: tuple) { raw in
             Array(raw.bindMemory(to: V.self).prefix(count))
         }
