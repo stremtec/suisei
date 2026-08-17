@@ -76,10 +76,14 @@ pub struct Theme {
     /// where the PROGRAM is, they are frequently the same row, and an editor
     /// that draws them alike is lying about which one it is showing.
     ///
-    /// Green, and translucent, because it sits behind code that still has to
-    /// be read. Xcode's is green for the same reason it is green everywhere:
-    /// it means "execution is here", which is the one thing the editor is
-    /// being asked.
+    /// Amber, and translucent, because it sits behind code that still has to
+    /// be read.
+    ///
+    /// The DEBUGGER'S colour, and the breakpoint chip already is it. The
+    /// gutter's other marks are git's — added green, deleted red, hunk blue —
+    /// so a debugger that spoke green would be borrowing a word that already
+    /// means something two points to the left. One family per subject: git in
+    /// its colours, the debugger in amber.
     pub debug_stop: Rgba,
     pub status_bg: Rgba,
     pub status_fg: Rgba,
@@ -177,7 +181,7 @@ pub static LIGHT: Theme = Theme {
     invisibles: rgb(192, 197, 202),
     editor_bg: rgb(252, 253, 254),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(243, 246, 249),
     status_fg: rgb(75, 82, 90),
     border: rgb(219, 224, 230),
@@ -263,7 +267,7 @@ pub static DARK: Theme = Theme {
     invisibles: rgb(65, 64, 64),
     editor_bg: rgb(27, 26, 24),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(18, 17, 16),
     status_fg: rgb(164, 164, 164),
     border: rgba(255, 255, 255, 20),
@@ -339,7 +343,7 @@ pub static OCEAN: Theme = Theme {
     invisibles: rgb(52, 58, 74),
     editor_bg: rgb(15, 17, 26),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(10, 12, 20),
     status_fg: rgb(180, 190, 200),
     border: rgb(58, 66, 88),
@@ -427,7 +431,7 @@ pub static CATPPUCCIN: Theme = Theme {
     invisibles: rgb(58, 60, 78),
     editor_bg: rgb(30, 30, 46),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(24, 24, 37),
     status_fg: rgb(166, 173, 200),
     border: rgb(49, 50, 68),
@@ -493,7 +497,7 @@ pub static MONOKAI: Theme = Theme {
     invisibles: rgb(62, 62, 54),
     editor_bg: rgb(39, 40, 34),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(30, 31, 26),
     status_fg: rgb(200, 200, 195),
     border: rgb(70, 70, 60),
@@ -559,7 +563,7 @@ pub static NORD: Theme = Theme {
     invisibles: rgb(62, 71, 87),
     editor_bg: rgb(46, 52, 64),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(36, 41, 51),
     status_fg: rgb(200, 207, 218),
     border: rgb(67, 76, 94),
@@ -625,7 +629,7 @@ pub static SOLARIZED: Theme = Theme {
     invisibles: rgb(28, 61, 71),
     editor_bg: rgb(0, 43, 54),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(0, 35, 44),
     status_fg: rgb(120, 135, 138),
     border: rgb(0, 55, 70),
@@ -691,7 +695,7 @@ pub static GRUVBOX: Theme = Theme {
     invisibles: rgb(62, 58, 53),
     editor_bg: rgb(40, 40, 40),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(32, 32, 32),
     status_fg: rgb(220, 205, 165),
     border: rgb(60, 56, 50),
@@ -757,7 +761,7 @@ pub static EVERFOREST: Theme = Theme {
     invisibles: rgb(59, 67, 57),
     editor_bg: rgb(39, 46, 44),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(31, 37, 35),
     status_fg: rgb(200, 188, 160),
     border: rgb(58, 66, 60),
@@ -823,7 +827,7 @@ pub static SAKURA: Theme = Theme {
     invisibles: rgb(225, 202, 212),
     editor_bg: rgb(255, 240, 245),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(255, 225, 235),
     status_fg: rgb(60, 20, 40),
     border: rgb(240, 200, 215),
@@ -889,7 +893,7 @@ pub static NEWSPAPER: Theme = Theme {
     invisibles: rgb(225, 217, 213),
     editor_bg: rgb(255, 243, 229),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(254, 249, 244),
     status_fg: rgb(125, 130, 172),
     border: rgb(228, 223, 225),
@@ -955,7 +959,7 @@ pub static MONO: Theme = Theme {
     invisibles: rgb(219, 219, 219),
     editor_bg: rgb(255, 255, 255),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(245, 245, 245),
     status_fg: rgb(30, 30, 30),
     border: rgb(220, 220, 220),
@@ -1023,7 +1027,7 @@ pub static MONO_DARK: Theme = Theme {
     invisibles: rgb(48, 48, 48),
     editor_bg: rgb(20, 20, 20),
     model_bg: rgb(255, 255, 255),
-    debug_stop: rgba(52, 199, 89, 30),
+    debug_stop: rgba(255, 204, 0, 44),
     status_bg: rgb(28, 28, 28),
     status_fg: rgb(230, 230, 230),
     border: rgb(50, 50, 50),

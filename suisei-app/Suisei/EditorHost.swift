@@ -96,7 +96,7 @@ struct EditorHost: NSViewRepresentable {
             breakpointInk: .black,
             debugStop: NSColor(theme.color(theme.debugStop)),
             debugStopInk: .systemGreen,
-            valueExtent: NSColor(accent).withAlphaComponent(0.55),
+            valueExtent: NSColor(accent).withAlphaComponent(0.8),
             liveFlash: NSColor(accent).withAlphaComponent(0.22),
             bracketFill: EditorCanvasView.bracketYellow,
             bracketInk: .black
@@ -978,7 +978,7 @@ final class EditorCanvasView: NSView {
         breakpoint: .systemYellow, breakpointInk: .black,
         debugStop: NSColor.systemGreen.withAlphaComponent(0.18),
         debugStopInk: .systemGreen,
-        valueExtent: NSColor.controlAccentColor.withAlphaComponent(0.55),
+        valueExtent: NSColor.controlAccentColor.withAlphaComponent(0.8),
         liveFlash: NSColor.systemBlue.withAlphaComponent(0.22),
         bracketFill: bracketYellow,
         bracketInk: .black
@@ -1664,10 +1664,6 @@ final class EditorCanvasView: NSView {
                     solid ? colors.debugStop : colors.debugStop.withAlphaComponent(
                         colors.debugStop.alphaComponent * 0.45)
                 )
-                let bars = solid
-                    ? Self.stopArrowBars(atY: y, lineH: lineH)
-                    : Self.frameArrowBars(atY: y, lineH: lineH)
-                for bar in bars { renderer.addRect(bar, colors.debugStopInk) }
             }
             let flash = liveFlash(line.lineNo)
             if flash > 0.01 {
@@ -1987,18 +1983,6 @@ final class EditorCanvasView: NSView {
                     : colors.debugStop.withAlphaComponent(
                         colors.debugStop.alphaComponent * 0.45)).setFill()
                 Self.stopBandRect(rowRect).fill()
-                let arrow = Self.stopArrowPath(atY: y, lineH: lineH)
-                colors.debugStopInk.setFill()
-                if solid {
-                    arrow.fill()
-                } else {
-                    // Hollow: the same outline, stroked. A different SHAPE
-                    // would be a second thing to learn; the same shape emptied
-                    // out reads as "this one, but not the live one".
-                    arrow.lineWidth = 1.5
-                    colors.debugStopInk.setStroke()
-                    arrow.stroke()
-                }
             }
             // A row someone else just wrote. Behind the text, ahead of nothing
             // else: it has to be legible under the glyphs, and it fades out.
@@ -2911,7 +2895,7 @@ final class EditorCanvasView: NSView {
     /// already read here as "this run, together", and inventing a second
     /// vocabulary for the same idea would be one more thing to learn.
     static func valueRuleRect(atY y: CGFloat, lineH: CGFloat, write: Bool) -> CGRect {
-        let w: CGFloat = write ? 3 : 1.5
+        let w: CGFloat = write ? 4 : 2
         return CGRect(x: EditorMetrics.gutter + 2, y: y, width: w, height: lineH)
     }
 
@@ -2921,7 +2905,7 @@ final class EditorCanvasView: NSView {
         CGRect(
             x: EditorMetrics.gutter + 2,
             y: top ? y + 1 : y + lineH - 2.5,
-            width: 6, height: 1.5
+            width: 8, height: 2
         )
     }
 
@@ -2932,89 +2916,16 @@ final class EditorCanvasView: NSView {
     /// none of them legible, which is most of what read as "UI가 좀 구린디".
     /// The gutter already has its own vocabulary; the band belongs to the code.
     static func stopBandRect(_ row: CGRect) -> CGRect {
-        // Starts at the code, which is now also where the arrow stops — the
-        // band must not wash over the mark that points into it.
+        // Over the code. The gutter keeps its own vocabulary — the change bar,
+        // the breakpoint chip, the line number — and washing them in a fourth
+        // colour is what made the first version unreadable.
         let left = max(row.minX, EditorMetrics.gutter)
         return CGRect(x: left, y: row.minY, width: max(0, row.maxX - left), height: row.height)
     }
 
-    /// The instruction pointer: a right-pointing triangle in the air gap
-    /// between the line number and the code.
-    ///
-    /// A SHAPE and not a colour, deliberately. The gutter already spends its
-    /// colours on git — added, deleted, staged — so a debugger arguing in hue
-    /// would be a fourth meaning for the same pixels, and colour alone is what
-    /// Increase Contrast and a colour-blind reader cannot use.
-    ///
-    /// **In the text gap, not in the change bar's lane.** It started at
-    /// `gitBarX`, which is exactly where the git stripe is drawn, so a line
-    /// that was both modified and stopped had the arrow sitting on top of its
-    /// hunk bar — two marks fighting for six points. `gutterTextGap` is the
-    /// twelve points of air the layout already leaves between the number and
-    /// the code, it belongs to nothing else, and an arrow there points AT the
-    /// line rather than merely being beside it.
-    static func stopArrowFrame(atY y: CGFloat, lineH: CGFloat) -> CGRect {
-        let h = min(lineH - 4, 10)
-        let w = h * 0.7
-        // Right-aligned in the gap, two points clear of the text.
-        let right = EditorMetrics.gutter - 2
-        return CGRect(
-            x: right - w, y: (y + (lineH - h) / 2).rounded(),
-            width: w, height: h
-        )
-    }
 
-    static func stopArrowPath(atY y: CGFloat, lineH: CGFloat) -> NSBezierPath {
-        let f = stopArrowFrame(atY: y, lineH: lineH)
-        let path = NSBezierPath()
-        path.move(to: CGPoint(x: f.minX, y: f.minY))
-        path.line(to: CGPoint(x: f.maxX, y: f.midY))
-        path.line(to: CGPoint(x: f.minX, y: f.maxY))
-        path.close()
-        return path
-    }
 
-    /// The hollow arrow, for the Metal path: the outline as four thin bars.
-    ///
-    /// A stroked triangle is not available where only rectangles are, so the
-    /// outline is drawn as its edges — a left bar for the back, and a stepped
-    /// diagonal for each of the two sides.
-    static func frameArrowBars(atY y: CGFloat, lineH: CGFloat) -> [CGRect] {
-        let f = stopArrowFrame(atY: y, lineH: lineH)
-        let t: CGFloat = 1.5
-        var bars: [CGRect] = [
-            CGRect(x: f.minX, y: f.minY, width: t, height: f.height)
-        ]
-        let steps = max(3, Int(f.height / 2))
-        let dy = f.height / CGFloat(steps * 2)
-        let dx = f.width / CGFloat(steps)
-        for i in 0..<steps {
-            let x = f.minX + dx * CGFloat(i)
-            bars.append(CGRect(x: x, y: f.minY + dy * CGFloat(i), width: dx + t, height: t))
-            bars.append(CGRect(x: x, y: f.maxY - dy * CGFloat(i) - t, width: dx + t, height: t))
-        }
-        return bars
-    }
 
-    /// The same arrow for the Metal path, which has rectangles and nothing
-    /// else. Horizontal bars of shrinking width — at eleven points that is six
-    /// of them, and the staircase reads as a triangle at any sane font size.
-    static func stopArrowBars(atY y: CGFloat, lineH: CGFloat) -> [CGRect] {
-        let f = stopArrowFrame(atY: y, lineH: lineH)
-        let steps = max(3, Int(f.height / 2))
-        let step = f.height / CGFloat(steps * 2)
-        var bars: [CGRect] = []
-        bars.reserveCapacity(steps)
-        for i in 0..<steps {
-            let inset = step * CGFloat(i)
-            let width = f.width * (1 - CGFloat(i) / CGFloat(steps))
-            bars.append(CGRect(
-                x: f.minX, y: f.minY + inset,
-                width: max(1, width), height: max(1, f.height - inset * 2)
-            ))
-        }
-        return bars
-    }
 
     static func breakpointChip(
         atY y: CGFloat, lineH: CGFloat, numberWidth: CGFloat,

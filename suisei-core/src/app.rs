@@ -3781,6 +3781,56 @@ impl App {
         let path = path.to_string_lossy().to_string();
         let col = self.buffer.cursor.col;
         self.lsp.request_document_highlight(&path, row, col);
+        // A scan of the buffer, straight away, so the mark is there while the
+        // server thinks — and STAYS there when the server has nothing to say.
+        //
+        // That is not the rare case. `test.rs` at this workspace's root is in
+        // no crate, so rust-analyzer will not answer about it at all; the same
+        // is true of a scratch file, a config, a language with no server
+        // installed. A feature that is dead on every file the server does not
+        // own is dead most of the time.
+        //
+        // It cannot tell a read from a write — that is the one thing only the
+        // server knows, and its answer replaces this when it arrives. But
+        // WHERE the value lives is plain text, and plain text is right here.
+        if self.lsp.highlights.is_empty() {
+            self.lsp.highlights = self.scan_occurrences(&word);
+        }
+    }
+
+    /// Every whole-word occurrence of `word` in the buffer.
+    ///
+    /// Whole-word, because `bottom` must not match inside `bottom_half`, and a
+    /// bracket that spanned the file because of a substring would be worse
+    /// than no bracket.
+    /// Letters, digits and underscore — the bytes an identifier is spelled
+    /// from. Anything past ASCII counts too: a language that allows non-ASCII
+    /// identifiers must not have its words split mid-character.
+    fn is_word_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
+    }
+
+    fn scan_occurrences(&self, word: &str) -> Vec<crate::lsp::SymbolOccurrence> {
+        let mut out = Vec::new();
+        for (row, line) in self.buffer.lines().iter().enumerate() {
+            let bytes = line.as_bytes();
+            let mut from = 0;
+            while let Some(at) = line[from..].find(word) {
+                let start = from + at;
+                let end = start + word.len();
+                let before_ok = start == 0 || !Self::is_word_byte(bytes[start - 1]);
+                let after_ok = end >= bytes.len() || !Self::is_word_byte(bytes[end]);
+                if before_ok && after_ok {
+                    out.push(crate::lsp::SymbolOccurrence { row, write: false });
+                    break;
+                }
+                from = end.max(start + 1);
+                if from >= line.len() {
+                    break;
+                }
+            }
+        }
+        out
     }
 
     fn word_under_cursor(&self) -> String {
@@ -4714,6 +4764,47 @@ pub use crate::fs_atomic::atomic_write_file;
 
 #[cfg(test)]
 mod tests {
+    /// The extent must not be dead on a file the language server does not own.
+    ///
+    /// `test.rs` at this workspace's root is in no crate, so rust-analyzer
+    /// answers nothing about it — and neither would a scratch file, a config,
+    /// or any language with no server installed. That is not the rare case.
+    #[test]
+    fn the_extent_falls_back_to_a_scan_when_no_server_answers() {
+        let mut app = App::default();
+        app.filename = Some(std::path::PathBuf::from("/tmp/scan.rs"));
+        app.buffer = Buffer::from_string(
+            "let bottom = 1;\n\nprintln!(\"{}\", bottom);\nlet other = 2;\nreturn bottom;\n",
+        );
+        app.buffer.cursor.row = 0;
+        app.buffer.cursor.col = 4; // inside `bottom`
+
+        app.refresh_value_extent();
+
+        let rows: Vec<usize> = app.lsp.highlights.iter().map(|h| h.row).collect();
+        assert_eq!(rows, vec![0, 2, 4], "every line the value lives on");
+        assert!(
+            app.lsp.highlights.iter().all(|h| !h.write),
+            "a scan cannot tell a read from a write, and must not claim to"
+        );
+    }
+
+    /// Whole words only. A bracket that spanned the file because `bottom`
+    /// matched inside `bottom_half` would be worse than no bracket.
+    #[test]
+    fn the_scan_does_not_match_inside_a_longer_word() {
+        let mut app = App::default();
+        app.filename = Some(std::path::PathBuf::from("/tmp/scan2.rs"));
+        app.buffer = Buffer::from_string("let bottom = 1;\nlet bottom_half = 2;\nlet x = bottom;\n");
+        app.buffer.cursor.row = 0;
+        app.buffer.cursor.col = 4;
+
+        app.refresh_value_extent();
+
+        let rows: Vec<usize> = app.lsp.highlights.iter().map(|h| h.row).collect();
+        assert_eq!(rows, vec![0, 2], "row 1 is bottom_half, not bottom");
+    }
+
     use super::*;
 
     /// Give the app `docs.len()` side-by-side panes, one per document.
