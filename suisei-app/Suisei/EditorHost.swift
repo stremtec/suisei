@@ -1857,13 +1857,13 @@ final class EditorCanvasView: NSView {
         // the whole of the curve.
         if let top = valueRunTop {
             let ink = colors.valueExtent
-            let spine = Self.valueSpineRect(top: top, bottom: valueRunBottom)
-            renderer.addRect(spine.insetBy(dx: 0, dy: 1), ink)
-            renderer.addRect(spine.insetBy(dx: 0.6, dy: 0.4), ink)
+            for r in Self.valueBracketRects(top: top, bottom: valueRunBottom) {
+                renderer.addRect(r, ink)
+            }
             for wy in valueWriteRows {
                 let dot = Self.valueWriteDot(atY: wy, lineH: lineH)
-                renderer.addRect(dot.insetBy(dx: 0, dy: 1.2), ink)
-                renderer.addRect(dot.insetBy(dx: 1.2, dy: 0), ink)
+                renderer.addRect(dot.insetBy(dx: 0, dy: 1), ink)
+                renderer.addRect(dot.insetBy(dx: 1, dy: 0), ink)
             }
         }
 
@@ -2303,12 +2303,9 @@ final class EditorCanvasView: NSView {
 
         if let top = valueRunTop {
             let ink = colors.valueExtent
-            let spine = Self.valueSpineRect(top: top, bottom: valueRunBottom)
+            ink.setStroke()
+            Self.valueBracketPath(top: top, bottom: valueRunBottom).stroke()
             ink.setFill()
-            NSBezierPath(
-                roundedRect: spine,
-                xRadius: Self.valueSpineWidth / 2, yRadius: Self.valueSpineWidth / 2
-            ).fill()
             for wy in valueWriteRows {
                 NSBezierPath(ovalIn: Self.valueWriteDot(atY: wy, lineH: lineH)).fill()
             }
@@ -2910,42 +2907,97 @@ final class EditorCanvasView: NSView {
     /// two markers sat on top of each other. They are separate targets now:
     /// the bar is pressed for its hunk, the number is pressed for its
     /// breakpoint, and neither can be hit by accident.
-    /// The spine of the value extent: ONE capsule for the whole run.
+    /// The value extent, as a real bracket, in the air between the line number
+    /// and the code.
     ///
-    /// **Inside the text, not in the gutter.** The gutter is full — git
-    /// stripe, breakpoint chip, line number — and this session already had to
-    /// move a debugger mark out of the change bar's lane after exactly that
-    /// collision. This one is about the CODE rather than the file's git state,
-    /// so it belongs on the code's side and costs the gutter nothing.
+    /// **Not inside the text.** It was, and the text is where it cannot go:
+    /// on an unindented line the spine landed on the first character, and on
+    /// an indented one it floated in the whitespace far from the code it was
+    /// about. Both were reported, and they are the same fault — a mark at a
+    /// fixed x cannot live in a column whose contents start wherever the
+    /// indentation says.
     ///
-    /// It was a rect per row with a short horizontal foot at each end — a `[`
-    /// drawn with a ruler, which read as a stack of segments rather than as
-    /// one object. The git bar's own comment names that mistake: "a bar is a
-    /// hunk-shaped object and the row loop is row-shaped. Drawing it per row
-    /// put a cap on every line."
+    /// `gutterTextGap` is the twelve points the layout already leaves between
+    /// the number and the code. It held the stop arrow briefly; that is gone,
+    /// so the lane is free — and a mark there is at the same place on every
+    /// row whatever the indentation, which is the whole requirement.
     ///
-    /// So: one rounded capsule from the first occurrence to the last, and no
-    /// feet at all. A capsule's ends already say where a run starts and stops,
-    /// which is the job the feet were doing badly.
-    static func valueSpineRect(top: CGFloat, bottom: CGFloat) -> CGRect {
-        CGRect(
-            x: EditorMetrics.gutter + 3, y: top,
-            width: valueSpineWidth, height: max(valueSpineWidth, bottom - top)
+    /// **And it is a bracket.** It was a bare vertical line, which says
+    /// "something is happening on these rows" and not "these rows are one
+    /// thing". A bracket has arms, and the arms are what close it.
+    static func valueBracketPath(top: CGFloat, bottom: CGFloat) -> NSBezierPath {
+        let right = EditorMetrics.gutter - 3
+        let x = right - valueBracketArm
+        let r = valueBracketRadius
+        // Held inside its rows by half a line, so the arms sit level with the
+        // text of the first and last row rather than in the gap above and
+        // below them.
+        let t = top + 3
+        let b = max(t + r * 2, bottom - 3)
+
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: right, y: t))
+        path.line(to: CGPoint(x: x + r, y: t))
+        // A quarter arc into the spine rather than a corner. The turn is the
+        // part that reads as drawn-by-hand or drawn-by-machine.
+        path.appendArc(
+            withCenter: CGPoint(x: x + r, y: t + r),
+            radius: r, startAngle: 270, endAngle: 180, clockwise: true
         )
+        path.line(to: CGPoint(x: x, y: b - r))
+        path.appendArc(
+            withCenter: CGPoint(x: x + r, y: b - r),
+            radius: r, startAngle: 180, endAngle: 90, clockwise: true
+        )
+        path.line(to: CGPoint(x: right, y: b))
+        path.lineWidth = valueBracketStroke
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        return path
     }
 
-    static let valueSpineWidth: CGFloat = 2.5
+    static let valueBracketStroke: CGFloat = 1.75
+    static let valueBracketArm: CGFloat = 4.5
+    static let valueBracketRadius: CGFloat = 3
 
-    /// A write, as a dot beside the spine.
+    /// The same bracket for the Metal path, which has rectangles and nothing
+    /// else: the spine, the two arms, and a stepped corner between them.
+    static func valueBracketRects(top: CGFloat, bottom: CGFloat) -> [CGRect] {
+        let right = EditorMetrics.gutter - 3
+        let x = right - valueBracketArm
+        let t = top + 3
+        let b = max(t + valueBracketRadius * 2, bottom - 3)
+        let w = valueBracketStroke
+        var out: [CGRect] = [
+            CGRect(x: x, y: t + valueBracketRadius, width: w, height: b - t - valueBracketRadius * 2)
+        ]
+        for (y, down) in [(t, true), (b - w, false)] {
+            out.append(CGRect(x: x + valueBracketRadius, y: y, width: right - x - valueBracketRadius, height: w))
+            // Two steps of corner. At three points of radius that is the whole
+            // curve, and it is the difference between a turn and a right angle.
+            for i in 0..<3 {
+                let f = CGFloat(i)
+                out.append(CGRect(
+                    x: x + f * (valueBracketRadius / 3),
+                    y: down ? y + (3 - f) * (valueBracketRadius / 3) : y - (3 - f) * (valueBracketRadius / 3),
+                    width: w, height: w
+                ))
+            }
+        }
+        return out
+    }
+
+    /// A write, as a dot on the spine.
     ///
     /// Not a swelling of the spine: thickening it at a write made the run
     /// lumpy, and a shape that changes width along its length reads as a
     /// drawing error rather than as a mark. A dot is a second object, which is
     /// what a write is — a point on the run, not a different kind of run.
     static func valueWriteDot(atY y: CGFloat, lineH: CGFloat) -> CGRect {
-        let d: CGFloat = 5
+        let d: CGFloat = 4.5
+        let spineX = EditorMetrics.gutter - 3 - valueBracketArm
         return CGRect(
-            x: EditorMetrics.gutter + 3 + valueSpineWidth / 2 - d / 2,
+            x: spineX + valueBracketStroke / 2 - d / 2,
             y: y + (lineH - d) / 2, width: d, height: d
         )
     }
