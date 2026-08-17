@@ -1623,13 +1623,6 @@ final class EditorCanvasView: NSView {
         // that line's segments in sequence.
         var segment = 0
         var previousLineNo: UInt32 = .max
-        // The extent is ONE object spanning a run of rows, so it is gathered
-        // here and drawn once after the row loop — the same separation the git
-        // change bar makes, and for the reason its comment gives: drawing a
-        // run-shaped thing inside a row-shaped loop puts an end on every line.
-        var valueRunTop: CGFloat?
-        var valueRunBottom: CGFloat = 0
-        var valueWriteRows: [CGFloat] = []
         for line in band {
             let baseRow = max(0, Int(line.lineNo) - 1)
             segment = line.lineNo == previousLineNo ? segment + 1 : 0
@@ -1642,11 +1635,6 @@ final class EditorCanvasView: NSView {
             // After the caret wash on purpose: the two are frequently the same
             // row, and the one that has to win is the one saying where the
             // PROGRAM is.
-            if line.inValueExtent {
-                if valueRunTop == nil { valueRunTop = y }
-                valueRunBottom = y + lineH
-                if line.valueWrite { valueWriteRows.append(y) }
-            }
             if let t = datatipTokenRect, t.midY >= y, t.midY < y + lineH {
                 renderer.addRect(
                     t.insetBy(dx: -2, dy: 1),
@@ -1855,16 +1843,19 @@ final class EditorCanvasView: NSView {
         // rounded by insetting the outermost pixels — this renderer has
         // rectangles and nothing else, and at two and a half points that is
         // the whole of the curve.
-        if let top = valueRunTop {
+        if let run = valueExtentRun(band, lineH: lineH) {
             let ink = colors.valueExtent
-            for r in Self.valueBracketRects(top: top, bottom: valueRunBottom) {
+            for r in Self.valueBracketRects(top: run.top, bottom: run.bottom) {
                 renderer.addRect(r, ink)
             }
-            for wy in valueWriteRows {
+            for wy in run.writes {
                 let dot = Self.valueWriteDot(atY: wy, lineH: lineH)
                 renderer.addRect(dot.insetBy(dx: 0, dy: 1), ink)
                 renderer.addRect(dot.insetBy(dx: 1, dy: 0), ink)
             }
+            noteValueExtent(top: run.top, bottom: run.bottom)
+        } else {
+            noteValueExtent(top: nil, bottom: 0)
         }
 
 
@@ -1944,13 +1935,6 @@ final class EditorCanvasView: NSView {
         // Every row, continuations included — see the note in the Metal path.
         var segment = 0
         var previousLineNo: UInt32 = .max
-        // The extent is ONE object spanning a run of rows, so it is gathered
-        // here and drawn once after the row loop — the same separation the git
-        // change bar makes, and for the reason its comment gives: drawing a
-        // run-shaped thing inside a row-shaped loop puts an end on every line.
-        var valueRunTop: CGFloat?
-        var valueRunBottom: CGFloat = 0
-        var valueWriteRows: [CGFloat] = []
         for line in band {
             let baseRow = max(0, Int(line.lineNo) - 1)
             segment = line.lineNo == previousLineNo ? segment + 1 : 0
@@ -1979,11 +1963,6 @@ final class EditorCanvasView: NSView {
             if line.isCursor {
                 colors.cursorLine.setFill()
                 rowRect.fill()
-            }
-            if line.inValueExtent {
-                if valueRunTop == nil { valueRunTop = y }
-                valueRunBottom = y + lineH
-                if line.valueWrite { valueWriteRows.append(y) }
             }
             if let t = datatipTokenRect, t.midY >= y, t.midY < y + lineH {
                 colors.debugStopInk.withAlphaComponent(0.16).setFill()
@@ -2301,14 +2280,17 @@ final class EditorCanvasView: NSView {
             cg.restoreGState()
         }
 
-        if let top = valueRunTop {
+        if let run = valueExtentRun(band, lineH: lineH) {
             let ink = colors.valueExtent
             ink.setStroke()
-            Self.valueBracketPath(top: top, bottom: valueRunBottom).stroke()
+            Self.valueBracketPath(top: run.top, bottom: run.bottom).stroke()
             ink.setFill()
-            for wy in valueWriteRows {
+            for wy in run.writes {
                 NSBezierPath(ovalIn: Self.valueWriteDot(atY: wy, lineH: lineH)).fill()
             }
+            noteValueExtent(top: run.top, bottom: run.bottom)
+        } else {
+            noteValueExtent(top: nil, bottom: 0)
         }
 
         PerfProbe.record(
@@ -2448,6 +2430,63 @@ final class EditorCanvasView: NSView {
     /// column by column and have to land on the pixel grid — see `capRects`.
     private var devicePixel: CGFloat {
         1 / (window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
+    }
+
+    /// Where the bracket was last drawn, so the rows it LEAVES get repainted.
+    ///
+    /// A repaint is clipped to its dirty rect, and when the caret moves to
+    /// another function the extent's old rows are nowhere near the new ones —
+    /// so nothing invalidated them and the old spine stayed on screen under
+    /// the new one: "기존 브라켓 세로선이 남아잇거나".
+    ///
+    /// Same shape as `setDatatipToken`: remember what was drawn, and when it
+    /// changes invalidate the union of where it was and where it is.
+    private var drawnValueExtent: CGRect?
+
+    private func noteValueExtent(top: CGFloat?, bottom: CGFloat) {
+        let lane = CGRect(
+            x: EditorMetrics.gutter - 3 - Self.valueBracketArm - 2,
+            y: (top ?? 0) - 2,
+            width: Self.valueBracketArm + 6,
+            height: top == nil ? 0 : bottom - (top ?? 0) + 4
+        )
+        let now: CGRect? = top == nil ? nil : lane
+        guard drawnValueExtent != now else { return }
+        for r in [drawnValueExtent, now].compactMap({ $0 }) {
+            setNeedsDisplay(r)
+        }
+        drawnValueExtent = now
+    }
+
+    /// The value extent's geometry, over the WHOLE band.
+    ///
+    /// A separate pass for the reason `gitBars` gives just below: a bracket is
+    /// a run-shaped object and the row loop is row-shaped — and, worse, that
+    /// loop is CLIPPED to the dirty rect. Collecting the run inside it meant a
+    /// partial repaint saw a partial run, so the bracket's arm was drawn
+    /// wherever the repaint happened to start: "화살표가 세로선 중간에 끼고".
+    ///
+    /// Returns the run's extent and the rows the value is written on, in view
+    /// coordinates. Nil when there is no extent in the band.
+    private func valueExtentRun<Band: Sequence<EditorLine>>(
+        _ band: Band, lineH: CGFloat
+    ) -> (top: CGFloat, bottom: CGFloat, writes: [CGFloat])? {
+        var top: CGFloat?
+        var bottom: CGFloat = 0
+        var writes: [CGFloat] = []
+        var previousLineNo: UInt32 = .max
+        var segment = 0
+        for line in band {
+            if line.lineNo == previousLineNo { segment += 1 } else { segment = 0 }
+            previousLineNo = line.lineNo
+            guard line.inValueExtent else { continue }
+            let y = visualY(max(0, Int(line.lineNo) - 1)) + CGFloat(segment) * lineH
+            if top == nil { top = y }
+            bottom = max(bottom, y + lineH)
+            if line.valueWrite { writes.append(y) }
+        }
+        guard let t = top else { return nil }
+        return (t, bottom, writes)
     }
 
     private func gitBars<Band: Sequence<EditorLine>>(
