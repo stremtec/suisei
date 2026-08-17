@@ -3757,6 +3757,22 @@ impl App {
     /// `documentHighlight` and not `references`: one file, one round trip, and
     /// it is the only one of the two that says read from write.
     pub fn refresh_value_extent(&mut self) -> bool {
+        // Only while the debugger's panel is up.
+        //
+        // The extent, the stop band and the hover value are all the debugger
+        // talking, and a reader who is not debugging did not ask. Gating here
+        // rather than at the drawing is what makes it free: no request goes
+        // out, nothing is scanned, nothing is published.
+        //
+        // `dap.panel_open` and not a second flag — the debug tab already sets
+        // it through `suisei_engine_dap_set_panel`, and this session has spent
+        // enough time on two sources for one fact.
+        if !self.dap.panel_open {
+            let had = !self.lsp.highlights.is_empty();
+            self.value_extent_key = None;
+            self.lsp.highlights.clear();
+            return had;
+        }
         let Some(path) = self.filename.clone() else {
             let had = !self.lsp.highlights.is_empty();
             self.value_extent_key = None;
@@ -4775,6 +4791,7 @@ mod tests {
     #[test]
     fn the_extent_falls_back_to_a_scan_when_no_server_answers() {
         let mut app = App::default();
+        app.dap.panel_open = true;
         app.filename = Some(std::path::PathBuf::from("/tmp/scan.rs"));
         app.buffer = Buffer::from_string(
             "let bottom = 1;\n\nprintln!(\"{}\", bottom);\nlet other = 2;\nreturn bottom;\n",
@@ -4792,11 +4809,37 @@ mod tests {
         );
     }
 
+    /// With the debugger's panel closed, nothing is asked and nothing is
+    /// marked.
+    ///
+    /// The extent, the stop band and the hover value are all the debugger
+    /// talking, and a reader who is not debugging did not ask. Gating in core
+    /// rather than at the drawing is what makes it free: no LSP request goes
+    /// out and no buffer is scanned.
+    #[test]
+    fn a_closed_debug_panel_asks_nothing_and_marks_nothing() {
+        let mut app = App::default();
+        app.dap.panel_open = false;
+        app.filename = Some(std::path::PathBuf::from("/tmp/closed.rs"));
+        app.buffer = Buffer::from_string("let bottom = 1;\nlet x = bottom;\n");
+        app.buffer.cursor.row = 0;
+        app.buffer.cursor.col = 4;
+
+        app.refresh_value_extent();
+        assert!(app.lsp.highlights.is_empty());
+
+        // And opening it starts answering, without the caret having moved.
+        app.dap.panel_open = true;
+        app.refresh_value_extent();
+        assert_eq!(app.lsp.highlights.len(), 2);
+    }
+
     /// Whole words only. A bracket that spanned the file because `bottom`
     /// matched inside `bottom_half` would be worse than no bracket.
     #[test]
     fn the_scan_does_not_match_inside_a_longer_word() {
         let mut app = App::default();
+        app.dap.panel_open = true;
         app.filename = Some(std::path::PathBuf::from("/tmp/scan2.rs"));
         app.buffer = Buffer::from_string("let bottom = 1;\nlet bottom_half = 2;\nlet x = bottom;\n");
         app.buffer.cursor.row = 0;

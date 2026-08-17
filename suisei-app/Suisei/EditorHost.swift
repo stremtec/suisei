@@ -1623,6 +1623,13 @@ final class EditorCanvasView: NSView {
         // that line's segments in sequence.
         var segment = 0
         var previousLineNo: UInt32 = .max
+        // The extent is ONE object spanning a run of rows, so it is gathered
+        // here and drawn once after the row loop — the same separation the git
+        // change bar makes, and for the reason its comment gives: drawing a
+        // run-shaped thing inside a row-shaped loop puts an end on every line.
+        var valueRunTop: CGFloat?
+        var valueRunBottom: CGFloat = 0
+        var valueWriteRows: [CGFloat] = []
         for line in band {
             let baseRow = max(0, Int(line.lineNo) - 1)
             segment = line.lineNo == previousLineNo ? segment + 1 : 0
@@ -1636,17 +1643,9 @@ final class EditorCanvasView: NSView {
             // row, and the one that has to win is the one saying where the
             // PROGRAM is.
             if line.inValueExtent {
-                let ink = colors.valueExtent
-                renderer.addRect(
-                    Self.valueRuleRect(atY: y, lineH: lineH, write: line.valueWrite),
-                    line.valueWrite ? ink : ink.withAlphaComponent(ink.alphaComponent * 0.55)
-                )
-                if line.valueExtentFirst {
-                    renderer.addRect(Self.valueCapRect(atY: y, lineH: lineH, top: true), ink)
-                }
-                if line.valueExtentLast {
-                    renderer.addRect(Self.valueCapRect(atY: y, lineH: lineH, top: false), ink)
-                }
+                if valueRunTop == nil { valueRunTop = y }
+                valueRunBottom = y + lineH
+                if line.valueWrite { valueWriteRows.append(y) }
             }
             if let t = datatipTokenRect, t.midY >= y, t.midY < y + lineH {
                 renderer.addRect(
@@ -1852,6 +1851,23 @@ final class EditorCanvasView: NSView {
             }
         }
 
+        // One capsule for the whole run, drawn after the rows. The ends are
+        // rounded by insetting the outermost pixels — this renderer has
+        // rectangles and nothing else, and at two and a half points that is
+        // the whole of the curve.
+        if let top = valueRunTop {
+            let ink = colors.valueExtent
+            let spine = Self.valueSpineRect(top: top, bottom: valueRunBottom)
+            renderer.addRect(spine.insetBy(dx: 0, dy: 1), ink)
+            renderer.addRect(spine.insetBy(dx: 0.6, dy: 0.4), ink)
+            for wy in valueWriteRows {
+                let dot = Self.valueWriteDot(atY: wy, lineH: lineH)
+                renderer.addRect(dot.insetBy(dx: 0, dy: 1.2), ink)
+                renderer.addRect(dot.insetBy(dx: 1.2, dy: 0), ink)
+            }
+        }
+
+
         if EditorDiagnostics.metal {
             EditorDiagnostics.reportMetal(
                 viewport: viewport,
@@ -1928,6 +1944,13 @@ final class EditorCanvasView: NSView {
         // Every row, continuations included — see the note in the Metal path.
         var segment = 0
         var previousLineNo: UInt32 = .max
+        // The extent is ONE object spanning a run of rows, so it is gathered
+        // here and drawn once after the row loop — the same separation the git
+        // change bar makes, and for the reason its comment gives: drawing a
+        // run-shaped thing inside a row-shaped loop puts an end on every line.
+        var valueRunTop: CGFloat?
+        var valueRunBottom: CGFloat = 0
+        var valueWriteRows: [CGFloat] = []
         for line in band {
             let baseRow = max(0, Int(line.lineNo) - 1)
             segment = line.lineNo == previousLineNo ? segment + 1 : 0
@@ -1958,17 +1981,9 @@ final class EditorCanvasView: NSView {
                 rowRect.fill()
             }
             if line.inValueExtent {
-                let ink = colors.valueExtent
-                (line.valueWrite ? ink : ink.withAlphaComponent(ink.alphaComponent * 0.55))
-                    .setFill()
-                Self.valueRuleRect(atY: y, lineH: lineH, write: line.valueWrite).fill()
-                ink.setFill()
-                if line.valueExtentFirst {
-                    Self.valueCapRect(atY: y, lineH: lineH, top: true).fill()
-                }
-                if line.valueExtentLast {
-                    Self.valueCapRect(atY: y, lineH: lineH, top: false).fill()
-                }
+                if valueRunTop == nil { valueRunTop = y }
+                valueRunBottom = y + lineH
+                if line.valueWrite { valueWriteRows.append(y) }
             }
             if let t = datatipTokenRect, t.midY >= y, t.midY < y + lineH {
                 colors.debugStopInk.withAlphaComponent(0.16).setFill()
@@ -2285,6 +2300,20 @@ final class EditorCanvasView: NSView {
             }
             cg.restoreGState()
         }
+
+        if let top = valueRunTop {
+            let ink = colors.valueExtent
+            let spine = Self.valueSpineRect(top: top, bottom: valueRunBottom)
+            ink.setFill()
+            NSBezierPath(
+                roundedRect: spine,
+                xRadius: Self.valueSpineWidth / 2, yRadius: Self.valueSpineWidth / 2
+            ).fill()
+            for wy in valueWriteRows {
+                NSBezierPath(ovalIn: Self.valueWriteDot(atY: wy, lineH: lineH)).fill()
+            }
+        }
+
         PerfProbe.record(
             "   draw: row loop",
             Double(DispatchTime.now().uptimeNanoseconds - rowLoopStart) / 1_000_000
@@ -2881,31 +2910,43 @@ final class EditorCanvasView: NSView {
     /// two markers sat on top of each other. They are separate targets now:
     /// the bar is pressed for its hunk, the number is pressed for its
     /// breakpoint, and neither can be hit by accident.
-    /// The value-extent rule: a hairline at the code's left edge, capped at
-    /// the ends, with a wider tick where the value is written.
+    /// The spine of the value extent: ONE capsule for the whole run.
     ///
     /// **Inside the text, not in the gutter.** The gutter is full — git
-    /// stripe, breakpoint chip, line number, stop arrow — and this session
-    /// already had to move the stop arrow out of the change bar's lane after
-    /// exactly that collision. This mark is about the CODE rather than about
-    /// the file's git state, so it belongs on the code's side of the line, and
-    /// it costs the gutter nothing.
+    /// stripe, breakpoint chip, line number — and this session already had to
+    /// move a debugger mark out of the change bar's lane after exactly that
+    /// collision. This one is about the CODE rather than the file's git state,
+    /// so it belongs on the code's side and costs the gutter nothing.
     ///
-    /// The shape is the git change bar's: a rule with caps. That mark is
-    /// already read here as "this run, together", and inventing a second
-    /// vocabulary for the same idea would be one more thing to learn.
-    static func valueRuleRect(atY y: CGFloat, lineH: CGFloat, write: Bool) -> CGRect {
-        let w: CGFloat = write ? 4 : 2
-        return CGRect(x: EditorMetrics.gutter + 2, y: y, width: w, height: lineH)
+    /// It was a rect per row with a short horizontal foot at each end — a `[`
+    /// drawn with a ruler, which read as a stack of segments rather than as
+    /// one object. The git bar's own comment names that mistake: "a bar is a
+    /// hunk-shaped object and the row loop is row-shaped. Drawing it per row
+    /// put a cap on every line."
+    ///
+    /// So: one rounded capsule from the first occurrence to the last, and no
+    /// feet at all. A capsule's ends already say where a run starts and stops,
+    /// which is the job the feet were doing badly.
+    static func valueSpineRect(top: CGFloat, bottom: CGFloat) -> CGRect {
+        CGRect(
+            x: EditorMetrics.gutter + 3, y: top,
+            width: valueSpineWidth, height: max(valueSpineWidth, bottom - top)
+        )
     }
 
-    /// The cap: a short horizontal foot, so the run has ends rather than
-    /// fading out at whatever row the viewport happens to stop at.
-    static func valueCapRect(atY y: CGFloat, lineH: CGFloat, top: Bool) -> CGRect {
-        CGRect(
-            x: EditorMetrics.gutter + 2,
-            y: top ? y + 1 : y + lineH - 2.5,
-            width: 8, height: 2
+    static let valueSpineWidth: CGFloat = 2.5
+
+    /// A write, as a dot beside the spine.
+    ///
+    /// Not a swelling of the spine: thickening it at a write made the run
+    /// lumpy, and a shape that changes width along its length reads as a
+    /// drawing error rather than as a mark. A dot is a second object, which is
+    /// what a write is — a point on the run, not a different kind of run.
+    static func valueWriteDot(atY y: CGFloat, lineH: CGFloat) -> CGRect {
+        let d: CGFloat = 5
+        return CGRect(
+            x: EditorMetrics.gutter + 3 + valueSpineWidth / 2 - d / 2,
+            y: y + (lineH - d) / 2, width: d, height: d
         )
     }
 
@@ -3402,7 +3443,10 @@ final class EditorCanvasView: NSView {
     /// each of them would be a strobe — so nothing is asked until the pointer
     /// has been still on one word.
     private func updateDatatipHover(_ p: CGPoint) {
-        guard let engine, engine.dap.state == .stopped else {
+        // Stopped AND the panel up. A value under the pointer is the debugger
+        // talking, and a reader who closed the panel is not asking it
+        // anything — the same gate the extent uses in core.
+        guard let engine, engine.dap.state == .stopped, engine.uiDebugVisible else {
             cancelDatatip()
             return
         }
