@@ -170,6 +170,10 @@ enum PendingKind {
     /// it, since the `dataId` that comes back is opaque.
     DataBreakpointInfo(String),
     SetDataBreakpoints,
+    /// setVariable — carries the row it came from and the container it lives
+    /// in, so the answer lands on the right variable and its siblings can be
+    /// refreshed.
+    SetVariable { index: usize, container: i64 },
     /// A hover datatip. Its own kind, not `Evaluate`, because the answer goes
     /// to a popover instead of the console — a hover that logged would fill
     /// the console with every word the pointer crossed.
@@ -256,6 +260,11 @@ pub struct DapClient {
     /// spec, and offering "break when this changes" on an adapter that cannot
     /// do it is the worst kind of menu item.
     pub supports_data_breakpoints: bool,
+    /// Whether a value can be CHANGED while stopped.
+    ///
+    /// Asked rather than assumed, like the watchpoint capability — offering an
+    /// edit an adapter will refuse is worse than not offering it.
+    pub supports_set_variable: bool,
     /// Filters chosen from the adapter's exceptionBreakpointFilters.
     exception_filters: Vec<String>,
     /// Set when the launch/attach request went out; drives the config fallback timer.
@@ -344,6 +353,7 @@ impl DapClient {
             supports_config_done: true,
             supports_terminate: false,
             supports_data_breakpoints: false,
+            supports_set_variable: false,
             exception_filters: Vec::new(),
             launch_sent_at: None,
             config_sent: false,
@@ -1629,6 +1639,53 @@ impl DapClient {
         self.eval_input.clear();
     }
 
+    /// Change a variable's value while the program is stopped.
+    ///
+    /// `index` is a row of the flattened Variables tree.
+    ///
+    /// **The container, not the variable.** DAP's `setVariable` takes the
+    /// PARENT's `variablesReference` plus a name — a `VarNode`'s own `var_ref`
+    /// is the handle to its CHILDREN, which is the opposite end. The tree is
+    /// flattened with a depth per row, so the parent is the nearest preceding
+    /// row one level shallower.
+    pub fn set_variable(&mut self, index: usize, value: &str) {
+        if !self.supports_set_variable {
+            self.log("✗ set: this adapter cannot change values");
+            return;
+        }
+        if self.state != DapState::Stopped {
+            self.log("✗ set: only while stopped");
+            return;
+        }
+        let Some(node) = self.vars.get(index) else { return };
+        if node.is_scope {
+            return;
+        }
+        let name = node.name.clone();
+        let depth = node.depth;
+        let Some(container) = self.vars[..index]
+            .iter()
+            .rev()
+            .find(|n| n.depth + 1 == depth)
+            .map(|n| n.var_ref)
+            .filter(|r| *r > 0)
+        else {
+            self.log(format!("✗ set {name}: no container to set it in"));
+            return;
+        };
+        let id = self.alloc(PendingKind::SetVariable { index, container });
+        self.send_json(&json!({
+            "seq": id,
+            "type": "request",
+            "command": "setVariable",
+            "arguments": {
+                "variablesReference": container,
+                "name": name,
+                "value": value
+            }
+        }));
+    }
+
     // ── Query surface ──────────────────────────────────────────────────
     //
     // What the debugger KNOWS, asked without disturbing what it is showing.
@@ -1939,6 +1996,22 @@ impl DapClient {
     }
 
     /// Splice `children` in under the (expanded) node holding `var_ref`.
+    /// Drop everything nested under `index`, and mark it collapsed.
+    ///
+    /// Used when a value changes: what was read out of the old value is not a
+    /// description of the new one.
+    fn collapse_children_of(&mut self, index: usize) {
+        let Some(depth) = self.vars.get(index).map(|n| n.depth) else { return };
+        let mut end = index + 1;
+        while end < self.vars.len() && self.vars[end].depth > depth {
+            end += 1;
+        }
+        self.vars.drain(index + 1..end);
+        if let Some(n) = self.vars.get_mut(index) {
+            n.expanded = false;
+        }
+    }
+
     fn insert_children(&mut self, var_ref: i64, children: Vec<VarNode>) {
         let Some(pos) = self
             .vars
@@ -2278,6 +2351,10 @@ impl DapClient {
                     .get("supportsDataBreakpoints")
                     .and_then(|x| x.as_bool())
                     .unwrap_or(false);
+                self.supports_set_variable = body
+                    .get("supportsSetVariable")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
                 self.exception_filters = pick_exception_filters(&body);
                 // Spec order: launch/attach goes out now; the adapter answers it only
                 // after configurationDone (which follows its `initialized`).
@@ -2510,6 +2587,30 @@ impl DapClient {
                 } else {
                     self.log(format!("= {result}  ({typ})"));
                 }
+            }
+            Some(PendingKind::SetVariable { index, container }) => {
+                let Some(node) = self.vars.get_mut(index) else { return };
+                if let Some(v) = body.get("value").and_then(|v| v.as_str()) {
+                    node.value = v.to_string();
+                }
+                if let Some(t) = body.get("type").and_then(|t| t.as_str()) {
+                    node.typ = t.to_string();
+                }
+                let name = node.name.clone();
+                // Anything that was UNDER it is about a value that no longer
+                // exists. A new `variablesReference` says so outright; even
+                // without one, the children were read from the old value.
+                if let Some(r) = body.get("variablesReference").and_then(|r| r.as_i64()) {
+                    node.var_ref = r;
+                }
+                self.collapse_children_of(index);
+                self.log(format!("= {name} set"));
+                // And its SIBLINGS may have moved with it — a field of the same
+                // struct, a length beside a buffer. Re-reading the container is
+                // one request and it keeps the tree's shape, where re-reading
+                // the scopes would collapse everything the user had opened.
+                self.children_cache.remove(&container);
+                self.request_variables(container);
             }
             Some(PendingKind::DataBreakpointInfo(name)) => {
                 // `dataId: null` is the spec's "no, and here is why". Reporting
@@ -3243,6 +3344,103 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    fn stopped_with_locals() -> DapClient {
+        let mut d = DapClient::default();
+        d.state = DapState::Stopped;
+        d.supports_set_variable = true;
+        d.stack = vec![StackFrameInfo {
+            id: 1,
+            name: "f".into(),
+            path: "/tmp/x.rs".into(),
+            line: 1,
+            column: 0,
+        }];
+        d.vars = vec![
+            VarNode { name: "Locals".into(), value: String::new(), typ: String::new(),
+                      var_ref: 100, depth: 0, expanded: true, is_scope: true },
+            VarNode { name: "count".into(), value: "3".into(), typ: "int".into(),
+                      var_ref: 0, depth: 1, expanded: false, is_scope: false },
+            VarNode { name: "user".into(), value: "User".into(), typ: "User".into(),
+                      var_ref: 200, depth: 1, expanded: true, is_scope: false },
+            VarNode { name: "id".into(), value: "7".into(), typ: "int".into(),
+                      var_ref: 0, depth: 2, expanded: false, is_scope: false },
+        ];
+        d
+    }
+
+    /// `setVariable` takes the PARENT's reference, not the variable's own.
+    ///
+    /// A `VarNode`'s `var_ref` is the handle to its CHILDREN — the opposite
+    /// end of the relationship the request wants. The tree is flattened with a
+    /// depth per row, so the container is the nearest preceding row one level
+    /// shallower: `Locals` for a local, and `user` for `user.id`.
+    #[test]
+    fn setting_a_variable_addresses_its_container() {
+        let mut d = stopped_with_locals();
+
+        d.set_variable(1, "9"); // `count`, a child of Locals
+        let sent = d.sent.last().unwrap();
+        assert_eq!(sent["command"], "setVariable");
+        assert_eq!(sent["arguments"]["variablesReference"], 100, "Locals");
+        assert_eq!(sent["arguments"]["name"], "count");
+        assert_eq!(sent["arguments"]["value"], "9");
+
+        d.set_variable(3, "8"); // `id`, a child of `user`
+        let sent = d.sent.last().unwrap();
+        assert_eq!(sent["arguments"]["variablesReference"], 200, "user");
+        assert_eq!(sent["arguments"]["name"], "id");
+    }
+
+    /// The answer lands on the row that asked, and takes its children with it.
+    ///
+    /// What was read out of the old value is not a description of the new one,
+    /// so the subtree goes — and the siblings are re-read, because a field of
+    /// the same struct may have moved with it.
+    #[test]
+    fn a_set_value_replaces_the_row_and_drops_what_was_under_it() {
+        let mut d = stopped_with_locals();
+        d.set_variable(2, "Other"); // `user`, which has a child
+        let seq = d.sent.last().unwrap()["seq"].as_u64().unwrap();
+
+        d.handle_response(&json!({
+            "type": "response",
+            "request_seq": seq,
+            "success": true,
+            "command": "setVariable",
+            "body": { "value": "Other", "type": "User", "variablesReference": 300 }
+        }));
+
+        assert_eq!(d.vars[2].value, "Other");
+        assert_eq!(d.vars[2].var_ref, 300, "a new handle for the new value");
+        assert!(!d.vars[2].expanded);
+        assert_eq!(d.vars.len(), 3, "the stale child is gone");
+        // And the container is re-read rather than the scopes, which would
+        // have collapsed everything the user had opened.
+        let last = d.sent.last().unwrap();
+        assert_eq!(last["command"], "variables");
+        assert_eq!(last["arguments"]["variablesReference"], 100);
+    }
+
+    /// A scope is not a value, a running program has no frame to set one in,
+    /// and an adapter that cannot do it is not asked.
+    #[test]
+    fn setting_is_refused_where_it_makes_no_sense() {
+        let mut d = stopped_with_locals();
+        d.set_variable(0, "x"); // "Locals"
+        assert!(d.sent.is_empty(), "a scope is not a value");
+
+        let mut d = stopped_with_locals();
+        d.state = DapState::Running;
+        d.set_variable(1, "9");
+        assert!(d.sent.is_empty(), "no frame to set it in");
+
+        let mut d = stopped_with_locals();
+        d.supports_set_variable = false;
+        d.set_variable(1, "9");
+        assert!(d.sent.is_empty());
+        assert!(d.console.last().unwrap().contains("cannot change"));
+    }
+
     /// A disabled breakpoint is not armed, and the response still lands on the
     /// right one.
     ///

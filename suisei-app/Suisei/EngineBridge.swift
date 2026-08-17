@@ -4289,6 +4289,20 @@ final class EngineBridge: ObservableObject {
         return breakpoints.first { $0.line == line && $0.name == want }
     }
 
+    /// Change a variable's value while the program is stopped.
+    func dapSetVariable(index: Int, value: String) {
+        guard let engine else { return }
+        value.withCString { suisei_engine_dap_set_variable(engine, UInt32(index), $0) }
+        refreshDapIfNeeded()
+    }
+
+    /// Whether this adapter can change values — a menu leaves the item out
+    /// rather than offering an edit that will be refused.
+    var dapCanSetVariable: Bool {
+        guard let engine else { return false }
+        return suisei_engine_dap_can_set_variable(engine) != 0
+    }
+
     /// Stop the program whenever this value changes. Toggles.
     func dapWatch(_ name: String) {
         guard let engine else { return }

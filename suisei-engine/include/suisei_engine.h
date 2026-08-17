@@ -1116,6 +1116,10 @@ void suisei_engine_dap_set_log_message(SuiseiEngine *e, const char *path,
 void suisei_engine_dap_toggle_breakpoint_enabled(SuiseiEngine *e, const char *path,
                                                  uint32_t line_1based);
 
+/* Change a value while stopped. `index` is a Variables-tree row. */
+void suisei_engine_dap_set_variable(SuiseiEngine *e, uint32_t index, const char *value);
+uint8_t suisei_engine_dap_can_set_variable(const SuiseiEngine *e);
+
 /* Watchpoints — stop when a value changes. `watch` toggles. */
 void suisei_engine_dap_watch(SuiseiEngine *e, const char *name);
 uint8_t suisei_engine_dap_can_watch(const SuiseiEngine *e);

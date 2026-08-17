@@ -5141,6 +5141,35 @@ pub extern "C" fn suisei_engine_dap_toggle_breakpoint_enabled(
     }
 }
 
+/// Change a variable's value. `index` is a row of the Variables tree.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_set_variable(
+    ptr: *mut SuiseiEngine,
+    index: u32,
+    value: *const c_char,
+) {
+    if ptr.is_null() || value.is_null() {
+        return;
+    }
+    let Ok(value) = unsafe { std::ffi::CStr::from_ptr(value) }.to_str() else {
+        return;
+    };
+    unsafe {
+        (*ptr).0.app_mut().dap.set_variable(index as usize, value);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Whether this adapter can change a value at all, so a menu can leave the
+/// item out rather than offer an edit that will be refused.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_can_set_variable(ptr: *const SuiseiEngine) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    u8::from(unsafe { (*ptr).0.app().dap.supports_set_variable })
+}
+
 /// Watch a value: stop the program whenever it changes.
 ///
 /// Toggles — asking to watch something already watched stops watching it,

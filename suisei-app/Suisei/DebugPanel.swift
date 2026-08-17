@@ -308,6 +308,32 @@ struct DebugPanelView: View {
         }
     }
 
+    /// A new value for `name`, or nil when cancelled.
+    ///
+    /// Pre-filled with what it is now and selected, so the common case —
+    /// replacing a number — is type-and-return. An alert rather than an inline
+    /// field because a menu item fires with no view context of its own; the
+    /// breakpoint condition prompt is the same shape for the same reason.
+    static func askForValue(name: String, current: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Set \(name)"
+        alert.informativeText =
+            "The adapter evaluates this in the current frame. A value it cannot "
+            + "parse is refused and nothing changes."
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = current
+        field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let text = field.stringValue
+        // Setting a value to what it already is is not an edit, and it would
+        // still drop the row's children and re-read its container.
+        return text == current ? nil : text
+    }
+
     private var variablesList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
@@ -366,6 +392,19 @@ struct DebugPanelView: View {
                     // never keeps. Absent on scopes too — "Locals" is not a
                     // value and has no address to watch.
                     .contextMenu {
+                        // Changing a value is the other thing you can do TO a
+                        // variable, so it lives beside watching it rather than
+                        // in a menu that would have to ask which one you meant.
+                        if engine.dapCanSetVariable, !node.isScope, !node.name.isEmpty {
+                            Button {
+                                guard let text = DebugPanelView.askForValue(
+                                    name: node.name, current: node.value
+                                ) else { return }
+                                engine.dapSetVariable(index: node.id, value: text)
+                            } label: {
+                                Label("Set Value…", systemImage: "pencil")
+                            }
+                        }
                         if engine.dapCanWatch, !node.isScope, !node.name.isEmpty {
                             let on = engine.dapIsWatched(node.name)
                             Button {
