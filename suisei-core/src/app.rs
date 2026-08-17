@@ -3756,26 +3756,28 @@ impl App {
     ///
     /// `documentHighlight` and not `references`: one file, one round trip, and
     /// it is the only one of the two that says read from write.
-    pub fn refresh_value_extent(&mut self) {
+    pub fn refresh_value_extent(&mut self) -> bool {
         let Some(path) = self.filename.clone() else {
+            let had = !self.lsp.highlights.is_empty();
             self.value_extent_key = None;
             self.lsp.highlights.clear();
-            return;
+            return had;
         };
         let word = self.word_under_cursor();
         let row = self.buffer.cursor.row;
         // A caret on punctuation or whitespace is not on a value, and the
         // previous word's bracket must not stay behind it.
         if word.is_empty() {
+            let had = !self.lsp.highlights.is_empty();
             if self.value_extent_key.is_some() {
                 self.value_extent_key = None;
                 self.lsp.highlights.clear();
             }
-            return;
+            return had;
         }
         let key = (self.buffer.version(), row, word.clone());
         if self.value_extent_key.as_ref() == Some(&key) {
-            return;
+            return false;
         }
         self.value_extent_key = Some(key);
         let path = path.to_string_lossy().to_string();
@@ -3796,6 +3798,7 @@ impl App {
         if self.lsp.highlights.is_empty() {
             self.lsp.highlights = self.scan_occurrences(&word);
         }
+        true
     }
 
     /// Every whole-word occurrence of `word` in the buffer.

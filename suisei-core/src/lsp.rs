@@ -1211,7 +1211,22 @@ impl LspClient {
                 self.references_ready = true;
             }
             PendingReq::DocumentHighlight => {
-                self.highlights = parse_document_highlights(&msg.body);
+                // An EMPTY answer must not erase what is on screen.
+                //
+                // A file the server does not own — `test.rs` at a workspace
+                // root is in no crate — answers `[]` to every highlight
+                // request. That empty answer was overwriting the buffer scan
+                // standing in for it, so the mark appeared and vanished a
+                // moment later.
+                //
+                // The scan is the fallback, not a placeholder: when the server
+                // has nothing, the scan IS the best available answer and it
+                // stays. A non-empty answer replaces it, because kinds are the
+                // one thing only the server knows.
+                let answered = parse_document_highlights(&msg.body);
+                if !answered.is_empty() {
+                    self.highlights = answered;
+                }
             }
             PendingReq::Rename => {
                 let edits =
@@ -2997,6 +3012,52 @@ fn lang_id(path: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// An empty answer must not erase the scan standing in for it.
+    ///
+    /// A file the server does not own answers `[]` to every highlight request
+    /// — `test.rs` at a workspace root is in no crate — and that empty answer
+    /// was overwriting the buffer scan, so the bracket appeared and vanished a
+    /// moment later.
+    #[test]
+    fn an_empty_highlight_answer_keeps_what_is_already_shown() {
+        let mut lsp = LspClient::new();
+        lsp.highlights = vec![
+            SymbolOccurrence { row: 3, write: false },
+            SymbolOccurrence { row: 9, write: false },
+        ];
+        let id = lsp.alloc_id(PendingReq::DocumentHighlight);
+
+        lsp.handle_raw(RawMsg {
+            id: Some(id),
+            method: None,
+            body: r#"{"jsonrpc":"2.0","result":[]}"#.to_string(),
+        });
+
+        assert_eq!(lsp.highlights.len(), 2, "the scan survives an empty answer");
+    }
+
+    /// A real answer replaces it — kinds are the one thing only the server
+    /// knows, so when it speaks it wins.
+    #[test]
+    fn a_real_highlight_answer_replaces_the_scan() {
+        let mut lsp = LspClient::new();
+        lsp.highlights = vec![SymbolOccurrence { row: 3, write: false }];
+        let id = lsp.alloc_id(PendingReq::DocumentHighlight);
+
+        lsp.handle_raw(RawMsg {
+            id: Some(id),
+            method: None,
+            body: r#"{"jsonrpc":"2.0","result":[{"range":{"start":{"line":7,"character":0},"end":{"line":7,"character":3}},"kind":3}]}"#
+                .to_string(),
+        });
+
+        assert_eq!(
+            lsp.highlights,
+            vec![SymbolOccurrence { row: 7, write: true }],
+            "and brings the read/write kind with it"
+        );
+    }
+
     /// Read from write is the whole point, and it is one integer.
     #[test]
     fn a_highlight_is_a_write_only_at_kind_three() {

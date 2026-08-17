@@ -75,7 +75,14 @@ impl App {
         self.poll_call_hierarchy();
         self.poll_hook_messages();
 
-        self.refresh_value_extent();
+        // The extent marks rows AWAY from the caret, and nothing else
+        // repaints those. Without this the part of the bracket on the caret's
+        // own line kept being redrawn — that row repaints constantly — and the
+        // rest was drawn once and then never again: "라인 여러개를 차지하는
+        // 브라켓은 바로 사라짐".
+        if self.refresh_value_extent() {
+            change.paint = true;
+        }
 
         self.dap.poll();
         if self.dap.location_dirty {
