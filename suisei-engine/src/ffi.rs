@@ -5302,3 +5302,307 @@ pub extern "C" fn suisei_engine_dap_set_panel(ptr: *mut SuiseiEngine, open: u8) 
         (*ptr).0.recompose();
     }
 }
+
+// ── Logic View ─────────────────────────────────────────────────────────────
+//
+// A Logic View pane asks for the logic of a PATH. It does not ask for "the
+// logic", singular: the pane showing it is very often not the pane the
+// keyboard is in — that is the point of it — so every call names its file and
+// the engine keeps a session per file behind them.
+
+pub const SUISEI_MAX_LOGIC_ROWS: usize = 320;
+pub const SUISEI_LOGIC_LABEL: usize = 192;
+pub const SUISEI_LOGIC_VALUE: usize = 96;
+
+/// Per-row facts that are true or not, in one byte each.
+///
+/// Bits rather than seven parallel arrays: they are read together, per row,
+/// and a row that is stopped is also enclosed by something and may also carry
+/// a breakpoint.
+pub const SUISEI_LOGIC_EXPANDABLE: u8 = 1;
+pub const SUISEI_LOGIC_EXPANDED: u8 = 2;
+/// The program is stopped inside this row, but not ON it — a branch or a loop
+/// we are within.
+pub const SUISEI_LOGIC_ENCLOSING: u8 = 4;
+/// A caller's frame sits here: the way in, which is exact.
+pub const SUISEI_LOGIC_CALLER: u8 = 8;
+/// This is the row running now.
+pub const SUISEI_LOGIC_STOPPED: u8 = 16;
+/// A breakpoint is set on this row's first line.
+pub const SUISEI_LOGIC_BREAKPOINT: u8 = 32;
+
+#[repr(C)]
+pub struct SuiseiLogicSnapshot {
+    pub ok: u8,
+    /// A session is live and stopped in THIS file, so the runtime bits mean
+    /// something. Without it a face cannot tell "not running" from "running
+    /// elsewhere", and the two want different drawings.
+    pub live: u8,
+    pub _pad: [u8; 2],
+    pub path: [c_char; SUISEI_PATH_CAP],
+    /// Why the list is empty, when it is. Never "" and empty at once.
+    pub note: [c_char; 160],
+    pub lang: [c_char; 32],
+    pub row_count: u32,
+    pub selected: u32,
+    pub labels: [[c_char; SUISEI_LOGIC_LABEL]; SUISEI_MAX_LOGIC_ROWS],
+    /// The locals this row names, at the moment the program stopped. Empty
+    /// unless the program is stopped in this file.
+    pub values: [[c_char; SUISEI_LOGIC_VALUE]; SUISEI_MAX_LOGIC_ROWS],
+    /// `LogicKind` — 0 entry, 1 process, 2 decision, 3 loop, 4 exit, 5 opaque.
+    pub kinds: [u8; SUISEI_MAX_LOGIC_ROWS],
+    pub depths: [u8; SUISEI_MAX_LOGIC_ROWS],
+    /// `EdgeLabel` — 0 next, 1 yes, 2 no, 3 back.
+    pub edges: [u8; SUISEI_MAX_LOGIC_ROWS],
+    pub flags: [u8; SUISEI_MAX_LOGIC_ROWS],
+    pub start_rows: [u32; SUISEI_MAX_LOGIC_ROWS],
+    pub end_rows: [u32; SUISEI_MAX_LOGIC_ROWS],
+}
+
+fn logic_path(path: *const c_char) -> Option<std::path::PathBuf> {
+    if path.is_null() {
+        return None;
+    }
+    let s = unsafe { CStr::from_ptr(path) }.to_string_lossy().to_string();
+    if s.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(s))
+}
+
+/// Cheap "has anything moved" for a Logic pane.
+///
+/// The snapshot is ~100 KiB and a pane would otherwise memcpy it every frame
+/// to find out that nothing changed. Same shape as the debugger's, and it
+/// mixes the things that move without changing the row count: which rows are
+/// open, and where the program is.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_logic_fingerprint(
+    ptr: *const SuiseiEngine,
+    path: *const c_char,
+) -> u64 {
+    let Some(p) = logic_path(path) else { return 0 };
+    if ptr.is_null() {
+        return 0;
+    }
+    // Nothing is BUILT here. This runs on every tick for every Logic pane,
+    // and asking the session for its rows would reparse the file — the whole
+    // point of a fingerprint is to be the cheap question.
+    let app = unsafe { (*ptr).0.app() };
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        h ^= v;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    };
+    mix(app.logic_source_stamp(&p));
+    if let Some(session) = app.logic_views.peek(&p) {
+        mix(session.rows().len() as u64);
+        mix(session.selected as u64);
+        for row in session.rows() {
+            mix(u64::from(row.expanded) | (row.start_row as u64) << 1);
+        }
+    }
+    let dap = &app.dap;
+    mix(dap.state as u64);
+    mix(dap.current_line.unwrap_or(usize::MAX) as u64);
+    mix(dap.vars.len() as u64);
+    mix(dap.breakpoints.len() as u64);
+    h
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_logic(
+    ptr: *mut SuiseiEngine,
+    path: *const c_char,
+    out: *mut SuiseiLogicSnapshot,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let Some(p) = logic_path(path) else { return 0 };
+    unsafe {
+        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiLogicSnapshot>());
+    }
+    let o = unsafe { &mut *out };
+
+    // The runtime facts are read BEFORE the session is borrowed mutably, and
+    // they are copies: a stop is three small strings and a list of pairs.
+    let app = unsafe { (*ptr).0.app() };
+    let stop = app.dap.stop_location().map(|(s, l)| (s.to_string(), l));
+    let frames: Vec<(String, String, usize)> = app
+        .dap
+        .call_path()
+        .into_iter()
+        .map(|(n, s, l)| (n.to_string(), s.to_string(), l))
+        .collect();
+    let values: Vec<(String, String)> = app
+        .dap
+        .frame_values()
+        .into_iter()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect();
+    let stopped_here = app.dap.state == suisei_core::dap::DapState::Stopped;
+    let here = p.to_string_lossy().to_string();
+    let breaks: Vec<usize> = app
+        .dap
+        .breakpoints
+        .iter()
+        .filter(|(file, _)| suisei_core::logic::same_file(file, &here))
+        .flat_map(|(_, list)| list.iter().map(|b| b.line))
+        .collect();
+
+    let app = unsafe { (*ptr).0.app_mut() };
+    let session = app.logic_session(&p);
+    write_cstr(&mut o.path, &session.path.to_string_lossy());
+    write_cstr(&mut o.lang, session.lang.name());
+    write_cstr(&mut o.note, session.note.as_deref().unwrap_or(""));
+    o.selected = session.selected as u32;
+
+    let file = session.path.to_string_lossy().to_string();
+    let rt = suisei_core::logic::runtime(
+        &session.tree,
+        &file,
+        stop.as_ref().map(|(s, l)| (s.as_str(), *l)),
+        &frames
+            .iter()
+            .map(|(n, s, l)| (n.as_str(), s.as_str(), *l))
+            .collect::<Vec<_>>(),
+    );
+    o.live = u8::from(stopped_here && rt.stopped.is_some());
+
+    let vals: Vec<(&str, &str)> = values.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+    let n = session.rows().len().min(SUISEI_MAX_LOGIC_ROWS);
+    o.row_count = n as u32;
+    for (i, row) in session.rows().iter().take(n).enumerate() {
+        write_cstr(&mut o.labels[i], &row.label);
+        o.kinds[i] = row.kind as u8;
+        o.depths[i] = row.depth.min(255) as u8;
+        o.edges[i] = row.edge as u8;
+        o.start_rows[i] = row.start_row as u32;
+        o.end_rows[i] = row.end_row as u32;
+        let mut flags = 0u8;
+        if row.expandable {
+            flags |= SUISEI_LOGIC_EXPANDABLE;
+        }
+        if row.expanded {
+            flags |= SUISEI_LOGIC_EXPANDED;
+        }
+        if rt.stopped == Some(i) {
+            flags |= SUISEI_LOGIC_STOPPED;
+        }
+        if rt.enclosing.contains(&i) {
+            flags |= SUISEI_LOGIC_ENCLOSING;
+        }
+        if rt.callers.contains(&i) {
+            flags |= SUISEI_LOGIC_CALLER;
+        }
+        if breaks.contains(&row.start_row) {
+            flags |= SUISEI_LOGIC_BREAKPOINT;
+        }
+        o.flags[i] = flags;
+        // Values only where the program actually is. A local called `count`
+        // means nothing on a row of a function nobody is in.
+        if o.live != 0 && (rt.stopped == Some(i) || rt.enclosing.contains(&i)) {
+            let named = suisei_core::logic::values_on(&row.label, &vals);
+            if !named.is_empty() {
+                let text = named
+                    .iter()
+                    .take(3)
+                    .map(|(k, v)| format!("{k} = {v}"))
+                    .collect::<Vec<_>>()
+                    .join("   ");
+                write_cstr(&mut o.values[i], &text);
+            }
+        }
+    }
+    o.ok = 1;
+    1
+}
+
+/// Open or close a row. The only thing that builds a graph.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_logic_toggle(
+    ptr: *mut SuiseiEngine,
+    path: *const c_char,
+    index: u32,
+) {
+    let Some(p) = logic_path(path) else { return };
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let app = (*ptr).0.app_mut();
+        let session = app.logic_session(&p);
+        session.selected = index as usize;
+        session.toggle(index as usize);
+        (*ptr).0.recompose();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_logic_select(
+    ptr: *mut SuiseiEngine,
+    path: *const c_char,
+    index: u32,
+) {
+    let Some(p) = logic_path(path) else { return };
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let app = (*ptr).0.app_mut();
+        let session = app.logic_session(&p);
+        if index as usize <= session.rows().len() {
+            session.selected = index as usize;
+        }
+    }
+}
+
+/// Take the reader to the source this row came from.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_logic_reveal(
+    ptr: *mut SuiseiEngine,
+    path: *const c_char,
+    index: u32,
+) {
+    let Some(p) = logic_path(path) else { return };
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let app = (*ptr).0.app_mut();
+        let session = app.logic_session(&p);
+        session.selected = index as usize;
+        let Some(line) = session.selected_line() else {
+            return;
+        };
+        app.reveal_logic_row(&p, line);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Open a Logic View of the focused document.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_logic_open(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().open_logic_view();
+        (*ptr).0.recompose();
+    }
+}
+
+/// Whether the focused document has logic worth opening — for the menu item.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_logic_available(ptr: *const SuiseiEngine) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let app = unsafe { &*ptr }.0.app();
+    let has = app
+        .filename
+        .as_deref()
+        .is_some_and(|p| suisei_core::logic::grammar_for_path(p).is_some());
+    u8::from(has)
+}

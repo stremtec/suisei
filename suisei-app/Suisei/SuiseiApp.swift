@@ -208,6 +208,14 @@ struct SuiseiApp: App {
             }
             .keyboardShortcut(".", modifiers: .command)
 
+            // A view OF this file, in a pane of its own: split, and the code
+            // and its logic sit side by side. Disabled where there is no logic
+            // table to read the file with, rather than opening an empty one.
+            Button("Show Logic View") {
+                engine.openLogicView()
+            }
+            .keyboardShortcut("l", modifiers: [.command, .control])
+
             Divider()
 
             Button("New Untitled Tab") {

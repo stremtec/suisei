@@ -138,6 +138,11 @@ fn pane_kind_wire_values() {
     assert_eq!(FileKind::Pdf as u8, 3);
     assert_eq!(FileKind::Audio as u8, 4);
     assert_eq!(FileKind::Binary as u8, 5);
+    assert_eq!(FileKind::Model as u8, 6);
+    // Appended, never inserted. A face built against an older engine reads an
+    // unknown kind as Text — which is only safe while the numbers below it
+    // stay put.
+    assert_eq!(FileKind::Logic as u8, 7);
     // The default must be the one kind that is safe to be wrong about: a pane
     // that falls back to Text shows an editor, which is recoverable. One that
     // fell back to a viewer would hide a file the user meant to edit.
@@ -326,4 +331,42 @@ fn chrome_snapshot_is_stack_friendly() {
         size_of::<SuiseiEditorLineC>()
     );
     println!("SuiseiPaneC:          {} bytes", size_of::<SuiseiPaneC>());
+}
+
+// ─── SuiseiLogicSnapshot ──────────────────────────────────────────────────────
+//
+// Swift imports this struct from the header rather than reading offsets, which
+// moves the risk rather than removing it: a field added on the Rust side and
+// not in `suisei_engine.h` is a silent misread of everything after it. These
+// numbers are the header's declaration, computed by hand — if they stop
+// matching, one of the two files moved without the other.
+
+#[test]
+fn logic_snapshot_layout() {
+    use suisei_engine::ffi::{
+        SUISEI_LOGIC_LABEL, SUISEI_LOGIC_VALUE, SUISEI_MAX_LOGIC_ROWS, SuiseiLogicSnapshot,
+    };
+    assert_eq!(SUISEI_MAX_LOGIC_ROWS, 320);
+    assert_eq!(SUISEI_LOGIC_LABEL, 192);
+    assert_eq!(SUISEI_LOGIC_VALUE, 96);
+
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, ok), 0);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, live), 1);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, path), 4);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, note), 4 + SUISEI_PATH_CAP);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, lang), 676);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, row_count), 708);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, selected), 712);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, labels), 716);
+    assert_eq!(
+        offset_of!(SuiseiLogicSnapshot, values),
+        716 + SUISEI_MAX_LOGIC_ROWS * SUISEI_LOGIC_LABEL
+    );
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, kinds), 92876);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, depths), 93196);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, edges), 93516);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, flags), 93836);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, start_rows), 94156);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, end_rows), 95436);
+    assert_eq!(size_of::<SuiseiLogicSnapshot>(), 96716);
 }

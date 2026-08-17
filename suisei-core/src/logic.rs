@@ -212,6 +212,14 @@ pub fn grammar_for(lang: Lang) -> Option<LogicGrammar> {
     })
 }
 
+/// Whether a file's extension has a logic table at all.
+///
+/// The question a menu item asks before offering to open a view of it.
+pub fn grammar_for_path(path: &std::path::Path) -> Option<LogicGrammar> {
+    let ext = path.extension()?.to_str()?;
+    grammar_for(Lang::from_ext(ext)?)
+}
+
 /// The innermost function node containing `row`, if any.
 pub fn function_at<'t>(tree: &'t tree_sitter::Tree, g: &LogicGrammar, row: usize) -> Option<Node<'t>> {
     let mut cursor = tree.root_node().walk();

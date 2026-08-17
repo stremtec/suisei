@@ -1132,3 +1132,52 @@ uint8_t suisei_engine_dap_datatip(const SuiseiEngine *e, char *out_expr,
 void suisei_engine_dap_select_frame(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_dap_toggle_var(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_dap_set_panel(SuiseiEngine *ptr, uint8_t open);
+
+/* ── Logic View ────────────────────────────────────────────────────────────
+   The control flow of one file, as far as it has been opened. Every call
+   names its path: a Logic pane is usually NOT the pane the keyboard is in,
+   which is the whole point of it. */
+
+#define SUISEI_MAX_LOGIC_ROWS 320
+#define SUISEI_LOGIC_LABEL 192
+#define SUISEI_LOGIC_VALUE 96
+
+/* Per-row flags. */
+#define SUISEI_LOGIC_EXPANDABLE 1
+#define SUISEI_LOGIC_EXPANDED 2
+#define SUISEI_LOGIC_ENCLOSING 4
+#define SUISEI_LOGIC_CALLER 8
+#define SUISEI_LOGIC_STOPPED 16
+#define SUISEI_LOGIC_BREAKPOINT 32
+
+typedef struct SuiseiLogicSnapshot {
+  uint8_t ok;
+  /* Stopped in THIS file: the runtime flags mean something. */
+  uint8_t live;
+  uint8_t _pad[2];
+  char path[SUISEI_PATH_CAP];
+  /* Why the list is empty, when it is. */
+  char note[160];
+  char lang[32];
+  uint32_t row_count;
+  uint32_t selected;
+  char labels[SUISEI_MAX_LOGIC_ROWS][SUISEI_LOGIC_LABEL];
+  char values[SUISEI_MAX_LOGIC_ROWS][SUISEI_LOGIC_VALUE];
+  /* 0 entry, 1 process, 2 decision, 3 loop, 4 exit, 5 opaque */
+  uint8_t kinds[SUISEI_MAX_LOGIC_ROWS];
+  uint8_t depths[SUISEI_MAX_LOGIC_ROWS];
+  /* 0 next, 1 yes, 2 no, 3 back */
+  uint8_t edges[SUISEI_MAX_LOGIC_ROWS];
+  uint8_t flags[SUISEI_MAX_LOGIC_ROWS];
+  uint32_t start_rows[SUISEI_MAX_LOGIC_ROWS];
+  uint32_t end_rows[SUISEI_MAX_LOGIC_ROWS];
+} SuiseiLogicSnapshot;
+
+uint64_t suisei_engine_logic_fingerprint(const SuiseiEngine *ptr, const char *path);
+uint8_t suisei_engine_logic(SuiseiEngine *ptr, const char *path,
+                            SuiseiLogicSnapshot *out);
+void suisei_engine_logic_toggle(SuiseiEngine *ptr, const char *path, uint32_t index);
+void suisei_engine_logic_select(SuiseiEngine *ptr, const char *path, uint32_t index);
+void suisei_engine_logic_reveal(SuiseiEngine *ptr, const char *path, uint32_t index);
+void suisei_engine_logic_open(SuiseiEngine *ptr);
+uint8_t suisei_engine_logic_available(const SuiseiEngine *ptr);

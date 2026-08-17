@@ -108,6 +108,14 @@ pub enum FileKind {
     /// against an older engine reads an unknown value as `Text` rather than
     /// as whatever used to be 6.
     Model = 6,
+    /// A Logic View — the control flow of a source file, not a file of its
+    /// own. Appended for the same reason `Model` was: an older face reads an
+    /// unknown kind as `Text`.
+    ///
+    /// The tab's `filename` is the SOURCE file, so a Logic tab and the text
+    /// tab of the same file can be open at once and sit side by side. That is
+    /// the whole point of it being a pane.
+    Logic = 7,
 }
 
 impl FileKind {
@@ -126,6 +134,7 @@ impl FileKind {
             FileKind::Audio => "Audio",
             FileKind::Binary => "Binary file",
             FileKind::Model => "3D model",
+            FileKind::Logic => "Logic View",
         }
     }
 }

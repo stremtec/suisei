@@ -21,6 +21,7 @@ pub mod highlight;
 pub mod hooks;
 pub mod lang;
 pub mod logic;
+pub mod logic_view;
 pub mod layout_tab;
 pub mod layouts;
 pub mod lsp;

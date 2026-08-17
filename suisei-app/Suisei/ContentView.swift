@@ -6073,6 +6073,7 @@ struct ContentView: View {
         case .pdf: return "doc.richtext.fill"
         case .audio: return "waveform"
         case .model: return "cube.fill"
+        case .logic: return "point.topleft.down.to.point.bottomright.curvepath"
         case .binary: return "doc.fill"
         }
     }

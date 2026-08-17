@@ -446,6 +446,156 @@ impl App {
         self.blame.clear();
         self.refresh_git();
     }
+    /// Open the Logic View of the focused document, as a tab of its own.
+    ///
+    /// A tab rather than a panel: it lands in a pane, so splitting puts the
+    /// code and its logic side by side, and every piece of tab machinery —
+    /// close, reorder, focus, the tab strip — already works on it. That is the
+    /// same reason a terminal is a tab, and this borrows the shape whole.
+    ///
+    /// Opening it twice focuses the one that is open. The view is OF a file,
+    /// so two of them would be two copies of one fact.
+    pub fn open_logic_view(&mut self) {
+        let Some(path) = self.filename.clone() else {
+            self.message = "Logic View needs a saved file".into();
+            return;
+        };
+        if crate::logic::grammar_for_path(&path).is_none() {
+            self.message = format!(
+                "No logic to read in {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+            return;
+        }
+        self.save_state_to_tab();
+        let existing = self
+            .tabs
+            .buffers
+            .iter()
+            .find(|t| t.kind == crate::media::FileKind::Logic && t.filename.as_ref() == Some(&path))
+            .map(|t| t.id);
+        if let Some(id) = existing {
+            self.split.focused_pane_mut().buffer = id;
+            self.restore_state_from_tab();
+            return;
+        }
+        let tab_id = self.take_tab_id();
+        self.tabs.buffers.push(BufferTab {
+            id: tab_id,
+            // Empty on purpose, like every other viewer: there is no text to
+            // show, the view draws from the path, and an empty buffer is the
+            // one thing that cannot be edited into a corrupted file.
+            buffer: Buffer::new(),
+            filename: Some(path.clone()),
+            scroll: 0,
+            modified: false,
+            saved_hash: EMPTY_TEXT_HASH,
+            undo_stack: UndoStack::new(),
+            file_mtime: None,
+            terminal: None,
+            terminal_title: None,
+            kind: crate::media::FileKind::Logic,
+            terminal_cwd: None,
+        });
+        self.split.focused_pane_mut().buffer = tab_id;
+        self.restore_state_from_tab();
+        self.message = format!("Logic View: {}", path.display());
+    }
+
+    /// The session for `path`, built or refreshed against the live text.
+    pub fn logic_session(&mut self, path: &std::path::Path) -> &mut crate::logic_view::LogicSession {
+        let text = self.logic_source(path);
+        self.logic_views.get(path, &text)
+    }
+
+    /// A cheap stand-in for "has this file changed", for the pane's poll.
+    ///
+    /// The Logic pane asks whether anything moved on every tick, and the
+    /// honest answer — reparse and compare — is a full copy of the buffer per
+    /// frame per pane. A version counter and a length say the same thing for
+    /// this purpose: they move when the text moves.
+    pub fn logic_source_stamp(&self, path: &std::path::Path) -> u64 {
+        if self.filename.as_deref() == Some(path)
+            && self.live_tab_kind() != crate::media::FileKind::Logic
+        {
+            return self.buffer.version() ^ (self.buffer.line_count() as u64) << 40;
+        }
+        for tab in &self.tabs.buffers {
+            if tab.kind != crate::media::FileKind::Logic && tab.filename.as_deref() == Some(path) {
+                return tab.buffer.version() ^ (tab.buffer.line_count() as u64) << 40;
+            }
+        }
+        // Not open: the file on disk, by size and when it was written.
+        let Ok(meta) = std::fs::metadata(path) else {
+            return 0;
+        };
+        let secs = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        meta.len() ^ secs << 24
+    }
+
+    /// Take the reader to the source a row came from.
+    ///
+    /// The pairing this view exists for: logic on one side, code on the other.
+    /// So the code goes where the code already is — the pane that is showing
+    /// this file if there is one, another pane if there is not, and only this
+    /// pane when there is no other. Opening the source over the view the user
+    /// clicked in would be answering "show me this" by hiding the question.
+    pub fn reveal_logic_row(&mut self, path: &std::path::Path, line: usize) {
+        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let showing = |app: &Self, buffer: crate::tabs::BufferId| {
+            app.tabs
+                .buffers
+                .iter()
+                .find(|t| t.id == buffer)
+                .is_some_and(|t| {
+                    t.kind != crate::media::FileKind::Logic
+                        && t.filename.as_ref().is_some_and(|f| {
+                            std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()) == target
+                        })
+                })
+        };
+        let here = self.split.focus_index();
+        let already = (0..self.split.panes.len())
+            .find(|&i| showing(self, self.split.panes[i].buffer));
+        match already {
+            Some(i) => self.focus_pane_to(i),
+            None => {
+                if let Some(other) = (0..self.split.panes.len()).find(|&i| i != here) {
+                    self.focus_pane_to(other);
+                }
+                self.open_new_tab(&path.to_string_lossy());
+            }
+        }
+        if self.buffer.line_count() == 0 {
+            return;
+        }
+        self.buffer.cursor.row = line.min(self.buffer.line_count().saturating_sub(1));
+        self.buffer.move_to_line_start();
+        self.update_scroll();
+    }
+
+    /// The text a Logic View of `path` should read.
+    ///
+    /// The open buffer when there is one, including edits that have not been
+    /// saved — reading the disk beside an editor showing something else is the
+    /// one thing a side-by-side view must not do. The disk otherwise, because
+    /// the file being viewed need not be open at all.
+    pub fn logic_source(&self, path: &std::path::Path) -> String {
+        if self.filename.as_deref() == Some(path) && self.live_tab_kind() != crate::media::FileKind::Logic {
+            return self.buffer.text();
+        }
+        for tab in &self.tabs.buffers {
+            if tab.kind != crate::media::FileKind::Logic && tab.filename.as_deref() == Some(path) {
+                return tab.buffer.text();
+            }
+        }
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
     pub fn open_new_tab(&mut self, path: &str) {
         // No "displaced document" to record. Opening replaces what the focused
         // pane shows (S2: `App` IS the focused pane), and an active layout's
@@ -475,10 +625,15 @@ impl App {
             .buffers
             .iter()
             .find(|tab| {
-                tab.filename.as_ref().is_some_and(|open_path| {
-                    fs::canonicalize(open_path).unwrap_or_else(|_| open_path.clone())
-                        == requested_identity
-                })
+                // A Logic View tab carries the SOURCE file's path — it is a
+                // view of that file, not that file. Without this, opening
+                // `foo.rs` while its logic is open focused the logic pane and
+                // the text never appeared.
+                tab.kind != crate::media::FileKind::Logic
+                    && tab.filename.as_ref().is_some_and(|open_path| {
+                        fs::canonicalize(open_path).unwrap_or_else(|_| open_path.clone())
+                            == requested_identity
+                    })
             })
             .map(|t| t.id);
         if let Some(id) = existing {

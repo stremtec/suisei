@@ -329,6 +329,8 @@ pub struct App {
     pub key_hints: bool,
     /// DAP debugger client + panel state.
     pub dap: crate::dap::DapClient,
+    /// What the open Logic View panes are looking at.
+    pub logic_views: crate::logic_view::LogicViews,
     /// Call hierarchy panel (gC / SPC l c).
     pub call_hierarchy: crate::call_hierarchy::CallHierarchyState,
     /// Interactive rebase planner.
@@ -668,6 +670,7 @@ impl Default for App {
             gpu_acc: true,
             key_hints: true,
             dap: crate::dap::DapClient::new(),
+            logic_views: crate::logic_view::LogicViews::default(),
             call_hierarchy: crate::call_hierarchy::CallHierarchyState::new(),
             hooks: crate::hooks::HooksConfig::load(),
             update: crate::update::UpdateState::new(),

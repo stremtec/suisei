@@ -104,6 +104,10 @@ enum PaneKind: UInt8 {
     case audio = 4
     case binary = 5
     case model = 6
+    /// Not a file: the control flow OF a file. The tab carries the source
+    /// path, so the code and its logic can be open side by side — which is
+    /// the reason this is a pane rather than a panel.
+    case logic = 7
 
     /// An unknown value can only come from an engine newer than this face.
     /// Fall back to the editor: showing text for something we cannot name is
@@ -115,7 +119,7 @@ enum PaneKind: UInt8 {
     var isViewer: Bool {
         switch self {
         case .text, .terminal: return false
-        case .image, .pdf, .audio, .binary, .model: return true
+        case .image, .pdf, .audio, .binary, .model, .logic: return true
         }
     }
 
@@ -129,6 +133,7 @@ enum PaneKind: UInt8 {
         case .audio: return "Audio"
         case .binary: return "Binary"
         case .model: return "3D Model"
+        case .logic: return "Logic"
         }
     }
 }
@@ -1342,6 +1347,13 @@ final class EngineBridge: ObservableObject {
     @Published private(set) var lspServerName = ""
     /// The debugger, as the panel draws it.
     @Published var dap = DapSnap.empty
+    /// One entry per file a Logic View pane is showing. Keyed by path because
+    /// the pane showing it is usually not the pane the keyboard is in — that
+    /// is what the view is FOR — so "the current file" is the wrong question.
+    @Published var logic: [String: LogicSnap] = [:]
+    /// The files those panes asked about, and what they last looked like.
+    var logicWatched: Set<String> = []
+    var logicFingerprints: [String: UInt64] = [:]
     private var hoverPoll: DispatchWorkItem?
     /// Discards results from a superseded query — the user types faster than a
     /// project grep finishes, and out-of-order replies would otherwise win.
@@ -1726,6 +1738,7 @@ final class EngineBridge: ObservableObject {
             self.refreshGitWorkbenchIfNeeded()
             self.refreshGitHubAccountIfNeeded()
             self.refreshDapIfNeeded()
+            self.refreshLogicIfNeeded()
             self.refreshSoftwareUpdateIfNeeded()
             // Never publish SwiftUI editor updates mid-gesture — the canvas
             // already merges paint windows itself; publishing re-enters
@@ -6779,6 +6792,124 @@ enum DapCommand: UInt32 {
     case stop = 5
     case restart = 6
     case clearBreakpoints = 7
+}
+
+// MARK: - Bridge
+
+extension EngineBridge {
+    /// A Logic pane says which file it is showing, so the tick knows to pull
+    /// it. Panes come and go; the engine keeps the sessions either way.
+    func watchLogic(_ path: String) {
+        guard !path.isEmpty else { return }
+        logicWatched.insert(path)
+        refreshLogicIfNeeded()
+    }
+
+    func unwatchLogic(_ path: String) {
+        logicWatched.remove(path)
+        logicFingerprints.removeValue(forKey: path)
+    }
+
+    /// Pull each watched file's rows, and only when they moved.
+    ///
+    /// The snapshot is ninety-odd kilobytes and the fingerprint is a `u64` —
+    /// the same trade the debugger's refresh makes, for the same reason.
+    func refreshLogicIfNeeded() {
+        guard let engine, !logicWatched.isEmpty else { return }
+        for path in logicWatched {
+            let fingerprint = path.withCString { suisei_engine_logic_fingerprint(engine, $0) }
+            if logicFingerprints[path] == fingerprint { continue }
+            logicFingerprints[path] = fingerprint
+            logic[path] = EngineBridge.loadLogic(engine, path)
+        }
+    }
+
+    func logicToggle(_ path: String, _ index: Int) {
+        guard let engine else { return }
+        path.withCString { suisei_engine_logic_toggle(engine, $0, UInt32(index)) }
+        logicFingerprints.removeValue(forKey: path)
+        refreshLogicIfNeeded()
+    }
+
+    func logicSelect(_ path: String, _ index: Int) {
+        guard let engine else { return }
+        path.withCString { suisei_engine_logic_select(engine, $0, UInt32(index)) }
+        logicFingerprints.removeValue(forKey: path)
+        refreshLogicIfNeeded()
+    }
+
+    /// Take the reader to the source this row came from — in the other pane,
+    /// which is what the pairing is for.
+    func logicReveal(_ path: String, _ index: Int) {
+        guard let engine else { return }
+        path.withCString { suisei_engine_logic_reveal(engine, $0, UInt32(index)) }
+        logicFingerprints.removeValue(forKey: path)
+        refreshLogicIfNeeded()
+        refreshChrome()
+    }
+
+    /// Open a Logic View of the focused document.
+    func openLogicView() {
+        guard let engine else { return }
+        suisei_engine_logic_open(engine)
+        refreshChrome()
+    }
+
+    var logicAvailable: Bool {
+        guard let engine else { return false }
+        return suisei_engine_logic_available(engine) != 0
+    }
+
+    private static func loadLogic(_ engine: OpaquePointer, _ path: String) -> LogicSnap {
+        var snap = SuiseiLogicSnapshot()
+        let ok = path.withCString { suisei_engine_logic(engine, $0, &snap) }
+        guard ok != 0 else { return .empty }
+
+        var out = LogicSnap()
+        out.path = withUnsafeBytes(of: snap.path) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
+        out.lang = withUnsafeBytes(of: snap.lang) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
+        out.note = withUnsafeBytes(of: snap.note) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
+        out.live = snap.live != 0
+        out.selected = Int(snap.selected)
+
+        func text(_ raw: UnsafeRawBufferPointer, _ i: Int, _ cap: Int) -> String {
+            String(cString: raw.baseAddress!.advanced(by: i * cap).assumingMemoryBound(to: CChar.self))
+        }
+        let n = min(Int(snap.row_count), Int(SUISEI_MAX_LOGIC_ROWS))
+        out.rows.reserveCapacity(n)
+        withUnsafeBytes(of: snap.labels) { labels in
+        withUnsafeBytes(of: snap.values) { values in
+        withUnsafeBytes(of: snap.kinds) { kinds in
+        withUnsafeBytes(of: snap.depths) { depths in
+        withUnsafeBytes(of: snap.edges) { edges in
+        withUnsafeBytes(of: snap.flags) { flags in
+        withUnsafeBytes(of: snap.start_rows) { starts in
+            withUnsafeBytes(of: snap.end_rows) { ends in
+                let startList = starts.bindMemory(to: UInt32.self)
+                let endList = ends.bindMemory(to: UInt32.self)
+                for i in 0..<n {
+                    let f = flags[i]
+                    out.rows.append(LogicRowSnap(
+                        id: i,
+                        kind: LogicKind(raw: kinds[i]),
+                        edge: LogicEdge(raw: edges[i]),
+                        label: text(labels, i, Int(SUISEI_LOGIC_LABEL)),
+                        values: text(values, i, Int(SUISEI_LOGIC_VALUE)),
+                        depth: Int(depths[i]),
+                        startRow: startList[i],
+                        endRow: endList[i],
+                        expandable: f & UInt8(SUISEI_LOGIC_EXPANDABLE) != 0,
+                        expanded: f & UInt8(SUISEI_LOGIC_EXPANDED) != 0,
+                        stopped: f & UInt8(SUISEI_LOGIC_STOPPED) != 0,
+                        enclosing: f & UInt8(SUISEI_LOGIC_ENCLOSING) != 0,
+                        caller: f & UInt8(SUISEI_LOGIC_CALLER) != 0,
+                        breakpoint: f & UInt8(SUISEI_LOGIC_BREAKPOINT) != 0
+                    ))
+                }
+            }
+        }}}}}}}
+        return out
+    }
 }
 
 extension EngineBridge {
