@@ -2087,6 +2087,7 @@ impl DapClient {
             }
             Some(PendingKind::SetBreakpoints(path)) => {
                 // Response array is 1:1 with the (line-sorted) request array.
+                let mut moved: Vec<(usize, usize)> = Vec::new();
                 if let Some(arr) = body.get("breakpoints").and_then(|b| b.as_array()) {
                     if let Some(list) = self.breakpoints.get_mut(&path) {
                         for (b, resp) in list.iter_mut().zip(arr) {
@@ -2099,14 +2100,30 @@ impl DapClient {
                                 .and_then(|m| m.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            // Adapter may slide the BP to the nearest valid line.
+                            // The adapter may slide the BP to the nearest line
+                            // that has code — a breakpoint asked for on a
+                            // comment lands below it.
+                            //
+                            // SAY SO. It used to move in silence, and a mark
+                            // appearing two lines from where it was clicked
+                            // reads as the editor being wrong rather than as
+                            // the debugger being right: reported as "분명 85번
+                            // 라인번호를 더블클릭했는데 87번에 브레이크 포인트가
+                            // 생김".
                             if let Some(l) = resp.get("line").and_then(|l| l.as_u64()) {
-                                b.line = l.saturating_sub(1) as usize;
+                                let to = l.saturating_sub(1) as usize;
+                                if to != b.line {
+                                    moved.push((b.line + 1, to + 1));
+                                }
+                                b.line = to;
                             }
                         }
                         list.sort_by_key(|b| b.line);
                         list.dedup_by_key(|b| b.line);
                     }
+                }
+                for (from, to) in moved {
+                    self.log(format!("● breakpoint {from} → {to} (no code on {from})"));
                 }
             }
             Some(PendingKind::Threads) => {
@@ -2959,6 +2976,52 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    /// A breakpoint the adapter moved says where it went.
+    ///
+    /// It moved in silence, and a mark appearing two lines below the one that
+    /// was clicked reads as the editor being wrong rather than as the debugger
+    /// being right — a breakpoint asked for on a comment lands on the next
+    /// line with code.
+    #[test]
+    fn a_slid_breakpoint_says_where_it_went() {
+        let mut d = DapClient::new();
+        d.toggle_breakpoint("/tmp/x.rs", 84); // 0-based 84 → line 85, a comment
+        let path = d.breakpoints.keys().next().unwrap().clone();
+        let id = d.alloc(PendingKind::SetBreakpoints(path.clone()));
+        let before = d.console.len();
+
+        d.handle_msg(response(
+            id,
+            "setBreakpoints",
+            json!({ "breakpoints": [ {"verified": true, "line": 87} ] }),
+        ));
+
+        assert_eq!(d.breakpoints[&path][0].line, 86, "moved to line 87");
+        let said = d.console[before..].join("\n");
+        assert!(said.contains("85"), "names where it was asked for: {said}");
+        assert!(said.contains("87"), "and where it went: {said}");
+    }
+
+    /// A breakpoint the adapter left alone says nothing. Announcing every
+    /// verified breakpoint would make the console useless for the one case
+    /// that matters.
+    #[test]
+    fn a_breakpoint_that_did_not_move_is_not_announced() {
+        let mut d = DapClient::new();
+        d.toggle_breakpoint("/tmp/x.rs", 4);
+        let path = d.breakpoints.keys().next().unwrap().clone();
+        let id = d.alloc(PendingKind::SetBreakpoints(path.clone()));
+        let before = d.console.len();
+
+        d.handle_msg(response(
+            id,
+            "setBreakpoints",
+            json!({ "breakpoints": [ {"verified": true, "line": 5} ] }),
+        ));
+
+        assert_eq!(d.console.len(), before);
+    }
+
     /// A build failure has to say WHERE.
     ///
     /// The real report: `println!("total score: {5}", total)` on line 130 of a

@@ -3794,6 +3794,19 @@ final class EditorCanvasView: NSView {
             return
         }
         if p.x < EditorMetrics.gutter - EditorMetrics.gutterTextGap * 0.5 {
+            // A double-click in the gutter is ONE gesture, not two toggles.
+            //
+            // It toggled on every mouseDown, so a double-click set a
+            // breakpoint and cleared it — except that the adapter answers in
+            // between, and it may SLIDE the breakpoint to the next line with
+            // code on it. The second click then aimed at the line the user
+            // clicked, found nothing there any more, and made a second one,
+            // which slid to the same place and merged: one breakpoint two
+            // lines down that the clicked line could no longer remove.
+            //
+            // The race is not fixable by ordering. A gesture that means one
+            // thing has to fire once.
+            guard event.clickCount == 1 else { return }
             // An inserted line has no buffer row and therefore no breakpoint.
             guard let row = bufferRow(atY: p.y) else { return }
             // Neither does a wrapped line's continuation. Its gutter is empty
