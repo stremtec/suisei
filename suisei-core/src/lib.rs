@@ -20,6 +20,7 @@ pub mod gui_edit;
 pub mod highlight;
 pub mod hooks;
 pub mod lang;
+pub mod logic;
 pub mod layout_tab;
 pub mod layouts;
 pub mod lsp;
