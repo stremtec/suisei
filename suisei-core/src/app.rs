@@ -2288,6 +2288,10 @@ impl App {
         if !self.lsp.server_running {
             return true;
         }
+        // A viewer has nothing to send — see `sync_lsp_document`.
+        if self.live_tab_kind().is_viewer() {
+            return true;
+        }
         let Some(path) = self.filename.as_ref() else {
             return true;
         };
@@ -2300,6 +2304,13 @@ impl App {
 
     pub fn sync_lsp_document(&mut self) {
         if !self.lsp.server_running {
+            return;
+        }
+        // Never from a viewer. Its buffer is empty by design and a Logic tab's
+        // filename is a real source file, so this would tell the server that
+        // the file open in the pane next door is now blank — every ~5 frames,
+        // silently, for as long as the view is focused.
+        if self.live_tab_kind().is_viewer() {
             return;
         }
         let Some(path) = self.filename.clone() else {
@@ -4584,6 +4595,13 @@ impl App {
     }
 
     pub fn lsp_restart_for_current(&mut self) {
+        // A viewer's buffer is EMPTY on purpose, and a Logic tab's filename is
+        // a real source file — so telling the server "here is foo.rs" from one
+        // would overwrite the server's copy of a file the user is editing next
+        // door with nothing. A viewer has no text to sync, ever.
+        if self.live_tab_kind().is_viewer() {
+            return;
+        }
         if let Some(ref path) = self.filename {
             let p = path.display().to_string();
             // Always open with live buffer text so unsaved edits aren't lost.

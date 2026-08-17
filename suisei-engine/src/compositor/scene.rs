@@ -2089,11 +2089,16 @@ fn tab_title(app: &App, tab_index: usize) -> String {
     } else {
         tab.filename.as_ref()
     };
-    filename
+    let name = filename
         .and_then(|path| path.file_name())
         .and_then(|name| name.to_str())
-        .unwrap_or("[No Name]")
-        .to_string()
+        .unwrap_or("[No Name]");
+    // A Logic tab carries the SOURCE file's path, so without this the strip
+    // shows two tabs called `foo.rs` and neither says which is which.
+    if tab.kind == suisei_core::media::FileKind::Logic {
+        return format!("{name} · Logic");
+    }
+    name.to_string()
 }
 
 /// Single editor or multi-pane split surfaces for the Swift face.
