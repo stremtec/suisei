@@ -71,6 +71,12 @@ pub struct Breakpoint {
     pub condition: Option<String>,
     /// Optional logpoint message (adapter-dependent)
     pub log_message: Option<String>,
+    /// A breakpoint that is still THERE but is not armed.
+    ///
+    /// Xcode's ⌘-click, and the reason it exists: a breakpoint carries a
+    /// place, a condition and a log message, and deleting one to quiet it for
+    /// five minutes throws all three away.
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -437,6 +443,7 @@ impl DapClient {
             message: String::new(),
             condition: None,
             log_message: None,
+            enabled: true,
         });
         entry.sort_by_key(|b| b.line);
         if self.is_session() {
@@ -444,6 +451,23 @@ impl DapClient {
         }
         let _ = self.persist_breakpoints();
         true
+    }
+
+    /// Arm or disarm a breakpoint without losing it.
+    ///
+    /// Returns the new state, or `None` when there is no breakpoint there.
+    pub fn toggle_breakpoint_enabled(&mut self, path: &str, line: usize) -> Option<bool> {
+        let path = self.canon(path);
+        let now = {
+            let b = self.breakpoints.get_mut(&path)?.iter_mut().find(|b| b.line == line)?;
+            b.enabled = !b.enabled;
+            b.enabled
+        };
+        if self.is_session() {
+            self.send_set_breakpoints(&path);
+        }
+        let _ = self.persist_breakpoints();
+        Some(now)
     }
 
     /// Set / clear a condition on an existing BP (0-based line). Creates BP if missing.
@@ -459,6 +483,7 @@ impl DapClient {
                 message: String::new(),
                 condition: condition.filter(|s| !s.trim().is_empty()),
                 log_message: None,
+                enabled: true,
             });
             entry.sort_by_key(|b| b.line);
         }
@@ -481,6 +506,7 @@ impl DapClient {
                 message: String::new(),
                 condition: None,
                 log_message: log_message.filter(|s| !s.trim().is_empty()),
+                enabled: true,
             });
             entry.sort_by_key(|b| b.line);
         }
@@ -521,7 +547,13 @@ impl DapClient {
                 for b in list {
                     let cond = b.condition.as_deref().unwrap_or("");
                     let log = b.log_message.as_deref().unwrap_or("");
-                    out.push_str(&format!("{}|{}|{}|{}\n", k, b.line, cond, log));
+                    // A disabled breakpoint marks its LINE, not a fifth field.
+                    // The log message is the last field and may contain `|`,
+                    // so it cannot be split further — and an older build reads
+                    // `!12` as an unparseable line and skips it, which loses
+                    // exactly the breakpoints that were switched off anyway.
+                    let mark = if b.enabled { "" } else { "!" };
+                    out.push_str(&format!("{}|{}{}|{}|{}\n", k, mark, b.line, cond, log));
                 }
             }
         }
@@ -543,7 +575,11 @@ impl DapClient {
                 continue;
             }
             let path = parts[0].to_string();
-            let Ok(ln) = parts[1].parse::<usize>() else {
+            let (enabled, digits) = match parts[1].strip_prefix('!') {
+                Some(rest) => (false, rest),
+                None => (true, parts[1]),
+            };
+            let Ok(ln) = digits.parse::<usize>() else {
                 continue;
             };
             let cond = parts
@@ -562,6 +598,7 @@ impl DapClient {
                     message: String::new(),
                     condition: cond,
                     log_message: log,
+                    enabled,
                 });
                 entry.sort_by_key(|b| b.line);
             }
@@ -1517,12 +1554,22 @@ impl DapClient {
         }
     }
 
+    /// Arm the enabled breakpoints for `path`.
+    ///
+    /// **The filter here and the zip in the response must agree.** The
+    /// response array is 1:1 with the request array by POSITION, and the
+    /// handler walks the stored list to apply verification and the adapter's
+    /// line slides. Sending a subset while the handler walked the whole list
+    /// would pair each answer with the wrong breakpoint — silently moving a
+    /// breakpoint to a line the adapter never mentioned. Both sides filter on
+    /// `enabled`, and a test holds them together.
     fn send_set_breakpoints(&mut self, path: &str) {
         let lines = self
             .breakpoints
             .get(path)
             .map(|v| {
                 v.iter()
+                    .filter(|b| b.enabled)
                     .map(|b| {
                         let mut o = json!({ "line": b.line + 1 });
                         if let Some(ref c) = b.condition {
@@ -2200,7 +2247,9 @@ impl DapClient {
                 let mut moved: Vec<(usize, usize)> = Vec::new();
                 if let Some(arr) = body.get("breakpoints").and_then(|b| b.as_array()) {
                     if let Some(list) = self.breakpoints.get_mut(&path) {
-                        for (b, resp) in list.iter_mut().zip(arr) {
+                        // Enabled only — see `send_set_breakpoints`. This is
+                        // the other half of that pairing.
+                        for (b, resp) in list.iter_mut().filter(|b| b.enabled).zip(arr) {
                             b.verified = resp
                                 .get("verified")
                                 .and_then(|x| x.as_bool())
@@ -3135,6 +3184,84 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    /// A disabled breakpoint is not armed, and the response still lands on the
+    /// right one.
+    ///
+    /// This is the trap the filter creates. `setBreakpoints` answers 1:1 with
+    /// the request BY POSITION, and the handler applies verification and the
+    /// adapter's line slides by walking the stored list. Filter the request
+    /// and not the walk, and every answer pairs with the wrong breakpoint —
+    /// which shows up as a breakpoint silently moving to a line the adapter
+    /// never mentioned.
+    #[test]
+    fn a_disabled_breakpoint_is_skipped_on_both_sides_of_the_wire() {
+        let mut d = DapClient::new();
+        for l in [4usize, 9, 14] {
+            d.toggle_breakpoint("/tmp/x.rs", l);
+        }
+        let path = d.breakpoints.keys().next().unwrap().clone();
+        // Switch the MIDDLE one off, so a mispairing cannot pass by luck.
+        d.toggle_breakpoint_enabled(&path, 9);
+        d.state = DapState::Stopped;
+        d.send_set_breakpoints(&path);
+
+        let sent = d.sent.last().unwrap();
+        let asked: Vec<u64> = sent["arguments"]["breakpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["line"].as_u64().unwrap())
+            .collect();
+        assert_eq!(asked, vec![5, 15], "only the enabled ones, 1-based");
+
+        // The adapter verifies both and slides the second.
+        let id = d.alloc(PendingKind::SetBreakpoints(path.clone()));
+        d.handle_msg(response(
+            id,
+            "setBreakpoints",
+            json!({ "breakpoints": [
+                {"verified": true, "line": 5},
+                {"verified": true, "line": 16}
+            ]}),
+        ));
+
+        let list = &d.breakpoints[&path];
+        assert_eq!(list[0].line, 4, "the first is where it was");
+        assert!(list[0].verified);
+        assert_eq!(list[1].line, 9, "the DISABLED one is untouched");
+        assert!(!list[1].verified, "and was never verified");
+        assert_eq!(list[2].line, 15, "and the slide landed on the third");
+    }
+
+    /// Disabling keeps the condition. Deleting a breakpoint to quiet it for
+    /// five minutes throws away its place, its condition and its log message,
+    /// which is the whole reason this is not just "remove it".
+    #[test]
+    fn disabling_a_breakpoint_keeps_what_it_knows() {
+        let mut d = DapClient::new();
+        d.toggle_breakpoint("/tmp/x.rs", 4);
+        let path = d.breakpoints.keys().next().unwrap().clone();
+        d.set_breakpoint_condition(&path, 4, Some("i == 3".into()));
+
+        assert_eq!(d.toggle_breakpoint_enabled(&path, 4), Some(false));
+
+        let b = &d.breakpoints[&path][0];
+        assert!(!b.enabled);
+        assert_eq!(b.condition.as_deref(), Some("i == 3"));
+
+        assert_eq!(d.toggle_breakpoint_enabled(&path, 4), Some(true));
+        assert!(d.breakpoints[&path][0].enabled);
+    }
+
+    /// Toggling somewhere with no breakpoint is not an error, and creates
+    /// nothing — a ⌘-click on a bare line means nothing to enable.
+    #[test]
+    fn toggling_a_breakpoint_that_is_not_there_does_nothing() {
+        let mut d = DapClient::new();
+        assert_eq!(d.toggle_breakpoint_enabled("/tmp/x.rs", 4), None);
+        assert!(d.breakpoints.is_empty());
+    }
+
     fn stopped_with_a_frame() -> DapClient {
         let mut d = DapClient::default();
         d.state = DapState::Stopped;

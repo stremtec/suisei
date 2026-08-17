@@ -834,6 +834,8 @@ typedef struct SuiseiBreakpointSnapshot {
   char paths[SUISEI_MAX_BREAKPOINTS][SUISEI_PATH_CAP];
   char names[SUISEI_MAX_BREAKPOINTS][SUISEI_BP_NAME]; /* file basename */
   char conditions[SUISEI_MAX_BREAKPOINTS][96];
+  uint8_t enabled[SUISEI_MAX_BREAKPOINTS];
+  char logs[SUISEI_MAX_BREAKPOINTS][96];
 } SuiseiBreakpointSnapshot;
 
 uint8_t suisei_engine_breakpoints(const SuiseiEngine *ptr, SuiseiBreakpointSnapshot *out);
@@ -1091,6 +1093,14 @@ void suisei_engine_dap_evaluate(SuiseiEngine *ptr, const char *expr);
 
 /* Hover datatip. `request` asks; `dap_datatip` returns 1 when filled, 2 while
    a request is in flight, 0 when there is nothing. */
+/* Breakpoint properties. Lines are 1-based; an empty string clears. */
+void suisei_engine_dap_set_condition(SuiseiEngine *e, const char *path,
+                                     uint32_t line_1based, const char *condition);
+void suisei_engine_dap_set_log_message(SuiseiEngine *e, const char *path,
+                                       uint32_t line_1based, const char *message);
+void suisei_engine_dap_toggle_breakpoint_enabled(SuiseiEngine *e, const char *path,
+                                                 uint32_t line_1based);
+
 /* Watchpoints — stop when a value changes. `watch` toggles. */
 void suisei_engine_dap_watch(SuiseiEngine *e, const char *name);
 uint8_t suisei_engine_dap_can_watch(const SuiseiEngine *e);

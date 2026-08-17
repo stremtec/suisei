@@ -226,3 +226,40 @@ fn an_extent_longer_than_the_bound_is_not_drawn() {
     let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0, 200);
     assert!(lines.iter().all(|l| l.debug_sign & VALUE_EXTENT == 0));
 }
+
+/// A breakpoint's KIND reaches the gutter, not just its existence.
+///
+/// The sign byte said "there is one here" and nothing else, so a disabled
+/// breakpoint and a conditional one were drawn as the plain kind — the state
+/// was visible in the panel and invisible where the user put it.
+#[test]
+fn the_gutter_learns_whether_a_breakpoint_is_armed_and_decorated() {
+    use suisei_engine::compositor::{BREAKPOINT_DECORATED, BREAKPOINT_DISABLED};
+
+    let (mut engine, path) = engine_at("chips.rs");
+    let _ = engine.app.dap.toggle_breakpoint(&path, 1);
+    let _ = engine.app.dap.toggle_breakpoint(&path, 3);
+    let _ = engine.app.dap.toggle_breakpoint(&path, 5);
+    engine.app.dap.set_breakpoint_condition(&path, 3, Some("i == 3".into()));
+    engine.app.dap.toggle_breakpoint_enabled(&path, 5);
+
+    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0, 200);
+    let sign = |row: u32| {
+        lines
+            .iter()
+            .find(|l| l.line_no == row + 1)
+            .map(|l| l.debug_sign)
+            .unwrap_or(0)
+    };
+
+    // Plain: present, armed, undecorated.
+    assert!(sign(1) & BREAKPOINT_DISABLED == 0);
+    assert!(sign(1) & BREAKPOINT_DECORATED == 0);
+    // Conditional: still armed, but not the plain kind.
+    assert!(sign(3) & BREAKPOINT_DECORATED != 0, "carries a condition");
+    assert!(sign(3) & BREAKPOINT_DISABLED == 0, "and is still armed");
+    // Disabled: still there, not armed.
+    assert!(sign(5) & BREAKPOINT_DISABLED != 0);
+    let plain = lines.iter().find(|l| l.line_no == 6).unwrap();
+    assert!(plain.git_sign & 0x40 != 0, "and still HAS a breakpoint");
+}

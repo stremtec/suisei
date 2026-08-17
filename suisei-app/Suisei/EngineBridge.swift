@@ -71,6 +71,11 @@ struct EditorLine: Equatable, Identifiable {
     var valueExtentLast: Bool { (debugSign & 0x10) != 0 }
     /// The value MOVES on this row — `documentHighlight` called it a write.
     var valueWrite: Bool { (debugSign & 0x20) != 0 }
+    /// The breakpoint here is not armed — drawn hollow. It is still THERE,
+    /// with its place, its condition and its log message.
+    var breakpointDisabled: Bool { (debugSign & 0x40) != 0 }
+    /// It carries a condition or a log message: not the plain kind.
+    var breakpointDecorated: Bool { (debugSign & 0x80) != 0 }
     /// Kind alone: 0 none, 1 added, 2 modified, 3 deleted.
     ///
     /// `& 0x03`, not `& 0x3F`. The wider mask let the hunk flags through into
@@ -325,6 +330,9 @@ struct BreakpointItem: Equatable, Identifiable {
     var verified: Bool
     var condition: String
     var hasLog: Bool
+    var logMessage: String = ""
+    /// Still there, but not armed. Xcode's ⌘-click.
+    var enabled: Bool = true
 }
 
 struct DiagnosticItem: Equatable, Identifiable {
@@ -4218,6 +4226,49 @@ final class EngineBridge: ObservableObject {
     @Published private(set) var datatipPending = false
     private var datatipPoll: DispatchWorkItem?
 
+    /// Set or clear a breakpoint's condition. Empty clears.
+    ///
+    /// Core has had `set_breakpoint_condition` since before this face existed,
+    /// and the snapshot has carried `has_condition` the whole time — the
+    /// breakpoints panel even prints "if <expr>". There was no way to WRITE
+    /// one until now.
+    func dapSetCondition(path: String, line: UInt32, condition: String) {
+        guard let engine else { return }
+        path.withCString { p in
+            condition.withCString { c in
+                suisei_engine_dap_set_condition(engine, p, line, c)
+            }
+        }
+        refreshChrome()
+    }
+
+    /// Set or clear a log message — a logpoint prints and carries on instead
+    /// of stopping. Empty clears.
+    func dapSetLogMessage(path: String, line: UInt32, message: String) {
+        guard let engine else { return }
+        path.withCString { p in
+            message.withCString { m in
+                suisei_engine_dap_set_log_message(engine, p, line, m)
+            }
+        }
+        refreshChrome()
+    }
+
+    /// Arm or disarm, keeping the place, the condition and the log message.
+    func dapToggleBreakpointEnabled(path: String, line: UInt32) {
+        guard let engine else { return }
+        path.withCString { suisei_engine_dap_toggle_breakpoint_enabled(engine, $0, line) }
+        refreshChrome()
+    }
+
+    /// The breakpoint on `line` of the file in front, if there is one.
+    func breakpoint(atLine line: UInt32) -> BreakpointItem? {
+        let file = chrome.filename
+        guard !file.isEmpty else { return nil }
+        let want = (file as NSString).lastPathComponent
+        return breakpoints.first { $0.line == line && $0.name == want }
+    }
+
     /// Stop the program whenever this value changes. Toggles.
     func dapWatch(_ name: String) {
         guard let engine else { return }
@@ -6398,58 +6449,63 @@ final class EngineBridge: ObservableObject {
         )
     }
 
+    /// Read the breakpoint snapshot.
+    ///
+    /// Flat, deliberately. This was seven nested `withUnsafeBytes` closures —
+    /// one per parallel array — indented so far that adding an eighth field
+    /// meant adding an eighth level. A fixed C array is a tuple in Swift and
+    /// has to be read through its bytes, but that is a per-FIELD problem and
+    /// does not have to be a per-field scope.
     private func loadBreakpoints(_ engine: OpaquePointer) -> [BreakpointItem] {
         var snap = SuiseiBreakpointSnapshot()
         guard suisei_engine_breakpoints(engine, &snap) != 0 else { return [] }
-        var items: [BreakpointItem] = []
         let n = min(Int(snap.count), Int(SUISEI_MAX_BREAKPOINTS))
-        withUnsafeBytes(of: snap.paths) { pathsRaw in
-            withUnsafeBytes(of: snap.names) { namesRaw in
-                withUnsafeBytes(of: snap.conditions) { condRaw in
-                    withUnsafeBytes(of: snap.lines) { linesRaw in
-                        withUnsafeBytes(of: snap.verified) { verRaw in
-                            withUnsafeBytes(of: snap.has_condition) { hcRaw in
-                                withUnsafeBytes(of: snap.has_log) { hlRaw in
-                                    let pathCap = Int(SUISEI_PATH_CAP)
-                                    let nameCap = Int(SUISEI_BP_NAME)
-                                    let condCap = 96
-                                    let linePtr = linesRaw.bindMemory(to: UInt32.self)
-                                    let verPtr = verRaw.bindMemory(to: UInt8.self)
-                                    let hcPtr = hcRaw.bindMemory(to: UInt8.self)
-                                    let hlPtr = hlRaw.bindMemory(to: UInt8.self)
-                                    for i in 0..<n {
-                                        let path = String(
-                                            cString: pathsRaw.baseAddress!
-                                                .advanced(by: i * pathCap)
-                                                .assumingMemoryBound(to: CChar.self)
-                                        )
-                                        let name = String(
-                                            cString: namesRaw.baseAddress!
-                                                .advanced(by: i * nameCap)
-                                                .assumingMemoryBound(to: CChar.self)
-                                        )
-                                        let cond = String(
-                                            cString: condRaw.baseAddress!
-                                                .advanced(by: i * condCap)
-                                                .assumingMemoryBound(to: CChar.self)
-                                        )
-                                        items.append(BreakpointItem(
-                                            path: path,
-                                            name: name.isEmpty ? (path as NSString).lastPathComponent : name,
-                                            line: linePtr[i],
-                                            verified: verPtr[i] != 0,
-                                            condition: hcPtr[i] != 0 ? cond : "",
-                                            hasLog: hlPtr[i] != 0
-                                        ))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        guard n > 0 else { return [] }
+
+        let paths = Self.cStrings(snap.paths, cap: Int(SUISEI_PATH_CAP), count: n)
+        let names = Self.cStrings(snap.names, cap: Int(SUISEI_BP_NAME), count: n)
+        let conditions = Self.cStrings(snap.conditions, cap: 96, count: n)
+        let logs = Self.cStrings(snap.logs, cap: 96, count: n)
+        let lineNos = Self.scalars(snap.lines, as: UInt32.self, count: n)
+        let verified = Self.scalars(snap.verified, as: UInt8.self, count: n)
+        let hasCondition = Self.scalars(snap.has_condition, as: UInt8.self, count: n)
+        let hasLog = Self.scalars(snap.has_log, as: UInt8.self, count: n)
+        let enabled = Self.scalars(snap.enabled, as: UInt8.self, count: n)
+
+        return (0..<n).map { i in
+            BreakpointItem(
+                path: paths[i],
+                name: names[i].isEmpty
+                    ? (paths[i] as NSString).lastPathComponent
+                    : names[i],
+                line: lineNos[i],
+                verified: verified[i] != 0,
+                condition: hasCondition[i] != 0 ? conditions[i] : "",
+                hasLog: hasLog[i] != 0,
+                logMessage: hasLog[i] != 0 ? logs[i] : "",
+                enabled: enabled[i] != 0
+            )
+        }
+    }
+
+    /// `count` strings out of a fixed C array of fixed-width buffers.
+    private static func cStrings<T>(_ tuple: T, cap: Int, count: Int) -> [String] {
+        withUnsafeBytes(of: tuple) { raw in
+            guard let base = raw.baseAddress else { return [] }
+            return (0..<count).map { i in
+                String(
+                    cString: base.advanced(by: i * cap)
+                        .assumingMemoryBound(to: CChar.self)
+                )
             }
         }
-        return items
+    }
+
+    /// `count` scalars out of a fixed C array.
+    private static func scalars<T, V>(_ tuple: T, as: V.Type, count: Int) -> [V] {
+        withUnsafeBytes(of: tuple) { raw in
+            Array(raw.bindMemory(to: V.self).prefix(count))
+        }
     }
 
     private func loadExplorer(_ engine: OpaquePointer) -> ExplorerSnap {

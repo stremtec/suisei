@@ -2337,7 +2337,7 @@ fn build_lines_at(
     // wrapped line in a split pane broke past its own right edge.
     let wrap = wrap_cols > 0;
     // Resolve breakpoint path **once** — never canonicalize per row on the scroll hot path.
-    let bp_lines: Option<std::collections::HashSet<usize>> = if is_current {
+    let bp_lines: Option<std::collections::HashMap<usize, (bool, bool)>> = if is_current {
         let path_str = app
             .tabs
             .buffers
@@ -2356,7 +2356,14 @@ fn build_lines_at(
                     continue;
                 }
                 if let Some(bps) = app.dap.breakpoints.get(&k) {
-                    return Some(bps.iter().map(|b| b.line).collect());
+                    // The line AND what kind of breakpoint it is. A hollow
+                    // chip and a marked one are different answers, and the
+                    // face cannot work them out from a set of line numbers.
+                    return Some(
+                        bps.iter()
+                            .map(|b| (b.line, (b.enabled, b.condition.is_some() || b.log_message.is_some())))
+                            .collect(),
+                    );
                 }
             }
             None
@@ -2650,14 +2657,20 @@ fn build_lines_at(
                 }
             }
             let mut gsign = if wrap_cont { git_sign | 0x80 } else { git_sign };
+            let mut dsign = 0u8;
             if !wrap_cont {
                 if let Some(ref set) = bp_lines {
-                    if set.contains(&row) {
+                    if let Some(&(enabled, decorated)) = set.get(&row) {
                         gsign |= 0x40;
+                        if !enabled {
+                            dsign |= BREAKPOINT_DISABLED;
+                        }
+                        if decorated {
+                            dsign |= BREAKPOINT_DECORATED;
+                        }
                     }
                 }
             }
-            let mut dsign = 0u8;
             if !wrap_cont {
                 if stopped_line == Some(row) {
                     dsign |= DEBUG_STOPPED;
@@ -2799,6 +2812,15 @@ pub const VALUE_LAST: u8 = 0x10;
 /// write is where it changes, and only the write kind answers "how does this
 /// value move".
 pub const VALUE_WRITE: u8 = 0x20;
+/// The breakpoint on this row is not armed. Drawn hollow — it is still THERE,
+/// with its place, its condition and its log message; it is switched off.
+pub const BREAKPOINT_DISABLED: u8 = 0x40;
+/// The breakpoint on this row carries a condition or a log message.
+///
+/// Both go in one bit because the chip says the same thing about them: this
+/// one is not the plain kind, look at it. Which of the two it is, is the
+/// menu's business and the panel's.
+pub const BREAKPOINT_DECORATED: u8 = 0x80;
 pub const GIT_HUNK_STAGED: u8 = 0x08;
 pub const GIT_HUNK_FIRST: u8 = 0x10;
 pub const GIT_HUNK_LAST: u8 = 0x20;

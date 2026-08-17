@@ -108,6 +108,9 @@ pub struct BreakpointRow {
     pub verified: bool,
     pub condition: String,
     pub has_log: bool,
+    pub log_message: String,
+    /// A breakpoint that is still there but is not armed.
+    pub enabled: bool,
 }
 
 pub struct Engine {
@@ -1963,6 +1966,8 @@ impl Engine {
                     verified: bp.verified,
                     condition: bp.condition.clone().unwrap_or_default(),
                     has_log: bp.log_message.as_ref().is_some_and(|s| !s.is_empty()),
+                    log_message: bp.log_message.clone().unwrap_or_default(),
+                    enabled: bp.enabled,
                 });
             }
         }

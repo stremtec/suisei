@@ -1664,14 +1664,32 @@ final class EditorCanvasView: NSView {
                 // Same chip the CoreText path draws, squared off: this
                 // renderer has rects only, and a 4pt radius on a 15pt-wide
                 // chip is the part it can afford to lose.
-                renderer.addRect(
-                    Self.breakpointChip(
-                        atY: y, lineH: lineH,
-                        numberWidth: gutterNumberWidth(gutterNumber(for: line), font: font),
-                        phase: bpPhase
-                    ),
-                    colors.breakpoint.withAlphaComponent(bpPhase)
+                let chip = Self.breakpointChip(
+                    atY: y, lineH: lineH,
+                    numberWidth: gutterNumberWidth(gutterNumber(for: line), font: font),
+                    phase: bpPhase
                 )
+                if line.breakpointDisabled {
+                    // Hollow: the outline as four bars, since this renderer has
+                    // rectangles and nothing else. Disabled is the same object
+                    // emptied out — a different colour would be a second thing
+                    // to learn, and a smaller one would read as a different
+                    // kind of breakpoint.
+                    let ink = colors.breakpoint.withAlphaComponent(bpPhase * 0.75)
+                    let t: CGFloat = 1.5
+                    renderer.addRect(CGRect(x: chip.minX, y: chip.minY, width: chip.width, height: t), ink)
+                    renderer.addRect(CGRect(x: chip.minX, y: chip.maxY - t, width: chip.width, height: t), ink)
+                    renderer.addRect(CGRect(x: chip.minX, y: chip.minY, width: t, height: chip.height), ink)
+                    renderer.addRect(CGRect(x: chip.maxX - t, y: chip.minY, width: t, height: chip.height), ink)
+                } else {
+                    renderer.addRect(chip, colors.breakpoint.withAlphaComponent(bpPhase))
+                }
+                if line.breakpointDecorated {
+                    renderer.addRect(
+                        Self.breakpointMarkRect(chip),
+                        colors.breakpointInk.withAlphaComponent(bpPhase)
+                    )
+                }
             }
 
             if EditorDiagnostics.metal, renderer.atlas.isFull {
@@ -2003,12 +2021,27 @@ final class EditorCanvasView: NSView {
                     let chip = Self.breakpointChip(
                         atY: y, lineH: lineH, numberWidth: ln.width, phase: phase
                     )
-                    colors.breakpoint.withAlphaComponent(phase).setFill()
-                    NSBezierPath(
+                    let shape = NSBezierPath(
                         roundedRect: chip,
                         xRadius: Self.breakpointChipRadius * phase,
                         yRadius: Self.breakpointChipRadius * phase
-                    ).fill()
+                    )
+                    if line.breakpointDisabled {
+                        // Hollow. Disabled is the same object emptied out — a
+                        // different colour would be a second thing to learn,
+                        // and a smaller one would read as a different kind of
+                        // breakpoint rather than as the same one switched off.
+                        colors.breakpoint.withAlphaComponent(phase * 0.75).setStroke()
+                        shape.lineWidth = 1.5
+                        shape.stroke()
+                    } else {
+                        colors.breakpoint.withAlphaComponent(phase).setFill()
+                        shape.fill()
+                    }
+                    if line.breakpointDecorated {
+                        colors.breakpointInk.withAlphaComponent(phase).setFill()
+                        NSBezierPath(ovalIn: Self.breakpointMarkRect(chip)).fill()
+                    }
                 }
                 cg.saveGState()
                 cg.textMatrix = .identity
@@ -3098,6 +3131,22 @@ final class EditorCanvasView: NSView {
 
 
 
+    /// The dot on a breakpoint that carries a condition or a log message.
+    ///
+    /// On the chip's trailing edge, where the line number is not — a mark over
+    /// a digit would make the number unreadable, and the number is what the
+    /// chip is behind.
+    ///
+    /// One mark for both, because it says the same thing about them: this one
+    /// is not the plain kind, look at it. WHICH of the two it is belongs to
+    /// the menu and the panel, where there is room to say.
+    static func breakpointMarkRect(_ chip: CGRect) -> CGRect {
+        let d: CGFloat = 3.5
+        return CGRect(
+            x: chip.maxX - d - 1.5, y: chip.minY + 1.5, width: d, height: d
+        )
+    }
+
     static func breakpointChip(
         atY y: CGFloat, lineH: CGFloat, numberWidth: CGFloat,
         phase: CGFloat = 1
@@ -3894,6 +3943,17 @@ final class EditorCanvasView: NSView {
             guard event.clickCount == 1 else { return }
             // An inserted line has no buffer row and therefore no breakpoint.
             guard let row = bufferRow(atY: p.y) else { return }
+            // ⌘-click DISARMS rather than deletes — Xcode's gesture, and the
+            // reason it exists: a breakpoint carries a place, a condition and
+            // a log message, and removing one to quiet it for five minutes
+            // throws all three away.
+            if event.modifierFlags.contains(.command), !engine.chrome.filename.isEmpty {
+                engine.dapToggleBreakpointEnabled(
+                    path: engine.chrome.filename, line: UInt32(row) + 1
+                )
+                noteContentChanged()
+                return
+            }
             // Neither does a wrapped line's continuation. Its gutter is empty
             // BECAUSE it owns no line — clicking there set a breakpoint on the
             // line above, from a row that shows no number to say so.
@@ -4107,6 +4167,140 @@ final class EditorCanvasView: NSView {
 
     // MARK: - Context menu (right-click — standard GUI editing)
 
+    /// The breakpoint at `contextMenuRow`, if there is one.
+    private var contextMenuRow = 0
+
+    /// The gutter's menu.
+    ///
+    /// Every item here reaches something core already had and the face could
+    /// not press: `set_breakpoint_condition`, `set_breakpoint_log`, and now
+    /// `toggle_breakpoint_enabled`. The snapshot has carried `has_condition`
+    /// since before this menu existed — the breakpoints panel prints
+    /// "if <expr>" — so the state was visible and unreachable.
+    private func breakpointMenu(row: Int) -> NSMenu {
+        contextMenuRow = row
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func item(_ title: String, _ action: Selector) -> NSMenuItem {
+            let it = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            it.target = self
+            return it
+        }
+        let existing = engine?.breakpoint(atLine: UInt32(row) + 1)
+        guard let bp = existing else {
+            menu.addItem(item("Add Breakpoint", #selector(ctxBreakpointAdd(_:))))
+            return menu
+        }
+
+        let cond = item(
+            bp.condition.isEmpty ? "Add Condition…" : "Edit Condition…",
+            #selector(ctxBreakpointCondition(_:))
+        )
+        cond.image = NSImage(systemSymbolName: "questionmark.diamond", accessibilityDescription: nil)
+        menu.addItem(cond)
+
+        let log = item(
+            bp.hasLog ? "Edit Log Message…" : "Add Log Message…",
+            #selector(ctxBreakpointLog(_:))
+        )
+        log.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: nil)
+        menu.addItem(log)
+
+        menu.addItem(.separator())
+        // Disable, not delete. A breakpoint carries a place, a condition and a
+        // log message; removing one to quiet it for five minutes throws all
+        // three away, which is why Xcode has both and why this is listed first.
+        let toggle = item(
+            bp.enabled ? "Disable Breakpoint" : "Enable Breakpoint",
+            #selector(ctxBreakpointToggleEnabled(_:))
+        )
+        toggle.image = NSImage(
+            systemSymbolName: bp.enabled ? "pause.circle" : "play.circle",
+            accessibilityDescription: nil
+        )
+        menu.addItem(toggle)
+
+        let del = item("Delete Breakpoint", #selector(ctxBreakpointDelete(_:)))
+        del.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
+        menu.addItem(del)
+        return menu
+    }
+
+    @objc private func ctxBreakpointAdd(_ sender: Any?) {
+        engine?.toggleBreakpointLine(UInt32(contextMenuRow) + 1)
+        noteContentChanged()
+    }
+
+    @objc private func ctxBreakpointDelete(_ sender: Any?) {
+        engine?.toggleBreakpointLine(UInt32(contextMenuRow) + 1)
+        noteContentChanged()
+    }
+
+    @objc private func ctxBreakpointToggleEnabled(_ sender: Any?) {
+        guard let engine else { return }
+        let file = engine.chrome.filename
+        guard !file.isEmpty else { return }
+        engine.dapToggleBreakpointEnabled(path: file, line: UInt32(contextMenuRow) + 1)
+        noteContentChanged()
+    }
+
+    @objc private func ctxBreakpointCondition(_ sender: Any?) {
+        guard let engine else { return }
+        let file = engine.chrome.filename
+        guard !file.isEmpty else { return }
+        let line = UInt32(contextMenuRow) + 1
+        let now = engine.breakpoint(atLine: line)?.condition ?? ""
+        guard let text = Self.askForText(
+            title: "Breakpoint Condition",
+            message: "Stop only when this expression is true. Leave it empty to "
+                + "stop every time.",
+            placeholder: "i == 3",
+            initial: now
+        ) else { return }
+        engine.dapSetCondition(path: file, line: line, condition: text)
+        noteContentChanged()
+    }
+
+    @objc private func ctxBreakpointLog(_ sender: Any?) {
+        guard let engine else { return }
+        let file = engine.chrome.filename
+        guard !file.isEmpty else { return }
+        let line = UInt32(contextMenuRow) + 1
+        let now = engine.breakpoint(atLine: line)?.logMessage ?? ""
+        guard let text = Self.askForText(
+            title: "Breakpoint Log Message",
+            message: "Print this and carry on instead of stopping. Braces "
+                + "interpolate: {name}. Leave it empty to stop instead.",
+            placeholder: "score is {score}",
+            initial: now
+        ) else { return }
+        engine.dapSetLogMessage(path: file, line: line, message: text)
+        noteContentChanged()
+    }
+
+    /// One line of text, or nil when cancelled.
+    ///
+    /// A sheet would be better and needs a window to hang from; a menu item
+    /// fires with no view context of its own, and an alert is what AppKit
+    /// gives for exactly this.
+    private static func askForText(
+        title: String, message: String, placeholder: String, initial: String
+    ) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "Done")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = placeholder
+        field.stringValue = initial
+        field.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return field.stringValue
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let engine else { return nil }
         // Was a vim-Visual probe, which the GUI never entered — Cut/Copy were
@@ -4116,6 +4310,14 @@ final class EditorCanvasView: NSView {
         // symbol is read from here, so both have to survive until the menu item
         // is chosen — by then the event is long gone.
         let p = convert(event.locationInWindow, from: nil)
+        // The GUTTER is a different subject. Right-clicking a line number is
+        // asking about the breakpoint there, not about the code — and it is
+        // the only way to reach conditions and logpoints, which core has had
+        // all along with nothing in the face able to press them.
+        if p.x < EditorMetrics.gutter - EditorMetrics.gutterTextGap * 0.5,
+           let row = bufferRow(atY: p.y) {
+            return breakpointMenu(row: row)
+        }
         contextMenuPoint = p
         contextMenuSymbol = symbolUnderPointer(p) ?? ""
         // Click outside a selection moves the caret there first (Xcode behavior).

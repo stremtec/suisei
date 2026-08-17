@@ -3161,6 +3161,9 @@ pub struct SuiseiBreakpointSnapshot {
     pub paths: [[c_char; SUISEI_PATH_CAP]; SUISEI_MAX_BREAKPOINTS],
     pub names: [[c_char; SUISEI_BP_NAME]; SUISEI_MAX_BREAKPOINTS],
     pub conditions: [[c_char; 96]; SUISEI_MAX_BREAKPOINTS],
+    /// Appended. A breakpoint that is still there but is not armed.
+    pub enabled: [u8; SUISEI_MAX_BREAKPOINTS],
+    pub logs: [[c_char; 96]; SUISEI_MAX_BREAKPOINTS],
 }
 
 #[unsafe(no_mangle)]
@@ -3187,6 +3190,8 @@ pub extern "C" fn suisei_engine_breakpoints(
         write_cstr(&mut o.paths[i], &row.path);
         write_cstr(&mut o.names[i], &row.name);
         write_cstr(&mut o.conditions[i], &row.condition);
+        o.enabled[i] = u8::from(row.enabled);
+        write_cstr(&mut o.logs[i], &row.log_message);
     }
     1
 }
@@ -4994,6 +4999,100 @@ pub extern "C" fn suisei_engine_dap_evaluate(ptr: *mut SuiseiEngine, expr: *cons
     };
     unsafe {
         (*ptr).0.app_mut().dap_evaluate(expr);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Set or clear a breakpoint's condition. An empty string clears it.
+///
+/// Core has had `set_breakpoint_condition` since before this face existed and
+/// the snapshot has carried `has_condition` and `conditions` the whole time —
+/// the panel even prints "if <expr>". There was simply no way to WRITE one.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_set_condition(
+    ptr: *mut SuiseiEngine,
+    path: *const c_char,
+    line_1based: u32,
+    condition: *const c_char,
+) {
+    if ptr.is_null() || path.is_null() || line_1based == 0 {
+        return;
+    }
+    let Ok(path) = (unsafe { std::ffi::CStr::from_ptr(path) }).to_str() else {
+        return;
+    };
+    let text = if condition.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(condition) }
+            .to_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    let value = (!text.trim().is_empty()).then_some(text);
+    unsafe {
+        (*ptr)
+            .0
+            .app_mut()
+            .dap
+            .set_breakpoint_condition(path, line_1based as usize - 1, value);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Set or clear a breakpoint's log message — a logpoint, which prints instead
+/// of stopping. Empty clears it.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_set_log_message(
+    ptr: *mut SuiseiEngine,
+    path: *const c_char,
+    line_1based: u32,
+    message: *const c_char,
+) {
+    if ptr.is_null() || path.is_null() || line_1based == 0 {
+        return;
+    }
+    let Ok(path) = (unsafe { std::ffi::CStr::from_ptr(path) }).to_str() else {
+        return;
+    };
+    let text = if message.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(message) }
+            .to_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    let value = (!text.trim().is_empty()).then_some(text);
+    unsafe {
+        (*ptr)
+            .0
+            .app_mut()
+            .dap
+            .set_breakpoint_log(path, line_1based as usize - 1, value);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Arm or disarm a breakpoint, keeping its place, condition and log message.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_toggle_breakpoint_enabled(
+    ptr: *mut SuiseiEngine,
+    path: *const c_char,
+    line_1based: u32,
+) {
+    if ptr.is_null() || path.is_null() || line_1based == 0 {
+        return;
+    }
+    let Ok(path) = (unsafe { std::ffi::CStr::from_ptr(path) }).to_str() else {
+        return;
+    };
+    unsafe {
+        (*ptr)
+            .0
+            .app_mut()
+            .dap
+            .toggle_breakpoint_enabled(path, line_1based as usize - 1);
         (*ptr).0.recompose();
     }
 }

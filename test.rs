@@ -82,8 +82,7 @@ fn recursive_test(depth: u32) -> u32 {
     if depth == 0 {
         let bottom = 1234;
 
-        // ★ BREAKPOINT:
-        // Call Stack 테스트하기 아주 좋은 위치
+        
         println!("bottom reached: {}", bottom);
 
         return bottom;
