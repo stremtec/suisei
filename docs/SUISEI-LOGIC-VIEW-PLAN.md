@@ -196,6 +196,95 @@ depends on the answer.
 
 ---
 
+## 6a. What it should LOOK like
+
+Asked directly: how does this fit Suisei rather than fight it. The answer comes
+out of what the app already draws, not out of what flowcharts usually look
+like.
+
+### It is not a canvas
+
+The reflex is boxes and bezier edges on a pannable surface — draw.io, Figma,
+every "code visualiser" screenshot. That is a different app's aesthetic and it
+would be the only thing in Suisei that works that way: nothing else here pans,
+nothing else is laid out by a graph algorithm, and nothing else asks the user
+to find things by scrolling in two dimensions.
+
+Suisei is a **document** app. Lists, rails, monospace, capped bars. And a
+program's logic is *mostly a vertical sequence* — which is what a document is.
+
+### The spine is the shape it already has
+
+The git change bar and the value bracket are the same object: **a vertical rule
+with caps, meaning "this run, together"**. The user already reads it that way.
+
+So Logic View is a **spine with rows on it**:
+
+```
+  ┌  fn process
+  │
+  ├─ let mut total = 0
+  │
+  ├─ ◇ n > 10
+  │  ├─ Yes ─ total = n
+  │  └─ No  ─ return 0        ⤫
+  │
+  ├─ ↻ for i in 0..n
+  │  └─ total += i
+  │
+  └─ total                    →
+```
+
+A branch splits the spine into two indented spines that rejoin; a loop is a
+spine with a back mark; an exit ends its spine rather than rejoining. That is
+the capped-bar vocabulary extended to a second subject, which is exactly the
+argument for reusing it — a second visual language for "these belong together"
+would be one more thing to learn.
+
+### Indentation is the hierarchy
+
+Project → Module → File → Function → Statement is disclosure, and the app has
+that idiom twice already: the file tree and the model workbench's outline. A
+closed node is `▸ [Authentication Module]`, and opening it indents its contents
+under it. Nothing new to explain.
+
+### Type and colour come from the app
+
+- **Labels are source text**, so JetBrains Mono, which ships. A paraphrase
+  would be a second thing that can disagree with the code, and the code is what
+  the reader is being helped to understand.
+- **Section headers** uppercase, 9pt, tracked — `WBSection`'s, which is already
+  the app's word for "this is a section".
+- **Structure** in the theme's `fg`/`dim`. **Opaque** nodes in `dim` with `⋯`,
+  visibly less certain than the rest, because they are.
+- **Runtime in amber** — the debugger's colour, the one the stop band, the
+  breakpoint chip, the datatip and the inline values all now share. A node lit
+  in Logic View and a line lit in the editor are then obviously the same fact,
+  which is the entire point of wiring the two together.
+
+### Where it lives
+
+A **pane**, like the model viewer — not the right inspector and not the bottom
+dock.
+
+The inspector is where the Outline lives and Logic View is "the outline, but of
+logic", which argues for it. But the inspector is a column: a branch needs
+width, and this is a surface you *work in* rather than glance at. The bottom
+dock is the debugger's and this is not only for debugging.
+
+A pane also gets the pairing for free: Logic View in one split, code in the
+other, clicking a node moves the other pane's caret. Which is the whole
+interaction — and it is why every node carries its exact source range.
+
+### The one thing to resist
+
+Auto-layout. The moment nodes are positioned by an algorithm, the same function
+looks different after an edit, and a reader loses the map they had built. Rows
+in source order, indentation for nesting, and nothing moves that the code did
+not move.
+
+---
+
 ## 7. What this is not
 
 Not a flowchart generator. The spec says so and it is worth keeping in front:

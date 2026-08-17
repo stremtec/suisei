@@ -284,3 +284,123 @@ def f():
         g.nodes
     );
 }
+
+// ── L2: the hierarchy, and the collapse ────────────────────────────────────
+
+use suisei_core::logic::{collapse, expand, outline};
+
+const TWO_FUNCTIONS: &str = "\
+fn helper(x: i32) -> i32 {
+    if x > 0 {
+        return x;
+    }
+    0
+}
+
+fn main() {
+    let a = helper(3);
+    println!(\"{}\", a);
+}
+";
+
+fn parsed(lang: Lang, src: &str) -> tree_sitter::Tree {
+    let mut bundle = LangBundle::build(lang).expect("grammar loads");
+    bundle.parser.parse(src, None).expect("parses")
+}
+
+/// The file opens as its functions, closed — and NOTHING below them is built.
+///
+/// That is the whole affordability argument: a file of four hundred functions
+/// costs four hundred rows, not four hundred graphs.
+#[test]
+fn a_file_opens_as_its_functions_and_computes_nothing_inside_them() {
+    let tree = parsed(Lang::Rust, TWO_FUNCTIONS);
+    let t = outline(&tree, TWO_FUNCTIONS, Lang::Rust).unwrap();
+
+    let labels: Vec<&str> = t.rows.iter().map(|r| r.label.as_str()).collect();
+    assert_eq!(labels, vec!["helper", "main"], "in source order");
+    assert!(t.rows.iter().all(|r| r.depth == 0 && !r.expanded && r.expandable));
+}
+
+/// Opening one is what costs, and closing it gives the cost back.
+#[test]
+fn opening_a_function_builds_its_body_and_closing_it_drops_it() {
+    let tree = parsed(Lang::Rust, TWO_FUNCTIONS);
+    let mut t = outline(&tree, TWO_FUNCTIONS, Lang::Rust).unwrap();
+
+    assert!(expand(&mut t, 0, &tree, TWO_FUNCTIONS, Lang::Rust));
+    assert!(t.rows[0].expanded);
+    assert!(t.rows.len() > 2, "helper's body is in the list now");
+    // Its steps sit one level in, and `main` is still where it was.
+    assert!(t.rows[1..].iter().any(|r| r.depth == 1));
+    assert!(t.rows.iter().any(|r| r.label == "main" && r.depth == 0));
+    // The function's own Entry is not drawn again inside itself.
+    assert_eq!(
+        t.rows.iter().filter(|r| r.label == "helper").count(),
+        1,
+        "the name appears once"
+    );
+
+    let opened = t.rows.len();
+    assert!(collapse(&mut t, 0));
+    assert_eq!(t.rows.len(), 2, "back to two functions");
+    assert!(opened > t.rows.len());
+    assert!(!t.rows[0].expanded);
+}
+
+/// A call to a function in this file can be opened, and opening it shows the
+/// CALLEE's body — which is what "expand [Authentication Module]" means.
+#[test]
+fn a_call_opens_into_what_it_calls() {
+    let tree = parsed(Lang::Rust, TWO_FUNCTIONS);
+    let mut t = outline(&tree, TWO_FUNCTIONS, Lang::Rust).unwrap();
+
+    // Open `main`, find the call to `helper`.
+    let main_at = t.rows.iter().position(|r| r.label == "main").unwrap();
+    assert!(expand(&mut t, main_at, &tree, TWO_FUNCTIONS, Lang::Rust));
+    let call_at = t
+        .rows
+        .iter()
+        .position(|r| r.label.contains("helper(3)"))
+        .expect("the call is a row");
+    assert!(t.rows[call_at].expandable, "it resolves in this file");
+
+    assert!(expand(&mut t, call_at, &tree, TWO_FUNCTIONS, Lang::Rust));
+    // What appeared is helper's body — its branch — one level deeper.
+    let inner_depth = t.rows[call_at].depth + 1;
+    assert!(
+        t.rows
+            .iter()
+            .any(|r| r.depth == inner_depth && r.kind == LogicKind::Decision),
+        "helper's `if` is now visible under the call: {:?}",
+        t.rows
+    );
+}
+
+/// A call that does not resolve is not openable, and an AMBIGUOUS one is not
+/// either.
+///
+/// A name is not a resolution. Opening the wrong `new` would be a confident
+/// lie of exactly the kind the Opaque rule exists to prevent — so two
+/// functions sharing a name resolve to neither, and that is the language
+/// server's job with a round trip in front of it.
+#[test]
+fn an_unresolved_or_ambiguous_call_does_not_open() {
+    const SRC: &str = "\
+fn a() -> i32 { 1 }
+fn b() -> i32 { 2 }
+fn main() {
+    external_thing();
+}
+";
+    let tree = parsed(Lang::Rust, SRC);
+    let mut t = outline(&tree, SRC, Lang::Rust).unwrap();
+    let main_at = t.rows.iter().position(|r| r.label == "main").unwrap();
+    expand(&mut t, main_at, &tree, SRC, Lang::Rust);
+    let call = t
+        .rows
+        .iter()
+        .find(|r| r.label.contains("external_thing"))
+        .expect("the call is a row");
+    assert!(!call.expandable, "nothing in this file to open");
+}

@@ -462,3 +462,201 @@ impl Builder<'_> {
         ends
     }
 }
+
+// ── L2: the hierarchy, and the collapse ────────────────────────────────────
+//
+// The collapse is load-bearing twice. It is what makes a hundred-file program
+// readable, and it is what makes it COMPUTABLE: a whole-project graph is every
+// function in every file and it invalidates on every keystroke. Computing
+// nothing below a closed node turns that into a per-function job on a tree
+// that is already parsed and already incremental.
+//
+// So `outline` builds the shallowest thing that is useful — the file's
+// functions, closed — and `expand` is the only thing that ever builds a graph.
+
+/// A row of the hierarchy. Flattened with a depth, the same shape the
+/// Variables tree uses, and for the same reason: a list is what a view draws
+/// and a depth is what makes it a tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicRow {
+    pub kind: LogicKind,
+    pub label: String,
+    pub start_row: usize,
+    pub end_row: usize,
+    pub depth: usize,
+    /// There is something inside this that has not been built.
+    pub expandable: bool,
+    pub expanded: bool,
+    /// For a call that resolves: the row its target function starts on.
+    ///
+    /// Same file only, at this stage. Crossing a file needs a definition
+    /// lookup, which is the same mechanism with a round trip in front of it.
+    pub target_row: Option<usize>,
+}
+
+/// The file's logic, as deep as it has been opened.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogicTree {
+    pub rows: Vec<LogicRow>,
+}
+
+/// Every function in the file, closed.
+///
+/// Nothing below this is computed. That is the point: opening one function is
+/// what costs, and a file of four hundred functions costs four hundred rows
+/// rather than four hundred graphs.
+pub fn outline(tree: &tree_sitter::Tree, src: &str, lang: Lang) -> Option<LogicTree> {
+    let g = grammar_for(lang)?;
+    let mut rows = Vec::new();
+    let mut cursor = tree.root_node().walk();
+    let mut stack: Vec<Node<'_>> = tree.root_node().named_children(&mut cursor).collect();
+    stack.reverse();
+    while let Some(n) = stack.pop() {
+        if g.function.contains(&n.kind()) {
+            rows.push(LogicRow {
+                kind: LogicKind::Entry,
+                label: function_label(n, &g, src),
+                start_row: n.start_position().row,
+                end_row: n.end_position().row,
+                depth: 0,
+                expandable: true,
+                expanded: false,
+                target_row: None,
+            });
+            // Not into a function: its body is what expanding it is FOR.
+            continue;
+        }
+        let mut c = n.walk();
+        let kids: Vec<Node<'_>> = n.named_children(&mut c).collect();
+        for k in kids.into_iter().rev() {
+            stack.push(k);
+        }
+    }
+    rows.sort_by_key(|r| r.start_row);
+    Some(LogicTree { rows })
+}
+
+fn function_label(n: Node<'_>, g: &LogicGrammar, src: &str) -> String {
+    n.child_by_field_name(g.name_field)
+        .and_then(|x| x.utf8_text(src.as_bytes()).ok())
+        .unwrap_or("fn")
+        .lines()
+        .next()
+        .unwrap_or("fn")
+        .trim()
+        .to_string()
+}
+
+/// Open the row at `index`, building what is inside it.
+///
+/// The ONLY thing that builds a graph. Returns false when there was nothing to
+/// open — a row already open, a call that resolves nowhere, an index past the
+/// end.
+pub fn expand(t: &mut LogicTree, index: usize, tree: &tree_sitter::Tree, src: &str, lang: Lang) -> bool {
+    let Some(row) = t.rows.get(index) else { return false };
+    if row.expanded || !row.expandable {
+        return false;
+    }
+    let Some(g) = grammar_for(lang) else { return false };
+    // A call opens where its target is DEFINED, so the body that appears is
+    // the callee's — which is what "expand [Authentication Module]" means.
+    let at = row.target_row.unwrap_or(row.start_row);
+    let Some(graph) = graph_at(tree, src, lang, at) else { return false };
+
+    let depth = t.rows[index].depth + 1;
+    let functions = function_starts(tree, &g, src);
+    let inserted: Vec<LogicRow> = graph
+        .nodes
+        .iter()
+        // The graph's own Entry is this row; drawing it again would be the
+        // function's name twice, once inside itself.
+        .filter(|n| n.kind != LogicKind::Entry)
+        .map(|n| {
+            let target = call_target(&n.label, &functions);
+            LogicRow {
+                kind: n.kind,
+                label: n.label.clone(),
+                start_row: n.start_row,
+                end_row: n.end_row,
+                depth,
+                expandable: target.is_some(),
+                expanded: false,
+                target_row: target,
+            }
+        })
+        .collect();
+    t.rows[index].expanded = true;
+    let after = index + 1;
+    t.rows.splice(after..after, inserted);
+    true
+}
+
+/// Close the row at `index`, dropping everything under it.
+pub fn collapse(t: &mut LogicTree, index: usize) -> bool {
+    let Some(depth) = t.rows.get(index).map(|r| r.depth) else { return false };
+    if !t.rows[index].expanded {
+        return false;
+    }
+    let mut end = index + 1;
+    while end < t.rows.len() && t.rows[end].depth > depth {
+        end += 1;
+    }
+    t.rows.drain(index + 1..end);
+    t.rows[index].expanded = false;
+    true
+}
+
+/// Every function in the file, by name, with the row it starts on.
+fn function_starts(tree: &tree_sitter::Tree, g: &LogicGrammar, src: &str) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut cursor = tree.root_node().walk();
+    let mut stack: Vec<Node<'_>> = vec![tree.root_node()];
+    while let Some(n) = stack.pop() {
+        if g.function.contains(&n.kind()) {
+            let name = function_label(n, g, src);
+            if !name.is_empty() {
+                out.push((name, n.start_position().row));
+            }
+        }
+        for c in n.named_children(&mut cursor) {
+            stack.push(c);
+        }
+    }
+    out
+}
+
+/// The function a step calls, if it is one in this file.
+///
+/// By NAME, off the label, which is source text. That is a deliberate limit
+/// and it is why this only claims same-file: a name is not a resolution, and
+/// two functions can share one. Crossing a file — and being right about which
+/// `new` was meant — is the language server's job, and it is the same
+/// mechanism with a round trip in front of it.
+fn call_target(label: &str, functions: &[(String, usize)]) -> Option<usize> {
+    // The identifier immediately before the first `(`.
+    //
+    // Not "everything before the `(`": a step's label is the whole statement,
+    // so `let a = helper(3);` would have resolved as `let a = helper`. Walking
+    // back over identifier characters from the paren is what picks the name
+    // out of `let a = helper(`, `self.helper(` and `foo::bar(` alike.
+    let open = label.find('(')?;
+    let head = &label[..open];
+    let name = head
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .last()
+        .map(|(i, _)| &head[i..])?
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut hits = functions.iter().filter(|(n, _)| n == name);
+    let first = hits.next()?;
+    // Ambiguous is not resolved. Opening the wrong `new` would be a confident
+    // lie of exactly the kind the Opaque rule exists to prevent.
+    if hits.next().is_some() {
+        return None;
+    }
+    Some(first.1)
+}
