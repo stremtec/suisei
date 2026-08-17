@@ -1845,8 +1845,13 @@ final class EditorCanvasView: NSView {
         // the whole of the curve.
         if let run = valueExtentRun(band, lineH: lineH) {
             let ink = colors.valueExtent
-            for r in Self.valueBracketRects(top: run.top, bottom: run.bottom) {
-                renderer.addRect(r, ink)
+            for half in Self.valueBracketHalves(
+                top: run.top, bottom: run.bottom, stop: run.stop, lineH: lineH
+            ) {
+                let c = half.past ? ink : ink.withAlphaComponent(ink.alphaComponent * 0.4)
+                for r in Self.valueBracketRects(top: half.top, bottom: half.bottom) {
+                    renderer.addRect(r, c)
+                }
             }
             for wy in run.writes {
                 let dot = Self.valueWriteDot(atY: wy, lineH: lineH)
@@ -2282,8 +2287,13 @@ final class EditorCanvasView: NSView {
 
         if let run = valueExtentRun(band, lineH: lineH) {
             let ink = colors.valueExtent
-            ink.setStroke()
-            Self.valueBracketPath(top: run.top, bottom: run.bottom).stroke()
+            for half in Self.valueBracketHalves(
+                top: run.top, bottom: run.bottom, stop: run.stop, lineH: lineH
+            ) {
+                (half.past ? ink : ink.withAlphaComponent(ink.alphaComponent * 0.4))
+                    .setStroke()
+                Self.valueBracketPath(top: half.top, bottom: half.bottom).stroke()
+            }
             ink.setFill()
             for wy in run.writes {
                 NSBezierPath(ovalIn: Self.valueWriteDot(atY: wy, lineH: lineH)).fill()
@@ -2470,10 +2480,11 @@ final class EditorCanvasView: NSView {
     /// coordinates. Nil when there is no extent in the band.
     private func valueExtentRun<Band: Sequence<EditorLine>>(
         _ band: Band, lineH: CGFloat
-    ) -> (top: CGFloat, bottom: CGFloat, writes: [CGFloat])? {
+    ) -> (top: CGFloat, bottom: CGFloat, writes: [CGFloat], stop: CGFloat?)? {
         var top: CGFloat?
         var bottom: CGFloat = 0
         var writes: [CGFloat] = []
+        var stop: CGFloat?
         var previousLineNo: UInt32 = .max
         var segment = 0
         for line in band {
@@ -2484,9 +2495,12 @@ final class EditorCanvasView: NSView {
             if top == nil { top = y }
             bottom = max(bottom, y + lineH)
             if line.valueWrite { writes.append(y) }
+            // Where the program is stopped, IF it is stopped inside this
+            // value's extent. That row cuts the bracket in two.
+            if line.isStoppedLine { stop = y }
         }
         guard let t = top else { return nil }
-        return (t, bottom, writes)
+        return (t, bottom, writes, stop)
     }
 
     private func gitBars<Band: Sequence<EditorLine>>(
@@ -2993,6 +3007,31 @@ final class EditorCanvasView: NSView {
         path.lineCapStyle = .round
         path.lineJoinStyle = .round
         return path
+    }
+
+    /// The bracket, cut at the stop.
+    ///
+    /// The one fact in this drawing that only the debugger knows: above the
+    /// stop is where the value has ALREADY been, below is where it is going.
+    /// A reader gets past and future out of it without a legend — which is the
+    /// argument for drawing this in the editor at all, since position is
+    /// spatial and the panel is not.
+    ///
+    /// The future half is drawn faint. Same bracket, same place, less ink: it
+    /// has not happened yet, and saying so by weight costs no second shape.
+    ///
+    /// Returns the two halves, top first. One entry when the program is not
+    /// stopped inside this extent, which is most of the time.
+    static func valueBracketHalves(
+        top: CGFloat, bottom: CGFloat, stop: CGFloat?, lineH: CGFloat
+    ) -> [(top: CGFloat, bottom: CGFloat, past: Bool)] {
+        guard let stop, stop > top, stop + lineH < bottom else {
+            // A stop at either end has no two sides — the whole run is one of
+            // them, and a bracket cut flush with its own cap is just a bracket
+            // with a chipped corner.
+            return [(top, bottom, stop == nil ? true : stop! >= bottom - lineH)]
+        }
+        return [(top, stop, true), (stop + lineH, bottom, false)]
     }
 
     static let valueBracketStroke: CGFloat = 1.75
