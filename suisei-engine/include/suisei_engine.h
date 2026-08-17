@@ -1091,6 +1091,11 @@ void suisei_engine_dap_evaluate(SuiseiEngine *ptr, const char *expr);
 
 /* Hover datatip. `request` asks; `dap_datatip` returns 1 when filled, 2 while
    a request is in flight, 0 when there is nothing. */
+/* Watchpoints — stop when a value changes. `watch` toggles. */
+void suisei_engine_dap_watch(SuiseiEngine *e, const char *name);
+uint8_t suisei_engine_dap_can_watch(const SuiseiEngine *e);
+uint8_t suisei_engine_dap_is_watched(const SuiseiEngine *e, const char *name);
+
 void suisei_engine_dap_request_datatip(SuiseiEngine *e, const char *expr);
 uint8_t suisei_engine_dap_datatip(const SuiseiEngine *e, char *out_expr,
                                   char *out_value, char *out_type,

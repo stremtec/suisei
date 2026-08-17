@@ -4998,6 +4998,50 @@ pub extern "C" fn suisei_engine_dap_evaluate(ptr: *mut SuiseiEngine, expr: *cons
     }
 }
 
+/// Watch a value: stop the program whenever it changes.
+///
+/// Toggles — asking to watch something already watched stops watching it,
+/// which is what a menu item that says "Break When Value Changes" has to do
+/// when it is ticked.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_watch(ptr: *mut SuiseiEngine, name: *const c_char) {
+    if ptr.is_null() || name.is_null() {
+        return;
+    }
+    let Ok(name) = unsafe { std::ffi::CStr::from_ptr(name) }.to_str() else {
+        return;
+    };
+    unsafe {
+        (*ptr).0.app_mut().dap.watch(name);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Whether this adapter can watch values at all, so a menu can leave the item
+/// out rather than offer something that will be refused.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_can_watch(ptr: *const SuiseiEngine) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    u8::from(unsafe { (*ptr).0.app().dap.supports_data_breakpoints })
+}
+
+/// Whether `name` is currently watched — the menu item's tick.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_dap_is_watched(
+    ptr: *const SuiseiEngine,
+    name: *const c_char,
+) -> u8 {
+    if ptr.is_null() || name.is_null() {
+        return 0;
+    }
+    let Ok(name) = unsafe { std::ffi::CStr::from_ptr(name) }.to_str() else {
+        return 0;
+    };
+    u8::from(unsafe { (*ptr).0.app().dap.watchpoints.iter().any(|w| w.name == name) })
+}
+
 /// Ask what the identifier under the pointer is worth.
 ///
 /// Separate from `suisei_engine_dap_evaluate`, which is the console's: this

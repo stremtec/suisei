@@ -4218,6 +4218,25 @@ final class EngineBridge: ObservableObject {
     @Published private(set) var datatipPending = false
     private var datatipPoll: DispatchWorkItem?
 
+    /// Stop the program whenever this value changes. Toggles.
+    func dapWatch(_ name: String) {
+        guard let engine else { return }
+        name.withCString { suisei_engine_dap_watch(engine, $0) }
+        refreshDapIfNeeded()
+    }
+
+    /// Whether this adapter can watch values at all — a menu leaves the item
+    /// out rather than offering something that will be refused.
+    var dapCanWatch: Bool {
+        guard let engine else { return false }
+        return suisei_engine_dap_can_watch(engine) != 0
+    }
+
+    func dapIsWatched(_ name: String) -> Bool {
+        guard let engine else { return false }
+        return name.withCString { suisei_engine_dap_is_watched(engine, $0) != 0 }
+    }
+
     func requestDatatip(_ expression: String) {
         guard let engine else { return }
         datatipPoll?.cancel()

@@ -96,6 +96,20 @@ pub struct VarNode {
     pub is_scope: bool,
 }
 
+/// A value the program is stopped for whenever it changes.
+///
+/// The `data_id` is the adapter's — it is resolved from a NAME in a frame, and
+/// it is what `setDataBreakpoints` takes. The name is kept beside it because
+/// the id is opaque and a list of opaque ids is not a list a person can read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Watchpoint {
+    pub data_id: String,
+    pub name: String,
+    /// The adapter's own description of what it is watching — often the
+    /// address and size, which is the honest answer to "watching what".
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DebugPane {
     Stack,
@@ -146,6 +160,10 @@ enum PendingKind {
     /// variablesReference the children belong to
     Variables(i64),
     Threads,
+    /// dataBreakpointInfo — carries the name so the answer can be listed under
+    /// it, since the `dataId` that comes back is opaque.
+    DataBreakpointInfo(String),
+    SetDataBreakpoints,
     /// A hover datatip. Its own kind, not `Evaluate`, because the answer goes
     /// to a popover instead of the console — a hover that logged would fill
     /// the console with every word the pointer crossed.
@@ -197,6 +215,10 @@ pub struct DapClient {
     /// one, which is the same reason `refreshHover` clears before it asks.
     pub datatip: Option<(String, String, String)>,
     pub datatip_pending: bool,
+    /// Values being watched. Armed together, because `setDataBreakpoints`
+    /// replaces the whole set on every call — the same shape as
+    /// `setBreakpoints`.
+    pub watchpoints: Vec<Watchpoint>,
     pub selected_bp: usize,
     pub pane: DebugPane,
     pub focus_row: usize,
@@ -222,6 +244,12 @@ pub struct DapClient {
     // Sequencer
     supports_config_done: bool,
     supports_terminate: bool,
+    /// Whether the adapter can watch a value at all.
+    ///
+    /// Asked rather than assumed: `dataBreakpointInfo` is optional in the
+    /// spec, and offering "break when this changes" on an adapter that cannot
+    /// do it is the worst kind of menu item.
+    pub supports_data_breakpoints: bool,
     /// Filters chosen from the adapter's exceptionBreakpointFilters.
     exception_filters: Vec<String>,
     /// Set when the launch/attach request went out; drives the config fallback timer.
@@ -292,6 +320,7 @@ impl DapClient {
             selected_frame: 0,
             datatip: None,
             datatip_pending: false,
+            watchpoints: Vec::new(),
             selected_bp: 0,
             pane: DebugPane::Stack,
             focus_row: 0,
@@ -308,6 +337,7 @@ impl DapClient {
             last_attach: None,
             supports_config_done: true,
             supports_terminate: false,
+            supports_data_breakpoints: false,
             exception_filters: Vec::new(),
             launch_sent_at: None,
             config_sent: false,
@@ -1307,6 +1337,10 @@ impl DapClient {
         self.thread_id = None;
         self.current_line = None;
         self.children_cache.clear();
+        // Watchpoints die with the session. A `dataId` is the adapter's,
+        // resolved against an address in a process that no longer exists —
+        // carrying them across would arm garbage on the next run.
+        self.watchpoints.clear();
         // Keep build_rx if a build is still running
         if self.build_rx.is_none() {
             self.build_message = None;
@@ -1546,6 +1580,78 @@ impl DapClient {
             }
         }));
         self.eval_input.clear();
+    }
+
+    /// Ask the adapter whether a value can be watched, then watch it.
+    ///
+    /// Two steps because the spec is two steps, and the first one is the
+    /// important one: `dataBreakpointInfo` resolves a NAME in a frame to an
+    /// opaque `dataId`, and it is allowed to answer "no" — a register, a value
+    /// with no address, or simply no hardware left. **Watchpoints are scarce
+    /// hardware**: x86 and ARM give four, and the fifth request fails. Asking
+    /// first is what lets the refusal be reported instead of swallowed.
+    pub fn watch(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if !self.supports_data_breakpoints {
+            self.log(format!("✗ watch {name}: this adapter cannot watch values"));
+            return;
+        }
+        if self.state != DapState::Stopped {
+            self.log(format!("✗ watch {name}: only while stopped"));
+            return;
+        }
+        if self.watchpoints.iter().any(|w| w.name == name) {
+            self.unwatch(name);
+            return;
+        }
+        let frame_id = self
+            .stack
+            .get(self.selected_frame)
+            .map(|f| f.id)
+            .unwrap_or(0);
+        let id = self.alloc(PendingKind::DataBreakpointInfo(name.to_string()));
+        self.send_json(&json!({
+            "seq": id,
+            "type": "request",
+            "command": "dataBreakpointInfo",
+            "arguments": { "name": name, "frameId": frame_id }
+        }));
+    }
+
+    /// Stop watching, by the name the user asked about.
+    pub fn unwatch(&mut self, name: &str) {
+        let before = self.watchpoints.len();
+        self.watchpoints.retain(|w| w.name != name);
+        if self.watchpoints.len() != before {
+            self.log(format!("○ no longer watching {name}"));
+            self.send_data_breakpoints();
+        }
+    }
+
+    /// Arm the whole set.
+    ///
+    /// `setDataBreakpoints` replaces every watchpoint on each call — the same
+    /// shape as `setBreakpoints`, and the same reason the list is the unit
+    /// rather than the individual.
+    fn send_data_breakpoints(&mut self) {
+        if !self.is_session() {
+            return;
+        }
+        let points: Vec<Value> = self
+            .watchpoints
+            .iter()
+            .map(|w| json!({ "dataId": w.data_id, "accessType": "write" }))
+            .collect();
+        let id = self.alloc(PendingKind::SetDataBreakpoints);
+        self.send_json(&json!({
+            "seq": id,
+            "type": "request",
+            "command": "setDataBreakpoints",
+            "arguments": { "breakpoints": points }
+        }));
     }
 
     /// Ask what an expression is worth, for a hover datatip.
@@ -2062,6 +2168,10 @@ impl DapClient {
                     .get("supportsTerminateRequest")
                     .and_then(|x| x.as_bool())
                     .unwrap_or(false);
+                self.supports_data_breakpoints = body
+                    .get("supportsDataBreakpoints")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
                 self.exception_filters = pick_exception_filters(&body);
                 // Spec order: launch/attach goes out now; the adapter answers it only
                 // after configurationDone (which follows its `initialized`).
@@ -2291,6 +2401,55 @@ impl DapClient {
                     self.log(format!("= {result}"));
                 } else {
                     self.log(format!("= {result}  ({typ})"));
+                }
+            }
+            Some(PendingKind::DataBreakpointInfo(name)) => {
+                // `dataId: null` is the spec's "no, and here is why". Reporting
+                // that is the whole point of asking — hardware watchpoints run
+                // out at four, and the fifth silently doing nothing would be
+                // the worst version of this feature.
+                let Some(data_id) = body.get("dataId").and_then(|d| d.as_str()) else {
+                    let why = body
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("cannot be watched");
+                    self.log(format!("✗ watch {name}: {why}"));
+                    return;
+                };
+                let description = body
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.watchpoints.push(Watchpoint {
+                    data_id: data_id.to_string(),
+                    name: name.clone(),
+                    description,
+                });
+                self.log(format!("◉ watching {name}"));
+                self.send_data_breakpoints();
+            }
+            Some(PendingKind::SetDataBreakpoints) => {
+                // The response is 1:1 with the request, and an adapter may
+                // refuse one it had previously allowed — the hardware is
+                // claimed at arm time, not at info time.
+                if let Some(arr) = body.get("breakpoints").and_then(|b| b.as_array()) {
+                    let mut refused: Vec<String> = Vec::new();
+                    for (w, resp) in self.watchpoints.iter().zip(arr) {
+                        if !resp.get("verified").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            let why = resp
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("refused");
+                            refused.push(format!("{}: {why}", w.name));
+                        }
+                    }
+                    for r in &refused {
+                        self.log(format!("✗ watch {r}"));
+                    }
+                    let names: Vec<String> =
+                        refused.iter().filter_map(|r| r.split(':').next().map(str::to_string)).collect();
+                    self.watchpoints.retain(|w| !names.contains(&w.name));
                 }
             }
             Some(PendingKind::Datatip) => {
@@ -2976,6 +3135,129 @@ fn parse_launch_configs(v: &Value, workspace: &Path) -> Vec<LaunchConfig> {
 
 #[cfg(test)]
 mod tests {
+    fn stopped_with_a_frame() -> DapClient {
+        let mut d = DapClient::default();
+        d.state = DapState::Stopped;
+        d.supports_data_breakpoints = true;
+        d.stack = vec![StackFrameInfo {
+            id: 11,
+            name: "f".into(),
+            path: "/tmp/x.rs".into(),
+            line: 1,
+            column: 0,
+        }];
+        d
+    }
+
+    /// Watching is two steps because the spec is two steps, and the first is
+    /// the one that matters: a name is resolved to an opaque `dataId` IN A
+    /// FRAME before anything is armed.
+    #[test]
+    fn watching_asks_the_adapter_first() {
+        let mut d = stopped_with_a_frame();
+        d.watch("bottom");
+
+        let sent = d.sent.last().expect("a request went out");
+        assert_eq!(sent["command"], "dataBreakpointInfo");
+        assert_eq!(sent["arguments"]["name"], "bottom");
+        assert_eq!(sent["arguments"]["frameId"], 11, "in the selected frame");
+        assert!(d.watchpoints.is_empty(), "nothing is watched until it answers");
+    }
+
+    /// A refusal is REPORTED. Hardware watchpoints run out at four, and the
+    /// fifth silently doing nothing is the worst version of this feature.
+    #[test]
+    fn a_refused_watch_says_why_and_watches_nothing() {
+        let mut d = stopped_with_a_frame();
+        d.watch("bottom");
+        let seq = d.sent.last().unwrap()["seq"].as_u64().unwrap();
+        let before = d.console.len();
+
+        d.handle_response(&json!({
+            "type": "response",
+            "request_seq": seq,
+            "success": true,
+            "command": "dataBreakpointInfo",
+            "body": { "dataId": null, "description": "no more hardware watchpoints" }
+        }));
+
+        assert!(d.watchpoints.is_empty());
+        let said = d.console[before..].join("\n");
+        assert!(said.contains("no more hardware watchpoints"), "{said}");
+    }
+
+    /// An accepted one is armed, and arming replaces the whole set — the same
+    /// shape `setBreakpoints` has, and the reason the list is the unit.
+    #[test]
+    fn an_accepted_watch_is_armed_as_part_of_the_whole_set() {
+        let mut d = stopped_with_a_frame();
+        d.writer = None;
+        d.watch("bottom");
+        let seq = d.sent.last().unwrap()["seq"].as_u64().unwrap();
+
+        d.handle_response(&json!({
+            "type": "response",
+            "request_seq": seq,
+            "success": true,
+            "command": "dataBreakpointInfo",
+            "body": { "dataId": "0x16f", "description": "4 bytes at 0x16f" }
+        }));
+
+        assert_eq!(d.watchpoints.len(), 1);
+        assert_eq!(d.watchpoints[0].name, "bottom");
+        assert_eq!(d.watchpoints[0].data_id, "0x16f");
+
+        let armed = d.sent.last().unwrap();
+        assert_eq!(armed["command"], "setDataBreakpoints");
+        assert_eq!(armed["arguments"]["breakpoints"][0]["dataId"], "0x16f");
+        assert_eq!(armed["arguments"]["breakpoints"][0]["accessType"], "write");
+    }
+
+    /// Asking to watch something already watched stops watching it — a menu
+    /// item that says "Break When Value Changes" has to un-say it.
+    #[test]
+    fn watching_the_same_value_twice_stops_watching_it() {
+        let mut d = stopped_with_a_frame();
+        d.watchpoints.push(Watchpoint {
+            data_id: "0x16f".into(),
+            name: "bottom".into(),
+            description: String::new(),
+        });
+
+        d.watch("bottom");
+
+        assert!(d.watchpoints.is_empty());
+    }
+
+    /// A `dataId` is an address in a process. When the process goes, so does
+    /// the watchpoint — carrying it into the next run would arm garbage.
+    #[test]
+    fn watchpoints_do_not_survive_the_session() {
+        let mut d = stopped_with_a_frame();
+        d.watchpoints.push(Watchpoint {
+            data_id: "0x16f".into(),
+            name: "bottom".into(),
+            description: String::new(),
+        });
+
+        d.stop();
+
+        assert!(d.watchpoints.is_empty());
+    }
+
+    /// An adapter that cannot watch says so once, rather than the request
+    /// going out and failing.
+    #[test]
+    fn an_adapter_without_watchpoints_is_not_asked() {
+        let mut d = stopped_with_a_frame();
+        d.supports_data_breakpoints = false;
+
+        d.watch("bottom");
+
+        assert!(d.sent.is_empty());
+        assert!(d.console.last().unwrap().contains("cannot watch"));
+    }
+
     /// A breakpoint the adapter moved says where it went.
     ///
     /// It moved in silence, and a mark appearing two lines below the one that

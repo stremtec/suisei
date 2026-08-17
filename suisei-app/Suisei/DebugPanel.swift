@@ -357,6 +357,29 @@ struct DebugPanelView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    // Watching is a property of a VARIABLE, so it is offered
+                    // on the variable — not in a menu somewhere that then has
+                    // to ask which one you meant.
+                    //
+                    // Absent rather than disabled when the adapter cannot do
+                    // it: a permanently greyed item is a promise the product
+                    // never keeps. Absent on scopes too — "Locals" is not a
+                    // value and has no address to watch.
+                    .contextMenu {
+                        if engine.dapCanWatch, !node.isScope, !node.name.isEmpty {
+                            let on = engine.dapIsWatched(node.name)
+                            Button {
+                                engine.dapWatch(node.name)
+                            } label: {
+                                Label(
+                                    on
+                                        ? "Stop Watching \(node.name)"
+                                        : "Break When \(node.name) Changes",
+                                    systemImage: on ? "eye.slash" : "eye"
+                                )
+                            }
+                        }
+                    }
                 }
             }
             .padding(.bottom, 6)
