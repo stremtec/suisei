@@ -105,31 +105,13 @@ fn dap_state_code(state: suisei_core::dap::DapState) -> u8 {
 /// Whole-word because `count` must not match inside `account`: an annotation
 /// naming a variable that is not on the line is worse than none, since it is
 /// read as a fact about that line.
-fn contains_word(line: &str, word: &str) -> bool {
-    if word.is_empty() {
-        return false;
-    }
-    let bytes = line.as_bytes();
-    let mut from = 0;
-    while let Some(at) = line[from..].find(word) {
-        let start = from + at;
-        let end = start + word.len();
-        let before = start == 0 || !is_ident_byte(bytes[start - 1]);
-        let after = end >= bytes.len() || !is_ident_byte(bytes[end]);
-        if before && after {
-            return true;
-        }
-        from = end.max(start + 1);
-        if from >= line.len() {
-            break;
-        }
-    }
-    false
-}
+/// One definition of "this line names that variable", shared with Logic View.
+///
+/// It used to be a private copy here. Two copies of a word test is two things
+/// that can come to disagree about whether `account` mentions `count`, and
+/// both features answer that question about the same fact.
+use suisei_core::logic::contains_word;
 
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
-}
 
 /// A value on one line, short enough to sit at the end of a row of code.
 ///
@@ -2025,8 +2007,7 @@ impl Engine {
         else {
             return Vec::new();
         };
-        let same = open == stop_path
-            || std::fs::canonicalize(&open).ok() == std::fs::canonicalize(stop_path).ok();
+        let same = suisei_core::logic::same_file(&open, stop_path);
         if !same {
             return Vec::new();
         }

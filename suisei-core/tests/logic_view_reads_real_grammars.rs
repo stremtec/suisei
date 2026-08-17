@@ -404,3 +404,114 @@ fn main() {
         .expect("the call is a row");
     assert!(!call.expandable, "nothing in this file to open");
 }
+
+// ── L3: the runtime overlay ────────────────────────────────────────────────
+
+use suisei_core::logic::{row_at, runtime, values_on};
+
+/// The row running now is the INNERMOST one holding the stopped line, and the
+/// rows around it are the branch and loop bodies we are inside.
+///
+/// An `if` and the step inside it both hold the line. The step is what is
+/// running; the `if` is where we are.
+#[test]
+fn the_stopped_row_is_the_innermost_thing_holding_the_line() {
+    let tree = parsed(Lang::Rust, TWO_FUNCTIONS);
+    let mut t = outline(&tree, TWO_FUNCTIONS, Lang::Rust).unwrap();
+    expand(&mut t, 0, &tree, TWO_FUNCTIONS, Lang::Rust);
+
+    // Line 2 is `return x;`, inside `if x > 0 {`, inside `helper`.
+    let rt = runtime(&t, "/x.rs", Some(("/x.rs", 2)), &[("helper", "/x.rs", 2)]);
+    let at = rt.stopped.expect("something is running");
+    assert_eq!(t.rows[at].label, "return x");
+
+    let around: Vec<&str> = rt.enclosing.iter().map(|&i| t.rows[i].label.as_str()).collect();
+    assert_eq!(around, vec!["helper", "x > 0"], "outermost first");
+    assert!(!rt.enclosing.contains(&at), "the stopped row is not around itself");
+}
+
+/// A local called `count` means nothing on a row of a file the program is not
+/// stopped in — the same rule the editor's inline values follow, because it is
+/// the same fact.
+#[test]
+fn nothing_is_marked_in_a_file_the_program_is_not_in() {
+    let tree = parsed(Lang::Rust, TWO_FUNCTIONS);
+    let mut t = outline(&tree, TWO_FUNCTIONS, Lang::Rust).unwrap();
+    expand(&mut t, 0, &tree, TWO_FUNCTIONS, Lang::Rust);
+
+    let rt = runtime(&t, "/x.rs", Some(("/other.rs", 2)), &[("helper", "/other.rs", 2)]);
+    assert_eq!(rt, Default::default(), "nothing here is running: {rt:?}");
+}
+
+/// The way in, which is the one part of the runtime path that is KNOWN.
+///
+/// The call stack is exact — which functions we came through is not an
+/// inference, and the row a caller sits on is the call that is still open.
+#[test]
+fn the_call_stack_marks_the_way_in() {
+    let tree = parsed(Lang::Rust, TWO_FUNCTIONS);
+    let mut t = outline(&tree, TWO_FUNCTIONS, Lang::Rust).unwrap();
+    let main_at = t.rows.iter().position(|r| r.label == "main").unwrap();
+    expand(&mut t, main_at, &tree, TWO_FUNCTIONS, Lang::Rust);
+    expand(&mut t, 0, &tree, TWO_FUNCTIONS, Lang::Rust);
+
+    // Stopped inside helper, having got there from `let a = helper(3);`.
+    let rt = runtime(
+        &t,
+        "/x.rs",
+        Some(("/x.rs", 2)),
+        &[("helper", "/x.rs", 2), ("main", "/x.rs", 8)],
+    );
+    let callers: Vec<&str> = rt.callers.iter().map(|&i| t.rows[i].label.as_str()).collect();
+    assert_eq!(callers, vec!["let a = helper(3);"]);
+    // And the frame we are IN is not listed as a caller of itself.
+    assert!(!rt.callers.contains(&rt.stopped.unwrap()));
+}
+
+/// An arm of a branch has to read as an arm, not as the next statement — so a
+/// row carries WHY it follows the one before it, off the graph's own edges.
+#[test]
+fn a_branch_arm_is_marked_as_an_arm_and_nests_inside_its_branch() {
+    let tree = parsed(Lang::Rust, TWO_FUNCTIONS);
+    let mut t = outline(&tree, TWO_FUNCTIONS, Lang::Rust).unwrap();
+    expand(&mut t, 0, &tree, TWO_FUNCTIONS, Lang::Rust);
+
+    let branch = t.rows.iter().position(|r| r.kind == LogicKind::Decision).unwrap();
+    let arm = t.rows.iter().position(|r| r.label == "return x").unwrap();
+    assert_eq!(t.rows[arm].edge, EdgeLabel::Yes, "it runs when the test holds");
+    assert_eq!(
+        t.rows[arm].depth,
+        t.rows[branch].depth + 1,
+        "and it sits inside the branch"
+    );
+    // What comes after the whole `if` is back out at the branch's own level.
+    let after = t.rows.iter().position(|r| r.label == "0").unwrap();
+    assert_eq!(t.rows[after].depth, t.rows[branch].depth);
+    assert_eq!(t.rows[after].edge, EdgeLabel::Next);
+}
+
+/// A row is annotated with what it NAMES, and nothing else. `account` is not
+/// `count`.
+#[test]
+fn a_row_shows_only_the_values_it_mentions() {
+    let vals = [("a", "3"), ("count", "7"), ("account", "99")];
+    assert_eq!(values_on("let a = helper(3);", &vals), vec![("a", "3")]);
+    assert_eq!(values_on("println!(\"{}\", account)", &vals), vec![("account", "99")]);
+    assert!(values_on("return;", &vals).is_empty());
+}
+
+/// Source to logic: clicking a line finds the row, which is the same
+/// containment test read the other way round.
+#[test]
+fn a_line_of_source_resolves_to_the_row_that_is_it() {
+    let tree = parsed(Lang::Rust, TWO_FUNCTIONS);
+    let mut t = outline(&tree, TWO_FUNCTIONS, Lang::Rust).unwrap();
+    let main_at = t.rows.iter().position(|r| r.label == "main").unwrap();
+    expand(&mut t, main_at, &tree, TWO_FUNCTIONS, Lang::Rust);
+
+    assert_eq!(t.rows[row_at(&t, 8).unwrap()].label, "let a = helper(3);");
+    // A line inside a function that has not been opened resolves to the
+    // function — which is the row that is actually on screen.
+    assert_eq!(t.rows[row_at(&t, 2).unwrap()].label, "helper");
+    assert!(row_at(&t, 6).is_none(), "the blank line between them is nobody's");
+}
