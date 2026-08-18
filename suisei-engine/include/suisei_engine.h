@@ -1309,6 +1309,9 @@ typedef struct SuiseiBuildSnapshot {
   uint32_t console_count;
   uint32_t console_total;
   char console[SUISEI_MAX_BUILD_CONSOLE][SUISEI_BUILD_LINE];
+  /* What each line IS — the debugger's vocabulary, because it is one console
+     to the reader: 0 program, 1 note, 2 adapter, 3 error, 4 result. */
+  uint8_t console_kinds[SUISEI_MAX_BUILD_CONSOLE];
   uint32_t problem_count;
   uint32_t problem_total;
   uint32_t problem_rows[SUISEI_MAX_BUILD_PROBLEMS]; /* 0-based */

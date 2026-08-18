@@ -267,6 +267,24 @@ struct SuiseiApp: App {
 
         // Terminal — shell surfaces (not only buried chords).
         CommandMenu("Debug") {
+            // Build, Run and Test lead, on the three keys every editor with a
+            // Product menu has used since Xcode 3. They do not need the
+            // debugger: `dap.rs` builds in order to LAUNCH, and this is the
+            // other half — running something because the output is the point.
+            //
+            // The panel follows the STATE rather than being opened from here,
+            // so pressing ⌘B from the menu and pressing Build in the panel land
+            // in exactly the same place.
+            Button("Build") { engine.buildRun(.build) }
+                .keyboardShortcut("b", modifiers: .command)
+            Button("Run") { engine.buildRun(.run) }
+                .keyboardShortcut("r", modifiers: .command)
+            Button("Test") { engine.buildRun(.test) }
+                .keyboardShortcut("u", modifiers: .command)
+            Button("Stop Build") { engine.buildStop() }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+            Divider()
+
             // The debugger's own shortcuts, which are the same five keys in
             // every tool that has one. Core has had all of this since before
             // this face existed; until now there was no way to press it.

@@ -35,6 +35,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::dap::{LogKind, LogLine};
 use crate::lsp::{Diagnostic, DiagnosticSeverity};
 
 /// Lines of console kept. A `cargo build` of a large workspace prints a few
@@ -316,7 +317,12 @@ pub struct Build {
     pub cwd: PathBuf,
     pub state: BuildState,
     /// Every line, oldest first, capped at [`OUTPUT_CAP`].
-    pub output: VecDeque<String>,
+    ///
+    /// The same `LogLine` the debugger's console holds, and deliberately: the
+    /// two consoles are one thing to a reader, and one kind of line drawn two
+    /// ways in two panels is a difference nobody can learn anything from. The
+    /// type lives in `dap.rs` because that is where the console was born.
+    pub output: VecDeque<LogLine>,
     pub problems: Vec<Problem>,
     /// Bumped whenever `problems` changes, so the merge into the editor's
     /// diagnostics knows when it is stale without comparing the vectors.
@@ -428,7 +434,7 @@ impl Build {
         self.traceback = None;
         self.panic_at = None;
         self.dropped = 0;
-        self.push_output(format!("$ {}", plan.command_line()));
+        self.push_output(LogKind::Note, format!("$ {}", plan.command_line()));
         Ok(())
     }
 
@@ -445,7 +451,7 @@ impl Build {
             self.finish_parse();
             self.state = BuildState::Failed;
             self.took = self.started.map(|t| t.elapsed());
-            self.push_output("· stopped".into());
+            self.push_output(LogKind::Result, "· stopped".into());
         }
     }
 
@@ -502,11 +508,14 @@ impl Build {
                     .took
                     .map(|d| format!(" · {:.1}s", d.as_secs_f32()))
                     .unwrap_or_default();
-                self.push_output(if code == 0 {
-                    format!("· done{took}")
-                } else {
-                    format!("· exit {code}{took}")
-                });
+                self.push_output(
+                    LogKind::Result,
+                    if code == 0 {
+                        format!("· done{took}")
+                    } else {
+                        format!("· exit {code}{took}")
+                    },
+                );
             }
             Ok(None) => {}
             Err(_) => {
@@ -573,7 +582,7 @@ impl Build {
                 }
             }
         }
-        self.push_output(line.clone());
+        self.push_output(severity_of_text(&line), line.clone());
         self.scan_text(&line);
     }
 
@@ -601,9 +610,17 @@ impl Build {
         }
         let Some(msg) = v.get("message") else { return };
         if let Some(rendered) = msg.get("rendered").and_then(|r| r.as_str()) {
-            for l in rendered.trim_end().lines() {
+            // The compiler's own rendering, which is what a shell would have
+            // shown. Its first line carries the severity, and the frame under
+            // it (`--> `, `|`, the source echo) is context for that line.
+            for (i, l) in rendered.trim_end().lines().enumerate() {
                 let l = strip_ansi(l);
-                self.push_output(l);
+                let kind = if i == 0 {
+                    severity_of_text(&l)
+                } else {
+                    LogKind::Note
+                };
+                self.push_output(kind, l);
             }
         }
         let severity = match msg.get("level").and_then(|l| l.as_str()) {
@@ -813,11 +830,11 @@ impl Build {
         }
     }
 
-    fn push_output(&mut self, line: String) {
+    fn push_output(&mut self, kind: LogKind, text: String) {
         if self.output.len() >= OUTPUT_CAP {
             self.output.pop_front();
         }
-        self.output.push_back(line);
+        self.output.push_back(LogLine { kind, text });
     }
 
     /// One complaint, once.
@@ -848,6 +865,31 @@ enum PipeEnd {
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+/// How a line of plain output READS.
+///
+/// The console shows the program's own output as the thing the reader ran and
+/// everything else as background, so a line that announces an error has to be
+/// recognisable as one — `cargo` prints its failures on stderr as ordinary
+/// text, and stderr is where a program's own output lives too.
+fn severity_of_text(line: &str) -> LogKind {
+    let t = line.trim_start();
+    if t.starts_with("error") || t.starts_with("fatal error") || t.starts_with("FAILED") {
+        LogKind::Error
+    } else if t.starts_with("warning") {
+        LogKind::Note
+    } else if t.starts_with("   Compiling")
+        || t.starts_with("    Finished")
+        || t.starts_with("     Running")
+        || t.starts_with("   Building")
+        || t.starts_with("    Blocking")
+    {
+        // Cargo narrating its own progress, in the column it indents them to.
+        LogKind::Adapter
+    } else {
+        LogKind::Program
+    }
 }
 
 /// Sentences that count other sentences.
@@ -1113,8 +1155,8 @@ mod tests {
         assert_eq!(p.code, "E0425");
         assert!(p.is_error());
         // The console shows the text a shell would have shown, not the JSON.
-        assert!(b.output.iter().any(|l| l.contains("cannot find value")));
-        assert!(!b.output.iter().any(|l| l.starts_with('{')), "no raw JSON");
+        assert!(b.output.iter().any(|l| l.text.contains("cannot find value")));
+        assert!(!b.output.iter().any(|l| l.text.starts_with('{')), "no raw JSON");
     }
 
     #[test]
@@ -1275,7 +1317,7 @@ mod tests {
             b.feed(&format!("line {i}"));
         }
         assert_eq!(b.output.len(), OUTPUT_CAP);
-        assert_eq!(b.output.back().unwrap(), &format!("line {}", OUTPUT_CAP + 9));
+        assert_eq!(b.output.back().unwrap().text, format!("line {}", OUTPUT_CAP + 9));
     }
 
     #[test]

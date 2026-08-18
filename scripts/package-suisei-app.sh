@@ -79,6 +79,8 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/LogicView.swift"
   "$ROOT/suisei-app/Suisei/ProjectPane.swift"
   "$ROOT/suisei-app/Suisei/FileSymbols.swift"
+  "$ROOT/suisei-app/Suisei/ConsolePane.swift"
+  "$ROOT/suisei-app/Suisei/BuildPanel.swift"
   "$ROOT/suisei-app/Suisei/DatatipCard.swift"
   "$ROOT/suisei-app/Suisei/MetalTextRenderer.swift"
   "$ROOT/suisei-app/Suisei/TabStripLayout.swift"

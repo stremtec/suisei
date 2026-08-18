@@ -1167,6 +1167,16 @@ struct ContentView: View {
                 animatePanels { withAnimation(NavStrip.settle) { engine.uiDebugVisible = true } }
             }
         }
+        // A build starting brings its panel forward, the way a debug session
+        // does. Through the state rather than from the menu item, so every way
+        // of starting one — menu, key, panel button — lands the same.
+        .onChange(of: engine.build.state) { _, state in
+            guard state == .running else { return }
+            debugTab = .build
+            if !engine.uiDebugVisible {
+                animatePanels { withAnimation(NavStrip.settle) { engine.uiDebugVisible = true } }
+            }
+        }
         .onChange(of: engine.chrome.terminal.open) { _, open in
             // Docked terminal (⌃T) → Debug area. Pane terminals (⌃⇧T) are
             // pane-local content and never touch the debug strip.
@@ -2981,9 +2991,14 @@ struct ContentView: View {
             // the same wall `sidebarRow` documents. This is also the view the
             // flag is ABOUT.
             //
-            // The id is the answer itself, so `task` fires on appear and on
-            // every flip — exactly when core needs telling.
-            .task(id: engine.uiDebugVisible && debugTab == .debug) {
+            // The id is the TAB, so `task` fires on appear and on every
+            // switch — exactly when core needs telling. It used to be
+            // `uiDebugVisible && debugTab == .debug`, which is a boolean that
+            // does not move when the reader goes from Terminal to Build: two
+            // different tabs, one `false`, and core never heard about the
+            // second one. The `uiDebugVisible` half is the bridge's, which is
+            // where it has to be — this view is inside `if uiDebugVisible`.
+            .task(id: debugTab) {
                 syncDebugPanel()
             }
     }
@@ -3085,6 +3100,11 @@ struct ContentView: View {
                         engine: engine, accent: accent, fg: fg, dim: dim,
                         separator: theme.separator
                     )
+                } else if debugTab == .build {
+                    BuildPanelView(
+                        engine: engine, accent: accent, fg: fg, dim: dim,
+                        separator: theme.separator
+                    )
                 } else if engine.chrome.terminal.open {
                     terminalPanelInner
                 } else {
@@ -3115,11 +3135,29 @@ struct ContentView: View {
         engine.focus == .terminal
     }
 
-    /// Which half of the bottom area is showing.
+    /// Which third of the bottom area is showing.
+    ///
+    /// Build joined Terminal and Debug because it is the same KIND of thing —
+    /// a program ran and said something — and putting its output anywhere else
+    /// would have meant a second place to look for what a program said.
     enum DebugAreaTab: String, CaseIterable {
-        case terminal, debug
-        var title: String { self == .terminal ? "Terminal" : "Debug" }
-        var symbol: String { self == .terminal ? "terminal.fill" : "ladybug.fill" }
+        case terminal, debug, build
+
+        var title: String {
+            switch self {
+            case .terminal: return "Terminal"
+            case .debug: return "Debug"
+            case .build: return "Build"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .terminal: return "terminal.fill"
+            case .debug: return "ladybug.fill"
+            case .build: return "hammer.fill"
+            }
+        }
     }
 
     /// Two words and two glyphs, not a segmented control.
@@ -3213,6 +3251,7 @@ struct ContentView: View {
     /// can never say the opposite — the dock closing takes this view with it.
     private func syncDebugPanel() {
         engine.debugTabIsDebugger = (debugTab == .debug)
+        engine.debugTabIsBuild = (debugTab == .build)
     }
 
     private func openDebugTerminal() {

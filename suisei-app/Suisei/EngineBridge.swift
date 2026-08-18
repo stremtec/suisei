@@ -1353,6 +1353,8 @@ final class EngineBridge: ObservableObject {
     @Published private(set) var lspServerName = ""
     /// The debugger, as the panel draws it.
     @Published var dap = DapSnap.empty
+    /// Build / Run / Test, as the panel draws it.
+    @Published var build = BuildSnap()
     /// One entry per file a Logic View pane is showing. Keyed by path because
     /// the pane showing it is usually not the pane the keyboard is in — that
     /// is what the view is FOR — so "the current file" is the wrong question.
@@ -1373,6 +1375,7 @@ final class EngineBridge: ObservableObject {
         didSet {
             syncMenu()
             pushDapPanel()
+            pushBuildPanel()
         }
     }
     /// The bottom dock is showing the DEBUGGER rather than a shell.
@@ -1393,6 +1396,14 @@ final class EngineBridge: ObservableObject {
     /// fact is true can never report it becoming false.
     private func pushDapPanel() {
         dapSetPanel(uiDebugVisible && debugTabIsDebugger)
+    }
+
+    /// The bottom dock is showing the BUILD rather than the debugger or a
+    /// shell. Same shape, same reason — see `pushDapPanel` above.
+    @Published var debugTabIsBuild: Bool = false { didSet { pushBuildPanel() } }
+
+    private func pushBuildPanel() {
+        setBuildPanelOpen(uiDebugVisible && debugTabIsBuild)
     }
     @Published var uiInspectorVisible: Bool = true { didSet { syncMenu() } }
     /// True while the tab strip is changing its structure (close/reorder or a
@@ -1470,6 +1481,8 @@ final class EngineBridge: ObservableObject {
     private var githubAccountGeneration = UInt64.max
     /// Cheap identity of the debugger's state — see `refreshDapIfNeeded`.
     var dapFingerprint = UInt64.max
+    /// The same trade for the build's 78 KiB snapshot.
+    var buildFingerprint = UInt64.max
     private var softwareUpdateGeneration = UInt64.max
     private var keyMonitor: Any?
     /// Debounced catch-up refresh scheduled by the typing fast path.
@@ -1785,6 +1798,7 @@ final class EngineBridge: ObservableObject {
             self.refreshGitWorkbenchIfNeeded()
             self.refreshGitHubAccountIfNeeded()
             self.refreshDapIfNeeded()
+            self.refreshBuildIfNeeded()
             self.refreshLogicIfNeeded()
             self.refreshSoftwareUpdateIfNeeded()
             // Never publish SwiftUI editor updates mid-gesture — the canvas
@@ -6842,11 +6856,19 @@ struct DapSnap: Equatable {
     var frames: [DapFrame] = []
     var selectedFrame = 0
     var variables: [DapVariable] = []
-    var console: [String] = []
+    /// Each line with its KIND — see `ConsolePane.swift`. The kind used to be
+    /// a prefix inside the text (`[stdout] 16`), which made what the program
+    /// printed look like the adapter talking about it.
+    var console: [ConsoleLine] = []
     /// Core keeps 400 lines and the snapshot carries the newest 200. Held so
     /// the panel can say what it is not showing rather than imply the session
     /// began where its scrollback does.
     var consoleTotal = 0
+    /// How the last program ended, or nil when it did not say. Kept beside the
+    /// console because four hundred lines later the line that said it has
+    /// scrolled away, and "it exited fine" is the answer to the question the
+    /// reader actually had.
+    var exitCode: Int32?
     var currentPath = ""
     var currentLine: UInt32 = 0
     var hasLocation = false
@@ -6917,6 +6939,9 @@ extension EngineBridge {
                 }
             }
         }
+        withUnsafeBytes(of: snap.commands) { cmds in
+            out.commands = (0..<3).map { text(cmds, $0, 192) }
+        }
         return out
     }
 
@@ -6946,6 +6971,14 @@ extension EngineBridge {
         lang.withCString { l in cmd.withCString { c in
             suisei_engine_project_set_lsp(engine, l, c)
         } }
+        refreshChrome()
+    }
+
+    /// What Build / Run / Test mean here. An empty command hands the decision
+    /// back to the manifest on disk.
+    func projectSetCommand(_ which: BuildSnap.Kind, _ cmd: String) {
+        guard let engine, let raw = which.settingIndex else { return }
+        cmd.withCString { suisei_engine_project_set_command(engine, raw, $0) }
         refreshChrome()
     }
 }
@@ -7229,10 +7262,17 @@ extension EngineBridge {
         }
 
         withUnsafeBytes(of: snap.console) { raw in
-            for i in 0..<min(Int(snap.console_count), Int(SUISEI_MAX_DAP_CONSOLE)) {
-                out.console.append(field(raw, i, Int(SUISEI_DAP_LINE)))
+            withUnsafeBytes(of: snap.console_kinds) { kinds in
+                for i in 0..<min(Int(snap.console_count), Int(SUISEI_MAX_DAP_CONSOLE)) {
+                    out.console.append(ConsoleLine(
+                        id: i,
+                        text: field(raw, i, Int(SUISEI_DAP_LINE)),
+                        kind: ConsoleLine.Kind(raw: kinds[i])
+                    ))
+                }
             }
         }
+        out.exitCode = snap.exit_code == Int32.min ? nil : snap.exit_code
         return out
     }
 
@@ -7304,5 +7344,197 @@ extension EngineBridge {
                 String(cString: raw.baseAddress!.advanced(by: i * cap))
             }
         }
+    }
+}
+
+// MARK: - Build & Run
+
+/// One problem the last run complained about.
+///
+/// It carries no PATH on purpose. A row is acted on by INDEX —
+/// `suisei_engine_build_goto` — because only core knows whether that file is
+/// already open in a tab, and the face guessing would open a second one.
+struct BuildProblem: Identifiable, Equatable {
+    let id: Int
+    let file: String
+    let row: UInt32
+    let col: UInt32
+    /// 0 error, 1 warning, 2 info.
+    let severity: UInt8
+    /// False for a complaint that names no place — a link failure, a bad flag.
+    let locatable: Bool
+    let message: String
+
+    var isError: Bool { severity == 0 }
+    /// 1-based, because that is where a human reads a line number.
+    var place: String { locatable ? "\(file):\(row + 1)" : "" }
+}
+
+struct BuildSnap: Equatable {
+    enum State: UInt8 {
+        case idle = 0, running = 1, ok = 2, failed = 3
+        init(raw: UInt8) { self = State(rawValue: raw) ?? .idle }
+    }
+
+    /// The three things a project can be asked to do. `settingIndex` is what
+    /// `project.suiseiprj` keys them by.
+    enum Kind: UInt8, CaseIterable {
+        case build = 0, run = 1, test = 2
+
+        var title: String {
+            switch self {
+            case .build: return "Build"
+            case .run: return "Run"
+            case .test: return "Test"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .build: return "hammer"
+            case .run: return "play.fill"
+            case .test: return "checkmark.diamond"
+            }
+        }
+
+        var settingIndex: UInt32? { UInt32(rawValue) }
+    }
+
+    var state: State = .idle
+    /// Nil until something has run.
+    var kind: Kind?
+    var open = false
+    /// Nil while it is still running, or when it never started.
+    var exit: Int32?
+    var tookMs: UInt32 = 0
+    var errors = 0
+    var warnings = 0
+    /// Problems found past core's cap, counted rather than kept.
+    var dropped = 0
+    var label = ""
+    var summary = ""
+    var console: [ConsoleLine] = []
+    var consoleTotal = 0
+    var problems: [BuildProblem] = []
+    var problemTotal = 0
+
+    var isRunning: Bool { state == .running }
+    var hasRun: Bool { state != .idle }
+
+    var took: String {
+        guard tookMs > 0 else { return "" }
+        return tookMs < 1000
+            ? "\(tookMs) ms"
+            : String(format: "%.1fs", Double(tookMs) / 1000)
+    }
+}
+
+extension EngineBridge {
+    /// The snapshot is 78 KiB; the fingerprint is a `u64`. The same trade the
+    /// debugger's snapshot and the diagnostics fingerprint make.
+    func refreshBuildIfNeeded() {
+        guard let engine else { return }
+        let fingerprint = suisei_engine_build_fingerprint(engine)
+        guard fingerprint != buildFingerprint else { return }
+        buildFingerprint = fingerprint
+        build = loadBuild(engine)
+    }
+
+    private func loadBuild(_ engine: OpaquePointer) -> BuildSnap {
+        var snap = SuiseiBuildSnapshot()
+        guard suisei_engine_build(engine, &snap) != 0 else { return BuildSnap() }
+
+        var out = BuildSnap()
+        out.state = BuildSnap.State(raw: snap.state)
+        out.kind = BuildSnap.Kind(rawValue: snap.kind)
+        out.open = snap.open != 0
+        out.exit = snap.exit == Int32.min ? nil : snap.exit
+        out.tookMs = snap.took_ms
+        out.errors = Int(snap.errors)
+        out.warnings = Int(snap.warnings)
+        out.dropped = Int(snap.dropped)
+        out.label = cStringField(snap.label)
+        out.summary = cStringField(snap.summary)
+        out.consoleTotal = Int(snap.console_total)
+        out.problemTotal = Int(snap.problem_total)
+
+        func text(_ raw: UnsafeRawBufferPointer, _ i: Int, _ cap: Int) -> String {
+            String(cString: raw.baseAddress!
+                .advanced(by: i * cap)
+                .assumingMemoryBound(to: CChar.self))
+        }
+
+        withUnsafeBytes(of: snap.console) { raw in
+            withUnsafeBytes(of: snap.console_kinds) { kinds in
+                for i in 0..<min(Int(snap.console_count), Int(SUISEI_MAX_BUILD_CONSOLE)) {
+                    out.console.append(ConsoleLine(
+                        id: i,
+                        text: text(raw, i, Int(SUISEI_BUILD_LINE)),
+                        kind: ConsoleLine.Kind(raw: kinds[i])
+                    ))
+                }
+            }
+        }
+
+        withUnsafeBytes(of: snap.problem_files) { files in
+        withUnsafeBytes(of: snap.problem_messages) { messages in
+        withUnsafeBytes(of: snap.problem_rows) { rows in
+        withUnsafeBytes(of: snap.problem_cols) { cols in
+        withUnsafeBytes(of: snap.problem_severities) { severities in
+            withUnsafeBytes(of: snap.problem_locatable) { locatable in
+                let rowList = rows.bindMemory(to: UInt32.self)
+                let colList = cols.bindMemory(to: UInt32.self)
+                for i in 0..<min(Int(snap.problem_count), Int(SUISEI_MAX_BUILD_PROBLEMS)) {
+                    out.problems.append(BuildProblem(
+                        id: i,
+                        file: text(files, i, 64),
+                        row: rowList[i],
+                        col: colList[i],
+                        severity: severities[i],
+                        locatable: locatable[i] != 0,
+                        message: text(messages, i, Int(SUISEI_BUILD_LINE))
+                    ))
+                }
+            }
+        }
+        }
+        }
+        }
+        }
+        return out
+    }
+
+    func buildRun(_ kind: BuildSnap.Kind) {
+        guard let engine else { return }
+        suisei_engine_build_run(engine, UInt32(kind.rawValue))
+        refreshChrome()
+        refreshBuildIfNeeded()
+    }
+
+    func buildStop() {
+        guard let engine else { return }
+        suisei_engine_build_stop(engine)
+        refreshChrome()
+        refreshBuildIfNeeded()
+    }
+
+    /// Put the caret on the `index`th problem, opening its file if need be.
+    func buildGoto(_ index: Int) {
+        guard let engine else { return }
+        suisei_engine_build_goto(engine, UInt32(index))
+        // The file may have changed under the caret, so this is the full
+        // chrome rebuild rather than a paint: tabs, title and gutter all move.
+        refreshChrome()
+    }
+
+    /// Whether the reader is looking at the build rather than the debugger.
+    ///
+    /// Told to core rather than kept in a `@State` on the panel, because a flag
+    /// that lives on a view which only exists while the tab is showing can say
+    /// "open" and can never say "closed" — the bug the debug panel's own
+    /// `panel_open` documents.
+    func setBuildPanelOpen(_ open: Bool) {
+        guard let engine else { return }
+        suisei_engine_build_set_open(engine, open ? 1 : 0)
     }
 }

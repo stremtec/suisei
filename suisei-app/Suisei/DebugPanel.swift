@@ -27,6 +27,15 @@ struct DebugPanelView: View {
 
     private var dap: DapSnap { engine.dap }
 
+    private var palette: ConsolePalette {
+        ConsolePalette(
+            fg: fg, dim: dim, accent: accent,
+            success: engine.chrome.theme.successColor,
+            warning: engine.chrome.theme.warningColor,
+            danger: engine.chrome.theme.dangerColor
+        )
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             transport
@@ -172,27 +181,73 @@ struct DebugPanelView: View {
 
     // MARK: - Idle
 
+    /// Before anything has run, and after.
+    ///
+    /// These used to be the same screen: a ladybug, "No debug session", and
+    /// the last session's console squeezed underneath into 120 points. So a
+    /// run that had just finished perfectly was announced by an empty-state
+    /// illustration, and its output — the thing the reader ran the program to
+    /// see — was the smallest element on the panel. A session that HAS run is
+    /// not an empty state; it is a result.
+    @ViewBuilder
     private var idle: some View {
-        VStack(spacing: 7) {
-            Image(systemName: "ladybug")
-                .font(.system(size: 22))
-                .foregroundStyle(dim)
-            Text("No debug session")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(fg)
-            Text(idleHint)
-                .font(.system(size: 11))
-                .foregroundStyle(dim)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 380)
-            if !dap.console.isEmpty {
-                // What the last session said, which is where the reason it
-                // ended is written.
-                consoleList.frame(maxHeight: 120)
+        if dap.console.isEmpty {
+            VStack(spacing: 7) {
+                Image(systemName: "ladybug")
+                    .font(.system(size: 22))
+                    .foregroundStyle(dim)
+                Text("No debug session")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(fg)
+                Text(idleHint)
+                    .font(.system(size: 11))
+                    .foregroundStyle(dim)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.vertical, 12)
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                lastRunBanner
+                consoleSection
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.vertical, 12)
+    }
+
+    /// How the last run ended, in one line, at the top where a result goes.
+    private var lastRunBanner: some View {
+        let ok = dap.exitCode == 0
+        return HStack(spacing: 7) {
+            Image(systemName: ok ? "checkmark.circle.fill"
+                  : dap.exitCode == nil ? "stop.circle" : "xmark.octagon.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(ok ? engine.chrome.theme.successColor
+                                 : dap.exitCode == nil ? dim
+                                 : engine.chrome.theme.dangerColor)
+            Text(endingText)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(fg)
+            Spacer(minLength: 0)
+            Text("Start again · F5")
+                .font(.system(size: 10))
+                .foregroundStyle(dim)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.035))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(separator).frame(height: 1)
+        }
+    }
+
+    private var endingText: String {
+        guard let code = dap.exitCode else {
+            // No exit code: it was stopped, or it never got far enough to have
+            // one. `status` is core's own sentence about why.
+            return dap.status.isEmpty ? "Session ended" : dap.status
+        }
+        return code == 0 ? "Finished · exit 0" : "Failed · exit \(code)"
     }
 
     private var idleHint: String {
@@ -222,7 +277,12 @@ struct DebugPanelView: View {
             }
             .frame(maxHeight: .infinity)
             Divider().overlay(separator)
-            consoleSection
+            // A third of the panel while a session is live: the stack and the
+            // variables are what a stopped program is read through, and the
+            // console is what it SAID. Idle, the proportions invert — see
+            // `idle`, where the console is the whole screen because by then it
+            // is the only thing left to read.
+            consoleSection.frame(height: 170)
         }
     }
 
@@ -429,17 +489,11 @@ struct DebugPanelView: View {
 
     private var consoleSection: some View {
         VStack(alignment: .leading, spacing: 0) {
-            sectionHeader("Console") {
-                if dap.consoleTotal > dap.console.count {
-                    // Say what is missing rather than let the scrollback imply
-                    // the session started where it does.
-                    Text("last \(dap.console.count) of \(dap.consoleTotal)")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(dim.opacity(0.8))
-                }
+            ConsoleHeader(title: "Console", dim: dim, separator: separator) {
+                ConsoleCopyButton(lines: dap.console, dim: dim)
             }
 
-            consoleList.frame(maxHeight: 160)
+            consoleList
 
             HStack(spacing: 6) {
                 Image(systemName: "chevron.right")
@@ -464,27 +518,14 @@ struct DebugPanelView: View {
         }
     }
 
+    /// The same console the build panel draws, for the same reason a file has
+    /// one glyph everywhere: two renderings of one object teach nothing.
     private var consoleList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    ForEach(Array(dap.console.enumerated()), id: \.offset) { i, line in
-                        Text(line)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(fg.opacity(0.9))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id(i)
-                    }
-                }
-                .padding(.horizontal, 10)
-            }
-            // A console is read from the bottom, and a new line arriving off
-            // screen is a line nobody sees.
-            .onChange(of: dap.console.count) { _, n in
-                guard n > 0 else { return }
-                withAnimation(.snappy(duration: 0.15)) { proxy.scrollTo(n - 1, anchor: .bottom) }
-            }
-        }
+        ConsoleView(
+            lines: dap.console,
+            total: dap.consoleTotal,
+            palette: palette,
+            placeholder: "What the program prints appears here."
+        )
     }
 }

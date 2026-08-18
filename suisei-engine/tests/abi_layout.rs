@@ -426,10 +426,12 @@ fn build_snapshot_layout() {
     assert_eq!(offset_of!(SuiseiBuildSnapshot, console_total), 364);
     assert_eq!(offset_of!(SuiseiBuildSnapshot, console), 368);
     let after_console = 368 + SUISEI_MAX_BUILD_CONSOLE * SUISEI_BUILD_LINE;
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, console_kinds), after_console);
+    let after_console = after_console + SUISEI_MAX_BUILD_CONSOLE;
     assert_eq!(offset_of!(SuiseiBuildSnapshot, problem_count), after_console);
     assert_eq!(
         offset_of!(SuiseiBuildSnapshot, problem_messages),
         after_console + 8 + 64 * 4 + 64 * 4 + 64 + 64 + 64 * 64
     );
-    assert_eq!(size_of::<SuiseiBuildSnapshot>(), 77912);
+    assert_eq!(size_of::<SuiseiBuildSnapshot>(), 78212);
 }

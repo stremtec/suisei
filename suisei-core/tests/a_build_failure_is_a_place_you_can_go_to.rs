@@ -67,7 +67,7 @@ fn a_failing_command_is_read_to_the_end_and_then_reported_failed() {
     assert_eq!(b.exit, Some(3));
     assert!(b.took.is_some(), "how long it took is part of the answer");
     // Both pipes, and the command itself first so the console reads like one.
-    let console: Vec<&str> = b.output.iter().map(String::as_str).collect();
+    let console: Vec<&str> = b.output.iter().map(|l| l.text.as_str()).collect();
     assert!(console[0].starts_with("$ sh -c"), "{console:?}");
     assert!(console.contains(&"out-one"), "{console:?}");
     assert!(console.contains(&"err-one"), "stderr too — {console:?}");
@@ -105,7 +105,7 @@ fn a_second_run_replaces_the_first_rather_than_queueing_behind_it() {
 
     run_to_completion(&mut b, &shell(&d, "echo second"));
     assert_eq!(b.exit, Some(0));
-    let console: Vec<&str> = b.output.iter().map(String::as_str).collect();
+    let console: Vec<&str> = b.output.iter().map(|l| l.text.as_str()).collect();
     assert!(console.contains(&"second"), "{console:?}");
     assert!(
         !console.iter().any(|l| l.contains("sleep")),
@@ -121,7 +121,7 @@ fn stopping_kills_it_and_says_that_is_what_happened() {
     b.stop();
     assert_eq!(b.state, BuildState::Failed);
     assert!(
-        b.output.iter().any(|l| l.contains("stopped")),
+        b.output.iter().any(|l| l.text.contains("stopped")),
         "{:?}",
         b.output
     );

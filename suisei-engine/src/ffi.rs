@@ -6219,6 +6219,9 @@ pub struct SuiseiBuildSnapshot {
     pub console_count: u32,
     pub console_total: u32,
     pub console: [[c_char; SUISEI_BUILD_LINE]; SUISEI_MAX_BUILD_CONSOLE],
+    /// What each line IS — the debugger's vocabulary, because it is one
+    /// console to the reader: 0 program, 1 note, 2 adapter, 3 error, 4 result.
+    pub console_kinds: [u8; SUISEI_MAX_BUILD_CONSOLE],
     pub problem_count: u32,
     pub problem_total: u32,
     pub problem_rows: [u32; SUISEI_MAX_BUILD_PROBLEMS],
@@ -6249,7 +6252,7 @@ pub extern "C" fn suisei_engine_build_fingerprint(ptr: *const SuiseiEngine) -> u
     b.open.hash(&mut h);
     // The last line, so a run that prints without adding problems still ticks.
     if let Some(last) = b.output.back() {
-        last.hash(&mut h);
+        last.text.hash(&mut h);
     }
     h.finish() | 1
 }
@@ -6293,7 +6296,8 @@ pub extern "C" fn suisei_engine_build(
     let n = b.output.len().min(SUISEI_MAX_BUILD_CONSOLE);
     o.console_count = n as u32;
     for (i, line) in b.output.iter().skip(skip).take(n).enumerate() {
-        write_cstr(&mut o.console[i], line);
+        write_cstr(&mut o.console[i], &line.text);
+        o.console_kinds[i] = line.code();
     }
 
     o.problem_total = b.problems.len() as u32;

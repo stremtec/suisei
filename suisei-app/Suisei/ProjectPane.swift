@@ -33,11 +33,14 @@ struct ProjectSnap: Equatable {
     /// `nil` = the project does not set one, so the global setting stands.
     var tabWidth: Int?
     var lspServers: [(String, String)] = []
+    /// Build, Run, Test — in that order. `""` means the manifest on disk
+    /// decides, which is the answer for almost every project.
+    var commands: [String] = ["", "", ""]
 
     static func == (a: ProjectSnap, b: ProjectSnap) -> Bool {
         a.ok == b.ok && a.root == b.root && a.name == b.name
             && a.projectId == b.projectId && a.schema == b.schema
-            && a.tabWidth == b.tabWidth
+            && a.tabWidth == b.tabWidth && a.commands == b.commands
             && a.lspServers.map(\.0) == b.lspServers.map(\.0)
             && a.lspServers.map(\.1) == b.lspServers.map(\.1)
     }
@@ -52,6 +55,8 @@ struct ProjectPaneViewer: View {
     @State private var name = ""
     @State private var newLang = ""
     @State private var newCmd = ""
+    /// Build / Run / Test, being typed. Committed on Return, like the name.
+    @State private var draftCommands = ["", "", ""]
 
     private static let widths = [0, 2, 4, 8]
 
@@ -61,6 +66,7 @@ struct ProjectPaneViewer: View {
                 header
                 identity
                 editorSettings
+                commands
                 languageServers
                 escapeHatch
             }
@@ -79,6 +85,7 @@ struct ProjectPaneViewer: View {
     private func reload() {
         snap = engine.loadProject()
         name = snap.name
+        draftCommands = snap.commands
     }
 
     private var header: some View {
@@ -163,6 +170,54 @@ struct ProjectPaneViewer: View {
                         .foregroundStyle(palette.dim)
                 }
             }
+        }
+    }
+
+    /// What Build, Run and Test mean here.
+    ///
+    /// Empty is the right answer for almost every project: core reads the
+    /// manifest on disk — `Cargo.toml`, `package.json`, `go.mod`,
+    /// `Package.swift`, `Makefile` — and a repository with one target and no
+    /// ceremony needs to say nothing. The field exists for the ones that are
+    /// not that: a workspace with six binaries, a `just` recipe, a dev server
+    /// on a particular port. Those repositories already decided somewhere, and
+    /// this is where the decision is written down once for everybody.
+    private var commands: some View {
+        WBSection("Build & Run", "hammer", palette: palette) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(BuildSnap.Kind.allCases, id: \.self) { kind in
+                    WBRow(kind.title, palette: palette) {
+                        TextField(
+                            inherited(kind),
+                            text: Binding(
+                                get: { draftCommands[Int(kind.rawValue)] },
+                                set: { draftCommands[Int(kind.rawValue)] = $0 }
+                            )
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 10, design: .monospaced))
+                        .onSubmit {
+                            engine.projectSetCommand(kind, draftCommands[Int(kind.rawValue)])
+                            reload()
+                        }
+                    }
+                }
+                Text("Empty means the manifest decides. Press Return to save.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(palette.dim)
+                    .padding(.horizontal, 10)
+            }
+        }
+    }
+
+    /// The placeholder is what would run if this were left empty — a real
+    /// answer rather than the word "optional", so the field says what it is
+    /// overriding.
+    private func inherited(_ kind: BuildSnap.Kind) -> String {
+        switch kind {
+        case .build: return "from the manifest — e.g. cargo build"
+        case .run: return "from the manifest — e.g. cargo run"
+        case .test: return "from the manifest — e.g. cargo test"
         }
     }
 
