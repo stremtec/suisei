@@ -311,6 +311,7 @@ void suisei_engine_block_extend_rows(SuiseiEngine *ptr, int32_t delta);
 /* Code folding. The row is a BUFFER row — the gutter is clicked where the eye
    is, not where the caret is. */
 void suisei_engine_fold_toggle_row(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_fold_at_cursor(SuiseiEngine *ptr, uint8_t close);
 void suisei_engine_fold_all(SuiseiEngine *ptr, uint8_t close);
 void suisei_engine_mouse_up(SuiseiEngine *ptr);
 uint8_t suisei_engine_hit_test(

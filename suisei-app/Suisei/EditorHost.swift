@@ -2341,6 +2341,21 @@ final class EditorCanvasView: NSView {
                 cg.scaleBy(x: 1, y: -1)
                 CTLineDraw(ln.line, cg)
                 cg.restoreGState()
+
+                // The fold triangle. Drawn only where it can be clicked, and
+                // only on a row that owns a fold — a triangle on a line that
+                // cannot fold is an affordance that does nothing.
+                if line.canFold {
+                    // Closed is the state worth noticing — lines are missing
+                    // and the reader has to be able to see WHY. An open fold's
+                    // triangle is a quiet affordance, so it stays faint.
+                    colors.gutter
+                        .withAlphaComponent(line.isFolded ? 0.95 : 0.35)
+                        .setFill()
+                    Self.foldTriangle(
+                        atY: y, lineH: lineH, right: gutter - 2, closed: line.isFolded
+                    ).fill()
+                }
             }
 
             cg.saveGState()
@@ -3592,6 +3607,37 @@ final class EditorCanvasView: NSView {
         )
     }
 
+    /// The disclosure triangle, as a path.
+    ///
+    /// A filled triangle rather than a chevron glyph: it is 6 points across and
+    /// at that size a stroked chevron loses a whole arm to antialiasing on a
+    /// 1x display, which is what makes VS Code's read as a smudge when the
+    /// window is on a non-Retina screen.
+    ///
+    /// Pointing DOWN when open and RIGHT when closed — the macOS disclosure
+    /// convention, and the opposite of a "click me to expand" arrow: it shows
+    /// the state, not the action.
+    static func foldTriangle(
+        atY y: CGFloat, lineH: CGFloat, right: CGFloat, closed: Bool
+    ) -> NSBezierPath {
+        let size: CGFloat = 6
+        let cx = (right - size / 2).rounded()
+        let cy = (y + lineH / 2).rounded()
+        let h = size * 0.5
+        let path = NSBezierPath()
+        if closed {
+            path.move(to: CGPoint(x: cx - h * 0.7, y: cy - h))
+            path.line(to: CGPoint(x: cx + h * 0.8, y: cy))
+            path.line(to: CGPoint(x: cx - h * 0.7, y: cy + h))
+        } else {
+            path.move(to: CGPoint(x: cx - h, y: cy - h * 0.7))
+            path.line(to: CGPoint(x: cx + h, y: cy - h * 0.7))
+            path.line(to: CGPoint(x: cx, y: cy + h * 0.8))
+        }
+        path.close()
+        return path
+    }
+
     static func breakpointChip(
         atY y: CGFloat, lineH: CGFloat, numberWidth: CGFloat,
         phase: CGFloat = 1
@@ -4422,6 +4468,17 @@ final class EditorCanvasView: NSView {
             let rowPitch = max(1, EditorMetrics.lineHeight)
             guard segmentOfVisual(Int(floor(p.y / rowPitch))) == 0 else { return }
             engine.toggleBreakpointLine(UInt32(row) + 1)
+            return
+        }
+        // The fold triangle lives in the strip between the line number and the
+        // text — where Xcode and VS Code put it, and the half of the gutter the
+        // breakpoint branch above deliberately leaves alone.
+        if p.x < EditorMetrics.gutter,
+           event.clickCount == 1,
+           let row = bufferRow(atY: p.y),
+           bandRows.first(where: { $0.lineNo == UInt32(row) + 1 })?.canFold == true {
+            engine.foldToggle(row: UInt32(row))
+            noteContentChanged()
             return
         }
         tracking = true

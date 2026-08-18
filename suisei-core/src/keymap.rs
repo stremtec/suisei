@@ -66,6 +66,11 @@ pub const CATALOG: &[Command] = &[
     // act, because a column of carets IS a zero-width rectangle.
     Command { id: "cursor_above",    title: "Add Cursor Above",        group: "Editing", default: "⌃⇧↑" },
     Command { id: "cursor_below",    title: "Add Cursor Below",        group: "Editing", default: "⌃⇧↓" },
+    // Xcode's chords. The gutter triangle is the same act with a mouse.
+    Command { id: "fold",            title: "Fold",                    group: "Editing", default: "⌥⌘←" },
+    Command { id: "unfold",          title: "Unfold",                  group: "Editing", default: "⌥⌘→" },
+    Command { id: "fold_all",        title: "Fold All",                group: "Editing", default: "⌥⇧⌘←" },
+    Command { id: "unfold_all",      title: "Unfold All",              group: "Editing", default: "⌥⇧⌘→" },
     // Navigate
     Command { id: "open_file",       title: "Go to File…",             group: "Navigate", default: "⌘P" },
     Command { id: "palette",         title: "Command Palette…",        group: "Navigate", default: "⇧⌘P" },

@@ -1545,6 +1545,45 @@ impl Engine {
         self.recompose();
     }
 
+    /// ⌥⌘← / ⌥⌘→ — fold or unfold the block the CARET is in.
+    ///
+    /// The caret's rule, not the gutter's: on a body row this reaches the
+    /// enclosing block, because a key pressed with the caret inside a function
+    /// means that function. `fold_toggle_row` is the mouse's rule.
+    ///
+    /// Directional rather than a toggle, again because it is a key: ⌥⌘← always
+    /// closes and ⌥⌘→ always opens, so holding one down cannot flap.
+    pub fn fold_at_cursor(&mut self, close: bool) {
+        if !self.text_editor_owns_keys() {
+            return;
+        }
+        self.app.rebuild_folds();
+        let row = self.app.buffer.cursor.row;
+        let start = if self.app.folds.fold_at(row).is_some() {
+            Some(row)
+        } else {
+            self.app
+                .folds
+                .ranges
+                .iter()
+                .filter(|r| row > r.start && row <= r.end)
+                .map(|r| r.start)
+                .max()
+        };
+        let Some(start) = start else { return };
+        let changed = if close {
+            self.app.folds.close_at(start)
+        } else {
+            self.app.folds.open_at(start)
+        };
+        if !changed {
+            return;
+        }
+        self.keep_caret_visible_after_fold();
+        self.app.update_scroll();
+        self.recompose();
+    }
+
     /// Fold every block in the file, or open every one.
     pub fn fold_all(&mut self, close: bool) {
         if !self.text_editor_owns_keys() {

@@ -50,6 +50,13 @@ struct EditorLine: Equatable, Identifiable {
     /// Git gutter: low 7 bits 0 none / 1 add / 2 mod / 3 del; bit 0x80 = soft-wrap continuation.
     var gitSign: UInt8
     var debugSign: UInt8 = 0
+    /// 0 none, 1 an open fold starts on this line, 2 a closed one does.
+    var fold: UInt8 = 0
+    /// Lines hidden under this row when `fold == 2`.
+    var foldLines: UInt16 = 0
+    /// A triangle is drawn here, and only here — see `Engine::fold_toggle_row`.
+    var canFold: Bool { fold != 0 && !isWrapContinuation }
+    var isFolded: Bool { fold == 2 }
     var spans: [SyntaxSpan]
     var hasSelection: Bool { selV0 != UInt32.max && selV1 != UInt32.max && selV1 > selV0 }
     var isWrapContinuation: Bool { (gitSign & 0x80) != 0 }
@@ -3191,6 +3198,30 @@ final class EngineBridge: ObservableObject {
         // Same reason as `pointerDragAbsolute`: no chrome pull at drag rate.
     }
 
+    /// Toggle the fold on a 0-based buffer row — the gutter triangle.
+    func foldToggle(row: UInt32) {
+        guard let engine else { return }
+        suisei_engine_fold_toggle_row(engine, row)
+        refreshChrome()
+        refreshEditorPaintOnly()
+    }
+
+    /// ⌥⌘← / ⌥⌘→ — fold or unfold the block the caret is in.
+    func foldAtCursor(close: Bool) {
+        guard let engine else { return }
+        suisei_engine_fold_at_cursor(engine, close ? 1 : 0)
+        refreshChrome()
+        refreshEditorPaintOnly()
+    }
+
+    /// Fold every block in the file, or open every one.
+    func foldAll(_ close: Bool) {
+        guard let engine else { return }
+        suisei_engine_fold_all(engine, close ? 1 : 0)
+        refreshChrome()
+        refreshEditorPaintOnly()
+    }
+
     /// ⌃⇧↑ / ⌃⇧↓ — grow a rectangle by a row, or start one at the caret.
     func blockExtendRows(_ delta: Int32) {
         guard let engine else { return }
@@ -3697,6 +3728,12 @@ final class EngineBridge: ObservableObject {
                 let selU0 = base.load(fromByteOffset: 24, as: UInt32.self)
                 let selU1 = base.load(fromByteOffset: 28, as: UInt32.self)
                 let text = readCString(at: base, offset: 32, cap: textCap)
+                // Fold state is APPENDED after the spans array, so every offset
+                // above keeps its number. `spanBaseOff + spans` is where the
+                // struct used to end.
+                let foldOff = spanBaseOff + Int(SUISEI_MAX_SPANS) * spanStride
+                let fold = base.load(fromByteOffset: foldOff, as: UInt8.self)
+                let foldLines = base.load(fromByteOffset: foldOff + 2, as: UInt16.self)
                 var spans: [SyntaxSpan] = []
                 let nSpan = min(spanCount, Int(SUISEI_MAX_SPANS))
                 let spanBase = base.advanced(by: spanBaseOff)
@@ -3713,7 +3750,8 @@ final class EngineBridge: ObservableObject {
                     paneId: UInt8(pane), lineNo: lineNo, text: text, isCursor: isCursor,
                     caretVCol: caret, caretUTF16: caretU16, selV0: sel0, selV1: sel1,
                     selU0: selU0, selU1: selU1,
-                    gitSign: gitSign, debugSign: debugSign, spans: spans
+                    gitSign: gitSign, debugSign: debugSign,
+                    fold: fold, foldLines: foldLines, spans: spans
                 ))
             }
         }

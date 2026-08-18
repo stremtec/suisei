@@ -240,6 +240,30 @@ struct SuiseiApp: App {
                 }
                 .suiseiShortcut("cursor_below", engine.keys)
 
+                Divider()
+
+                // The gutter triangle is the same act with a mouse. These are
+                // the keys for it, on Xcode's chords.
+                Button("Fold") {
+                    engine.foldAtCursor(close: true)
+                }
+                .suiseiShortcut("fold", engine.keys)
+
+                Button("Unfold") {
+                    engine.foldAtCursor(close: false)
+                }
+                .suiseiShortcut("unfold", engine.keys)
+
+                Button("Fold All") {
+                    engine.foldAll(true)
+                }
+                .suiseiShortcut("fold_all", engine.keys)
+
+                Button("Unfold All") {
+                    engine.foldAll(false)
+                }
+                .suiseiShortcut("unfold_all", engine.keys)
+
                 // The shape of this file, in the right rail, beside the code
                 // that is the text of it. The rail is the home; the pane below is
                 // for a wide read of a long function.

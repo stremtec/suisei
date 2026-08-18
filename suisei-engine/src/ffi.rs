@@ -1039,6 +1039,17 @@ pub extern "C" fn suisei_engine_fold_toggle_row(ptr: *mut SuiseiEngine, row: u32
     }
 }
 
+/// ⌥⌘← / ⌥⌘→ — fold or unfold the block the caret is in.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_fold_at_cursor(ptr: *mut SuiseiEngine, close: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.fold_at_cursor(close != 0);
+    }
+}
+
 /// Fold every block in the file, or open every one.
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_fold_all(ptr: *mut SuiseiEngine, close: u8) {

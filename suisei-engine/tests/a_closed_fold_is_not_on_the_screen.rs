@@ -223,3 +223,26 @@ fn a_row_past_the_end_is_clamped_not_a_panic() {
     engine.fold_toggle_row(9_999);
     assert!(!drawn(&engine).is_empty());
 }
+
+#[test]
+fn the_keys_are_directional_so_holding_one_cannot_flap() {
+    // ⌥⌘← always closes and ⌥⌘→ always opens. A toggle on a key repeat would
+    // open and close the same block as fast as the keyboard fires.
+    let mut engine = engine_with("directional", SRC);
+    engine.app.buffer.cursor.row = 2;
+    engine.fold_at_cursor(true);
+    engine.fold_at_cursor(true);
+    engine.fold_at_cursor(true);
+    assert_eq!(drawn(&engine), vec![1, 5, 6, 7, 8, 9], "still closed");
+    engine.fold_at_cursor(false);
+    engine.fold_at_cursor(false);
+    assert_eq!(drawn(&engine), vec![1, 2, 3, 4, 5, 6, 7, 8, 9], "still open");
+}
+
+#[test]
+fn the_keys_reach_the_block_the_caret_is_inside() {
+    let mut engine = engine_with("enclosing", SRC);
+    engine.app.buffer.cursor.row = 3; // `    three;`
+    engine.fold_at_cursor(true);
+    assert_eq!(drawn(&engine), vec![1, 5, 6, 7, 8, 9]);
+}
