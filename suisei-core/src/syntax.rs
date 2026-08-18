@@ -657,35 +657,78 @@ fn query_tree(
     let lines: Vec<&str> = text.split('\n').collect();
     let capture_names = bundle.query.capture_names().to_vec();
     let root = tree.root_node();
-    let mut cursor = QueryCursor::new();
-    if let Some(r) = &rows {
-        cursor.set_point_range(
-            tree_sitter::Point {
-                row: r.start,
-                column: 0,
-            }..tree_sitter::Point {
-                row: r.end,
-                column: 0,
-            },
-        );
-    }
     let mut tokens: Vec<HlToken> = Vec::new();
-    let mut matches = cursor.matches(&bundle.query, root, source);
-    while let Some(m) = matches.next() {
-        for cap in m.captures {
-            let name = capture_names.get(cap.index as usize).copied().unwrap_or("");
-            let Some(kind) = highlight::from_capture(name) else {
-                continue;
-            };
-            let node = cap.node;
-            let end_byte = node.end_byte();
-            if end_byte > source.len() || node.start_byte() > end_byte {
-                continue;
+
+    // A BYTE range per run of rows, not one point range over the window.
+    //
+    // The point range `(r.start, 0)..(r.end, 0)` says nothing about columns, so
+    // a window holding one minified line asked tree-sitter to walk the whole
+    // line — 8 MB of it, 17 s — to colour the 480 bytes that get painted.
+    // Cutting each row at its drawn prefix leaves an ordinary window as exactly
+    // one range; only an over-long line splits it, and then the split is what
+    // skips the part nobody sees.
+    for range in drawn_byte_ranges(text, &lines, &rows) {
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(range);
+        let mut matches = cursor.matches(&bundle.query, root, source);
+        while let Some(m) = matches.next() {
+            for cap in m.captures {
+                let name = capture_names.get(cap.index as usize).copied().unwrap_or("");
+                let Some(kind) = highlight::from_capture(name) else {
+                    continue;
+                };
+                let node = cap.node;
+                let end_byte = node.end_byte();
+                if end_byte > source.len() || node.start_byte() > end_byte {
+                    continue;
+                }
+                push_node_tokens(node, &lines, kind, &mut tokens);
             }
-            push_node_tokens(node, &lines, kind, &mut tokens);
         }
     }
     flatten_overlaps(tokens)
+}
+
+/// The window's rows, each cut where the drawing is, merged where they touch.
+///
+/// Consecutive ordinary rows come back as a single range — the newline is
+/// included precisely so they join — so this costs nothing on the files that
+/// are not the problem.
+fn drawn_byte_ranges(
+    text: &str,
+    lines: &[&str],
+    rows: &Option<std::ops::Range<usize>>,
+) -> Vec<std::ops::Range<usize>> {
+    let base = text.as_ptr() as usize;
+    let span = match rows {
+        Some(r) => r.start..r.end.min(lines.len()),
+        None => 0..lines.len(),
+    };
+    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+    for row in span {
+        let Some(line) = lines.get(row) else { break };
+        // Sound: every element of `lines` is a subslice of `text`.
+        let start = (line.as_ptr() as usize) - base;
+        let drawn = drawn_byte_len(line);
+        let end = if drawn == line.len() {
+            (start + drawn + 1).min(text.len()) // include the newline, so rows join
+        } else {
+            start + drawn
+        };
+        match out.last_mut() {
+            Some(last) if last.end >= start => last.end = last.end.max(end),
+            _ => out.push(start..end),
+        }
+    }
+    out
+}
+
+/// How many BYTES of this line are drawn — its length, or the cut.
+fn drawn_byte_len(line: &str) -> usize {
+    line.char_indices()
+        .nth(DRAWN_CHARS)
+        .map(|(b, _)| b)
+        .unwrap_or(line.len())
 }
 
 /// Turn overlapping captures into non-overlapping spans, letting the INNER one
@@ -769,8 +812,11 @@ fn push_node_tokens(
 
     if start.row == end.row {
         if let Some(line) = lines.get(start.row) {
-            let scol = byte_col_to_char_col(line, start.column);
-            let ecol = byte_col_to_char_col(line, end.column);
+            // Starts past the cut: nothing to paint, and nothing to measure.
+            let Some(scol) = drawn_char_col(line, start.column) else {
+                return;
+            };
+            let ecol = drawn_char_col(line, end.column).unwrap_or(DRAWN_CHARS);
             if scol < ecol {
                 tokens.push((kind, scol, ecol, start.row));
             }
@@ -780,22 +826,23 @@ fn push_node_tokens(
 
     // Multi-line comments / strings
     if let Some(line) = lines.get(start.row) {
-        let scol = byte_col_to_char_col(line, start.column);
-        let ecol = line.chars().count();
-        if scol < ecol {
-            tokens.push((kind, scol, ecol, start.row));
+        if let Some(scol) = drawn_char_col(line, start.column) {
+            let ecol = drawn_len(line);
+            if scol < ecol {
+                tokens.push((kind, scol, ecol, start.row));
+            }
         }
     }
     for row in start.row + 1..end.row {
         if let Some(line) = lines.get(row) {
-            let ecol = line.chars().count();
+            let ecol = drawn_len(line);
             if ecol > 0 {
                 tokens.push((kind, 0, ecol, row));
             }
         }
     }
     if let Some(line) = lines.get(end.row) {
-        let ecol = byte_col_to_char_col(line, end.column);
+        let ecol = drawn_char_col(line, end.column).unwrap_or(DRAWN_CHARS);
         if ecol > 0 {
             tokens.push((kind, 0, ecol, end.row));
         }
@@ -869,18 +916,45 @@ fn point_at(text: &str, byte: usize) -> tree_sitter::Point {
     }
 }
 
-fn byte_col_to_char_col(line: &str, byte_col: usize) -> usize {
+/// The longest raw-line prefix any row can draw, in characters.
+///
+/// The scene takes `char_prefix(line, ROW_BYTES + 1)` before it expands tabs
+/// and cuts at [`crate::wrap::ROW_BYTES`], and `wrap::rows_for` counts against
+/// the same budget — so character 481 of a line is never painted, wrapped or
+/// not. A token past it is a token nobody can see.
+const DRAWN_CHARS: usize = crate::wrap::ROW_BYTES + 1;
+
+/// Char column for a byte column, giving up at the cut.
+///
+/// `None` means the byte column lies past what the row draws.
+///
+/// Bounding the walk is the whole point. Unbounded, this ran from the start of
+/// the line for EVERY capture, and a minified line is one capture per comma —
+/// O(line²). Measured on a 100 KB line of `a.b(1),`: the parse took 24 ms and
+/// the query 384 ms, for 99,995 tokens on a row that paints 480 bytes. At 1 MB
+/// it did not finish. Same shape, and the same answer, as the enormous-line
+/// work in `wrap`: stop measuring where the drawing stops.
+fn drawn_char_col(line: &str, byte_col: usize) -> Option<usize> {
     if byte_col == 0 {
-        return 0;
+        return Some(0);
     }
-    if byte_col >= line.len() {
-        return line.chars().count();
+    let mut chars = 0usize;
+    for (b, _) in line.char_indices() {
+        if b >= byte_col {
+            return Some(chars);
+        }
+        if chars >= DRAWN_CHARS {
+            return None;
+        }
+        chars += 1;
     }
-    let mut idx = byte_col;
-    while idx > 0 && !line.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    line.get(..idx).map(|s| s.chars().count()).unwrap_or(0)
+    // `byte_col` is at or past the line's end: the whole line, if it fits.
+    (chars <= DRAWN_CHARS).then_some(chars)
+}
+
+/// How many characters of this line are drawn — its length, or the cut.
+fn drawn_len(line: &str) -> usize {
+    drawn_char_col(line, line.len()).unwrap_or(DRAWN_CHARS)
 }
 
 /// Full-content FNV-1a fingerprint (skip re-query only when bytes are identical).
@@ -1002,16 +1076,38 @@ mod tests {
 
     #[test]
     fn byte_to_char_ascii() {
-        assert_eq!(byte_col_to_char_col("hello", 0), 0);
-        assert_eq!(byte_col_to_char_col("hello", 5), 5);
+        assert_eq!(drawn_char_col("hello", 0), Some(0));
+        assert_eq!(drawn_char_col("hello", 5), Some(5));
     }
 
     #[test]
     fn byte_to_char_cjk() {
         let line = "a한b";
-        assert_eq!(byte_col_to_char_col(line, 0), 0);
-        assert_eq!(byte_col_to_char_col(line, 1), 1);
-        assert_eq!(byte_col_to_char_col(line, 4), 2);
+        assert_eq!(drawn_char_col(line, 0), Some(0));
+        assert_eq!(drawn_char_col(line, 1), Some(1));
+        assert_eq!(drawn_char_col(line, 4), Some(2));
+    }
+
+    /// The cut is in characters, not bytes, and it is the same cut the renderer
+    /// makes — so a CJK line reaches it three times sooner in bytes and must
+    /// still report the same column. Getting this backwards would either paint
+    /// nothing on wide-glyph lines or walk them to the end.
+    #[test]
+    fn the_conversion_gives_up_where_the_drawing_does() {
+        let ascii = "x".repeat(DRAWN_CHARS * 3);
+        assert_eq!(drawn_char_col(&ascii, DRAWN_CHARS - 1), Some(DRAWN_CHARS - 1));
+        assert_eq!(drawn_char_col(&ascii, DRAWN_CHARS), Some(DRAWN_CHARS));
+        assert_eq!(drawn_char_col(&ascii, DRAWN_CHARS + 1), None);
+        assert_eq!(drawn_len(&ascii), DRAWN_CHARS);
+
+        let cjk = "한".repeat(DRAWN_CHARS * 3);
+        assert_eq!(drawn_char_col(&cjk, 3 * (DRAWN_CHARS - 1)), Some(DRAWN_CHARS - 1));
+        assert_eq!(drawn_char_col(&cjk, 3 * (DRAWN_CHARS + 1)), None);
+        assert_eq!(drawn_len(&cjk), DRAWN_CHARS);
+
+        // A short line still answers with its own length, not the cut.
+        assert_eq!(drawn_len("let x = 1;"), 10);
+        assert_eq!(drawn_char_col("let x = 1;", 999), Some(10));
     }
 
     #[test]
