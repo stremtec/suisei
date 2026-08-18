@@ -68,6 +68,7 @@ impl App {
         // Navigator-visible quantities, sampled before the drain.
         let diagnostics_revision_before = self.lsp.diagnostics_revision;
         let running_before = self.lsp.server_running;
+        let build_revision_before = self.build.revision;
 
         if self.lsp.poll() {
             change.paint = true;
@@ -85,6 +86,23 @@ impl App {
         }
 
         self.dap.poll();
+
+        // The build, on the same tick as the debugger and for the same reason:
+        // it is a process that talks, and nothing else is listening.
+        let build_state_before = self.build.state;
+        let build_lines_before = self.build.output.len();
+        self.build.poll();
+        // The FILE can change without the build saying anything, so this is
+        // asked every tick rather than only when a build ends.
+        self.sync_build_diagnostics();
+        if self.build.state != build_state_before {
+            change.chrome = true;
+            change.paint = true;
+        }
+        if self.build.output.len() != build_lines_before {
+            change.chrome = true;
+        }
+
         if self.dap.location_dirty {
             self.dap_apply_stopped_location();
             change.chrome = true;
@@ -177,8 +195,10 @@ impl App {
 
         if self.lsp.diagnostics_revision != diagnostics_revision_before
             || self.lsp.server_running != running_before
+            || self.build.revision != build_revision_before
         {
             change.chrome = true;
+            change.paint = true;
         }
         change
     }

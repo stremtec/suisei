@@ -329,6 +329,19 @@ pub struct App {
     pub key_hints: bool,
     /// DAP debugger client + panel state.
     pub dap: crate::dap::DapClient,
+    /// Build / Run / Test — the command, its output and its problems.
+    pub build: crate::build::Build,
+    /// The build's problems that belong to the file on screen, in the shape
+    /// the editor draws, sorted by row.
+    ///
+    /// A copy on purpose. `build.problems` covers the whole project and is
+    /// keyed by path; every reader of a diagnostic wants THIS file, sorted, and
+    /// re-deriving that per painted row would sort the project's problems once
+    /// per line. [`App::sync_build_diagnostics`] refills it when the build or
+    /// the file changes, and nothing else writes it.
+    pub build_diagnostics: Vec<crate::lsp::Diagnostic>,
+    /// `(build revision, file)` the copy above was made from.
+    build_diag_stamp: (u64, Option<std::path::PathBuf>),
     /// What the open Logic View panes are looking at.
     pub logic_views: crate::logic_view::LogicViews,
     /// Call hierarchy panel (gC / SPC l c).
@@ -670,6 +683,9 @@ impl Default for App {
             gpu_acc: true,
             key_hints: true,
             dap: crate::dap::DapClient::new(),
+            build: crate::build::Build::default(),
+            build_diagnostics: Vec::new(),
+            build_diag_stamp: (0, None),
             logic_views: crate::logic_view::LogicViews::default(),
             call_hierarchy: crate::call_hierarchy::CallHierarchyState::new(),
             hooks: crate::hooks::HooksConfig::load(),
@@ -2919,9 +2935,10 @@ impl App {
     }
 
     pub fn open_problems_palette(&mut self) {
-        self.palette.open_problems(&self.lsp.diagnostics);
+        let all: Vec<_> = self.diagnostics().cloned().collect();
+        self.palette.open_problems(&all);
         self.mode = Mode::Palette;
-        self.message = format!("Problems — {} items", self.lsp.diagnostics.len());
+        self.message = format!("Problems — {} items", self.diagnostic_count());
     }
 
     pub fn execute_palette_selection(&mut self) {
@@ -3216,13 +3233,136 @@ impl App {
         }
     }
 
+    // ── Diagnostics, from every source that has one ────────────────────
+
+    /// Every complaint about the file on screen.
+    ///
+    /// Two sources, one sequence. The language server's, and the build's — see
+    /// `build.rs` for why a compile error is a diagnostic and not a fourth kind
+    /// of underline. Everything that draws, lists or steps through diagnostics
+    /// asks here, so neither source can be visible in one surface and missing
+    /// from another.
+    ///
+    /// An iterator rather than a `Vec`: the fingerprint the face pulls every
+    /// frame walks this, and a per-frame allocation is exactly what that
+    /// fingerprint exists to avoid.
+    pub fn diagnostics(&self) -> impl Iterator<Item = &crate::lsp::Diagnostic> {
+        self.lsp.diagnostics.iter().chain(&self.build_diagnostics)
+    }
+
+    pub fn diagnostic_count(&self) -> usize {
+        self.lsp.diagnostics.len() + self.build_diagnostics.len()
+    }
+
+    pub fn has_diagnostics(&self) -> bool {
+        !self.lsp.diagnostics.is_empty() || !self.build_diagnostics.is_empty()
+    }
+
+    /// The ones on one row. Both sides are sorted, so both are found by search
+    /// rather than by scanning — this runs once per painted line.
+    pub fn diagnostics_for_row(&self, row: usize) -> impl Iterator<Item = &crate::lsp::Diagnostic> {
+        fn slice(all: &[crate::lsp::Diagnostic], row: usize) -> &[crate::lsp::Diagnostic] {
+            let lo = all.partition_point(|d| d.row < row);
+            let hi = all.partition_point(|d| d.row <= row);
+            &all[lo..hi]
+        }
+        slice(&self.lsp.diagnostics, row)
+            .iter()
+            .chain(slice(&self.build_diagnostics, row))
+    }
+
+    /// Refill [`App::build_diagnostics`] when the build or the file has moved.
+    ///
+    /// Called from the tick, and cheap when nothing changed: two comparisons.
+    /// The stamp carries the FILE as well as the revision because switching
+    /// tabs changes the answer without the build having said anything — the
+    /// bug shape this codebase keeps finding, an observer that can only ever
+    /// report one direction.
+    pub fn sync_build_diagnostics(&mut self) {
+        let stamp = (self.build.revision, self.filename.clone());
+        if stamp == self.build_diag_stamp {
+            return;
+        }
+        self.build_diag_stamp = stamp;
+        self.build_diagnostics = match self.filename.as_ref() {
+            Some(f) => self.build.problems_in(&f.display().to_string()),
+            None => Vec::new(),
+        };
+    }
+
+    // ── Build / Run / Test ─────────────────────────────────────────────
+
+    /// Run the project the way its manifest says, without a debugger.
+    ///
+    /// The debugger's own build stays where it is: it builds in order to
+    /// launch, and it has to know the binary that came out. This is the other
+    /// half — the one where the output IS the point.
+    pub fn start_build(&mut self, kind: crate::build::BuildKind) {
+        let root = self.project_root();
+        let custom = self
+            .open_project()
+            .and_then(|p| p.settings.commands.get(kind.key()).cloned());
+        let plan = match crate::build::plan(kind, &root, self.filename.as_deref(), custom.as_deref())
+        {
+            Ok(p) => p,
+            Err(e) => {
+                self.message = e;
+                return;
+            }
+        };
+        self.build.open = true;
+        match self.build.start(&plan) {
+            Ok(()) => {
+                self.message = format!("{}…", plan.label);
+                // Yesterday's squiggles are not this build's answer.
+                self.sync_build_diagnostics();
+            }
+            Err(e) => {
+                self.message = e;
+            }
+        }
+    }
+
+    pub fn stop_build(&mut self) {
+        if self.build.state.is_running() {
+            self.build.stop();
+            self.message = format!("{} stopped", self.build.label);
+        }
+    }
+
+    /// Go to the `i`th problem of the last build, opening its file if needed.
+    pub fn goto_build_problem(&mut self, i: usize) {
+        let Some(p) = self.build.problems.get(i).cloned() else {
+            return;
+        };
+        if p.path.is_empty() {
+            // A link failure names no place. Saying so beats a jump to line 1
+            // of whatever happened to be open.
+            self.message = p.message;
+            return;
+        }
+        let same = self
+            .filename
+            .as_ref()
+            .is_some_and(|f| crate::logic::same_file(&f.display().to_string(), &p.path));
+        if !same {
+            self.open_text_tab(&p.path);
+        }
+        self.push_jump();
+        self.buffer.cursor.row = p.row.min(self.buffer.lines().len().saturating_sub(1));
+        self.buffer.cursor.col = p.col;
+        self.buffer.clamp_col();
+        self.update_scroll();
+        self.message = p.message;
+    }
+
     pub fn diag_next(&mut self) {
-        if self.lsp.diagnostics.is_empty() {
+        if !self.has_diagnostics() {
             self.message = String::from("No diagnostics");
             return;
         }
         let cur = self.buffer.cursor();
-        let mut diags = self.lsp.diagnostics.clone();
+        let mut diags: Vec<_> = self.diagnostics().cloned().collect();
         diags.sort_by_key(|d| (d.row, d.col_start));
         let next = diags
             .iter()
@@ -3239,12 +3379,12 @@ impl App {
     }
 
     pub fn diag_prev(&mut self) {
-        if self.lsp.diagnostics.is_empty() {
+        if !self.has_diagnostics() {
             self.message = String::from("No diagnostics");
             return;
         }
         let cur = self.buffer.cursor();
-        let mut diags = self.lsp.diagnostics.clone();
+        let mut diags: Vec<_> = self.diagnostics().cloned().collect();
         diags.sort_by_key(|d| (d.row, d.col_start));
         let prev = diags
             .iter()
@@ -4348,13 +4488,8 @@ impl App {
     pub fn check_external_change(&mut self) {
         self.check_active_file_external();
         self.check_background_tabs_external();
-        if self.debug && !self.lsp.diagnostics.is_empty() {
-            let rows: Vec<String> = self
-                .lsp
-                .diagnostics
-                .iter()
-                .map(|d| d.row.to_string())
-                .collect();
+        if self.debug && self.has_diagnostics() {
+            let rows: Vec<String> = self.diagnostics().map(|d| d.row.to_string()).collect();
             self.set_message(&format!("diag rows: {}", rows.join(",")));
         }
     }

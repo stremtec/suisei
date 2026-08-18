@@ -3400,13 +3400,13 @@ pub extern "C" fn suisei_engine_diagnostics_fingerprint(ptr: *const SuiseiEngine
     }
     use std::hash::{Hash, Hasher};
     let eng = unsafe { &*ptr };
-    let diags = &eng.0.app().lsp.diagnostics;
-    if diags.is_empty() {
+    let app = eng.0.app();
+    if !app.has_diagnostics() {
         return 0;
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    diags.len().hash(&mut h);
-    for d in diags.iter().take(SUISEI_MAX_DIAGS) {
+    app.diagnostic_count().hash(&mut h);
+    for d in app.diagnostics().take(SUISEI_MAX_DIAGS) {
         d.row.hash(&mut h);
         d.col_start.hash(&mut h);
         std::mem::discriminant(&d.severity).hash(&mut h);
@@ -3429,10 +3429,10 @@ pub extern "C" fn suisei_engine_diagnostics(
         std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiDiagnosticsSnapshot>());
     }
     let o = unsafe { &mut *out };
-    let diags = &eng.0.app().lsp.diagnostics;
-    let n = diags.len().min(SUISEI_MAX_DIAGS);
+    let app = eng.0.app();
+    let n = app.diagnostic_count().min(SUISEI_MAX_DIAGS);
     o.count = n as u32;
-    for (i, d) in diags.iter().take(n).enumerate() {
+    for (i, d) in app.diagnostics().take(n).enumerate() {
         o.rows[i] = d.row as u32;
         o.cols[i] = d.col_start as u32;
         o.severities[i] = match d.severity {

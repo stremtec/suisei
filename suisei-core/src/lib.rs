@@ -1,5 +1,6 @@
 pub mod bench;
 pub mod buffer;
+pub mod build;
 pub mod call_hierarchy;
 pub mod clipboard;
 pub mod completion;

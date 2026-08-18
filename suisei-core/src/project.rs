@@ -68,12 +68,20 @@ pub struct ProjectSettings {
     /// toolchain, or one built from the repository itself — and that is a fact
     /// about the project rather than about whoever cloned it.
     pub lsp_servers: BTreeMap<String, String>,
+    /// What Build, Run and Test mean here — keyed `"build"`, `"run"`, `"test"`.
+    ///
+    /// `build.rs` guesses from the manifest on disk, and the guess is right for
+    /// a repository that has one target and no ceremony. Everything else — a
+    /// workspace with six binaries, a `just` recipe, a `make -j8`, a dev server
+    /// on a particular port — is a decision the repository already made
+    /// somewhere, and this is where it says so once for everybody.
+    pub commands: BTreeMap<String, String>,
 }
 
 impl ProjectSettings {
     /// Nothing is set, so nothing needs writing.
     pub fn is_empty(&self) -> bool {
-        self.tab_width.is_none() && self.lsp_servers.is_empty()
+        self.tab_width.is_none() && self.lsp_servers.is_empty() && self.commands.is_empty()
     }
 }
 
@@ -112,6 +120,24 @@ impl Project {
                     out.push_str(&format!(
                         "\n      {}: {}",
                         json_string(lang),
+                        json_string(cmd)
+                    ));
+                }
+                out.push_str("\n    }");
+                first = false;
+            }
+            if !self.settings.commands.is_empty() {
+                if !first {
+                    out.push(',');
+                }
+                out.push_str("\n    \"commands\": {");
+                for (i, (name, cmd)) in self.settings.commands.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&format!(
+                        "\n      {}: {}",
+                        json_string(name),
                         json_string(cmd)
                     ));
                 }
@@ -190,16 +216,24 @@ fn read_settings(v: Option<&serde_json::Value>) -> ProjectSettings {
             .get("tab_width")
             .and_then(|x| x.as_u64())
             .map(|n| (n as usize).clamp(1, 16)),
-        lsp_servers: v
-            .get("lsp_servers")
-            .and_then(|x| x.as_object())
-            .map(|map| {
-                map.iter()
-                    .filter_map(|(k, val)| Some((k.clone(), val.as_str()?.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        lsp_servers: string_map(v.get("lsp_servers")),
+        // Only the three the editor has buttons for. A key nobody reads is a
+        // setting that silently does nothing, which is worse than an error.
+        commands: string_map(v.get("commands"))
+            .into_iter()
+            .filter(|(k, _)| matches!(k.as_str(), "build" | "run" | "test"))
+            .collect(),
     }
+}
+
+fn string_map(v: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+    v.and_then(|x| x.as_object())
+        .map(|map| {
+            map.iter()
+                .filter_map(|(k, val)| Some((k.clone(), val.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Write the marker back, whole.

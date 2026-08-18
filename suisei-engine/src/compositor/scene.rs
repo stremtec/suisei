@@ -2454,7 +2454,7 @@ fn build_lines_at(
     } else {
         Vec::new()
     };
-    let diags_active = is_current && !app.lsp.diagnostics.is_empty();
+    let diags_active = is_current && app.has_diagnostics();
 
     // Visual row origin for first buffer line in this window (approx: 1:1 before scroll).
     // Xcode-style bracket hint: moving across a closer points out its opener.
@@ -2662,7 +2662,7 @@ fn build_lines_at(
                 }
             }
             if diags_active {
-                for d in app.lsp.diagnostics_for_row(row) {
+                for d in app.diagnostics_for_row(row) {
                     let v0 = visual_col(raw, d.col_start, app.tab_width) as u32;
                     let v1 = visual_col(raw, d.col_end.max(d.col_start.saturating_add(1)), app.tab_width) as u32;
                     let s = v0.max(base_col);
