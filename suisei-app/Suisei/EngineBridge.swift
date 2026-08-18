@@ -1447,6 +1447,20 @@ final class EngineBridge: ObservableObject {
     private var lastEditorSize: CGSize = .zero
 
     private var engine: OpaquePointer?
+
+    /// The engine, for the accessibility layer only.
+    ///
+    /// `engine` is private and stays private — everything else goes through a
+    /// method here. The canvas's accessibility lives in `EditorHost.swift`
+    /// because it is a set of `NSView` overrides and cannot live anywhere
+    /// else, so it gets this one door rather than sixteen wrappers.
+    var enginePointerForAccessibility: OpaquePointer? { engine }
+
+    /// A client moved the caret. Repaint, and let the rest of the app follow.
+    func refreshAfterAccessibilityMove() {
+        refreshChrome()
+        refreshEditorPaintOnly()
+    }
     /// The full diff is intentionally outside the fixed chrome snapshot. Keep
     /// one decoded copy and refresh it only when Core's generation changes.
     private var gitDiffGeneration = UInt64.max

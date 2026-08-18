@@ -529,6 +529,21 @@ final class EditorScrollView: NSScrollView {
             canvas.noteContentChanged()
         }
 
+        // Tell an assistive client where the caret went.
+        //
+        // A screen reader follows the SELECTION, and every path that moves the
+        // caret ends here: typing, clicking, ⌘G, a jump to a definition, the
+        // debugger stopping. Posting from each of them would be a list to keep
+        // in step; posting from the one place they all arrive cannot fall
+        // behind. Only when it actually moved — VoiceOver interrupts itself on
+        // every notification, and a caret that "changed" at 60 Hz would talk
+        // over itself forever.
+        canvas.noteAccessibilityCaret(
+            engine?.chrome.cursorRow ?? 0,
+            engine?.chrome.cursorCol ?? 0,
+            contentChanged: contentGen != lastContentGen || docChanged
+        )
+
         // Core states WHY it moved the scroll; the face just obeys. Guessing
         // from `abs(coreLine - clipLine)` could never separate "restore a tab"
         // (instant) from "jump to a symbol" (animate) — any threshold got one
@@ -844,6 +859,201 @@ enum FindSquiggle {
 
     static func color(current: Bool) -> NSColor {
         ink.withAlphaComponent(current ? 1.0 : 0.6)
+    }
+}
+
+// MARK: - Accessibility
+//
+// The canvas draws its own text, so AppKit has nothing to describe: to
+// VoiceOver the editor was one blank rectangle while Welcome, Settings and
+// Account were fully readable. The part of the application that IS the
+// application was the part that could not be used.
+//
+// A text area is asked about CHARACTER OFFSETS over the whole document, and
+// the document is in core — so every answer here is a question to core rather
+// than a mirror kept in the face. A mirror would be one more thing to hold in
+// step with every keystroke, and a reader reading stale lines is worse than
+// one reading nothing.
+//
+// These run only when an assistive client is attached, at the pace of someone
+// pressing an arrow key.
+
+extension EditorCanvasView {
+    override func isAccessibilityElement() -> Bool { true }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
+
+    override func accessibilityRoleDescription() -> String? { "source editor" }
+
+    override func accessibilityLabel() -> String? {
+        let name = engine?.chrome.filename ?? ""
+        let short = (name as NSString).lastPathComponent
+        return short.isEmpty ? "Editor" : "Editor, \(short)"
+    }
+
+    override func isAccessibilityFocused() -> Bool {
+        window?.firstResponder === self
+    }
+
+    override func setAccessibilityFocused(_ focused: Bool) {
+        if focused { window?.makeFirstResponder(self) }
+    }
+
+    override func accessibilityNumberOfCharacters() -> Int {
+        guard let engine = engine?.enginePointerForAccessibility else { return 0 }
+        return Int(suisei_engine_ax_char_count(engine))
+    }
+
+    /// The whole document, but only when the whole document is a reasonable
+    /// thing to hand over.
+    ///
+    /// Clients ask for this to read everything at once. A five-megabyte string
+    /// built per query is not an answer, so past a bound this reports the
+    /// region on screen instead — line navigation still covers the whole file,
+    /// because that goes through the range family below and never through
+    /// this.
+    override func accessibilityValue() -> Any? {
+        guard let engine = engine?.enginePointerForAccessibility else { return nil }
+        let count = Int(suisei_engine_ax_char_count(engine))
+        if count > Self.axWholeDocumentLimit {
+            return axString(inLineRange: bandStart..<max(bandStart, bandEnd + 1))
+        }
+        return axString(inLineRange: 0..<Int(suisei_engine_ax_line_count(engine)))
+    }
+
+    override func accessibilityVisibleCharacterRange() -> NSRange {
+        guard let engine = engine?.enginePointerForAccessibility else { return NSRange(location: 0, length: 0) }
+        let first = suisei_engine_ax_offset_of_row(engine, UInt32(max(0, bandStart)))
+        let last = suisei_engine_ax_offset_of_row(engine, UInt32(max(0, bandEnd + 1)))
+        return NSRange(location: Int(first), length: Int(last > first ? last - first : 0))
+    }
+
+    override func accessibilityInsertionPointLineNumber() -> Int {
+        // `chrome.cursorRow` is one-based; every line number in this protocol
+        // is zero-based.
+        max(0, Int(engine?.chrome.cursorRow ?? 1) - 1)
+    }
+
+    override func accessibilityLine(for index: Int) -> Int {
+        guard let engine = engine?.enginePointerForAccessibility else { return 0 }
+        return Int(suisei_engine_ax_row_of_offset(engine, UInt64(max(0, index))))
+    }
+
+    override func accessibilityRange(forLine line: Int) -> NSRange {
+        guard let engine = engine?.enginePointerForAccessibility, line >= 0 else {
+            return NSRange(location: 0, length: 0)
+        }
+        let start = suisei_engine_ax_offset_of_row(engine, UInt32(line))
+        let len = axLineLength(line)
+        return NSRange(location: Int(start), length: len)
+    }
+
+    override func accessibilityString(for range: NSRange) -> String? {
+        guard let engine = engine?.enginePointerForAccessibility, range.length >= 0 else { return nil }
+        let firstLine = Int(suisei_engine_ax_row_of_offset(engine, UInt64(range.location)))
+        let lastLine = Int(suisei_engine_ax_row_of_offset(engine, UInt64(range.location + range.length)))
+        let whole = axString(inLineRange: firstLine..<(lastLine + 1))
+        let base = Int(suisei_engine_ax_offset_of_row(engine, UInt32(firstLine)))
+        let from = range.location - base
+        guard from >= 0, from <= whole.count else { return nil }
+        let start = whole.index(whole.startIndex, offsetBy: from)
+        let end = whole.index(start, offsetBy: min(range.length, whole.count - from))
+        return String(whole[start..<end])
+    }
+
+    override func accessibilitySelectedTextRange() -> NSRange {
+        guard let engine = engine?.enginePointerForAccessibility else {
+            return NSRange(location: 0, length: 0)
+        }
+        var start: UInt64 = 0
+        var len: UInt64 = 0
+        suisei_engine_ax_selection(engine, &start, &len)
+        return NSRange(location: Int(start), length: Int(len))
+    }
+
+    override func setAccessibilitySelectedTextRange(_ range: NSRange) {
+        guard let engine = engine?.enginePointerForAccessibility else { return }
+        // The client's half of the conversation: VoiceOver navigates by SETTING
+        // the selection, and an editor that only reports its caret can be read
+        // but not driven.
+        suisei_engine_ax_set_selection(engine, UInt64(max(0, range.location)), UInt64(max(0, range.length)))
+        engine_refreshAfterAccessibilityMove()
+    }
+
+    override func accessibilitySelectedText() -> String? {
+        accessibilityString(for: accessibilitySelectedTextRange())
+    }
+
+    override func accessibilityFrame(for range: NSRange) -> NSRect {
+        guard let engine = engine?.enginePointerForAccessibility else { return .zero }
+        let line = Int(suisei_engine_ax_row_of_offset(engine, UInt64(range.location)))
+        let lineH = EditorMetrics.lineHeight
+        let rect = CGRect(
+            x: EditorMetrics.gutter, y: visualY(line),
+            width: max(0, bounds.width - EditorMetrics.gutter), height: lineH
+        )
+        // Screen coordinates, which is what an assistive client draws its
+        // cursor in.
+        guard let window else { return rect }
+        return window.convertToScreen(convert(rect, to: nil))
+    }
+
+    /// What is true of this editor that the text does not say.
+    ///
+    /// The caret line's diagnostic first, because a squiggle is invisible to a
+    /// reader and it is the single most useful thing the editor knows about
+    /// the line they are on. Then the size of the document.
+    override func accessibilityHelp() -> String? {
+        guard let bridge = engine, let engine = bridge.enginePointerForAccessibility else {
+            return nil
+        }
+        var parts: [String] = []
+        let caretRow = max(0, Int(bridge.chrome.cursorRow) - 1)
+        if let d = bridge.diagnostics.first(where: { Int($0.row) == caretRow }) {
+            let kind = ["error", "warning", "info", "hint"]
+            parts.append("\(kind[min(Int(d.severity), 3)]): \(d.message)")
+        }
+        let lines = Int(suisei_engine_ax_line_count(engine))
+        let count = Int(suisei_engine_ax_char_count(engine))
+        parts.append(count > Self.axWholeDocumentLimit
+            ? "\(lines) lines. Large file: reading the visible region."
+            : "\(lines) lines.")
+        return parts.joined(separator: ". ")
+    }
+
+    /// Past this, `accessibilityValue` reports the visible region rather than
+    /// building a string of the whole document per query.
+    static let axWholeDocumentLimit = 512 * 1024
+
+    private func axLineLength(_ line: Int) -> Int {
+        guard let engine = engine?.enginePointerForAccessibility else { return 0 }
+        let n = suisei_engine_ax_line(engine, UInt32(line), nil, 0)
+        // Plus the newline that ends it, unless it is the last line — a range
+        // that stops short of the newline reads two lines as one word.
+        let last = Int(suisei_engine_ax_line_count(engine)) - 1
+        return Int(n) + (line < last ? 1 : 0)
+    }
+
+    private func axString(inLineRange rows: Range<Int>) -> String {
+        guard let engine = engine?.enginePointerForAccessibility, !rows.isEmpty else { return "" }
+        let total = Int(suisei_engine_ax_line_count(engine))
+        var out = ""
+        var buf = [CChar](repeating: 0, count: Int(SUISEI_LINE_CAP))
+        for row in rows.lowerBound..<min(rows.upperBound, total) {
+            _ = buf.withUnsafeMutableBufferPointer {
+                suisei_engine_ax_line(engine, UInt32(row), $0.baseAddress, UInt32($0.count))
+            }
+            out += String(cString: buf)
+            if row < min(rows.upperBound, total) - 1 { out += "\n" }
+        }
+        return out
+    }
+
+    /// The caret moved because a client asked it to — repaint and tell the
+    /// client where it landed.
+    private func engine_refreshAfterAccessibilityMove() {
+        engine?.refreshAfterAccessibilityMove()
+        NSAccessibility.post(element: self, notification: .selectedTextChanged)
     }
 }
 
@@ -2609,6 +2819,27 @@ final class EditorCanvasView: NSView {
         }
         guard let t = top else { return nil }
         return (t, bottom, writes, stop)
+    }
+
+    /// The caret and the text, as an assistive client last heard them.
+    private var axCaret: (row: UInt32, col: UInt32) = (0, 0)
+
+    /// Post the two notifications a screen reader listens for, and only when
+    /// there is something to say.
+    func noteAccessibilityCaret(_ row: UInt32, _ col: UInt32, contentChanged: Bool) {
+        // Nothing is listening: `NSAccessibility.post` is cheap but this runs
+        // on every frame of every pane, and cheap × always is not free.
+        guard NSWorkspace.shared.isVoiceOverEnabled else {
+            axCaret = (row, col)
+            return
+        }
+        if contentChanged {
+            NSAccessibility.post(element: self, notification: .valueChanged)
+        }
+        if (row, col) != axCaret {
+            axCaret = (row, col)
+            NSAccessibility.post(element: self, notification: .selectedTextChanged)
+        }
     }
 
     /// Where the logic marks were last drawn, so the rows they LEAVE get

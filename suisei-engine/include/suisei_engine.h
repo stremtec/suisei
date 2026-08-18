@@ -1248,3 +1248,20 @@ void suisei_engine_project_set_lsp(SuiseiEngine *ptr, const char *lang, const ch
    `out_lang` gets the language's canonical extension (`js` for `jsx`/`mjs`),
    or "". Returns the FileKind discriminant. */
 uint8_t suisei_engine_classify_name(const char *name, char *out_lang, uint32_t cap);
+
+/* ── Accessibility ─────────────────────────────────────────────────────────
+   The canvas draws its text itself, so AppKit cannot describe it. A text area
+   answers in CHARACTER OFFSETS over the whole document, and the document is
+   here — a mirror in the face would be one more thing to hold in step with
+   every keystroke, and a screen reader reading stale lines is worse than one
+   reading nothing. Asked at human pace, so an O(lines) walk is the right
+   trade against a cache that has to be invalidated correctly. */
+
+uint32_t suisei_engine_ax_line_count(const SuiseiEngine *ptr);
+uint64_t suisei_engine_ax_char_count(const SuiseiEngine *ptr);
+/* Returns the line's length in CHARACTERS (not bytes, not what fit in cap). */
+uint32_t suisei_engine_ax_line(const SuiseiEngine *ptr, uint32_t row, char *out, uint32_t cap);
+uint64_t suisei_engine_ax_offset_of_row(const SuiseiEngine *ptr, uint32_t row);
+uint32_t suisei_engine_ax_row_of_offset(const SuiseiEngine *ptr, uint64_t offset);
+void suisei_engine_ax_selection(const SuiseiEngine *ptr, uint64_t *out_start, uint64_t *out_len);
+void suisei_engine_ax_set_selection(SuiseiEngine *ptr, uint64_t start, uint64_t len);

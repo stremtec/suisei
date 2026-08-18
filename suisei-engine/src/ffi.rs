@@ -5985,3 +5985,177 @@ pub extern "C" fn suisei_engine_classify_name(
     // is a name. The disk-reading classifier is for opening a document.
     suisei_core::media::classify_bytes(path, None) as u8
 }
+
+// ── Accessibility ──────────────────────────────────────────────────────────
+//
+// The editor canvas draws its text with Metal and CoreText, so AppKit has no
+// idea what is in it — to VoiceOver the whole editor was one blank rectangle
+// while Welcome, Settings and Account were fully readable. The BODY of the
+// application was the part that could not be used.
+//
+// A text area answers in CHARACTER OFFSETS over the whole document, and the
+// document lives here. So these are the questions an assistive client asks,
+// answered by core rather than by the face keeping a second copy of the text:
+// a mirror would be one more thing to hold in step with every keystroke, and
+// the one thing worse than a silent editor is one that reads out stale lines.
+//
+// Every one of them is asked at human pace — a VoiceOver user pressing an
+// arrow key — so an O(lines) walk is the right trade against a cache that has
+// to be invalidated correctly.
+
+/// Lines in the document.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_ax_line_count(ptr: *const SuiseiEngine) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { &*ptr }.0.app().buffer.line_count() as u32
+}
+
+/// Characters in the document, counting the newline that ends each line but
+/// the last — which is how a text area counts, and what every range the client
+/// hands back is measured in.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_ax_char_count(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let lines = unsafe { &*ptr }.0.app().buffer.lines();
+    let chars: usize = lines.iter().map(|l| l.chars().count()).sum();
+    (chars + lines.len().saturating_sub(1)) as u64
+}
+
+/// One line's text. Returns its length in CHARACTERS, which is what the
+/// client's ranges are in — not bytes, and not what fits in `cap`.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_ax_line(
+    ptr: *const SuiseiEngine,
+    row: u32,
+    out: *mut c_char,
+    cap: u32,
+) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let lines = unsafe { &*ptr }.0.app().buffer.lines();
+    let Some(line) = lines.get(row as usize) else {
+        if !out.is_null() && cap > 0 {
+            let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+            write_cstr(dst, "");
+        }
+        return 0;
+    };
+    if !out.is_null() && cap > 0 {
+        let dst = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+        write_cstr(dst, line);
+    }
+    line.chars().count() as u32
+}
+
+/// Character offset of a row's first character.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_ax_offset_of_row(ptr: *const SuiseiEngine, row: u32) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let lines = unsafe { &*ptr }.0.app().buffer.lines();
+    let upto = (row as usize).min(lines.len());
+    let mut chars: usize = lines[..upto].iter().map(|l| l.chars().count() + 1).sum();
+    // There is no newline after the LAST line, so a row past the end is the
+    // end of the document rather than one character beyond it. Off by one per
+    // query, and the reader lands past the last character of every file.
+    if upto == lines.len() {
+        chars = chars.saturating_sub(1);
+    }
+    chars as u64
+}
+
+/// The row a character offset falls on, clamped to the document.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_ax_row_of_offset(ptr: *const SuiseiEngine, offset: u64) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let lines = unsafe { &*ptr }.0.app().buffer.lines();
+    let mut seen = 0usize;
+    for (row, line) in lines.iter().enumerate() {
+        let end = seen + line.chars().count();
+        if (offset as usize) <= end {
+            return row as u32;
+        }
+        seen = end + 1;
+    }
+    lines.len().saturating_sub(1) as u32
+}
+
+/// The selection, as a character offset and a length. A caret is length zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_ax_selection(
+    ptr: *const SuiseiEngine,
+    out_start: *mut u64,
+    out_len: *mut u64,
+) {
+    if ptr.is_null() || out_start.is_null() || out_len.is_null() {
+        return;
+    }
+    let app = unsafe { &*ptr }.0.app();
+    let lines = app.buffer.lines();
+    let offset = |p: suisei_core::buffer::Position| -> usize {
+        let upto = p.row.min(lines.len());
+        let before: usize = lines[..upto].iter().map(|l| l.chars().count() + 1).sum();
+        let col = lines
+            .get(p.row)
+            .map(|l| p.col.min(l.chars().count()))
+            .unwrap_or(0);
+        before + col
+    };
+    let sel = app.sel.primary();
+    let (a, b) = (offset(sel.start()), offset(sel.end()));
+    unsafe {
+        *out_start = a as u64;
+        *out_len = b.saturating_sub(a) as u64;
+    }
+}
+
+/// Move the caret / selection, in character offsets.
+///
+/// The client's half of the conversation: VoiceOver navigates by setting the
+/// selected range, and an editor that only REPORTS its caret can be read but
+/// not driven.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_ax_set_selection(ptr: *mut SuiseiEngine, start: u64, len: u64) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let app = (*ptr).0.app_mut();
+        let place = |offset: u64, lines: &[String]| -> suisei_core::buffer::Position {
+            let mut seen = 0usize;
+            for (row, line) in lines.iter().enumerate() {
+                let n = line.chars().count();
+                if (offset as usize) <= seen + n {
+                    return suisei_core::buffer::Position {
+                        row,
+                        col: (offset as usize) - seen,
+                    };
+                }
+                seen += n + 1;
+            }
+            suisei_core::buffer::Position {
+                row: lines.len().saturating_sub(1),
+                col: lines.last().map(|l| l.chars().count()).unwrap_or(0),
+            }
+        };
+        let lines: Vec<String> = app.buffer.lines().to_vec();
+        let anchor = place(start, &lines);
+        let head = place(start + len, &lines);
+        app.sel = suisei_core::selection::SelectionSet::single(suisei_core::selection::Selection {
+            anchor,
+            head,
+            goal_x: None,
+        });
+        app.buffer.cursor = head;
+        app.update_scroll();
+        (*ptr).0.recompose();
+    }
+}
