@@ -37,6 +37,8 @@ pub struct UpdateState {
     build_rx: Option<Receiver<crate::update_build::Progress>>,
     pub build_phase: Option<crate::update_build::Phase>,
     pub build_line: String,
+    /// How far along, and how much longer. See `update_build::BuildProgress`.
+    pub build_progress: Option<crate::update_build::BuildProgress>,
     /// `:update` before any check finished — install as soon as one lands.
     install_after_check: bool,
     install_rx: Option<Receiver<Result<String, String>>>,
@@ -122,6 +124,7 @@ impl UpdateState {
         self.build_rx = Some(rx);
         self.build_phase = Some(ub::Phase::Cloning);
         self.build_line.clear();
+        self.build_progress = None;
         std::thread::spawn(move || {
             let send = |p: ub::Progress| {
                 let _ = tx.send(p);
@@ -169,6 +172,10 @@ impl UpdateState {
                 }
                 Ok(Progress::Line(l)) => {
                     self.build_line = l;
+                    moved = true;
+                }
+                Ok(Progress::Advance(p)) => {
+                    self.build_progress = Some(p);
                     moved = true;
                 }
                 Err(TryRecvError::Empty) => break,

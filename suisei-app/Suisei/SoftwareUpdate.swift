@@ -56,6 +56,12 @@ struct SoftwareUpdatePage: View {
     /// 0 idle · 1 cloning · 2 building · 3 staging · 4 ready · 5 failed.
     var buildPhase: UInt8 = 0
     var buildDetail: String = ""
+    /// 0…1, and how much longer. See `update_build::BuildProgress` for where
+    /// the number comes from and which parts of it are counted rather than
+    /// estimated.
+    var buildFraction: Double = 0
+    var buildETA: Int? = nil
+    var buildHeadline: String = ""
 
     private var snap: SoftwareUpdateSnap { store.snap }
     private var automaticOn: Bool { automaticUpdates?.valueIndex != 0 }
@@ -155,14 +161,30 @@ struct SoftwareUpdatePage: View {
         if buildPhase > 0 {
             HStack(alignment: .top, spacing: 10) {
                 if buildPhase < 4 {
-                    ProgressView().controlSize(.small)
+                    EmptyView()
                 } else {
                     Image(systemName: buildPhase == 4
                           ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(Color(nsColor: buildPhase == 4 ? .systemGreen : .systemRed))
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(buildHeadline).font(.subheadline.weight(.medium))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(buildPhase < 4 && !buildHeadline.isEmpty ? buildHeadline : headlineForPhase)
+                        .font(.subheadline.weight(.medium))
+                    // A determinate bar, because the number under it is real:
+                    // the engine step counts `Cargo.lock`'s packages as cargo
+                    // compiles them. Where nothing can be counted the bar holds
+                    // still rather than creeping on a timer — a bar that
+                    // arrives before the work does is the reason people stop
+                    // believing bars.
+                    if buildPhase < 4 {
+                        ProgressView(value: min(max(buildFraction, 0), 1))
+                            .progressViewStyle(.linear)
+                            .frame(maxWidth: 320)
+                        Text(progressLine)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
                     if !buildDetail.isEmpty {
                         Text(buildDetail)
                             .font(.caption.monospaced())
@@ -178,7 +200,17 @@ struct SoftwareUpdatePage: View {
         }
     }
 
-    private var buildHeadline: String {
+    /// "34% · about 12 minutes remaining", or just the percentage while there
+    /// is nothing honest to say about the time.
+    private var progressLine: String {
+        let pct = Int((min(max(buildFraction, 0), 1) * 100).rounded())
+        guard let eta = buildETA else { return "\(pct)%" }
+        if eta < 90 { return "\(pct)% · less than a minute remaining" }
+        let mins = Int((Double(eta) / 60).rounded())
+        return "\(pct)% · about \(mins) minute\(mins == 1 ? "" : "s") remaining"
+    }
+
+    private var headlineForPhase: String {
         switch buildPhase {
         case 1: return "Downloading the source…"
         case 2: return "Building. This takes a while — you can keep working."

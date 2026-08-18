@@ -7736,6 +7736,27 @@ extension EngineBridge {
         return suisei_engine_update_phase(engine)
     }
 
+    /// How far along the build is, 0…1. Zero when none is running.
+    func sourceUpdateFraction() -> Double {
+        guard let engine else { return 0 }
+        return Double(suisei_engine_update_fraction(engine)) / 10_000.0
+    }
+
+    /// Seconds left, or nil while there is not enough to estimate from.
+    func sourceUpdateETA() -> Int? {
+        guard let engine else { return nil }
+        let v = suisei_engine_update_eta(engine)
+        return v == UInt32.max ? nil : Int(v)
+    }
+
+    /// What the build is doing, in the user's words.
+    func sourceUpdateHeadline() -> String {
+        guard let engine else { return "" }
+        var buf = [CChar](repeating: 0, count: 256)
+        _ = suisei_engine_update_headline(engine, &buf, 256)
+        return String(cString: buf)
+    }
+
     /// The last line the build printed, or the failure and where its log is.
     func sourceUpdateDetail() -> String {
         guard let engine else { return "" }

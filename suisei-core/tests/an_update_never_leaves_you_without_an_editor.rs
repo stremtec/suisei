@@ -173,3 +173,145 @@ fn a_build_is_refused_when_the_release_has_no_build_script() {
     let out = ub::run("0.0.1", "", &format!("file://{}", dir.display()), &|_| {});
     assert!(out.is_err(), "built something it should not have");
 }
+
+// ── The percentage, and whether it is telling the truth ────────────────────
+
+use suisei_core::update_build::ProgressModel;
+
+/// The step lines a real cold build prints, in order. Taken from the release
+/// script and packager's own output, not invented.
+fn feed(model: &mut ProgressModel, lines: &[&str]) {
+    for l in lines {
+        model.observe(l);
+    }
+}
+
+#[test]
+fn the_bar_only_goes_forwards() {
+    // The one property a progress bar cannot violate and still be believed.
+    let mut m = ProgressModel::new(81);
+    let script = [
+        "▸ Welcome art",
+        "  19M masters → 6.2M shipped",
+        "→ SwiftTerm (vendored, pinned)",
+        "Compiling swift-term",
+        "→ cargo build -p suisei-engine --release",
+        "Compiling libc v0.2",
+        "Compiling serde v1.0",
+        "Compiling suisei-core v0.1.0",
+        "→ swiftc → Contents/MacOS/Suisei",
+        "→ embed GLTFKit2.framework",
+        "→ build + bundle daemon",
+        "→ packaged /x/Suisei.app",
+    ];
+    let mut last = 0.0f32;
+    for line in script {
+        m.observe(line);
+        let f = m.progress(60).fraction;
+        assert!(f >= last, "went backwards at {line:?}: {last} → {f}");
+        last = f;
+    }
+    assert!(last > 0.9, "ended at {last}, should be near done");
+}
+
+#[test]
+fn the_engine_step_is_counted_against_the_lock_file() {
+    // The part that is real rather than estimated: one `Compiling` line per
+    // package, and `Cargo.lock` says how many packages there are.
+    let mut a = ProgressModel::new(100);
+    feed(&mut a, &["→ cargo build -p suisei-engine --release"]);
+    let start = a.progress(60).fraction;
+
+    for i in 0..50 {
+        a.observe(&format!("Compiling crate{i} v1.0"));
+    }
+    let half = a.progress(60).fraction;
+
+    for i in 50..100 {
+        a.observe(&format!("Compiling crate{i} v1.0"));
+    }
+    let full = a.progress(60).fraction;
+
+    assert!(half > start && full > half, "{start} {half} {full}");
+    // Half the crates should be about half of the engine step's share.
+    let step = full - start;
+    let got = half - start;
+    assert!(
+        (got - step / 2.0).abs() < 0.02,
+        "half the crates moved {got}, step is {step}"
+    );
+}
+
+#[test]
+fn the_terminal_s_compiling_lines_do_not_count_against_the_engine() {
+    // SwiftPM prints the same word. Counting those against the engine's
+    // denominator would run the bar past its own step before the engine
+    // started, and then it would have to stall or go backwards.
+    let mut m = ProgressModel::new(10);
+    feed(&mut m, &["→ SwiftTerm (vendored, pinned)"]);
+    let before = m.progress(60).fraction;
+    for i in 0..10 {
+        m.observe(&format!("Compiling SwiftTermPart{i}"));
+    }
+    assert_eq!(m.progress(60).fraction, before, "counted the wrong step");
+}
+
+#[test]
+fn it_never_claims_to_be_finished() {
+    // The bar reaching 100% while the build is still running is the specific
+    // lie that makes people force-quit.
+    let mut m = ProgressModel::new(4);
+    feed(&mut m, &["→ packaged /x/Suisei.app"]);
+    for i in 0..99 {
+        m.observe(&format!("Compiling x{i}"));
+    }
+    assert!(m.progress(9_999).fraction < 1.0);
+}
+
+#[test]
+fn there_is_no_estimate_until_there_is_something_to_estimate_from() {
+    // `elapsed / fraction` with either number tiny reports an hour on a build
+    // with thirty seconds left. Saying nothing is the honest answer then.
+    let mut m = ProgressModel::new(81);
+    assert_eq!(m.progress(1).eta_secs, None, "estimated from one second");
+    feed(&mut m, &["→ cargo build -p suisei-engine --release"]);
+    m.observe("Compiling a v1.0");
+    assert_eq!(m.progress(5).eta_secs, None, "estimated too early");
+
+    // Far enough in, it answers.
+    feed(&mut m, &["→ swiftc → Contents/MacOS/Suisei"]);
+    assert!(m.progress(600).eta_secs.is_some());
+}
+
+#[test]
+fn the_estimate_shrinks_as_the_build_goes_on() {
+    let mut m = ProgressModel::new(81);
+    feed(&mut m, &["→ cargo build -p suisei-engine --release"]);
+    for i in 0..40 {
+        m.observe(&format!("Compiling c{i} v1.0"));
+    }
+    let early = m.progress(300).eta_secs.expect("an estimate");
+    feed(&mut m, &["→ swiftc → x", "→ build + bundle daemon"]);
+    let late = m.progress(600).eta_secs.expect("an estimate");
+    assert!(late < early, "estimate grew: {early} → {late}");
+}
+
+#[test]
+fn an_unreadable_lock_file_degrades_to_no_granularity() {
+    // The denominator is a divisor. A clone we could not read the lock file
+    // from must lose the fine-grained part, not crash or divide by zero.
+    let mut m = ProgressModel::new(0);
+    feed(&mut m, &["→ cargo build -p suisei-engine --release"]);
+    m.observe("Compiling a v1.0");
+    let f = m.progress(60).fraction;
+    assert!(f.is_finite() && (0.0..1.0).contains(&f), "got {f}");
+}
+
+#[test]
+fn the_headline_says_what_it_is_doing_in_the_users_words() {
+    let mut m = ProgressModel::new(81);
+    feed(&mut m, &["→ cargo build -p suisei-engine --release"]);
+    let h = m.progress(60).headline;
+    assert!(h.contains("engine"), "{h}");
+    assert!(!h.contains("cargo"), "leaked the build system's words: {h}");
+}

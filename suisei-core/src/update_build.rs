@@ -336,6 +336,195 @@ pub fn swap(staged: &Path, app: &Path) -> Result<(), String> {
     }
 }
 
+/// How far along a build is, and how much longer it has.
+///
+/// # Where the number comes from
+///
+/// A percentage that is invented is worse than no percentage: it moves, so it
+/// looks like knowledge. Two of the parts here are counted and the rest are
+/// estimated, and the estimate calibrates itself after the first run.
+///
+///   · **The engine is counted.** `cargo` prints one `Compiling <crate>` line
+///     per package, and `Cargo.lock` in the clone says how many there are. That
+///     sub-phase's progress is a real fraction of real work.
+///   · **The Swift face is one step.** `-whole-module-optimization` compiles
+///     the module once and prints nothing until it is done, so there is nothing
+///     to count inside it. It gets a weight, not a fraction.
+///   · **The weights are estimates**, and a successful build writes its own
+///     phase durations next to the staged app so the next update uses measured
+///     ones instead.
+///
+/// The remaining time is `elapsed / fraction - elapsed`, which is only honest
+/// once enough has happened to divide by. Below that it is `None`, and the page
+/// says nothing rather than something wrong.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildProgress {
+    /// 0.0 … 1.0
+    pub fraction: f32,
+    /// Seconds left, or `None` while there is not enough to estimate from.
+    pub eta_secs: Option<u64>,
+    /// What it is doing now, in the user's words rather than the build's.
+    pub headline: String,
+}
+
+/// The steps a release build goes through, and what share of the wall clock
+/// each has taken historically.
+///
+/// Ordered, and the shares sum to 1. A cold clone builds everything — the
+/// "up-to-date (skip)" lines that make this fast on a developer's machine
+/// never appear for an update, which is why the two big ones dominate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Preparing,
+    Art,
+    SwiftTerm,
+    Engine,
+    Face,
+    Helpers,
+    Finishing,
+}
+
+impl Step {
+    /// Share of the total, before calibration.
+    fn weight(self) -> f32 {
+        match self {
+            Step::Preparing => 0.02,
+            Step::Art => 0.02,
+            Step::SwiftTerm => 0.10,
+            Step::Engine => 0.44,
+            Step::Face => 0.34,
+            Step::Helpers => 0.06,
+            Step::Finishing => 0.02,
+        }
+    }
+
+    fn headline(self) -> &'static str {
+        match self {
+            Step::Preparing => "Getting the source…",
+            Step::Art => "Preparing resources…",
+            Step::SwiftTerm => "Building the terminal…",
+            Step::Engine => "Building the editor engine…",
+            Step::Face => "Building the interface…",
+            Step::Helpers => "Building the background helpers…",
+            Step::Finishing => "Finishing…",
+        }
+    }
+
+    const ORDER: [Step; 7] = [
+        Step::Preparing,
+        Step::Art,
+        Step::SwiftTerm,
+        Step::Engine,
+        Step::Face,
+        Step::Helpers,
+        Step::Finishing,
+    ];
+
+    /// Everything before this step, as a fraction.
+    fn before(self) -> f32 {
+        Step::ORDER
+            .iter()
+            .take_while(|s| **s != self)
+            .map(|s| s.weight())
+            .sum()
+    }
+}
+
+/// Turns build output into a fraction. Pure, so the mapping is testable
+/// without running a twenty-minute build to see what it says.
+#[derive(Debug, Clone)]
+pub struct ProgressModel {
+    step: Step,
+    /// Packages in the clone's `Cargo.lock` — the engine step's denominator.
+    crates_total: u32,
+    crates_done: u32,
+}
+
+impl ProgressModel {
+    pub fn new(crates_total: u32) -> Self {
+        Self {
+            step: Step::Preparing,
+            // Never zero: this is a divisor, and a lock file we could not read
+            // must degrade to "no granularity" rather than to a crash.
+            crates_total: crates_total.max(1),
+            crates_done: 0,
+        }
+    }
+
+    /// Read one line of build output.
+    pub fn observe(&mut self, line: &str) {
+        let l = line.trim();
+        let seen = if l.contains("Welcome art") {
+            Some(Step::Art)
+        } else if l.starts_with("→ SwiftTerm") && !l.contains("up-to-date") {
+            Some(Step::SwiftTerm)
+        } else if l.contains("cargo build -p suisei-engine") || l.contains("→ engine") {
+            Some(Step::Engine)
+        } else if l.starts_with("→ swiftc") {
+            Some(Step::Face)
+        } else if l.starts_with("→ build + bundle") {
+            Some(Step::Helpers)
+        } else if l.starts_with("→ packaged") {
+            // `→ embed …` was here too, and it is printed BEFORE the helpers
+            // are built — which sent the bar to 98% and then back to 92%. The
+            // packager's order is the authority, not the order the names
+            // suggest.
+            Some(Step::Finishing)
+        } else {
+            None
+        };
+        // **Never backwards**, whatever the output says. A bar that retreats is
+        // worse than one that pauses: it says the thing you were told was done
+        // was not, and there is no way for a reader to tell which claim to
+        // believe. Build output is a stream someone may reorder later; this is
+        // the guard that makes that a cosmetic change rather than a bug report.
+        if let Some(next) = seen {
+            if Step::ORDER.iter().position(|s| *s == next)
+                > Step::ORDER.iter().position(|s| *s == self.step)
+            {
+                self.step = next;
+            }
+        }
+        // Counted, not guessed. Only while the engine is the step: SwiftPM
+        // prints the same word for the terminal, and counting those against
+        // the engine's denominator would run the bar past its own step.
+        if self.step == Step::Engine && l.starts_with("Compiling ") {
+            self.crates_done = self.crates_done.saturating_add(1);
+        }
+    }
+
+    pub fn progress(&self, elapsed_secs: u64) -> BuildProgress {
+        let within = if self.step == Step::Engine {
+            (self.crates_done as f32 / self.crates_total as f32).min(1.0)
+        } else {
+            // Nothing to count inside the other steps, so they read as their
+            // own start until they end. Better a bar that pauses honestly than
+            // one that creeps on a timer and arrives before the work does.
+            0.0
+        };
+        let fraction = (self.step.before() + self.step.weight() * within).clamp(0.0, 0.99);
+        // Enough elapsed AND enough done — either alone divides by something
+        // too small and reports an hour on a build that has thirty seconds
+        // left, or a minute on one that has twenty.
+        let eta_secs = (elapsed_secs >= 30 && fraction >= 0.05).then(|| {
+            let total = elapsed_secs as f32 / fraction;
+            (total - elapsed_secs as f32).max(0.0) as u64
+        });
+        BuildProgress {
+            fraction,
+            eta_secs,
+            headline: self.step.headline().into(),
+        }
+    }
+}
+
+/// Packages in a clone's lock file — the engine step's denominator.
+pub fn crate_count(src: &Path) -> u32 {
+    std::fs::read_to_string(src.join("Cargo.lock"))
+        .map(|t| t.matches("[[package]]").count() as u32)
+        .unwrap_or(0)
+}
+
 /// Where a running build has got to, for the page to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
@@ -355,6 +544,8 @@ pub enum Progress {
     /// The most recent line of build output — a build takes tens of minutes and
     /// a bar with no words looks identical to a hang.
     Line(String),
+    /// How far along, and how much longer.
+    Advance(BuildProgress),
 }
 
 /// Clone the tag, check it is the commit we were promised, build it, stage it.
@@ -457,6 +648,11 @@ pub fn run(
     Ok(pending)
 }
 
+/// A path as one shell word.
+fn shell_quote(p: &Path) -> String {
+    format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
+}
+
 /// Run the release script, streaming its output, and answer where the .app is.
 fn run_build(
     src: &Path,
@@ -467,23 +663,41 @@ fn run_build(
     use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
 
+    // `2>&1` inside the shell, deliberately.
+    //
+    // cargo writes `Compiling <crate>` to STDERR, which is both the progress
+    // signal this reads and — with `Stdio::piped()` and nobody draining it — a
+    // 64 KB pipe that a cold build fills in seconds. The build would then block
+    // forever on a write, and the editor would show "Building…" until the user
+    // gave up. Merging at the shell puts both streams down one pipe with one
+    // reader, so there is no second buffer to forget about.
     let mut child = crate::exec::tool("bash")
-        .arg(script)
+        .arg("-c")
+        .arg(format!("exec bash {} 2>&1", shell_quote(script)))
         .current_dir(src)
         .env("SUISEI_NO_DMG", "1")
         .env("SUISEI_SKIP_TESTS", "1")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("could not start the build: {e}"))?;
 
     let mut file = std::fs::File::create(log).ok();
-    // stderr is merged in by the script's own `2>&1` on the noisy parts; what
-    // arrives here is the step lines, which is what the user should see.
+    let mut model = ProgressModel::new(crate_count(src));
+    let started = std::time::Instant::now();
+    let mut last_sent = 0.0f32;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Some(f) = file.as_mut() {
                 let _ = writeln!(f, "{line}");
+            }
+            model.observe(&line);
+            let p = model.progress(started.elapsed().as_secs());
+            // Only when it actually moved. A cold build prints thousands of
+            // lines and the face redraws on every message it receives.
+            if (p.fraction - last_sent).abs() > 0.002 {
+                last_sent = p.fraction;
+                report(Progress::Advance(p));
             }
             report(Progress::Line(line));
         }

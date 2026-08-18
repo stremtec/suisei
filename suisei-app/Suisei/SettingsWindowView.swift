@@ -570,7 +570,10 @@ struct SettingsWindowView: View {
                             }
                         },
                         buildPhase: engine.sourceUpdatePhase(),
-                        buildDetail: engine.sourceUpdateDetail()
+                        buildDetail: engine.sourceUpdateDetail(),
+                        buildFraction: engine.sourceUpdateFraction(),
+                        buildETA: engine.sourceUpdateETA(),
+                        buildHeadline: engine.sourceUpdateHeadline()
                     )
                 case .softwareUpdateAutomatic:
                     SoftwareUpdateAutomaticPage(

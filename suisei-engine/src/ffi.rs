@@ -1090,6 +1090,65 @@ pub extern "C" fn suisei_engine_update_detail(
     text.len().min(cap as usize - 1) as u32
 }
 
+/// How far along the build is, 0…10000 (basis points).
+///
+/// An integer because this crosses a C ABI and a float there is one more thing
+/// to get wrong for a number the face immediately turns back into a percentage.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_fraction(ptr: *const SuiseiEngine) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { &*ptr }
+        .0
+        .app
+        .update
+        .build_progress
+        .as_ref()
+        .map(|p| (p.fraction * 10_000.0) as u32)
+        .unwrap_or(0)
+}
+
+/// Seconds left, or `u32::MAX` while there is nothing to estimate from.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_eta(ptr: *const SuiseiEngine) -> u32 {
+    if ptr.is_null() {
+        return u32::MAX;
+    }
+    unsafe { &*ptr }
+        .0
+        .app
+        .update
+        .build_progress
+        .as_ref()
+        .and_then(|p| p.eta_secs)
+        .map(|s| s.min(u32::MAX as u64 - 1) as u32)
+        .unwrap_or(u32::MAX)
+}
+
+/// What the build is doing, in the user's words.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_headline(
+    ptr: *const SuiseiEngine,
+    out: *mut c_char,
+    cap: u32,
+) -> u32 {
+    if ptr.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let text = unsafe { &*ptr }
+        .0
+        .app
+        .update
+        .build_progress
+        .as_ref()
+        .map(|p| p.headline.clone())
+        .unwrap_or_default();
+    let buf = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(buf, &text);
+    text.len().min(cap as usize - 1) as u32
+}
+
 /// The version staged for the next launch, or empty.
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_update_pending(

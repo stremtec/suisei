@@ -310,6 +310,9 @@ uint32_t suisei_engine_update_blockers(const SuiseiEngine *ptr, const char *app_
                                        char *out, uint32_t cap);
 uint8_t suisei_engine_update_phase(const SuiseiEngine *ptr);
 uint32_t suisei_engine_update_detail(const SuiseiEngine *ptr, char *out, uint32_t cap);
+uint32_t suisei_engine_update_fraction(const SuiseiEngine *ptr); /* 0..10000 */
+uint32_t suisei_engine_update_eta(const SuiseiEngine *ptr);      /* seconds, UINT32_MAX = unknown */
+uint32_t suisei_engine_update_headline(const SuiseiEngine *ptr, char *out, uint32_t cap);
 uint32_t suisei_engine_update_pending(const char *current, char *out, uint32_t cap);
 uint8_t suisei_engine_update_apply(const char *current, const char *app_path,
                                    char *err, uint32_t cap);
