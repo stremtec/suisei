@@ -342,6 +342,7 @@ name = "suisei-core"
 version = "0.1.0"
 dependencies = [
  "image",
+ "libc",
  "serde_json",
  "streaming-iterator",
  "tree-sitter",

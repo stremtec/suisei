@@ -8,6 +8,10 @@ repository.workspace = true
 keywords = ["editor", "gui", "core", "headless"]
 
 [dependencies]
+# `renamex_np(RENAME_SWAP)` — the atomic bundle exchange the updater
+# applies with. std has no equivalent, and the alternative (remove then move)
+# has a window where the user owns no editor.
+libc = "0.2"
 unicode-width = "0.2"
 image = { version = "0.25", default-features = false, features = ["gif", "png", "jpeg", "webp", "bmp"] }
 # 0.25, not 0.24: eight of the grammars below are generated with a newer

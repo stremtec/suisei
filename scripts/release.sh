@@ -29,6 +29,8 @@
 #   SUISEI_HERO_MAX=…   long edge in px for the downscale (default 1800)
 #   SUISEI_HERO_Q=…     JPEG quality 1-100 (default 80)
 #   SUISEI_SKIP_TESTS=1 do not run the test suite first
+#   SUISEI_NO_DMG=1     stop after the .app — what the in-app updater builds,
+#                       which replaces a bundle rather than shipping an image
 #
 set -euo pipefail
 
@@ -170,6 +172,14 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+if [[ "${SUISEI_NO_DMG:-0}" == "1" ]]; then
+  step "Done"
+  bold "  $APP"
+  note "size: $(human "$APP")"
+  note "no disk image — SUISEI_NO_DMG=1"
+  exit 0
+fi
+
 step "Disk image"
 
 mkdir -p "$DIST"

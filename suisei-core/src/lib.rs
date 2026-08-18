@@ -50,6 +50,7 @@ pub mod tabs;
 pub mod theme;
 pub mod undo;
 pub mod update;
+pub mod update_build;
 pub mod workspace_search;
 pub mod wrap;
 
