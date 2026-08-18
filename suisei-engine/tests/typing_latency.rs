@@ -33,7 +33,24 @@
 //! every other test and is the part that can fail; see its comment for why it
 //! asserts a ratio rather than a millisecond count.
 
-use std::time::Instant;
+/// Milliseconds of CPU this THREAD has actually burned.
+///
+/// Not wall clock, and that is the whole point. The assertion below is a ratio
+/// of two durations, so anything that steals the CPU inflates the numerator and
+/// the denominator unevenly and reads exactly like an O(file) regression.
+/// Measured on a healthy tree: 2.9x idle, 4.7x while six cargo builds ran —
+/// passing and failing on identical code. And the normal way to run this is
+/// `cargo test`, which runs the whole suite in parallel, i.e. always loaded.
+///
+/// Thread CPU time counts work done rather than time passed, so a busy machine
+/// makes it slower to FINISH without changing what it reports.
+fn cpu_ms() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid, initialised timespec and the clock id is a
+    // constant the platform defines.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 * 1000.0 + ts.tv_nsec as f64 / 1_000_000.0
+}
 
 use suisei_engine::Engine;
 use suisei_engine::bridge::input::key_from_ffi;
@@ -158,7 +175,7 @@ fn measure(lines: usize, keys: usize, mode: Keys) -> Cost {
     let mut snapshot = Vec::with_capacity(keys);
     for k in 0..keys {
         let returns = mode == Keys::WithReturns && k % 8 == 7;
-        let t = Instant::now();
+        let t = cpu_ms();
         if returns {
             // The real Return. `gui_type_char('\n')` reaches the typing fast
             // path with a newline in it and skips smart Return entirely, so it
@@ -167,11 +184,11 @@ fn measure(lines: usize, keys: usize, mode: Keys) -> Cost {
         } else {
             engine.gui_type_char('x');
         }
-        out.push(t.elapsed().as_secs_f64() * 1000.0);
+        out.push(cpu_ms() - t);
 
-        let t = Instant::now();
+        let t = cpu_ms();
         let text = engine.app.buffer.text();
-        snapshot.push(t.elapsed().as_secs_f64() * 1000.0);
+        snapshot.push(cpu_ms() - t);
         drop(text);
     }
 
@@ -252,6 +269,12 @@ fn typing_cost_does_not_scale_with_the_file() {
     // 20,000 lines lands far above it.
     let floor = 0.05_f64;
     let ratio = large_ms.max(floor) / small_ms.max(floor);
+    // **Re-run on an idle machine before believing a failure.** This measures
+    // wall-clock, so a saturated CPU inflates the ratio rather than the
+    // constant, which reads exactly like an O(file) regression. Measured: a
+    // healthy tree reports 2.93–3.08 idle and 4.5–4.7 while six full cargo
+    // rebuilds were running — comfortably passing and clearly failing, same
+    // code. That cost an hour and a bisect once; it does not need to again.
     assert!(
         ratio < 4.0,
         "a keystroke got {ratio:.1}x more expensive for a 10x bigger file \

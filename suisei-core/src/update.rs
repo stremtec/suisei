@@ -19,6 +19,12 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 pub struct UpdateState {
     /// Newer version available (plain semver, no leading `v`).
     pub latest: Option<String>,
+    /// The commit `latest` names — what an update clones and builds.
+    ///
+    /// Carried from the tag lookup rather than resolved again later: the tag
+    /// could move between the check and the build, and then the version the
+    /// user was shown and the source they got would be different things.
+    pub latest_sha: Option<String>,
     /// Release notes for `latest`, when the check returned a body.
     pub notes: String,
     /// A self-update finished this session — restart to load it.
@@ -92,6 +98,7 @@ impl UpdateState {
                 Ok(found) => {
                     match found {
                         Some(release) => {
+                            self.latest_sha = Some(release.sha);
                             self.latest = Some(release.tag);
                             self.notes = release.notes;
                         }
@@ -225,68 +232,127 @@ fn write_stamp(latest: Option<&str>) {
     let _ = std::fs::write(xei_dir().join("update_check"), body);
 }
 
-struct LatestRelease {
-    tag: String,
-    notes: String,
+/// The repository a release is a tag in.
+pub const REPO_URL: &str = "https://github.com/stremtec/suisei";
+
+pub struct LatestRelease {
+    /// Plain semver, no leading `v`.
+    pub tag: String,
+    /// The COMMIT the tag names — what an update clones and builds.
+    pub sha: String,
+    /// Empty from a tag. A tag carries no body; the notes the old REST path
+    /// showed came from a GitHub Release, which is the thing we stopped using.
+    pub notes: String,
 }
 
-/// Latest GitHub release for Suisei (tag + first paragraph of notes).
+/// The newest release tag in the repository, and the commit it points at.
+///
+/// **`git ls-remote`, not `api.github.com`.** Measured while designing this:
+/// the REST endpoint the old check used answered `403` with `0/60` remaining.
+/// Unauthenticated GitHub REST is sixty requests an hour **per IP**, and every
+/// other tool on that address spends from the same bucket — so on an office,
+/// campus or CGNAT connection the update check is simply broken most of the
+/// time, silently, because a failed check looks exactly like "no update". The
+/// git protocol has no such limit, over the same TLS to the same host.
+///
+/// It also asks a better question. A Release is an artifact to download; a tag
+/// is a NAME FOR A COMMIT, which is what a source update actually needs.
 fn fetch_latest() -> Option<LatestRelease> {
-    let out = crate::exec::tool("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            "5",
-            "-H",
-            "User-Agent: suisei-update-check",
-            "https://api.github.com/repos/stremtec/suisei/releases/latest",
-        ])
+    let out = crate::exec::tool("git")
+        .args(["ls-remote", "--tags", REPO_URL])
+        // A machine with no network should fail fast, not hang the thread for
+        // git's own (much longer) default.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "10")
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let tag = v.get("tag_name")?.as_str()?;
-    let notes = v
-        .get("body")
-        .and_then(|b| b.as_str())
-        .map(first_paragraph)
-        .unwrap_or_default();
-    Some(LatestRelease {
-        tag: tag.trim_start_matches('v').to_string(),
-        notes,
+    parse_ls_remote(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pick the highest release tag out of `git ls-remote --tags` output.
+///
+/// Two things this has to get right, and both are invisible until they break:
+///
+///   · **An annotated tag prints TWICE.** `refs/tags/v1.2.0` carries the tag
+///     OBJECT's sha, and `refs/tags/v1.2.0^{}` carries the commit it points at.
+///     Cloning the first one checks out nothing — it is not a commit. The
+///     dereferenced line wins wherever both appear.
+///
+///   · **Highest, not last.** Refs come back in lexical order, where `v1.10.0`
+///     sorts before `v1.9.0`. Taking the final line would walk the version
+///     backwards on exactly the release that matters.
+pub fn parse_ls_remote_for_test(text: &str) -> Option<LatestRelease> {
+    parse_ls_remote(text)
+}
+
+fn parse_ls_remote(text: &str) -> Option<LatestRelease> {
+    let mut best: Option<(Vec<u64>, String, String)> = None;
+    for line in text.lines() {
+        let (sha, refname) = line.split_once('\t')?;
+        let Some(name) = refname.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        let (name, dereferenced) = match name.strip_suffix("^{}") {
+            Some(n) => (n, true),
+            None => (name, false),
+        };
+        let tag = name.trim_start_matches('v').to_string();
+        if !looks_like_version(&tag) || !is_suisei_release(&tag) {
+            continue;
+        }
+        let key = version_key(&tag);
+        match &mut best {
+            // Same tag seen again: only the dereferenced line may replace it,
+            // and it always should — that one is the commit.
+            Some((k, t, s)) if *t == tag => {
+                if dereferenced {
+                    *s = sha.to_string();
+                }
+                let _ = k;
+            }
+            Some((k, _, _)) if *k >= key => {}
+            _ => best = Some((key, tag, sha.to_string())),
+        }
+    }
+    best.map(|(_, tag, sha)| LatestRelease {
+        tag,
+        sha,
+        notes: String::new(),
     })
 }
 
-fn first_paragraph(body: &str) -> String {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    let para = trimmed
-        .split("\n\n")
-        .next()
-        .unwrap_or(trimmed)
-        .replace('\n', " ");
-    para.chars().take(480).collect()
+/// Whether a tag names a version at all.
+///
+/// Repositories collect tags that are not releases — `nightly`, `latest`,
+/// `ci-run-4`. Those parse to version `[0]` and merely LOSE the comparison,
+/// which is safe today and quietly wrong: a repository whose only tag is
+/// `nightly` would have it treated as the newest release rather than as no
+/// release at all. Requiring `<digits>.<digits>` up front says what is meant.
+fn looks_like_version(tag: &str) -> bool {
+    let mut parts = tag.split('.');
+    let (Some(major), Some(minor)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    !major.is_empty()
+        && major.chars().all(|c| c.is_ascii_digit())
+        && minor.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
-/// Release asset triple for the running platform (self-update targets).
-#[allow(dead_code)]
-fn release_triple() -> Option<&'static str> {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        Some("aarch64-apple-darwin")
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Some("x86_64-apple-darwin")
-    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        Some("aarch64-unknown-linux-gnu")
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        Some("x86_64-unknown-linux-gnu")
-    } else {
-        // Windows can't replace a running .exe in place — installer path there.
-        None
-    }
+/// `1.10.2` → `[1, 10, 2]`, for comparing as numbers rather than as text.
+fn version_key(tag: &str) -> Vec<u64> {
+    tag.split('.')
+        .map(|p| {
+            p.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 // `install_binary` lived here: download a `.gz`, gunzip it, and `mv` the result

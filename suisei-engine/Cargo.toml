@@ -18,3 +18,8 @@ suisei-core = { path = "../suisei-core" }
 # never depends on the engine.
 suisei-daemon = { path = "../suisei-daemon" }
 unicode-width = "0.2"
+
+[dev-dependencies]
+# `typing_latency` measures THREAD CPU TIME rather than wall clock; see the
+# note there. Test-only, so nothing ships with it.
+libc = "0.2"
