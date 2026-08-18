@@ -188,6 +188,32 @@ impl LogicSession {
         self.tree.rows.get(self.selected).map(|r| r.start_row)
     }
 
+    /// Where to draw the guide for the row at `index`, as a visual column.
+    ///
+    /// The node's OWN indentation, not its body's. A block's last line is its
+    /// closing brace, which sits at the node's indent and not the body's, so
+    /// "the minimum indent inside" is the head's anyway — and measuring the
+    /// head is one line instead of all of them, and cannot be thrown by a
+    /// continuation line that happens to be outdented.
+    ///
+    /// `None` for a node that occupies one line: there is nothing to run down.
+    pub fn guide_col(&self, index: usize, tab_width: usize) -> Option<usize> {
+        let row = self.tree.rows.get(index)?;
+        if row.end_row <= row.start_row {
+            return None;
+        }
+        let line = self.src.split('\n').nth(row.start_row)?;
+        let mut col = 0usize;
+        for c in line.chars() {
+            match c {
+                ' ' => col += 1,
+                '\t' => col += tab_width - (col % tab_width.max(1)),
+                _ => break,
+            }
+        }
+        Some(col)
+    }
+
     /// Point the view at the row a source line belongs to, opening nothing.
     ///
     /// The other direction of the same containment test the runtime overlay
@@ -218,6 +244,71 @@ impl LogicSession {
             }
         }
         self.follow_source(line) || moved
+    }
+}
+
+/// A run of source rows for the EDITOR to mark.
+///
+/// Runs, not rows. A guide down a block is one object, and the face clips it
+/// to whatever band it is painting — handing over one entry per visible row
+/// would rebuild that object inside a row loop, which is how the value
+/// bracket came out in pieces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogicMark {
+    pub start_row: usize,
+    pub end_row: usize,
+    /// Visual column for the guide: the node's own indentation.
+    pub col: usize,
+    /// The reader is pointing at this.
+    pub selected: bool,
+    /// The program is stopped inside this.
+    pub runtime: bool,
+}
+
+impl LogicSession {
+    /// What the editor should draw: the selection, then the branches and loops
+    /// the program is inside, outermost first.
+    ///
+    /// `runtime_allowed` is the debugger's panel. Closing it has to take every
+    /// runtime mark with it — the stop band and the value bracket already
+    /// learned that, and a guide left behind would be the same bug in another
+    /// colour.
+    pub fn marks(
+        &self,
+        rt: &crate::logic::LogicRuntime,
+        runtime_allowed: bool,
+        tab_width: usize,
+    ) -> Vec<LogicMark> {
+        let mut out = Vec::new();
+        if let Some(row) = self.tree.rows.get(self.selected) {
+            out.push(LogicMark {
+                start_row: row.start_row,
+                end_row: row.end_row,
+                col: self.guide_col(self.selected, tab_width).unwrap_or(0),
+                selected: true,
+                runtime: false,
+            });
+        }
+        if !runtime_allowed {
+            return out;
+        }
+        for &i in &rt.enclosing {
+            let Some(row) = self.tree.rows.get(i) else { continue };
+            // Not the function itself. "You are inside `process`" is what the
+            // whole view already says, and a guide down a whole function is a
+            // line beside every line of it.
+            if row.kind == LogicKind::Entry {
+                continue;
+            }
+            out.push(LogicMark {
+                start_row: row.start_row,
+                end_row: row.end_row,
+                col: self.guide_col(i, tab_width).unwrap_or(0),
+                selected: false,
+                runtime: true,
+            });
+        }
+        out
     }
 }
 

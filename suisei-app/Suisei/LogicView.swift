@@ -54,6 +54,21 @@ struct LogicRowSnap: Identifiable, Equatable {
     var breakpoint: Bool
 }
 
+/// A run of source rows the editor should mark.
+///
+/// Runs, not rows: a guide down a block is one object, and assembling it
+/// inside a row loop is the mistake the git bar's own comment warns about.
+struct LogicRun: Equatable {
+    var startRow: UInt32
+    var endRow: UInt32
+    /// Visual column for the guide — the node's own indentation.
+    var col: Int
+    /// The reader is pointing at this: the accent.
+    var selected: Bool
+    /// The program is stopped inside this: amber, the debugger's voice.
+    var runtime: Bool
+}
+
 struct LogicSnap: Equatable {
     var path: String = ""
     var lang: String = ""
@@ -63,6 +78,8 @@ struct LogicSnap: Equatable {
     var live: Bool = false
     var selected: Int = 0
     var rows: [LogicRowSnap] = []
+    /// What the EDITOR draws. Empty unless something is selected.
+    var runs: [LogicRun] = []
 
     static let empty = LogicSnap()
 }

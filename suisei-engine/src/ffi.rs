@@ -5331,6 +5331,18 @@ pub const SUISEI_LOGIC_STOPPED: u8 = 16;
 /// A breakpoint is set on this row's first line.
 pub const SUISEI_LOGIC_BREAKPOINT: u8 = 32;
 
+/// How many marks the editor can be given at once.
+///
+/// A selection and the branches and loops the program is inside — that is a
+/// nesting depth, and sixteen of them is a function nobody is reading.
+pub const SUISEI_MAX_LOGIC_RUNS: usize = 16;
+/// The reader is pointing at this. The accent, because the accent is what
+/// "Suisei is pointing at something" means everywhere else.
+pub const SUISEI_LOGIC_RUN_SELECTED: u8 = 1;
+/// The program is stopped INSIDE this. Amber, because that is the debugger
+/// speaking and the debugger speaks in one colour.
+pub const SUISEI_LOGIC_RUN_RUNTIME: u8 = 2;
+
 #[repr(C)]
 pub struct SuiseiLogicSnapshot {
     pub ok: u8,
@@ -5357,6 +5369,23 @@ pub struct SuiseiLogicSnapshot {
     pub flags: [u8; SUISEI_MAX_LOGIC_ROWS],
     pub start_rows: [u32; SUISEI_MAX_LOGIC_ROWS],
     pub end_rows: [u32; SUISEI_MAX_LOGIC_ROWS],
+
+    // ── What the EDITOR draws ──────────────────────────────────────────
+    //
+    // Runs, not rows. A guide down a block is a run-shaped object and the
+    // face clips it to whatever band it is painting; handing over one entry
+    // per visible row would rebuild the same object inside a row loop, which
+    // is the mistake the git bar's own comment warns about.
+    //
+    // They ride the snapshot rather than a pull of their own because they
+    // change exactly when it does — the selection, the rows, the stop — and
+    // the snapshot is already gated on a fingerprint that watches all three.
+    pub run_count: u32,
+    pub run_start: [u32; SUISEI_MAX_LOGIC_RUNS],
+    pub run_end: [u32; SUISEI_MAX_LOGIC_RUNS],
+    /// Visual column to draw the guide at — the node's own indentation.
+    pub run_col: [u16; SUISEI_MAX_LOGIC_RUNS],
+    pub run_flags: [u8; SUISEI_MAX_LOGIC_RUNS],
 }
 
 fn logic_path(path: *const c_char) -> Option<std::path::PathBuf> {
@@ -5451,6 +5480,9 @@ pub extern "C" fn suisei_engine_logic(
         .flat_map(|(_, list)| list.iter().map(|b| b.line))
         .collect();
 
+    let tab_width_for_marks = app.tab_width.max(1);
+    let panel_open = app.dap.panel_open;
+
     let app = unsafe { (*ptr).0.app_mut() };
     let session = app.logic_session(&p);
     write_cstr(&mut o.path, &session.path.to_string_lossy());
@@ -5515,6 +5547,20 @@ pub extern "C" fn suisei_engine_logic(
             }
         }
     }
+
+    // What the editor draws, assembled in core so the rules — the selection,
+    // the nesting, the panel gate — are testable without a face.
+    let marks = session.marks(&rt, panel_open, tab_width_for_marks);
+    let rn = marks.len().min(SUISEI_MAX_LOGIC_RUNS);
+    o.run_count = rn as u32;
+    for (i, m) in marks.into_iter().take(rn).enumerate() {
+        o.run_start[i] = m.start_row as u32;
+        o.run_end[i] = m.end_row as u32;
+        o.run_col[i] = m.col as u16;
+        o.run_flags[i] = u8::from(m.selected) * SUISEI_LOGIC_RUN_SELECTED
+            | u8::from(m.runtime) * SUISEI_LOGIC_RUN_RUNTIME;
+    }
+
     o.ok = 1;
     1
 }

@@ -6933,7 +6933,38 @@ extension EngineBridge {
                 }
             }
         }}}}}}}
+
+        withUnsafeBytes(of: snap.run_start) { starts in
+        withUnsafeBytes(of: snap.run_end) { ends in
+        withUnsafeBytes(of: snap.run_col) { cols in
+            withUnsafeBytes(of: snap.run_flags) { flags in
+                let startList = starts.bindMemory(to: UInt32.self)
+                let endList = ends.bindMemory(to: UInt32.self)
+                let colList = cols.bindMemory(to: UInt16.self)
+                for i in 0..<min(Int(snap.run_count), Int(SUISEI_MAX_LOGIC_RUNS)) {
+                    out.runs.append(LogicRun(
+                        startRow: startList[i],
+                        endRow: endList[i],
+                        col: Int(colList[i]),
+                        selected: flags[i] & UInt8(SUISEI_LOGIC_RUN_SELECTED) != 0,
+                        runtime: flags[i] & UInt8(SUISEI_LOGIC_RUN_RUNTIME) != 0
+                    ))
+                }
+            }
+        }}}
         return out
+    }
+
+    /// The marks for a file the editor is showing — and only while a Logic
+    /// view is actually in front.
+    ///
+    /// Gated on the WATCH, not on a session existing. Sessions are cached, so
+    /// keying on one would leave the guides painted over the code after the
+    /// rail was closed — which is the bug the debug panel already had once,
+    /// where closing the panel left the stop band and the bracket behind.
+    func logicRuns(for path: String) -> [LogicRun] {
+        guard logicWatched[path] != nil else { return [] }
+        return logic[path]?.runs ?? []
     }
 }
 

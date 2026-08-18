@@ -368,5 +368,11 @@ fn logic_snapshot_layout() {
     assert_eq!(offset_of!(SuiseiLogicSnapshot, flags), 93836);
     assert_eq!(offset_of!(SuiseiLogicSnapshot, start_rows), 94156);
     assert_eq!(offset_of!(SuiseiLogicSnapshot, end_rows), 95436);
-    assert_eq!(size_of::<SuiseiLogicSnapshot>(), 96716);
+    // Appended after the rows, so nothing above them moved.
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, run_count), 96716);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, run_start), 96720);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, run_end), 96784);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, run_col), 96848);
+    assert_eq!(offset_of!(SuiseiLogicSnapshot, run_flags), 96880);
+    assert_eq!(size_of::<SuiseiLogicSnapshot>(), 96896);
 }

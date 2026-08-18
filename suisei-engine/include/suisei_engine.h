@@ -1150,6 +1150,11 @@ void suisei_engine_dap_set_panel(SuiseiEngine *ptr, uint8_t open);
 #define SUISEI_LOGIC_STOPPED 16
 #define SUISEI_LOGIC_BREAKPOINT 32
 
+/* Editor marks. */
+#define SUISEI_MAX_LOGIC_RUNS 16
+#define SUISEI_LOGIC_RUN_SELECTED 1
+#define SUISEI_LOGIC_RUN_RUNTIME 2
+
 typedef struct SuiseiLogicSnapshot {
   uint8_t ok;
   /* Stopped in THIS file: the runtime flags mean something. */
@@ -1171,6 +1176,15 @@ typedef struct SuiseiLogicSnapshot {
   uint8_t flags[SUISEI_MAX_LOGIC_ROWS];
   uint32_t start_rows[SUISEI_MAX_LOGIC_ROWS];
   uint32_t end_rows[SUISEI_MAX_LOGIC_ROWS];
+
+  /* What the EDITOR draws: runs, not rows — a guide down a block is a run and
+     the face clips it to the band it is painting. */
+  uint32_t run_count;
+  uint32_t run_start[SUISEI_MAX_LOGIC_RUNS];
+  uint32_t run_end[SUISEI_MAX_LOGIC_RUNS];
+  /* Visual column for the guide: the node's own indentation. */
+  uint16_t run_col[SUISEI_MAX_LOGIC_RUNS];
+  uint8_t run_flags[SUISEI_MAX_LOGIC_RUNS];
 } SuiseiLogicSnapshot;
 
 uint64_t suisei_engine_logic_fingerprint(const SuiseiEngine *ptr, const char *path);

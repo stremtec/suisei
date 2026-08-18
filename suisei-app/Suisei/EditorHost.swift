@@ -105,6 +105,8 @@ struct EditorHost: NSViewRepresentable {
             // the user's and means "Suisei is pointing at something"; this
             // means "the debugger is".
             valueExtent: NSColor.systemYellow.withAlphaComponent(0.85),
+            logicGuide: NSColor(accent).withAlphaComponent(0.55),
+            logicBand: NSColor(accent).withAlphaComponent(0.09),
             liveFlash: NSColor(accent).withAlphaComponent(0.22),
             bracketFill: EditorCanvasView.bracketYellow,
             bracketInk: .black
@@ -905,6 +907,13 @@ final class EditorCanvasView: NSView {
         /// The value-extent rule. The accent, faint: it is a note about the
         /// symbol the caret is on, not a warning and not a change.
         var valueExtent: NSColor
+        /// The Logic View's marks. The accent — "Suisei is pointing at
+        /// something" — because that is what a selection is, and the guide is
+        /// the same statement drawn down the block it covers. The runtime
+        /// guide is not here: it is amber, the debugger's, and comes from
+        /// `debugStopInk`.
+        var logicGuide: NSColor
+        var logicBand: NSColor
         /// The wash over a row a live reload just replaced. The accent, faint
         /// — this is a notice that something arrived, not an error and not a
         /// change the reader made. It fades to nothing within about a second,
@@ -987,6 +996,8 @@ final class EditorCanvasView: NSView {
         debugStop: NSColor.systemGreen.withAlphaComponent(0.18),
         debugStopInk: .systemYellow,
         valueExtent: NSColor.systemYellow.withAlphaComponent(0.85),
+        logicGuide: NSColor.controlAccentColor.withAlphaComponent(0.55),
+        logicBand: NSColor.controlAccentColor.withAlphaComponent(0.09),
         liveFlash: NSColor.systemBlue.withAlphaComponent(0.22),
         bracketFill: bracketYellow,
         bracketInk: .black
@@ -1883,6 +1894,15 @@ final class EditorCanvasView: NSView {
             }
         }
 
+        // Under the debugger's marks and over the text's background: the
+        // logic guides are a note about structure, and anything the debugger
+        // says outranks them.
+        let logicMarks = logicMarkRects(band, lineH: lineH)
+        for (rect, ink) in logicMarks {
+            renderer.addRect(rect, ink)
+        }
+        noteLogicMarks(logicMarks)
+
         // One capsule for the whole run, drawn after the rows. The ends are
         // rounded by insetting the outermost pixels — this renderer has
         // rectangles and nothing else, and at two and a half points that is
@@ -2366,6 +2386,13 @@ final class EditorCanvasView: NSView {
             cg.restoreGState()
         }
 
+        let logicMarks = logicMarkRects(band, lineH: lineH)
+        for (rect, ink) in logicMarks {
+            ink.setFill()
+            rect.fill()
+        }
+        noteLogicMarks(logicMarks)
+
         if let run = valueExtentRun(band, lineH: lineH) {
             let ink = colors.valueExtent
             for half in Self.valueBracketHalves(
@@ -2582,6 +2609,97 @@ final class EditorCanvasView: NSView {
         }
         guard let t = top else { return nil }
         return (t, bottom, writes, stop)
+    }
+
+    /// Where the logic marks were last drawn, so the rows they LEAVE get
+    /// repainted.
+    ///
+    /// The value bracket's lesson, and it applies harder here: a guide can be
+    /// forty rows long and the caret that moved it is one row. A repaint is
+    /// clipped to its dirty rect, so without this nothing invalidates the old
+    /// guide and it stays on screen under the new one.
+    private var drawnLogicMarks: CGRect?
+
+    private func noteLogicMarks(_ rects: [(CGRect, NSColor)]) {
+        let now = rects.map(\.0).reduce(into: CGRect?.none) { acc, r in
+            acc = acc.map { $0.union(r) } ?? r
+        }
+        guard drawnLogicMarks != now else { return }
+        for r in [drawnLogicMarks, now].compactMap({ $0 }) {
+            setNeedsDisplay(r.insetBy(dx: -2, dy: -2))
+        }
+        drawnLogicMarks = now
+    }
+
+    /// The Logic View's marks on the code: a band on the row the reader is
+    /// pointing at, and a guide down what that row covers.
+    ///
+    /// **Runs, not rows.** A guide down a block is one object; assembling it
+    /// inside the row loop is what put the value bracket in pieces, and that
+    /// loop is clipped to the dirty rect besides. The engine hands over runs
+    /// and this clips them to the band it is painting.
+    ///
+    /// Only in the FOCUSED pane. The marks are about where the caret is, and
+    /// the same file open twice would otherwise be marked in both.
+    ///
+    /// The x is `gutter + column × advance`, which is where the text of that
+    /// column is drawn — a guide belongs at the node's own indentation, which
+    /// is a column and not a fixed point. (The value bracket is the opposite
+    /// case and lives in the gutter gap for exactly that reason: its rows have
+    /// different indents, so it has no column to sit in.)
+    private func logicMarkRects<Band: Sequence<EditorLine>>(
+        _ band: Band, lineH: CGFloat
+    ) -> [(CGRect, NSColor)] {
+        guard let engine else { return [] }
+        let runs = engine.logicRuns(for: engine.chrome.filename)
+        guard !runs.isEmpty else { return [] }
+        guard engine.editorSplit.panes.isEmpty
+            || engine.editorSplit.panes.indices.contains(paneIndex)
+            && engine.editorSplit.panes[paneIndex].focused
+        else { return [] }
+
+        let rows = Array(band)
+        let text: (Int) -> String? = { row in
+            rows.first(where: { Int($0.lineNo) - 1 == row })?.text
+        }
+        let advance = EditorMetrics.textAdvance
+        let pixel = devicePixel
+        var out: [(CGRect, NSColor)] = []
+
+        for run in runs {
+            let start = Int(run.startRow)
+            let end = Int(run.endRow)
+            let ink = run.runtime ? colors.debugStopInk.withAlphaComponent(0.55) : colors.logicGuide
+
+            // The band, on the head row, for a selection only — the debugger
+            // already paints the row it is stopped on, and two washes on one
+            // row is a muddier answer than either.
+            if run.selected, !(rows.first(where: { Int($0.lineNo) - 1 == start })?.isStoppedLine ?? false) {
+                let y = visualY(start)
+                out.append((
+                    Self.stopBandRect(CGRect(x: 0, y: y, width: bounds.width, height: lineH)),
+                    colors.logicBand
+                ))
+            }
+            guard end > start else { continue }
+
+            // Down to the closing bracket, and no further: a `}` sits at the
+            // node's own column, so a guide that covered it would be drawn
+            // through the glyph. A language that closes a block by outdenting
+            // has no such row, and there the guide covers everything.
+            let closes = text(end)?.trimmingCharacters(in: .whitespaces).first.map {
+                "}])".contains($0)
+            } ?? false
+            let top = visualY(start) + lineH
+            let bottom = closes ? visualY(end) : visualY(end) + lineH
+            guard bottom > top else { continue }
+            let x = EditorMetrics.gutter + CGFloat(run.col) * advance
+            out.append((
+                CGRect(x: x.rounded(), y: top, width: max(pixel, 1), height: bottom - top),
+                ink
+            ))
+        }
+        return out
     }
 
     private func gitBars<Band: Sequence<EditorLine>>(

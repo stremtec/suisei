@@ -9,6 +9,7 @@
 //! ```
 
 use std::path::Path;
+use suisei_core::logic::LogicRuntime;
 use suisei_core::logic_view::{LogicSession, LogicViews};
 
 const SRC: &str = "\
@@ -119,6 +120,70 @@ fn following_the_caret_opens_the_function_the_caret_is_in() {
     s.follow_caret(4);
     assert_eq!(s.rows().len(), opened);
     assert_eq!(s.rows()[s.selected].label, "0");
+}
+
+// ── What the editor draws ──────────────────────────────────────────────────
+
+/// A guide runs at the node's OWN indentation, down what the node covers —
+/// and a node that occupies one line has nothing to run down.
+#[test]
+fn the_selection_is_marked_as_a_run_at_its_own_column() {
+    let mut s = session();
+    s.toggle(0);
+    let branch = s.rows().iter().position(|r| r.label == "x > 0").unwrap();
+    s.selected = branch;
+
+    let marks = s.marks(&LogicRuntime::default(), false, 4);
+    assert_eq!(marks.len(), 1, "just the selection: nothing is running");
+    let m = marks[0];
+    assert!(m.selected && !m.runtime);
+    assert_eq!((m.start_row, m.end_row), (1, 3), "the whole `if`");
+    assert_eq!(m.col, 4, "the `if`'s own indentation, not its body's");
+
+    // A single-line node still gets its band, and a column of zero says there
+    // is nothing to run down.
+    let step = s.rows().iter().position(|r| r.label == "return x").unwrap();
+    s.selected = step;
+    let one = s.marks(&LogicRuntime::default(), false, 4);
+    assert_eq!(one[0].start_row, one[0].end_row);
+    assert_eq!(one[0].col, 0);
+}
+
+/// The branches and loops the program is inside get an amber guide — but the
+/// FUNCTION does not: a line beside every line of it says nothing.
+#[test]
+fn the_runtime_path_is_marked_but_not_the_whole_function() {
+    let mut s = session();
+    s.toggle(0);
+    let rt = suisei_core::logic::runtime(
+        &s.tree,
+        "/tmp/logic_probe.rs",
+        Some(("/tmp/logic_probe.rs", 2)),
+        &[("helper", "/tmp/logic_probe.rs", 2)],
+    );
+    assert_eq!(rt.enclosing.len(), 2, "the function and the `if`");
+
+    let marks = s.marks(&rt, true, 4);
+    let runtime: Vec<_> = marks.iter().filter(|m| m.runtime).collect();
+    assert_eq!(runtime.len(), 1, "the `if` only: {marks:?}");
+    assert_eq!((runtime[0].start_row, runtime[0].end_row), (1, 3));
+}
+
+/// Closing the debug panel takes every runtime mark with it. The stop band and
+/// the value bracket already learned this; a guide left behind would be the
+/// same bug in another colour.
+#[test]
+fn closing_the_debug_panel_takes_the_runtime_marks_with_it() {
+    let mut s = session();
+    s.toggle(0);
+    let rt = suisei_core::logic::runtime(
+        &s.tree,
+        "/tmp/logic_probe.rs",
+        Some(("/tmp/logic_probe.rs", 2)),
+        &[("helper", "/tmp/logic_probe.rs", 2)],
+    );
+    let marks = s.marks(&rt, false, 4);
+    assert!(marks.iter().all(|m| !m.runtime), "nothing amber survives: {marks:?}");
 }
 
 /// Two Logic tabs are two sessions, and switching between them does not close
