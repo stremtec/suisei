@@ -18,6 +18,16 @@ struct ProjectTreeView: View {
     var onRefresh: () -> Void
 
     @State private var expanded: Set<String> = []
+    /// The lit row.
+    ///
+    /// Kept in step with the file the EDITOR is showing, which is the fact
+    /// this view used to be the last one in the app not to know. It was set
+    /// only by clicking a row here, so opening `readme.md` from the tab strip,
+    /// the palette, a jump to definition or the debugger left the tree
+    /// pointing at whatever was clicked last — usually nothing.
+    ///
+    /// Still writable, because a FOLDER can be selected and no editor is ever
+    /// showing one; that is also what New File / New Folder aim at.
     @State private var selectedPath: String = ""
     /// Files a live reload just touched. Observed separately for the same
     /// reason everywhere else does it: a reload must not republish the shell
@@ -48,6 +58,7 @@ struct ProjectTreeView: View {
                 let rows = expanded.contains(rootPath)
                     ? visibleChildren(of: rootPath, depth: 1)
                     : []
+                ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: true) {
                     // `LazyVStack` creates rows on demand and does NOT run
                     // insertion transitions, so above this threshold expanding
@@ -98,6 +109,15 @@ struct ProjectTreeView: View {
                     .padding(.bottom, 6)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The editor moved to another file: light it, open the folders
+                // above it, and bring it on screen. All three are the same
+                // question — "where am I" — and answering only the first one
+                // leaves the answer off screen inside a collapsed folder.
+                .onChange(of: engine.chrome.filename) { _, path in
+                    reveal(path, using: proxy)
+                }
+                .onAppear { reveal(engine.chrome.filename, using: proxy) }
+                }
 
                 // Filter bar: the rounded capsule alone. The bare [+] that
                 // used to sit here posted New Untitled Tab — a TUI vestige;
@@ -168,8 +188,71 @@ struct ProjectTreeView: View {
         }
         .onChange(of: rootPath) { _, newRoot in
             expanded = newRoot.isEmpty ? [] : [newRoot]
+            dirStamps = [:]
             rebuild()
         }
+        // Its own slow clock rather than the 60 Hz tick: the question is
+        // "did somebody create a file", and the answer changes at human pace.
+        // Tied to the view, so a hidden navigator stats nothing.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.watchInterval)
+                if Task.isCancelled { return }
+                pollDirectories()
+            }
+        }
+    }
+
+    // MARK: - Following the editor
+
+    /// Light the file the editor is showing, open every folder above it, and
+    /// bring it on screen.
+    ///
+    /// Reported as "파일 트리와 탭바가 따로 논다": the tab strip had `readme.md`
+    /// open and the tree said nothing, and opening a file inside a folder that
+    /// was not expanded left it invisible — the row exists, three collapsed
+    /// folders above it.
+    ///
+    /// Silent for a file outside the project. The tree is a view OF the root,
+    /// and quietly re-rooting it because a stray file was opened would throw
+    /// away where the reader was.
+    private func reveal(_ path: String, using proxy: ScrollViewProxy) {
+        guard !path.isEmpty, !rootPath.isEmpty, isInside(path) else { return }
+        selectedPath = path
+
+        // Every folder between the root and the file. Read each one BEFORE
+        // animating, for the reason the click handler documents: a synchronous
+        // `contentsOfDirectory` inside `withAnimation` eats the whole 0.26s
+        // and the rows appear instead of sliding.
+        var missing: [String] = []
+        var dir = (path as NSString).deletingLastPathComponent
+        while dir == rootPath || isInside(dir) {
+            if !expanded.contains(dir) { missing.append(dir) }
+            let parent = (dir as NSString).deletingLastPathComponent
+            if parent == dir { break }
+            dir = parent
+        }
+        for folder in missing { _ = children(of: folder) }
+        if !missing.isEmpty {
+            withAnimation(.smooth(duration: 0.26)) { expanded.formUnion(missing) }
+        }
+
+        // After the rows exist. Scrolling to an id that has not been built
+        // yet — which is every row that just came out of a collapsed folder —
+        // does nothing at all.
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(path, anchor: .center)
+            }
+        }
+    }
+
+    /// Whether `path` is under the project root — by PATH COMPONENT, not by
+    /// string prefix. `/Users/a/suisei-app/x` starts with `/Users/a/suisei`,
+    /// and this repository has both of those folders side by side.
+    private func isInside(_ path: String) -> Bool {
+        let root = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        return path.hasPrefix(root)
     }
 
     // MARK: - Row
@@ -334,6 +417,8 @@ struct ProjectTreeView: View {
             }
         }
         .buttonStyle(.plain)
+        // Addressable, so `reveal` can scroll to it.
+        .id(path)
         // Drag the row out as a file URL — the same payload Finder sends, so a
         // drag out of Suisei lands correctly in other apps too.
         .onDrag {
@@ -704,6 +789,57 @@ struct ProjectTreeView: View {
 
     static func invalidateCache() {
         listingCache.removeAll()
+    }
+
+    // MARK: - Noticing the filesystem
+
+    /// Modification time of each folder we are showing, as of the last look.
+    @State private var dirStamps: [String: Date] = [:]
+
+    /// How often the open folders are re-checked. Slow on purpose: this is
+    /// "somebody else created a file", which happens at human and build-tool
+    /// pace, and the check must never compete with a frame.
+    private static let watchInterval: Duration = .seconds(2)
+
+    /// Notice files that appeared, vanished or were renamed underneath us.
+    ///
+    /// Reported: "live reload 는 파일트리에도 잘 보이는데, 정작 파일이 새로
+    /// 생길땐 감지가 없음." Both halves were true. The one-second tick in the
+    /// engine stats the files that are OPEN — that is what live reload is — and
+    /// nothing ever asked a directory whether its contents had changed, so a
+    /// `cargo new`, a `git checkout` or a file saved from another editor left
+    /// the tree showing yesterday.
+    ///
+    /// One `stat` per OPEN folder, and only the folders that are open: a
+    /// directory's mtime moves when an entry is added, removed or renamed,
+    /// which is exactly the question, and it costs a syscall instead of a
+    /// listing. A collapsed folder is not on screen and is re-read when it
+    /// opens anyway.
+    private func pollDirectories() {
+        guard !rootPath.isEmpty else { return }
+        var changed: [String] = []
+        var seen: [String: Date] = [:]
+        for dir in expanded.union([rootPath]) {
+            guard let stamp = try? FileManager.default
+                .attributesOfItem(atPath: dir)[.modificationDate] as? Date
+            else {
+                // The folder itself went away. Forget its listing; the parent's
+                // own stamp will have moved too, so the row disappears with it.
+                if Self.listingCache[dir] != nil { changed.append(dir) }
+                continue
+            }
+            seen[dir] = stamp
+            if let was = dirStamps[dir], was == stamp { continue }
+            // First sight is not a change — otherwise every newly expanded
+            // folder would rebuild the tree one tick after it opened.
+            if dirStamps[dir] != nil { changed.append(dir) }
+        }
+        dirStamps = seen
+        guard !changed.isEmpty else { return }
+        for dir in changed { Self.listingCache.removeValue(forKey: dir) }
+        // Only the folders that moved are re-listed; `rebuild` primes the root
+        // and refreshes the git marks, which is also what a new file needs.
+        rebuild()
     }
 
     // MARK: - Git marks
