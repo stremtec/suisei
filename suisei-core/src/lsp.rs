@@ -71,6 +71,14 @@ pub struct LspClient {
     pub pending_workspace_edit: Option<String>,
     /// Multi-file full-text edits ready to apply (path → new content).
     pub pending_edits: Vec<FileEdit>,
+    /// A `textDocument/formatting` reply arrived — carrying edits, or saying
+    /// there was nothing to change.
+    ///
+    /// Both are ANSWERS, and a save held for the formatter is waiting on the
+    /// answer rather than on the edits. Without this, saving an already-tidy
+    /// file would hang until the timeout on every ⌘S, because "nothing to
+    /// change" fills `pending_edits` with nothing at all.
+    pub formatting_answered: bool,
     pub pending_symbols: Vec<SymbolItem>,
     pub pending_code_actions: Vec<CodeActionItem>,
     /// Call hierarchy items ready for the panel (after prepare + incoming/outgoing).
@@ -250,6 +258,7 @@ impl Default for LspClient {
             references_ready: false,
             pending_workspace_edit: None,
             pending_edits: Vec::new(),
+            formatting_answered: false,
             pending_symbols: Vec::new(),
             pending_code_actions: Vec::new(),
             pending_call_hierarchy: Vec::new(),
@@ -1241,6 +1250,7 @@ impl LspClient {
                 }
             }
             PendingReq::Formatting => {
+                self.formatting_answered = true;
                 if let Some(edit) =
                     parse_text_edits_as_full_replace(&msg.body, &self.semantic_doc_text)
                 {

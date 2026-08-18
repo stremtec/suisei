@@ -679,6 +679,7 @@ pub enum SettingRow {
     KeyHints,
     LspHeader,
     LspEnabled,
+    FormatOnSave,
     /// Index into `config::lsp_lang_catalog()`
     LspLang(usize),
     GitHeader,
@@ -803,6 +804,7 @@ impl SettingRow {
             SettingRow::KeyHints => 12,
             SettingRow::LspHeader => 13,
             SettingRow::LspEnabled => 14,
+            SettingRow::FormatOnSave => 14,
             SettingRow::LspLang(_) => 15,
             SettingRow::GitHeader => 16,
             SettingRow::OpenWorkbench => 17,
@@ -1016,6 +1018,15 @@ impl SettingRow {
                 options: "",
                 advanced: false,
             },
+            Self::FormatOnSave => SettingPresentation {
+                page: LanguageServers,
+                group: "Language Servers",
+                control: Toggle,
+                label: "Format on Save",
+                detail: "Run the language server's formatter on ⌘S. A save is never held longer than a moment — if the server does not answer, the file is written unformatted.",
+                options: "",
+                advanced: false,
+            },
             Self::LspLang(_) => SettingPresentation {
                 page: LanguageServers,
                 group: "Configured Servers",
@@ -1078,6 +1089,7 @@ impl SettingRow {
             Self::GpuHyperlinks => u32::from(draft.gpu_hyperlinks),
             Self::KeyHints => u32::from(draft.key_hints),
             Self::LspEnabled => u32::from(draft.lsp_enabled),
+            Self::FormatOnSave => u32::from(draft.format_on_save),
             Self::HighlightColor => u32::from(draft.highlight_color != "default"),
             Self::UpdateCheck => u32::from(draft.update_check),
             Self::LspLang(i) => config::lsp_lang_catalog()
@@ -1118,6 +1130,7 @@ fn setting_rows() -> Vec<SettingRow> {
     rows.push(SettingRow::KeyHints);
     rows.push(SettingRow::LspHeader);
     rows.push(SettingRow::LspEnabled);
+    rows.push(SettingRow::FormatOnSave);
     for i in 0..config::lsp_lang_catalog().len() {
         rows.push(SettingRow::LspLang(i));
     }
@@ -1639,6 +1652,11 @@ impl SettingsPanel {
                 self.draft.lsp_enabled = option != 0;
                 self.status = Some(format!("lsp_enabled = {}", self.draft.lsp_enabled));
                 SettingsAction::ApplyLsp
+            }
+            SettingRow::FormatOnSave => {
+                self.draft.format_on_save = option != 0;
+                self.status = Some(format!("format_on_save = {}", self.draft.format_on_save));
+                SettingsAction::None
             }
             SettingRow::LspLang(i) => {
                 let Some((key, _label, default_cmd)) = config::lsp_lang_catalog().get(i) else {

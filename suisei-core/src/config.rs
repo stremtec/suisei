@@ -54,6 +54,12 @@ pub struct Config {
     pub key_hints: bool,
     /// Master switch for automatic LSP start.
     pub lsp_enabled: bool,
+    /// Run the language server's formatter on ⌘S, before writing.
+    ///
+    /// Off by default, and deliberately. A formatter rewrites the whole file,
+    /// so turning this on for someone means the first save in a shared
+    /// repository produces a diff nobody asked for.
+    pub format_on_save: bool,
     /// Per-language LSP command overrides.
     /// Key = language id (`rust`, `python`, …).
     /// Value = command line; empty string = disabled for that language.
@@ -84,6 +90,7 @@ impl Default for Config {
             gpu_acc: true,
             key_hints: true,
             lsp_enabled: true,
+            format_on_save: false,
             lsp_servers: HashMap::new(),
             keybindings: BTreeMap::new(),
         }
@@ -261,6 +268,9 @@ pub fn load() -> Config {
             "key_hints" | "which_key" | "chord_hints" => {
                 cfg.key_hints = matches!(v, "true" | "1" | "yes" | "on");
             }
+            "format_on_save" => {
+                cfg.format_on_save = matches!(v, "true" | "1" | "yes" | "on");
+            }
             "lsp_enabled" | "lsp" => {
                 cfg.lsp_enabled = matches!(v, "true" | "1" | "yes" | "on");
             }
@@ -327,7 +337,7 @@ pub fn load() -> Config {
 
 pub fn save(cfg: &Config) {
     let mut content = format!(
-        "# suisei config\ntheme = \"{}\"\nglass_style = \"{}\"\nhighlight_color = \"{}\"\ntab_width = {}\nclipboard_sync = {}\nrelative_number = {}\nwrap_lines = {}\nupdate_check = {}\nundo_caching = {}\ngpu_graphics = {}\ngpu_hyperlinks = {}\ngpu_acc = {}\nkey_hints = {}\nlsp_enabled = {}\n",
+        "# suisei config\ntheme = \"{}\"\nglass_style = \"{}\"\nhighlight_color = \"{}\"\ntab_width = {}\nclipboard_sync = {}\nrelative_number = {}\nwrap_lines = {}\nupdate_check = {}\nundo_caching = {}\ngpu_graphics = {}\ngpu_hyperlinks = {}\ngpu_acc = {}\nkey_hints = {}\nlsp_enabled = {}\nformat_on_save = {}\n",
         cfg.theme,
         cfg.glass_style,
         cfg.highlight_color,
@@ -342,6 +352,7 @@ pub fn save(cfg: &Config) {
         if cfg.gpu_acc { "true" } else { "false" },
         if cfg.key_hints { "true" } else { "false" },
         if cfg.lsp_enabled { "true" } else { "false" },
+        if cfg.format_on_save { "true" } else { "false" },
     );
     // Written only when there is something to write: an empty section in every
     // config file is noise in a file people open by hand.

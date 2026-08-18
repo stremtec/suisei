@@ -1747,6 +1747,9 @@ fn build_settings(app: &App) -> SettingsScene {
                     SettingRow::LspEnabled => {
                         (presentation.label.into(), on_off(draft.lsp_enabled), false)
                     }
+                    SettingRow::FormatOnSave => {
+                        (presentation.label.into(), on_off(draft.format_on_save), false)
+                    }
                     SettingRow::LspLang(li) => {
                         let catalog = suisei_core::config::lsp_lang_catalog();
                         let (key, label, _) = catalog.get(li).copied().unwrap_or(("?", "?", "?"));

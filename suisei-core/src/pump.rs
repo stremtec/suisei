@@ -58,6 +58,13 @@ impl PumpChange {
 /// bytes, and this one is by characters.
 const HOVER_CHARS: usize = 4000;
 
+/// How long a ⌘S waits for the formatter before writing anyway.
+///
+/// VS Code uses 750 ms for the same trade and it is the right order: long
+/// enough that a warm `rust-analyzer` makes it, short enough that a cold or
+/// wedged one does not turn ⌘S into a pause the hand notices.
+const FORMAT_ON_SAVE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+
 impl App {
     /// Drain the language services and apply whatever arrived. Call once per
     /// frame; it is a cheap no-op (two empty `try_recv`s) when nothing is
@@ -166,9 +173,47 @@ impl App {
         // Multi-file full-text edits (rename / format / code action apply).
         if !self.lsp.pending_edits.is_empty() {
             let edits = std::mem::take(&mut self.lsp.pending_edits);
-            self.apply_file_edits(edits);
+            // A save held for the formatter: this reply describes the document
+            // as it was when we asked, and applying it replaces the WHOLE
+            // buffer. If the user kept typing while the server thought, that
+            // replacement would put the file back and take the keystrokes with
+            // it. A version that has moved means the answer is about a document
+            // that no longer exists.
+            let held = self
+                .pending_save
+                .as_ref()
+                .filter(|_| self.lsp.formatting_answered);
+            let stale = held.is_some_and(|p| p.version != self.buffer.version());
+            if stale {
+                self.set_message("Kept typing while formatting — saved as typed");
+            } else {
+                self.apply_file_edits(edits);
+            }
             change.chrome = true;
             change.paint = true;
+        }
+
+        // The formatter answered. Edits or not — "nothing to change" is an
+        // answer too — the save it was holding can go through now.
+        if self.lsp.formatting_answered {
+            self.lsp.formatting_answered = false;
+            if self.pending_save.take().is_some() {
+                self.save_file();
+                change.chrome = true;
+                change.paint = true;
+            }
+        }
+
+        // …and if it never answers, the file is still written. A save must not
+        // be lost to a hung language server; unformatted beats unsaved.
+        if let Some(p) = &self.pending_save {
+            if p.asked_at.elapsed() >= FORMAT_ON_SAVE_TIMEOUT {
+                self.pending_save = None;
+                self.save_file();
+                self.set_message("Formatter did not answer — saved unformatted");
+                change.chrome = true;
+                change.paint = true;
+            }
         }
         if let Some(msg) = self.lsp.pending_workspace_edit.take() {
             // "APPLY\n…" is the payload form handled by apply_file_edits above;

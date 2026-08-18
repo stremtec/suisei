@@ -188,6 +188,8 @@ pub struct App {
     pub xlc_height: u16,
     pub xlc_separator_y: u16,
     pub file_mtime: Option<std::time::SystemTime>,
+    /// A ⌘S waiting on the formatter. See [`App::save_file_formatted`].
+    pub pending_save: Option<PendingSave>,
     /// The active file was deleted/moved out from under the open buffer. Set by
     /// `check_active_file_external`, cleared when the path reappears. Drives the
     /// tab's "deleted on disk" state so editing a vanished file is not silent.
@@ -622,6 +624,7 @@ impl Default for App {
             xlc_height: 11,
             xlc_separator_y: 0,
             file_mtime: None,
+            pending_save: None,
             file_deleted: false,
             live_rows: std::collections::HashMap::new(),
             live_marked_at: None,
@@ -839,6 +842,21 @@ pub fn file_looks_binary(path: &std::path::Path) -> bool {
         return false;
     }
     looks_binary(&head)
+}
+
+/// A ⌘S held while the formatter thinks.
+#[derive(Debug, Clone)]
+pub struct PendingSave {
+    /// When we asked. A save is never held longer than the timeout.
+    pub asked_at: std::time::Instant,
+    /// The document as it was when we asked.
+    ///
+    /// A formatting reply is a WHOLE-BUFFER replacement. If the user typed
+    /// while the server was thinking, applying it would put the file back to
+    /// how it looked before those keystrokes and take them with it — so a
+    /// version that has moved means the answer is about a document that no
+    /// longer exists, and it is dropped rather than applied.
+    pub version: u64,
 }
 
 impl App {
@@ -4104,6 +4122,44 @@ impl App {
             end += 1;
         }
         chars[start..end].iter().collect()
+    }
+
+    /// ⌘S, with format-on-save honoured.
+    ///
+    /// The formatter is a language server, and a language server answers when
+    /// it feels like it — so this cannot be "format, then write". It asks, and
+    /// the write happens in the pump when the answer lands (or when it does
+    /// not; see `FORMAT_ON_SAVE_TIMEOUT`).
+    ///
+    /// **A save is never lost.** Every path that declines to format falls
+    /// straight through to the plain write, and a formatter that never answers
+    /// times out into one. Holding a file hostage to a hung `rust-analyzer` is
+    /// the one outcome that would make this feature worse than not having it.
+    pub fn save_file_formatted(&mut self) {
+        let wanted = self.settings.draft.format_on_save
+            && self.lsp.server_running
+            && self.filename.is_some()
+            && !self.live_tab_kind().is_viewer();
+        if !wanted {
+            self.save_file();
+            return;
+        }
+        // A second ⌘S while one is already waiting is the same save, not a
+        // second one. Re-asking would leave two replies for one write.
+        if self.pending_save.is_some() {
+            return;
+        }
+        let Some(path) = self.filename.clone() else {
+            self.save_file();
+            return;
+        };
+        self.lsp.formatting_answered = false;
+        self.lsp.request_formatting(&path.display().to_string());
+        self.pending_save = Some(PendingSave {
+            asked_at: std::time::Instant::now(),
+            version: self.buffer.version(),
+        });
+        self.set_message("Formatting…");
     }
 
     pub fn save_file(&mut self) {

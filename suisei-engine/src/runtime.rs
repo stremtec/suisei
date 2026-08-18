@@ -1656,7 +1656,11 @@ impl Engine {
     }
 
     pub fn save_file(&mut self) {
-        self.app.save_file();
+        // `save_file_formatted`, not `save_file`: with the setting off it is
+        // the same call, and with it on the write happens in the pump once the
+        // formatter answers. Routing ⌘S past it is how the feature would end up
+        // working from the menu and not from the key, or the other way round.
+        self.app.save_file_formatted();
         // File is now durable — remove the shadow WAL entry.
         if let Some(ref path) = self.app.filename {
             self.journal.on_saved(&path.to_string_lossy());
