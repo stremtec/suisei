@@ -208,13 +208,17 @@ struct SuiseiApp: App {
             }
             .keyboardShortcut(".", modifiers: .command)
 
-            // A view OF this file, in a pane of its own: split, and the code
-            // and its logic sit side by side. Disabled where there is no logic
-            // table to read the file with, rather than opening an empty one.
-            Button("Show Logic View") {
-                engine.openLogicView()
+            // The shape of this file, in the right rail, beside the code
+            // that is the text of it. The rail is the home; the pane below is
+            // for a wide read of a long function.
+            Button("Show Logic") {
+                NotificationCenter.default.post(name: .suiseiRevealLogicInspector, object: nil)
             }
             .keyboardShortcut("l", modifiers: [.command, .control])
+
+            Button("Open Logic in a Pane") {
+                engine.openLogicView()
+            }
 
             Divider()
 
@@ -552,6 +556,9 @@ extension Notification.Name {
     static let suiseiNavNewFolder = Notification.Name("suisei.nav.newFolder")
     static let suiseiNavCollapseAll = Notification.Name("suisei.nav.collapseAll")
     static let suiseiRecoveryAccepted = Notification.Name("suisei.recoveryAccepted")
+    /// Reveal the right rail's Logic inspector. The menu lives in the app and
+    /// the rail's mode lives in `ContentView`, which is what this crosses.
+    static let suiseiRevealLogicInspector = Notification.Name("suisei.revealLogicInspector")
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {

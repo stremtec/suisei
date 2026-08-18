@@ -1179,5 +1179,7 @@ uint8_t suisei_engine_logic(SuiseiEngine *ptr, const char *path,
 void suisei_engine_logic_toggle(SuiseiEngine *ptr, const char *path, uint32_t index);
 void suisei_engine_logic_select(SuiseiEngine *ptr, const char *path, uint32_t index);
 void suisei_engine_logic_reveal(SuiseiEngine *ptr, const char *path, uint32_t index);
+/* The rail catching up with the caret. Returns 1 when something moved. */
+uint8_t suisei_engine_logic_follow(SuiseiEngine *ptr, const char *path, uint32_t line);
 void suisei_engine_logic_open(SuiseiEngine *ptr);
 uint8_t suisei_engine_logic_available(const SuiseiEngine *ptr);

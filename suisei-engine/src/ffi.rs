@@ -5558,6 +5558,27 @@ pub extern "C" fn suisei_engine_logic_select(
     }
 }
 
+/// Follow the caret: select the row holding `line`, opening its function.
+///
+/// The rail's half of the pairing. The editor is the authority on where the
+/// reader is, and this is the view catching up — the same containment test
+/// `reveal` uses, read the other way round.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_logic_follow(
+    ptr: *mut SuiseiEngine,
+    path: *const c_char,
+    line: u32,
+) -> u8 {
+    let Some(p) = logic_path(path) else { return 0 };
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let app = (*ptr).0.app_mut();
+        u8::from(app.logic_session(&p).follow_caret(line as usize))
+    }
+}
+
 /// Take the reader to the source this row came from.
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_logic_reveal(

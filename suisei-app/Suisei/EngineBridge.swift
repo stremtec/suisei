@@ -1351,8 +1351,11 @@ final class EngineBridge: ObservableObject {
     /// the pane showing it is usually not the pane the keyboard is in — that
     /// is what the view is FOR — so "the current file" is the wrong question.
     @Published var logic: [String: LogicSnap] = [:]
-    /// The files those panes asked about, and what they last looked like.
-    var logicWatched: Set<String> = []
+    /// The files those views asked about, and how many of them asked.
+    ///
+    /// COUNTED, not a set: the rail and a pane can be showing one file at
+    /// once, and closing either would otherwise stop the other one updating.
+    var logicWatched: [String: Int] = [:]
     var logicFingerprints: [String: UInt64] = [:]
     private var hoverPoll: DispatchWorkItem?
     /// Discards results from a superseded query — the user types faster than a
@@ -6801,13 +6804,19 @@ extension EngineBridge {
     /// it. Panes come and go; the engine keeps the sessions either way.
     func watchLogic(_ path: String) {
         guard !path.isEmpty else { return }
-        logicWatched.insert(path)
+        logicWatched[path, default: 0] += 1
         refreshLogicIfNeeded()
     }
 
     func unwatchLogic(_ path: String) {
-        logicWatched.remove(path)
-        logicFingerprints.removeValue(forKey: path)
+        guard let n = logicWatched[path] else { return }
+        if n <= 1 {
+            logicWatched.removeValue(forKey: path)
+            logicFingerprints.removeValue(forKey: path)
+            logic.removeValue(forKey: path)
+        } else {
+            logicWatched[path] = n - 1
+        }
     }
 
     /// Pull each watched file's rows, and only when they moved.
@@ -6816,7 +6825,7 @@ extension EngineBridge {
     /// the same trade the debugger's refresh makes, for the same reason.
     func refreshLogicIfNeeded() {
         guard let engine, !logicWatched.isEmpty else { return }
-        for path in logicWatched {
+        for path in logicWatched.keys {
             let fingerprint = path.withCString { suisei_engine_logic_fingerprint(engine, $0) }
             if logicFingerprints[path] == fingerprint { continue }
             logicFingerprints[path] = fingerprint
@@ -6834,6 +6843,22 @@ extension EngineBridge {
     func logicSelect(_ path: String, _ index: Int) {
         guard let engine else { return }
         path.withCString { suisei_engine_logic_select(engine, $0, UInt32(index)) }
+        logicFingerprints.removeValue(forKey: path)
+        refreshLogicIfNeeded()
+    }
+
+    /// The rail catching up with the caret: select the row holding `line` and
+    /// open the function it is in.
+    ///
+    /// The editor is the authority on where the reader is. This runs on caret
+    /// moves, so it does the cheap containment scan in core and publishes
+    /// nothing unless something actually moved.
+    func logicFollow(_ path: String, _ line: Int) {
+        guard let engine, line >= 0 else { return }
+        let moved = path.withCString {
+            suisei_engine_logic_follow(engine, $0, UInt32(line))
+        }
+        guard moved != 0 else { return }
         logicFingerprints.removeValue(forKey: path)
         refreshLogicIfNeeded()
     }

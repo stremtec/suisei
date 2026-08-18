@@ -291,10 +291,14 @@ struct ContentView: View {
     /// the code while you read, it already owns ⌥⌘0, and moving it left would
     /// make it fight the project tree for the same rail. Kept here knowingly.
     enum InspectorMode: String, CaseIterable {
-        case outline, file, quickHelp
+        /// Logic sits next to Outline on purpose: they answer neighbouring
+        /// questions — where things are, and what happens — and the rail is
+        /// where you look while reading the code either way.
+        case outline, logic, file, quickHelp
         var systemImage: String {
             switch self {
             case .outline: return "list.bullet.indent"
+            case .logic: return "arrow.trianglehead.branch"
             case .file: return "doc"
             case .quickHelp: return "questionmark.circle"
             }
@@ -302,6 +306,7 @@ struct ContentView: View {
         var title: String {
             switch self {
             case .outline: return "Outline"
+            case .logic: return "Logic"
             case .file: return "File"
             case .quickHelp: return "Quick Help"
             }
@@ -1192,6 +1197,21 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .suiseiOpenGitWorkbenchWindow)) { _ in
             engine.openGitWorkbenchWindow()
             openWindow(id: "git-workbench")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .suiseiRevealLogicInspector)) { _ in
+            // The File inspector's three states, and for the same reasons.
+            // Shut → open on Logic. Open on something else → switch, do not
+            // close: the press means "show me the logic". Open and already on
+            // Logic → close, because at that point it cannot mean anything else.
+            if engine.uiInspectorVisible, inspectorMode == .logic {
+                animatePanels { engine.uiInspectorVisible = false }
+            } else {
+                if !engine.uiInspectorVisible {
+                    animatePanels { engine.uiInspectorVisible = true }
+                }
+                inspectorMode = .logic
+            }
+            focused = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .suiseiNavProject)) { _ in
             navMode = .project
@@ -5118,6 +5138,7 @@ struct ContentView: View {
             case .file: fileInspectorContent
             case .quickHelp: quickHelpContent
             case .outline: outlineContent
+            case .logic: logicInspectorContent
             }
         }
         // Shares ONE surface with the editor, split by a hairline — which is
@@ -5220,6 +5241,19 @@ struct ContentView: View {
         .padding(.horizontal, 10)
         .padding(.top, 8)
         .padding(.bottom, 2)
+    }
+
+    /// Logic — the shape of the file, beside the code that is the text of it.
+    ///
+    /// Nothing of the file's identity is repeated here: the editor one column
+    /// left is already showing which file this is, and a rail this narrow
+    /// cannot afford to say anything twice.
+    private var logicInspectorContent: some View {
+        LogicRail(
+            rawPath: engine.chrome.filename,
+            palette: viewerPalette,
+            cursorRow: engine.chrome.cursorRow
+        )
     }
 
     private var outlineContent: some View {

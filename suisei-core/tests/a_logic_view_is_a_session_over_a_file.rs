@@ -26,7 +26,7 @@ fn main() {
 ";
 
 fn session() -> LogicSession {
-    LogicSession::open(Path::new("/tmp/logic_probe.rs"), SRC)
+    LogicSession::open(Path::new("/tmp/logic_probe.rs"), SRC, None)
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn an_edit_rebuilds_the_tree_and_keeps_open_what_was_open() {
 
     // Two lines land above everything, so every row's line number moves.
     let edited = format!("// a note\n// and another\n{SRC}");
-    s.refresh(&edited);
+    s.refresh(&edited, None);
 
     assert_eq!(s.rows().len(), opened, "still open after the edit");
     let helper = s.rows().iter().find(|r| r.label == "helper").expect("still there");
@@ -65,7 +65,7 @@ fn text_that_did_not_change_is_not_reparsed() {
     let mut s = session();
     s.toggle(0);
     let before = s.rows().len();
-    s.refresh(SRC);
+    s.refresh(SRC, None);
     assert_eq!(s.rows().len(), before, "the open function stayed open");
     assert!(s.is_current(SRC));
 }
@@ -74,11 +74,11 @@ fn text_that_did_not_change_is_not_reparsed() {
 /// same rule the model viewer arrived at from the other side.
 #[test]
 fn a_file_with_no_logic_says_so_rather_than_showing_an_empty_list() {
-    let empty = LogicSession::open(Path::new("/tmp/logic_probe.rs"), "const A: i32 = 1;\n");
+    let empty = LogicSession::open(Path::new("/tmp/logic_probe.rs"), "const A: i32 = 1;\n", None);
     assert!(empty.rows().is_empty());
     assert!(empty.note.is_some(), "it says why it is empty");
 
-    let untabled = LogicSession::open(Path::new("/tmp/notes.md"), "# hello\n");
+    let untabled = LogicSession::open(Path::new("/tmp/notes.md"), "# hello\n", None);
     assert!(untabled.note.is_some(), "Markdown has no control flow to be wrong about");
 }
 
@@ -95,6 +95,32 @@ fn the_view_can_follow_the_editor() {
     assert!(!s.follow_source(2));
 }
 
+/// The rail sits beside the editor, so "the function you are reading" is the
+/// one thing it can know without being asked — and it opens THAT function.
+///
+/// Only that one. Walking into every call from here would build the whole
+/// file, which is the one thing the collapse exists to prevent.
+#[test]
+fn following_the_caret_opens_the_function_the_caret_is_in() {
+    let mut s = session();
+    assert_eq!(s.rows().len(), 2, "both functions closed to begin with");
+
+    // Line 2 is `return x;`, inside `helper`.
+    assert!(s.follow_caret(2));
+    assert!(s.rows()[0].expanded, "helper opened");
+    assert_eq!(s.rows()[s.selected].label, "return x", "and the row is the caret's");
+    assert!(
+        s.rows().iter().all(|r| r.label != "main" || !r.expanded),
+        "main was not opened: nothing but the caret's function is built"
+    );
+
+    // Moving inside the same function does not rebuild it, it just moves.
+    let opened = s.rows().len();
+    s.follow_caret(4);
+    assert_eq!(s.rows().len(), opened);
+    assert_eq!(s.rows()[s.selected].label, "0");
+}
+
 /// Two Logic tabs are two sessions, and switching between them does not close
 /// everything the reader had opened in the other.
 #[test]
@@ -103,11 +129,11 @@ fn each_file_keeps_its_own_open_functions() {
     let a = Path::new("/tmp/logic_a.rs");
     let b = Path::new("/tmp/logic_b.rs");
 
-    views.get(a, SRC).toggle(0);
-    let opened = views.get(a, SRC).rows().len();
-    views.get(b, SRC);
-    assert_eq!(views.get(a, SRC).rows().len(), opened, "a is as it was left");
-    assert_eq!(views.get(b, SRC).rows().len(), 2, "b was never opened");
+    views.get(a, SRC, None).toggle(0);
+    let opened = views.get(a, SRC, None).rows().len();
+    views.get(b, SRC, None);
+    assert_eq!(views.get(a, SRC, None).rows().len(), opened, "a is as it was left");
+    assert_eq!(views.get(b, SRC, None).rows().len(), 2, "b was never opened");
 
     views.forget(a);
     assert!(views.peek(a).is_none());

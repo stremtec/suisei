@@ -4,16 +4,23 @@
 //! the session behind one pane: which file, the rows as far as they have been
 //! opened, what is selected, and the parse the rows were read from.
 //!
-//! ## Why it holds its own parse
+//! ## Whose parse it uses
 //!
-//! The editor's live tree belongs to the buffer that is open in a pane, and a
-//! Logic View pane is a pane — so the file it draws is very often NOT the one
-//! the keyboard is in. Reading `live_tree()` would mean the view showing
-//! whatever was last typed in, which is the opposite of "code here, logic
-//! there, side by side".
+//! Two callers, two answers, and the difference is which file is on screen.
 //!
-//! So a session parses the text it was given and keeps that tree. It is
-//! rebuilt when the text changes, and never otherwise.
+//! The right rail draws the FOCUSED document, and the syntax engine already
+//! holds a live tree for exactly that, reparsed incrementally on every
+//! keystroke. So the rail hands it over and this adopts it: the rail is always
+//! visible, and building a parser and reparsing on every file switch — to
+//! reach a tree that already exists — is the one cost that would make an
+//! always-visible view not worth having.
+//!
+//! A Logic PANE draws whatever file it was opened on, which is usually not the
+//! one the keyboard is in — that is the point of it. There is no live tree for
+//! that file, so the session parses the text it was given and keeps it.
+//!
+//! Either way the tree and the text it was parsed from travel together: a tree
+//! indexed against stale text names the wrong ranges.
 //!
 //! ## The expansion survives the rebuild
 //!
@@ -25,7 +32,7 @@
 //! index 7 after an edit is not the row that was open before it.
 
 use crate::lang::{Lang, LangBundle};
-use crate::logic::{self, LogicRow, LogicTree};
+use crate::logic::{self, LogicKind, LogicRow, LogicTree};
 use std::path::{Path, PathBuf};
 
 /// One pane's view of one file.
@@ -49,7 +56,12 @@ pub struct LogicSession {
 
 impl LogicSession {
     /// Read `text` as `path`'s logic. Cheap: the outline is functions only.
-    pub fn open(path: &Path, text: &str) -> LogicSession {
+    ///
+    /// `ready` is a parse of that exact text when the caller already has one —
+    /// the editor's live tree for the focused document. Without it this builds
+    /// a parser and parses, which is the expensive path and the one the always
+    /// visible right rail must not take on every file switch.
+    pub fn open(path: &Path, text: &str, ready: Option<tree_sitter::Tree>) -> LogicSession {
         let mut s = LogicSession {
             path: path.to_path_buf(),
             lang: Lang::Rust,
@@ -59,7 +71,7 @@ impl LogicSession {
             src: String::new(),
             ts: None,
         };
-        s.rebuild(text);
+        s.rebuild(text, ready);
         s
     }
 
@@ -69,7 +81,7 @@ impl LogicSession {
     }
 
     /// Re-read the file, keeping open what was open.
-    pub fn refresh(&mut self, text: &str) {
+    pub fn refresh(&mut self, text: &str, ready: Option<tree_sitter::Tree>) {
         if self.is_current(text) {
             return;
         }
@@ -81,7 +93,7 @@ impl LogicSession {
             .map(|r| (r.label.clone(), r.depth))
             .collect();
         let selected = self.tree.rows.get(self.selected).map(|r| r.label.clone());
-        self.rebuild(text);
+        self.rebuild(text, ready);
         self.reopen(&open);
         if let Some(label) = selected {
             if let Some(i) = self.tree.rows.iter().position(|r| r.label == label) {
@@ -90,7 +102,7 @@ impl LogicSession {
         }
     }
 
-    fn rebuild(&mut self, text: &str) {
+    fn rebuild(&mut self, text: &str, ready: Option<tree_sitter::Tree>) {
         self.src = text.to_string();
         self.tree = LogicTree::default();
         self.ts = None;
@@ -110,13 +122,22 @@ impl LogicSession {
             self.note = Some(format!("{} has no control flow to read", lang.name()));
             return;
         }
-        let Some(mut bundle) = LangBundle::build(lang) else {
-            self.note = Some("Grammar unavailable".into());
-            return;
-        };
-        let Some(ts) = bundle.parser.parse(text, None) else {
-            self.note = Some("This file did not parse".into());
-            return;
+        let ts = match ready {
+            // Already parsed, by the editor, from this exact text. Adopting it
+            // costs a refcount; the alternative is building a parser and
+            // walking the file again to reach the same tree.
+            Some(t) => t,
+            None => {
+                let Some(mut bundle) = LangBundle::build(lang) else {
+                    self.note = Some("Grammar unavailable".into());
+                    return;
+                };
+                let Some(t) = bundle.parser.parse(text, None) else {
+                    self.note = Some("This file did not parse".into());
+                    return;
+                };
+                t
+            }
         };
         match logic::outline(&ts, text, lang) {
             Some(t) if !t.rows.is_empty() => self.tree = t,
@@ -180,6 +201,24 @@ impl LogicSession {
             _ => false,
         }
     }
+
+    /// Follow the caret, opening the function it is in.
+    ///
+    /// The rail is beside the editor and the caret is always somewhere, so
+    /// "the function you are reading" is the one thing the view can know
+    /// without being asked. It opens THAT function and nothing else — walking
+    /// into every call from here would build the whole file, which is the one
+    /// thing the collapse exists to prevent.
+    pub fn follow_caret(&mut self, line: usize) -> bool {
+        let mut moved = false;
+        if let Some(i) = logic::row_at(&self.tree, line) {
+            let row = &self.tree.rows[i];
+            if row.kind == LogicKind::Entry && row.expandable && !row.expanded {
+                moved = self.expand(i);
+            }
+        }
+        self.follow_source(line) || moved
+    }
 }
 
 /// The sessions the open Logic View panes are using.
@@ -197,15 +236,23 @@ const MAX_SESSIONS: usize = 8;
 
 impl LogicViews {
     /// The session for `path`, built or refreshed against `text`.
-    pub fn get(&mut self, path: &Path, text: &str) -> &mut LogicSession {
+    ///
+    /// `ready` is a parse of that exact text when the caller has one — see
+    /// [`LogicSession::open`].
+    pub fn get(
+        &mut self,
+        path: &Path,
+        text: &str,
+        ready: Option<tree_sitter::Tree>,
+    ) -> &mut LogicSession {
         if let Some(i) = self.sessions.iter().position(|s| s.path == path) {
-            self.sessions[i].refresh(text);
+            self.sessions[i].refresh(text, ready);
             return &mut self.sessions[i];
         }
         if self.sessions.len() >= MAX_SESSIONS {
             self.sessions.remove(0);
         }
-        self.sessions.push(LogicSession::open(path, text));
+        self.sessions.push(LogicSession::open(path, text, ready));
         self.sessions.last_mut().expect("just pushed")
     }
 

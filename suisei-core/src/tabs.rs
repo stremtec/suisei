@@ -503,9 +503,25 @@ impl App {
     }
 
     /// The session for `path`, built or refreshed against the live text.
+    ///
+    /// Hands over the editor's own tree when this is the focused document and
+    /// that tree was parsed from exactly this text. The right rail is always
+    /// visible, so without this every file switch pays a second full parse —
+    /// and a second parser build — on the main thread, for a tree the syntax
+    /// engine has already produced and keeps incrementally up to date.
     pub fn logic_session(&mut self, path: &std::path::Path) -> &mut crate::logic_view::LogicSession {
         let text = self.logic_source(path);
-        self.logic_views.get(path, &text)
+        let ready = if self.filename.as_deref() == Some(path)
+            && !self.live_tab_kind().is_viewer()
+        {
+            self.syntax
+                .live_tree()
+                .filter(|(_, parsed)| *parsed == text)
+                .map(|(tree, _)| tree.clone())
+        } else {
+            None
+        };
+        self.logic_views.get(path, &text, ready)
     }
 
     /// A cheap stand-in for "has this file changed", for the pane's poll.
