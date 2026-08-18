@@ -240,6 +240,15 @@ run "hdiutil create failed" \
 
 # Mounted at /Volumes, not a temp dir: the AppleScript below addresses the
 # volume by NAME, and Finder cannot find one mounted anywhere else.
+# A volume left mounted by an earlier run holds the image open, and the convert
+# below then fails with the source busy. That happened: a detach failed, the
+# `|| true` after it swallowed the failure, and the NEXT release died at its last
+# step with a cause two runs upstream. Clear ours before starting rather than
+# trusting the cleanup to have worked.
+for stale in /Volumes/"$VOLNAME"*; do
+  [[ -d "$stale" ]] && hdiutil detach "$stale" -force -quiet 2>/dev/null || true
+done
+
 MOUNT="/Volumes/$VOLNAME"
 if hdiutil attach "$DMG_RW" -quiet 2>/dev/null && [[ -d "$MOUNT" ]]; then
   if osascript >/dev/null 2>&1 <<APPLESCRIPT
@@ -265,7 +274,16 @@ APPLESCRIPT
     LAYOUT_OK=1
     sync
   fi
-  hdiutil detach "$MOUNT" -quiet 2>/dev/null || hdiutil detach "$MOUNT" -force -quiet 2>/dev/null || true
+  # Finder can still be holding the volume for a moment after `close`. Retry
+  # before forcing: an image left attached is what breaks the NEXT release, not
+  # this one, which is the hardest kind of failure to trace back.
+  for attempt in 1 2 3; do
+    hdiutil detach "$MOUNT" -quiet 2>/dev/null && break
+    sleep 1
+    if [[ "$attempt" == 3 ]]; then
+      hdiutil detach "$MOUNT" -force -quiet 2>/dev/null || true
+    fi
+  done
 fi
 
 if [[ "$LAYOUT_OK" == "1" ]]; then
@@ -275,8 +293,11 @@ else
 fi
 
 # UDZO: compressed and read-only, which is what a download should be.
+# No `-quiet`: `run` exists to keep the tool's own words for the failure
+# message, and `-quiet` is exactly what throws them away. The first time this
+# step failed it reported nothing but its own name.
 run "hdiutil convert failed" \
-  hdiutil convert "$DMG_RW" -format UDZO -imagekey zlib-level=9 -ov -quiet -o "$DMG"
+  hdiutil convert "$DMG_RW" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG"
 rm -f "$DMG_RW"
 rm -rf "$STAGE"
 
