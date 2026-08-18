@@ -446,13 +446,21 @@ if [[ -d "$ICON_SRC_DIR/Fonts" ]]; then
   echo "→ Fonts: $(ls "$RES/Fonts" 2>/dev/null | wc -l | tr -d ' ') files"
 fi
 # Launch-art rotation pool (one random image per app start).
-if [[ -d "$ICON_SRC_DIR/WelcomeHeroes" ]]; then
+#
+# `SUISEI_HERO_DIR` overrides the source, and `scripts/release.sh` sets it to a
+# downscaled copy: the masters in Resources are 3200px and the panel draws them
+# at 1032px, so shipping the masters wastes ~13 MB of every download. The
+# override exists so the RE-ENCODE NEVER TOUCHES THE MASTERS — a lossy pass
+# written back over its own input loses a little more every time it runs, and
+# after a few releases there is no way back.
+HERO_SRC="${SUISEI_HERO_DIR:-$ICON_SRC_DIR/WelcomeHeroes}"
+if [[ -d "$HERO_SRC" ]]; then
   rm -rf "$RES/WelcomeHeroes"
   mkdir -p "$RES/WelcomeHeroes"
   # Only ship real image files (skip .DS_Store / notes).
-  find "$ICON_SRC_DIR/WelcomeHeroes" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) \
+  find "$HERO_SRC" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) \
     -exec cp -f {} "$RES/WelcomeHeroes/" \;
-  echo "→ WelcomeHeroes: $(ls "$RES/WelcomeHeroes" | wc -l | tr -d ' ') images"
+  echo "→ WelcomeHeroes: $(ls "$RES/WelcomeHeroes" | wc -l | tr -d ' ') images ($(du -sh "$RES/WelcomeHeroes" | cut -f1))"
 fi
 if [[ -d "$ICON_SRC_DIR/Suisei.icon" ]]; then
   rm -rf "$RES/Suisei.icon"

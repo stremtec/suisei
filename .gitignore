@@ -20,3 +20,6 @@ suisei-agent/.build/
 
 # Vendored third-party build output.
 third_party/*/.build/
+
+# Release artefacts — a .dmg is a build output, not a source.
+dist/
