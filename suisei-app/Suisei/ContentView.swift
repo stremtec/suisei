@@ -1164,7 +1164,7 @@ struct ContentView: View {
             guard live else { return }
             debugTab = .debug
             if !engine.uiDebugVisible {
-                animatePanels { withAnimation(NavStrip.settle) { engine.uiDebugVisible = true } }
+                animatePanels { engine.uiDebugVisible = true }
             }
         }
         // A build starting brings its panel forward, the way a debug session
@@ -1174,26 +1174,28 @@ struct ContentView: View {
             guard state == .running else { return }
             debugTab = .build
             if !engine.uiDebugVisible {
-                animatePanels { withAnimation(NavStrip.settle) { engine.uiDebugVisible = true } }
+                animatePanels { engine.uiDebugVisible = true }
             }
         }
         .onChange(of: engine.chrome.terminal.open) { _, open in
             // Docked terminal (⌃T) → Debug area. Pane terminals (⌃⇧T) are
             // pane-local content and never touch the debug strip.
-            withAnimation(.snappy(duration: 0.28)) {
-                if open {
-                    // Bring the TERMINAL tab forward — the mirror of what a
-                    // starting debug session does above, and the line that was
-                    // missing. `debugTab` sticks at `.debug` once a session has
-                    // run, so a shell opened afterwards started, took the
-                    // keyboard and put the dock up STILL SHOWING THE DEBUGGER.
-                    // Every keystroke went to a terminal that was not on
-                    // screen: "사이드바에서 여는 터미널 여전히 입력 안됨".
-                    debugTab = .terminal
-                    engine.uiDebugVisible = true
-                } else {
-                    engine.uiDebugVisible = false
-                }
+            if open {
+                // Bring the TERMINAL tab forward — the mirror of what a
+                // starting debug session does above, and the line that was
+                // missing. `debugTab` sticks at `.debug` once a session has
+                // run, so a shell opened afterwards started, took the
+                // keyboard and put the dock up STILL SHOWING THE DEBUGGER.
+                // Every keystroke went to a terminal that was not on
+                // screen: "사이드바에서 여는 터미널 여전히 입력 안됨".
+                //
+                // The tab swap keeps its own explicit transaction; the FLAG
+                // does not get one, so the panel's single animator stays
+                // single.
+                withAnimation(.snappy(duration: 0.28)) { debugTab = .terminal }
+                engine.uiDebugVisible = true
+            } else {
+                engine.uiDebugVisible = false
             }
         }
         .onChange(of: engine.chrome.settings.open) { _, open in
@@ -1528,6 +1530,24 @@ struct ContentView: View {
             style: .continuous
         )
         return editorIsolatedStage
+            // ONE animator for the debug area, declared where the panel and
+            // the content that steps aside for it both live.
+            //
+            // It used to be five `withAnimation` blocks at five call sites, in
+            // two different curves, wrapped around the flag. `animatingPanels`
+            // says in its own comment why that is wrong — "two animators for
+            // one value, and it stuttered" — and the cost was paid by the
+            // NAVIGATOR: an explicit transaction around the change beat the
+            // strip's own `.animation(NavStrip.settle, value: separated)`, so
+            // the terminal button stopped gliding to its separated slot and
+            // teleported. v0.1.0 wrote `animatePanels { engine.setDebugArea(next) }`
+            // with no transaction at all, and the strip glided; every later
+            // caller added one to make the PANEL move, because the panel had
+            // no animation of its own. Now it has one, here, and the callers
+            // go back to just setting the flag.
+            //
+            // Same shape as the find bar twenty lines up, and as the inspector
+            // — the two surfaces in this file that never had this problem.
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
                 ZStack(alignment: .bottom) {
@@ -1556,6 +1576,10 @@ struct ContentView: View {
                     }
                 }
             }
+            // BELOW the background, so the terminal's tint band — which is
+            // painted there and appears with the panel — travels with it
+            // instead of snapping in behind a sliding card.
+            .animation(NavStrip.settle, value: engine.uiDebugVisible)
             .clipShape(shape)
             .overlay(shape.strokeBorder(theme.separator, lineWidth: 1))
             .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.13 : 0.34), radius: 5, y: 1)
@@ -2156,7 +2180,7 @@ struct ContentView: View {
         // that overrides `navigatorModeStrip`'s own
         // `.animation(NavStrip.settle, value: separated)` and the strip's
         // split-apart stopped animating entirely.
-        animatePanels { withAnimation(NavStrip.settle) { engine.setDebugArea(next) } }
+        animatePanels { engine.setDebugArea(next) }
         // Only reclaim editor focus when CLOSING. On open the shell owns the
         // keyboard (setDebugArea), and `focused = true` here was part of the
         // long-standing focus bug — the root `.focused` container isn't itself
@@ -3076,9 +3100,7 @@ struct ContentView: View {
                     systemImage: "xmark", help: "Hide Debug Area",
                     fg: dockHeaderFg, dim: dockHeaderDim
                 ) {
-                    withAnimation(.snappy(duration: 0.28)) {
-                        engine.uiDebugVisible = false
-                    }
+                    engine.uiDebugVisible = false
                     // Closes the DOCK only. Pane terminals are separate
                     // processes and are not affected.
                     if engine.chrome.terminal.open {
