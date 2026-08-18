@@ -237,7 +237,7 @@ struct WelcomeView: View {
                 .foregroundStyle(ink.brand)
                 .lineLimit(1)
             VStack(alignment: .leading, spacing: 3) {
-                Text("© 2025–2026 Stemtec. All rights reserved.")
+                Text("© 2025–2026 Stremtec. All rights reserved.")
                     .font(.system(size: 10, weight: .regular))
                     .foregroundStyle(muted.opacity(0.90))
                 Text("Suisei 2026dev · Legal Information")

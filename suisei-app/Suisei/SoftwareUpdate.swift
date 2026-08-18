@@ -152,7 +152,6 @@ struct SoftwareUpdatePage: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
-            Button("Open Release…", action: onInfo)
         }
         .padding(.vertical, 2)
     }
@@ -163,7 +162,15 @@ struct SoftwareUpdatePage: View {
                 .controlSize(.small)
                 .padding(.trailing, 4)
         } else if snap.available {
-            Button("Update Now", action: onInfo)
+            // "Update Now" is what this said, and it opens a web page. The row
+            // directly below it says the update CANNOT be installed from here —
+            // so the button was contradicting the sentence explaining it.
+            //
+            // It is also the only control now: the blocked row used to carry a
+            // second button doing the identical thing under a different name.
+            // A blocking fact is a status line, and a status line does not need
+            // its own button when the action is the prominent one above it.
+            Button("Download…", action: onInfo)
                 .buttonStyle(.borderedProminent)
         } else {
             Button("Check Now", action: onCheckNow)

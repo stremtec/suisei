@@ -9,7 +9,6 @@
 //! which works for npm / brew / cargo / curl installs alike.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -290,34 +289,20 @@ fn release_triple() -> Option<&'static str> {
     }
 }
 
-/// Download + gunzip + atomic rename over the running executable.
-#[allow(dead_code)]
-fn install_binary(latest: &str, triple: &str, exe: PathBuf) -> Result<String, String> {
-    let url =
-        format!("https://github.com/stremtec/suisei/releases/download/v{latest}/suisei-{triple}.gz");
-    let tmp = exe.with_extension(format!("update-{latest}"));
-    let tmp_s = tmp.display().to_string();
-    let exe_s = exe.display().to_string();
-    let script = format!(
-        "curl -fsSL --max-time 120 '{url}' | gunzip > '{tmp_s}' && chmod +x '{tmp_s}' && mv '{tmp_s}' '{exe_s}'"
-    );
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(&script)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(format!("Updated to v{latest} — restart Suisei to use it"))
-    } else {
-        let _ = std::fs::remove_file(&tmp);
-        let err = String::from_utf8_lossy(&out.stderr);
-        Err(err
-            .lines()
-            .next()
-            .unwrap_or("download failed (permissions? network?)")
-            .to_string())
-    }
-}
+// `install_binary` lived here: download a `.gz`, gunzip it, and `mv` the result
+// over the running executable. It was dead — `#[allow(dead_code)]`, no callers —
+// and it described an update model this product cannot use.
+//
+// Suisei ships as a `.app` in a `.dmg`. Replacing `Contents/MacOS/Suisei` alone
+// would leave `Frameworks/`, `Helpers/` and `Resources/` at the old version, and
+// it would break the bundle's signature — ad-hoc today, Developer ID later, and
+// invalid either way once the executable no longer matches what was sealed. It
+// also named an artifact the release script does not build
+// (`suisei-<triple>.gz`; `scripts/release.sh` produces `Suisei-<version>.dmg`).
+//
+// Deleted rather than left for later, because dead code that looks finished is
+// an invitation to wire it up. Updating here means downloading the .dmg and
+// replacing the app, and the Software Update page says exactly that.
 
 #[cfg(test)]
 mod tests {
