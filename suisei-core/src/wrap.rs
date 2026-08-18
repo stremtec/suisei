@@ -193,24 +193,42 @@ fn rows_for(line: &str, cols: u16, tab_width: usize, wide_ratio: u16) -> usize {
     let mut rows = 1usize;
     let mut row_w = 0u32;
     let mut col = 0usize;
+    // Expanded BYTES, because that is the unit the row is cut in — see
+    // [`ROW_BYTES`]. The count has to stop exactly where the drawing does.
+    let mut bytes = 0usize;
+    let mut cut = false;
     for ch in line.chars() {
         // A tab is cells, not a glyph: expanded it is N spaces, and a break
         // can land between any two of them. Walking it as one advance of N
         // would refuse to break inside a tab and overflow the row instead —
         // and the renderer, which chunks text that has already been expanded,
-        // breaks inside it.
+        // breaks inside it. The cut can land inside one too, which is why the
+        // byte budget is spent per space rather than per tab.
         let cells: usize = if ch == '\t' { tab - (col % tab) } else { 0 };
         if ch == '\t' {
             for _ in 0..cells {
+                if bytes + 1 > ROW_BYTES {
+                    cut = true;
+                    break;
+                }
+                bytes += 1;
                 if row_w + CELL > width {
                     rows += 1;
                     row_w = 0;
                 }
                 row_w += CELL;
+                col += 1;
             }
-            col += cells;
+            if cut {
+                break;
+            }
             continue;
         }
+        if bytes + ch.len_utf8() > ROW_BYTES {
+            cut = true;
+            break;
+        }
+        bytes += ch.len_utf8();
         let w = char_width(ch, wide_ratio);
         if row_w > 0 && row_w + w > width {
             rows += 1;
@@ -218,6 +236,10 @@ fn rows_for(line: &str, cols: u16, tab_width: usize, wide_ratio: u16) -> usize {
         }
         row_w += w;
         col += char_cells(ch);
+    }
+    // The ellipsis is a glyph like any other and can be the one that spills.
+    if cut && row_w > 0 && row_w + CELL > width {
+        rows += 1;
     }
     rows
 }
@@ -229,6 +251,40 @@ fn char_cells(ch: char) -> usize {
 
 /// One narrow cell, in the hundredths this module measures wrapping in.
 pub const CELL: u32 = 100;
+
+/// The most of one line a row will ever DRAW, in bytes of tab-expanded text.
+///
+/// A row is cut here and given an ellipsis — the editor has never drawn more,
+/// and the ABI's per-line buffer could not carry it if it tried.
+///
+/// It lives beside the wrap rule because the count and the draw have to stop
+/// in the same place. They did not: a minified 8 MB line in an HTML file was
+/// counted as fifty-five thousand rows and drawn as four, so every row below
+/// it was laid out a kilometre down the page and the document appeared to end
+/// at that line. That is precisely the failure
+/// `the_count_and_the_split_agree` warns about, one step further out — the
+/// count agreed with `visual_chunks` about the text it was given, and nobody
+/// had told it that the renderer would only ever be given 480 bytes.
+pub const ROW_BYTES: usize = 480;
+
+/// The text one row draws: tabs expanded, cut to [`ROW_BYTES`] on a character
+/// boundary, with an ellipsis when anything was cut.
+///
+/// The one rule, in one place. The scene draws this; [`rows_for`] counts its
+/// rows without building it, and `the_drawn_row_is_the_row_that_was_counted`
+/// keeps the two honest.
+pub fn drawn_row(line: &str, tab_width: usize) -> String {
+    let mut text = expand_tabs(line, tab_width);
+    if text.len() > ROW_BYTES {
+        let mut cut = ROW_BYTES;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push('…');
+    }
+    text
+}
 
 /// How wide a "two-cell" glyph really paints, in hundredths of a narrow cell.
 ///
@@ -471,9 +527,27 @@ mod tests {
     /// resolves to the wrong line. This is the test that keeps them one rule.
     ///
     /// The cases are the ones a division gets wrong: wide glyphs that cannot
-    /// straddle a boundary, and tabs, which expand to cells that can.
+    /// straddle a boundary, and tabs, which expand to cells that can — and the
+    /// ones a CUT gets wrong, which is everything longer than a row may draw.
+    ///
+    /// The comparison is against [`drawn_row`], not against the whole expanded
+    /// line, because the whole expanded line is not what any renderer ever
+    /// receives. That gap is what put a minified 8 MB line's worth of rows into
+    /// the layout and four rows on the screen.
     #[test]
     fn the_row_count_and_the_split_agree() {
+        let long_ascii = "x".repeat(5_000);
+        let long_cjk = "한".repeat(2_000);
+        let long_tabs = "\t".repeat(3_000);
+        let mixed = "a\t한 ".repeat(400);
+        // Exactly at, one either side of, the cut.
+        let at_cut = "y".repeat(ROW_BYTES);
+        let past_cut = "y".repeat(ROW_BYTES + 1);
+        let under_cut = "y".repeat(ROW_BYTES - 1);
+        // A wide glyph straddling the cut: 160 × 3 bytes lands on it exactly,
+        // 161 does not and has to fall back to a character boundary.
+        let cjk_on_cut = "한".repeat(ROW_BYTES / 3);
+        let cjk_over_cut = "한".repeat(ROW_BYTES / 3 + 1);
         let cases: &[&str] = &[
             "",
             "a",
@@ -489,20 +563,48 @@ mod tests {
             "\tabc\tdef",
             "a\t한\tb",
             "  \t한글 코드 \t끝",
+            &under_cut,
+            &at_cut,
+            &past_cut,
+            &cjk_on_cut,
+            &cjk_over_cut,
+            &long_ascii,
+            &long_cjk,
+            &long_tabs,
+            &mixed,
         ];
         for tab in [2usize, 4, 8] {
             for cols in 1u16..=20 {
                 for raw in cases {
                     let counted = rows_for(raw, cols, tab, WIDE_TWO_CELLS);
-                    let split = visual_chunks(&expand_tabs(raw, tab), cols, WIDE_TWO_CELLS).len();
+                    let split = visual_chunks(&drawn_row(raw, tab), cols, WIDE_TWO_CELLS).len();
                     assert_eq!(
                         counted, split,
-                        "line {raw:?} at {cols} cols, tab {tab}: \
-                         counted {counted} rows, split into {split}"
+                        "line of {} bytes at {cols} cols, tab {tab}: \
+                         counted {counted} rows, split into {split}",
+                        raw.len()
                     );
                 }
             }
         }
+    }
+
+    /// The whole point, at the size that found it: a line nobody could draw
+    /// more than 480 bytes of must not be counted as fifty-five thousand rows.
+    ///
+    /// Every row below it is placed by that count. Getting it wrong put the
+    /// rest of an 8.5 MB HTML file a kilometre below the viewport, which read
+    /// as "the editor stops rendering at line 1165".
+    #[test]
+    fn a_line_of_megabytes_is_as_tall_as_it_draws() {
+        let monster = "a.b(1),".repeat(1_200_000);
+        assert!(monster.len() > 8_000_000);
+        let m = WrapMap::build(&doc(&[&monster, "after"]), 1, 150, 4, WIDE_TWO_CELLS);
+        let drawn = visual_chunks(&drawn_row(&monster, 4), 150, WIDE_TWO_CELLS).len();
+        assert_eq!(m.rows_of(0) as usize, drawn);
+        assert!(drawn <= 5, "four rows and a bit, not a skyscraper");
+        // And the line after it is where it looks: right underneath.
+        assert_eq!(m.visual_of(1) as usize, drawn);
     }
 
     /// The case that made this one rule instead of two: four double-width

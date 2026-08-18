@@ -2501,15 +2501,7 @@ fn build_lines_at(
         // range and is dropped, which is what should happen to something off
         // the end of a truncated line.
         let raw = char_prefix(buf.line(row), ROW_BYTES + 1);
-        let mut text = suisei_core::wrap::expand_tabs(raw, app.tab_width);
-        if text.len() > ROW_BYTES {
-            let mut cut = ROW_BYTES;
-            while cut > 0 && !text.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            text.truncate(cut);
-            text.push('…');
-        }
+        let text = suisei_core::wrap::drawn_row(raw, app.tab_width);
         let is_cursor_row = row == cursor_row;
         let (sel_v0, sel_v1) = if use_live_syntax && is_current {
             selection_on_line(app, row, &text, sel)
@@ -2906,12 +2898,10 @@ fn git_sign_for_row(app: &App, row: usize) -> u8 {
 
 /// Convert highlight tokens → visual-column spans for the face.
 /// Prefers tree-sitter; falls back to Core `highlight_line` (md/swift/etc.).
-/// How much of one line the editor will ever draw.
-///
-/// A row is cut to this and given an ellipsis. Everything that measures a line
-/// measures only this much of it — see the note at the cut in
-/// `build_editor_band`.
-pub(crate) const ROW_BYTES: usize = 480;
+/// How much of one line the editor will ever draw — core's rule, re-exported
+/// here because this is the file that draws it. `WrapMap` counts rows against
+/// the same number, and must: see the note on it.
+pub(crate) use suisei_core::wrap::ROW_BYTES;
 
 /// The first `max_chars` characters, on a character boundary.
 ///
