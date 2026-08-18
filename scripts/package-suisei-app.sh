@@ -94,6 +94,7 @@ SWIFT_FILES=(
   "$ROOT/suisei-app/Suisei/SettingsWindowView.swift"
   "$ROOT/suisei-app/Suisei/GitHubAccount.swift"
   "$ROOT/suisei-app/Suisei/SoftwareUpdate.swift"
+  "$ROOT/suisei-app/Suisei/ShortcutRecorder.swift"
   "$ROOT/suisei-app/Suisei/GitWorkbenchWindowView.swift"
   "$ROOT/suisei-app/Suisei/AboutPanel.swift"
   "$ROOT/suisei-app/Suisei/GlassChrome.swift"

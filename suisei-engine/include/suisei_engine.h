@@ -1329,3 +1329,30 @@ void suisei_engine_build_run(SuiseiEngine *ptr, uint32_t kind);
 void suisei_engine_build_stop(SuiseiEngine *ptr);
 void suisei_engine_build_goto(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_build_set_open(SuiseiEngine *ptr, uint8_t open);
+
+/* ── Shortcuts ─────────────────────────────────────────────────────────────
+ * Core owns the chord notation on both sides, so the face never parses "⇧⌘P"
+ * and the two cannot drift over what it means. */
+#define SUISEI_KEY_CAP 32
+
+typedef struct SuiseiKeyBindingC {
+  char id[64];                        /* stable, what the config file stores */
+  char title[SUISEI_TITLE_CAP];
+  char group[32];
+  char chord[SUISEI_KEY_CAP];         /* in force now */
+  char default_chord[SUISEI_KEY_CAP]; /* what it ships with */
+  uint8_t customised;                 /* 1 = chord != default_chord */
+  uint8_t _pad[7];
+} SuiseiKeyBindingC;
+
+uint32_t suisei_engine_keymap_count(void);
+uint8_t suisei_engine_keymap_row(const SuiseiEngine *ptr, uint32_t index,
+                                 SuiseiKeyBindingC *out);
+/* Title of the OTHER command already on `chord`, or "" — asked before setting. */
+uint8_t suisei_engine_keymap_conflict(const SuiseiEngine *ptr, const char *id,
+                                      const char *chord, char *out_title,
+                                      uint32_t cap);
+/* NULL or empty chord = back to the shipped one. 0 = not a usable shortcut. */
+uint8_t suisei_engine_keymap_set(SuiseiEngine *ptr, const char *id,
+                                 const char *chord);
+void suisei_engine_keymap_reset_all(SuiseiEngine *ptr);

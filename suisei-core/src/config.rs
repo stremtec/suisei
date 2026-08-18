@@ -59,6 +59,10 @@ pub struct Config {
     /// Value = command line; empty string = disabled for that language.
     /// Missing key = use built-in default.
     pub lsp_servers: HashMap<String, String>,
+    /// Command id → the chord the user put it on. Only what DIFFERS from the
+    /// shipped default is here — see `keymap::set`. `BTreeMap` for the same
+    /// reason `theme_overrides` is one: this file gets opened by hand.
+    pub keybindings: BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -81,6 +85,7 @@ impl Default for Config {
             key_hints: true,
             lsp_enabled: true,
             lsp_servers: HashMap::new(),
+            keybindings: BTreeMap::new(),
         }
     }
 }
@@ -293,6 +298,16 @@ pub fn load() -> Config {
                     .or_default()
                     .insert(token, format!("#{}", hex.to_ascii_uppercase()));
             }
+            k if k.starts_with("key.") => {
+                let id = k["key.".len()..].trim();
+                // Only commands that exist, and only chords that parse. A
+                // stale id from an older build, or a typo, is dropped rather
+                // than stored and written back as though Suisei believed it —
+                // the same rule the theme tokens above follow.
+                if crate::keymap::command(id).is_some() {
+                    let _ = crate::keymap::set(&mut cfg, id, Some(v));
+                }
+            }
             k if k.starts_with("lsp.") => {
                 let lang = k.trim_start_matches("lsp.").trim().to_lowercase();
                 if !lang.is_empty() {
@@ -342,6 +357,12 @@ pub fn save(cfg: &Config) {
             for (token, hex) in tokens {
                 content.push_str(&format!("theme.{palette}.{token} = \"{hex}\"\n"));
             }
+        }
+    }
+    if !cfg.keybindings.is_empty() {
+        content.push_str("\n# Shortcuts you changed (omit a command to keep the shipped key)\n");
+        for (id, chord) in &cfg.keybindings {
+            content.push_str(&format!("key.{id} = \"{chord}\"\n"));
         }
     }
     content.push_str("\n# LSP servers (empty / off = disabled; omit = built-in default)\n");

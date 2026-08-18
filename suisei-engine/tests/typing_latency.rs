@@ -70,6 +70,17 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
 
+/// The typing cost with the worker snapshot taken out, per sample.
+fn paired_median(c: &Cost) -> f64 {
+    median(
+        c.per_key
+            .iter()
+            .zip(&c.snapshot)
+            .map(|(key, snap)| key - snap)
+            .collect(),
+    )
+}
+
 fn median(mut samples: Vec<f64>) -> f64 {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     percentile(&samples, 0.50)
@@ -218,8 +229,22 @@ fn typing_cost_does_not_scale_with_the_file() {
     let small = measure(2_000, 40, Keys::Plain);
     let large = measure(20_000, 40, Keys::Plain);
 
-    let small_ms = median(small.per_key) - median(small.snapshot);
-    let large_ms = median(large.per_key) - median(large.snapshot);
+    // The median of the PAIRED differences, not the difference of two medians.
+    //
+    // The loop above interleaves the samples precisely so each keystroke and
+    // the snapshot after it share their conditions — and then this threw the
+    // pairing away. At 20,000 lines the snapshot is 87% of the keystroke, so
+    // the residual is 13%, and any systematic offset between the two sample
+    // sets (the snapshot allocates 600 KB and frees it, so the next keystroke
+    // meets a different allocator) lands entirely in that 13% — amplified
+    // sevenfold. Measured: the same build reported 0.230 ms here and 0.489 ms
+    // in the assertion, and a change that made typing FASTER (1.949 → 1.903 ms
+    // per key) failed it 5 runs out of 5.
+    //
+    // Subtracting per sample cancels the shared conditions where they are
+    // actually shared, which is within one iteration.
+    let small_ms = paired_median(&small);
+    let large_ms = paired_median(&large);
 
     // Both are well under a tenth of a millisecond when nothing is wrong, and
     // a ratio of two numbers that small is mostly timer noise. The floor keeps

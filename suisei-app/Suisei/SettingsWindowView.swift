@@ -12,6 +12,14 @@ struct SettingsWindowView: View {
     /// Shortcuts' own filter. Separate from `searchText`, which filters the
     /// sidebar's pages — Xcode's Shortcuts pane has its own Filter field too.
     @State private var shortcutFilter = ""
+    /// The catalogue, pulled. See `EngineBridge.keyBindings()` for why it is not
+    /// on `chrome`.
+    @State private var keyBindings: [KeyBindingItem] = []
+    /// The command whose key field is armed, if any. One at a time — a second
+    /// armed field would race the first for the key press.
+    @State private var recordingCommand: String?
+    /// Why the last chord was refused. Cleared the moment another is offered.
+    @State private var shortcutError: String?
     /// Which syntax category the Themes page's editing row is pointed at.
     /// A key, not an index — see `selectedToken`.
     @State private var selectedTokenKey = "fg"
@@ -603,6 +611,14 @@ struct SettingsWindowView: View {
         }
         .background(theme.windowBg)
         .task(id: settingsFingerprint) { await commitWhenSettled() }
+        // Pulled on arrival and after any change core made — including a reset
+        // from another window. Leaving the page disarms whatever was recording,
+        // so a field cannot sit waiting for a key nobody is going to press.
+        .task(id: engine.keymapGeneration) { keyBindings = engine.keyBindings() }
+        .onChange(of: selectedPageID) { _, _ in
+            recordingCommand = nil
+            shortcutError = nil
+        }
     }
 
     /// Everything the user could have just changed, as one comparable value.
@@ -1680,32 +1696,54 @@ struct SettingsWindowView: View {
     /// in width.
     @ViewBuilder private var helpSections: some View {
         let engineRows = s.rows.filter { !$0.isHeader }
+        let bindings = keyBindings.filter { shortcutMatches($0.title, $0.chord) }
+        let groups = orderedGroups(of: bindings)
 
         Section {
             TextField("Filter", text: $shortcutFilter)
                 .textFieldStyle(.roundedBorder)
+            if let shortcutError {
+                Label(shortcutError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(Color(nsColor: .systemYellow))
+            }
         }
 
-        ForEach(Self.shortcutGroups, id: \.title) { group in
-            let matches = group.items.filter { shortcutMatches($0.command, $0.keys) }
-            if !matches.isEmpty {
-                Section(group.title) {
-                    ForEach(matches, id: \.command) { item in
-                        shortcutRow(item.command, item.keys)
-                    }
+        ForEach(groups, id: \.self) { group in
+            Section(group) {
+                ForEach(bindings.filter { $0.group == group }) { item in
+                    shortcutRow(item)
                 }
             }
         }
 
-        // Core's own binding table. Capped, and the cap is stated rather than
-        // silently swallowing the tail — a list that stops without saying so
-        // reads as a complete list.
+        if keyBindings.contains(where: \.customised) {
+            Section {
+                Button("Restore All Defaults") {
+                    engine.resetKeyBindings()
+                    reloadKeyBindings()
+                }
+            } footer: {
+                Text("Only the shortcuts you changed are stored; everything else follows Suisei's defaults.")
+            }
+        }
+
+        // Core's own binding table. Reference only — these are the modal engine
+        // keys, they COMPOSE (`d`,`i`,`w`), and "what does `diw` rebind to" is a
+        // different feature with a different answer. Capped, and the cap is
+        // stated rather than silently swallowing the tail: a list that stops
+        // without saying so reads as a complete list.
         let engineMatches = engineRows.filter { shortcutMatches($0.label, $0.value) }
         if !engineMatches.isEmpty {
             Section {
                 DisclosureGroup(isExpanded: $engineReferenceExpanded) {
                     ForEach(engineMatches.prefix(Self.engineCommandLimit)) { row in
-                        shortcutRow(clean(row.label), row.value)
+                        LabeledContent(clean(row.label)) {
+                            Text(row.value)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                     }
                 } label: {
                     LabeledContent("Engine Commands", value: "\(engineMatches.count)")
@@ -1715,42 +1753,108 @@ struct SettingsWindowView: View {
             } footer: {
                 Text(
                     engineMatches.count > Self.engineCommandLimit
-                        ? "Showing the first \(Self.engineCommandLimit) of \(engineMatches.count) engine bindings."
-                        : "Suisei's engine bindings — advanced users can drive Core directly."
+                        ? "Showing the first \(Self.engineCommandLimit) of \(engineMatches.count) engine bindings. These are modal editor keys and are not rebindable here."
+                        : "Suisei's engine bindings — modal editor keys, not rebindable here."
                 )
             }
         }
     }
 
-    private static let engineCommandLimit = 24
-
-    private struct ShortcutGroup {
-        let title: String
-        let items: [(command: String, keys: String)]
+    /// Groups in the order core lists them, not alphabetically: the catalogue's
+    /// order is a judgement about what a reader looks for first.
+    private func orderedGroups(of items: [KeyBindingItem]) -> [String] {
+        var seen: [String] = []
+        for i in items where !seen.contains(i.group) { seen.append(i.group) }
+        return seen
     }
 
-    private static let shortcutGroups: [ShortcutGroup] = [
-        ShortcutGroup(title: "Editing", items: [
-            ("Save", "⌘S"),
-            ("Open File", "⌘P"),
-            ("Command Palette", "⇧⌘P"),
-            ("Find in File", "⌘F"),
-            ("Next / Previous Match", "⌘G / ⇧⌘G"),
-            ("Find in Project", "⇧⌘F"),
-            ("Undo / Redo", "⌘Z / ⇧⌘Z"),
-            ("Next / Previous Tab", "⌃⇥ / ⌃⇧⇥"),
-        ]),
-        ShortcutGroup(title: "Panels", items: [
-            ("Toggle Navigator", "⌘0"),
-            ("Toggle Inspector", "⌥⌘0"),
-            ("Toggle Debug Area", "⇧⌘Y"),
-            ("Terminal in Debug Area", "⌃T"),
-            ("Terminal in Editor Pane", "⌃⇧T"),
-            ("Pretty Preview", "⇧⌘V"),
-            ("Source Control / Git Workbench", "⌃G / ⌃⇧G"),
-            ("Settings", "⌘,"),
-        ]),
-    ]
+    private static let engineCommandLimit = 24
+
+    /// Command on the left, its key on the right — the order every Mac shortcut
+    /// list uses, the menu bar included. The key is a BUTTON now: click it and
+    /// the next chord replaces it.
+    @ViewBuilder
+    private func shortcutRow(_ item: KeyBindingItem) -> some View {
+        let isRecording = recordingCommand == item.id
+        LabeledContent(item.title) {
+            HStack(spacing: 6) {
+                if item.customised, !isRecording {
+                    // Only where there is something to undo.
+                    Button {
+                        engine.setKeyBinding(id: item.id, chord: nil)
+                        reloadKeyBindings()
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Back to \(item.defaultChord)")
+                }
+                Button {
+                    shortcutError = nil
+                    recordingCommand = isRecording ? nil : item.id
+                } label: {
+                    Text(isRecording ? "Press a key…" : item.chord)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(isRecording ? Color.accentColor : .secondary)
+                        .lineLimit(1)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.primary.opacity(isRecording ? 0.10 : 0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(
+                                    isRecording ? Color.accentColor : .clear,
+                                    lineWidth: 1
+                                )
+                        )
+                }
+                .buttonStyle(.plain)
+                .overlay {
+                    // Armed only for the row being recorded, so ⌘S still saves
+                    // everywhere else in this window.
+                    if isRecording {
+                        ShortcutRecorder(
+                            recording: Binding(
+                                get: { recordingCommand == item.id },
+                                set: { if !$0 { recordingCommand = nil } }
+                            ),
+                            onChord: { apply($0, to: item) }
+                        )
+                        .allowsHitTesting(false)
+                    }
+                }
+            }
+        }
+        .help(item.customised ? "Suisei's default is \(item.defaultChord)" : "")
+    }
+
+    /// Take a recorded chord, but say what is wrong before taking it.
+    ///
+    /// Two menu items on one key equivalent is a state AppKit resolves by
+    /// picking one — silently, and not necessarily the one just set. So the
+    /// clash is refused and named, rather than stored and discovered later as
+    /// "the shortcut stopped working".
+    private func apply(_ chord: String, to item: KeyBindingItem) {
+        if let other = engine.keyBindingConflict(id: item.id, chord: chord) {
+            shortcutError = "\(chord) is already \(other)."
+            return
+        }
+        guard engine.setKeyBinding(id: item.id, chord: chord) else {
+            shortcutError = "\(chord) cannot be a menu shortcut. Use ⌘ or ⌃ — ⌥ and a letter types a character."
+            return
+        }
+        shortcutError = nil
+        reloadKeyBindings()
+    }
+
+    private func reloadKeyBindings() {
+        keyBindings = engine.keyBindings()
+    }
 
     private func shortcutMatches(_ command: String, _ keys: String) -> Bool {
         let query = shortcutFilter.trimmingCharacters(in: .whitespacesAndNewlines)

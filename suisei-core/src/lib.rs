@@ -55,6 +55,7 @@ pub mod wrap;
 pub mod app;
 pub mod dispatch;
 pub mod key;
+pub mod keymap;
 pub use app::{
     App, BufferId, BufferTab, EditorContextMenu, EditorCtxItem, Mode, MouseState, ProcMetrics,
     ResizeTarget, SplitSepHit, Stage,

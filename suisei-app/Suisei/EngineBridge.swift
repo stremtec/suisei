@@ -1291,6 +1291,8 @@ final class EngineBridge: ObservableObject {
     /// These six change only on explicit commands, so they publish at their
     /// own rate. The `App` no longer observes the engine at all.
     let menu = MenuState()
+    /// What the menu bar draws for each command. See `KeymapState`.
+    let keys = KeymapState()
 
     /// The focused viewer pane's toolbar controls. Same reasoning as `menu`:
     /// a small object with its own publish rate, so the window chrome can
@@ -1406,6 +1408,14 @@ final class EngineBridge: ObservableObject {
         setBuildPanelOpen(uiDebugVisible && debugTabIsBuild)
     }
     @Published var uiInspectorVisible: Bool = true { didSet { syncMenu() } }
+    /// Bumped whenever a shortcut changes.
+    ///
+    /// The catalogue is PULLED, not published — it moves only when the user
+    /// moves it, so carrying it on `chrome` would copy a payload on every
+    /// keystroke for a page that is usually shut. This counter is the one thing
+    /// that has to be published: the Shortcuts page re-reads on it, and so does
+    /// the menu bar, whose key equivalents are these bindings.
+    @Published private(set) var keymapGeneration: UInt64 = 0
     /// True while the tab strip is changing its structure (close/reorder or a
     /// layout presentation step). The strip uses this to suppress its normal
     /// active-tab auto-centering: scrolling the viewport while chips are also
@@ -1617,6 +1627,10 @@ final class EngineBridge: ObservableObject {
         suisei_engine_restore_session(engine)
         pushSystemAppearance()
         observeSystemAppearance()
+        // BEFORE the first menu build. `keys` starts empty and an empty table
+        // means every `suiseiShortcut` returns nil — the whole menu bar would
+        // come up with no key equivalents at all.
+        publishKeymap()
         refreshChrome()
         checkRecovery()
     }
@@ -7536,5 +7550,97 @@ extension EngineBridge {
     func setBuildPanelOpen(_ open: Bool) {
         guard let engine else { return }
         suisei_engine_build_set_open(engine, open ? 1 : 0)
+    }
+}
+
+// MARK: - Shortcuts
+
+/// One rebindable command, as the Shortcuts page shows it.
+struct KeyBindingItem: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var group: String
+    /// What runs it now.
+    var chord: String
+    /// What it ships with.
+    var defaultChord: String
+    var customised: Bool
+}
+
+extension EngineBridge {
+    /// The whole catalogue, in the order core lists it.
+    ///
+    /// Pulled rather than published: it changes when the user changes it and at
+    /// no other time, so putting it on `chrome` would be a payload copied on
+    /// every keystroke for a page that is usually closed.
+    func keyBindings() -> [KeyBindingItem] {
+        guard let engine else { return [] }
+        let n = Int(suisei_engine_keymap_count())
+        var out: [KeyBindingItem] = []
+        out.reserveCapacity(n)
+        for i in 0..<n {
+            var row = SuiseiKeyBindingC()
+            guard suisei_engine_keymap_row(engine, UInt32(i), &row) != 0 else { continue }
+            out.append(KeyBindingItem(
+                id: Self.text(&row.id),
+                title: Self.text(&row.title),
+                group: Self.text(&row.group),
+                chord: Self.text(&row.chord),
+                defaultChord: Self.text(&row.default_chord),
+                customised: row.customised != 0
+            ))
+        }
+        return out
+    }
+
+    /// The command already on `chord`, if another one is — asked BEFORE setting.
+    func keyBindingConflict(id: String, chord: String) -> String? {
+        guard let engine else { return nil }
+        var buf = [CChar](repeating: 0, count: 128)
+        let hit = id.withCString { idPtr in
+            chord.withCString { chordPtr in
+                suisei_engine_keymap_conflict(engine, idPtr, chordPtr, &buf, 128)
+            }
+        }
+        guard hit != 0 else { return nil }
+        let title = String(cString: buf)
+        return title.isEmpty ? nil : title
+    }
+
+    /// Put `id` on `chord`; `nil` puts it back on the shipped one.
+    /// False = not a usable shortcut, and the old binding is untouched.
+    @discardableResult
+    func setKeyBinding(id: String, chord: String?) -> Bool {
+        guard let engine else { return false }
+        let ok: UInt8 = id.withCString { idPtr in
+            guard let chord else {
+                return suisei_engine_keymap_set(engine, idPtr, nil)
+            }
+            return chord.withCString { suisei_engine_keymap_set(engine, idPtr, $0) }
+        }
+        if ok != 0 { publishKeymap() }
+        return ok != 0
+    }
+
+    /// Hand the menu bar the table, and tell the Shortcuts page it moved.
+    func publishKeymap() {
+        var map: [String: String] = [:]
+        for b in keyBindings() { map[b.id] = b.chord }
+        keys.adopt(map)
+        keymapGeneration &+= 1
+    }
+
+    func resetKeyBindings() {
+        guard let engine else { return }
+        suisei_engine_keymap_reset_all(engine)
+        publishKeymap()
+    }
+
+    /// Read a fixed C char array out of a snapshot struct.
+    private static func text<T>(_ tuple: inout T) -> String {
+        withUnsafeBytes(of: &tuple) { raw in
+            let p = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
+            return String(cString: p)
+        }
     }
 }

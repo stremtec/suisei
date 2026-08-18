@@ -435,3 +435,18 @@ fn build_snapshot_layout() {
     );
     assert_eq!(size_of::<SuiseiBuildSnapshot>(), 78212);
 }
+
+/// The shortcut row crosses the ABI as a fixed-size struct, so its size is part
+/// of the contract with the hand-maintained header.
+#[test]
+fn key_binding_row_layout() {
+    use suisei_engine::ffi::{SUISEI_KEY_CAP, SUISEI_TITLE_CAP, SuiseiKeyBindingC};
+    assert_eq!(SUISEI_KEY_CAP, 32);
+    assert_eq!(
+        size_of::<SuiseiKeyBindingC>(),
+        64 + SUISEI_TITLE_CAP + 32 + SUISEI_KEY_CAP * 2 + 8,
+        "SuiseiKeyBindingC size — update suisei_engine.h with it"
+    );
+    assert_eq!(offset_of!(SuiseiKeyBindingC, id), 0);
+    assert_eq!(offset_of!(SuiseiKeyBindingC, title), 64);
+}

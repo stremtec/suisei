@@ -3933,6 +3933,14 @@ pub extern "C" fn suisei_project_name(
     1
 }
 
+/// A borrowed C string as an owned Rust one. `None` for null.
+fn cstr(p: *const c_char) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+}
+
 fn cstr_path(p: *const c_char) -> Option<std::path::PathBuf> {
     if p.is_null() {
         return None;
@@ -6414,4 +6422,127 @@ pub extern "C" fn suisei_engine_project_set_command(
             }
         });
     }
+}
+
+// ── Shortcuts ───────────────────────────────────────────────────────────────
+//
+// The Shortcuts page used to be sixteen hand-written Swift strings next to a
+// read-only dump of the engine's bindings — it could not be wrong, because it
+// was not connected to anything. `keymap` gives every menu command an id, and
+// this is the window onto it: enumerate, change one, put one back, put them all
+// back. The face never parses a chord; core owns that notation on both sides so
+// the two cannot drift over what "⇧⌘P" means.
+
+pub const SUISEI_KEY_CAP: usize = 32;
+
+#[repr(C)]
+pub struct SuiseiKeyBindingC {
+    pub id: [c_char; 64],
+    pub title: [c_char; SUISEI_TITLE_CAP],
+    pub group: [c_char; 32],
+    /// What runs it now — the user's chord, or the shipped one.
+    pub chord: [c_char; SUISEI_KEY_CAP],
+    /// What it ships with, so the page can offer "put it back".
+    pub default_chord: [c_char; SUISEI_KEY_CAP],
+    /// 1 when `chord` is not `default_chord`.
+    pub customised: u8,
+    pub _pad: [u8; 7],
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_keymap_count() -> u32 {
+    suisei_core::keymap::CATALOG.len() as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_keymap_row(
+    ptr: *const SuiseiEngine,
+    index: u32,
+    out: *mut SuiseiKeyBindingC,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let Some(cmd) = suisei_core::keymap::CATALOG.get(index as usize) else {
+        return 0;
+    };
+    let cfg = &unsafe { &*ptr }.0.app().settings.draft;
+    let chord = suisei_core::keymap::binding(cfg, cmd.id);
+    let o = unsafe { &mut *out };
+    write_cstr(&mut o.id, cmd.id);
+    write_cstr(&mut o.title, cmd.title);
+    write_cstr(&mut o.group, cmd.group);
+    write_cstr(&mut o.chord, &chord);
+    write_cstr(&mut o.default_chord, cmd.default);
+    o.customised = u8::from(chord != cmd.default);
+    o._pad = [0; 7];
+    1
+}
+
+/// Which OTHER command already answers to `chord`, as its title.
+///
+/// Asked before the change is made. Two menu items on one key equivalent is a
+/// state AppKit resolves by picking one — silently, and not necessarily the one
+/// just set — so the page has to be able to say so first.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_keymap_conflict(
+    ptr: *const SuiseiEngine,
+    id: *const c_char,
+    chord: *const c_char,
+    out_title: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if ptr.is_null() || id.is_null() || chord.is_null() {
+        return 0;
+    }
+    let (Some(id), Some(chord)) = (cstr(id), cstr(chord)) else {
+        return 0;
+    };
+    let cfg = &unsafe { &*ptr }.0.app().settings.draft;
+    match suisei_core::keymap::conflict(cfg, &id, &chord) {
+        Some(other) => {
+            unsafe { write_cstr_raw(out_title, cap as usize, other.title) };
+            1
+        }
+        None => {
+            unsafe { write_cstr_raw(out_title, cap as usize, "") };
+            0
+        }
+    }
+}
+
+/// Put `id` on `chord`. A null or empty chord puts it back on the shipped one.
+///
+/// Returns 0 when the chord could not be a shortcut — a bare letter, ⌥ and a
+/// letter, a modifier alone. The old binding survives and the caller says so;
+/// storing it would make the command unreachable and look like it worked.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_keymap_set(
+    ptr: *mut SuiseiEngine,
+    id: *const c_char,
+    chord: *const c_char,
+) -> u8 {
+    if ptr.is_null() || id.is_null() {
+        return 0;
+    }
+    let Some(id) = cstr(id) else { return 0 };
+    let chord = if chord.is_null() { None } else { cstr(chord) };
+    let chord = chord.filter(|c| !c.trim().is_empty());
+    let eng = unsafe { &mut *ptr };
+    let cfg = &mut eng.0.app_mut().settings.draft;
+    if !suisei_core::keymap::set(cfg, &id, chord.as_deref()) {
+        return 0;
+    }
+    eng.0.app_mut().settings.save();
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_keymap_reset_all(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    let eng = unsafe { &mut *ptr };
+    suisei_core::keymap::reset_all(&mut eng.0.app_mut().settings.draft);
+    eng.0.app_mut().settings.save();
 }

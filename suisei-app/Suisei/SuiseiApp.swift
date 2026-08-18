@@ -127,201 +127,211 @@ struct SuiseiApp: App {
             PanelToggleCommands(engine: engine)
         }
         CommandMenu("Workspace") {
-            Button("File Explorer") {
-                NotificationCenter.default.post(name: .suiseiNavProject, object: nil)
-                engine.animatingPanels { engine.uiNavVisible = true }
-            }
-            .keyboardShortcut("f", modifiers: .control)
+            Keyed(engine.keys) {
+                Button("File Explorer") {
+                    NotificationCenter.default.post(name: .suiseiNavProject, object: nil)
+                    engine.animatingPanels { engine.uiNavVisible = true }
+                }
+                .suiseiShortcut("explorer", engine.keys)
 
-            Button("Source Control") {
-                // Load before the slide, never during it: these are engine
-                // recomposes and chrome pulls, and on the animation's first
-                // frame they are exactly what makes the panel hitch on open.
-                engine.ensureScm()
-                NotificationCenter.default.post(name: .suiseiNavScm, object: nil)
-                engine.animatingPanels { engine.uiNavVisible = true }
-            }
-            .keyboardShortcut("g", modifiers: .control)
+                Button("Source Control") {
+                    // Load before the slide, never during it: these are engine
+                    // recomposes and chrome pulls, and on the animation's first
+                    // frame they are exactly what makes the panel hitch on open.
+                    engine.ensureScm()
+                    NotificationCenter.default.post(name: .suiseiNavScm, object: nil)
+                    engine.animatingPanels { engine.uiNavVisible = true }
+                }
+                .suiseiShortcut("scm", engine.keys)
 
-            Button("Find Navigator") {
-                NotificationCenter.default.post(name: .suiseiNavFind, object: nil)
-                engine.animatingPanels { engine.uiNavVisible = true }
-            }
+                Button("Find Navigator") {
+                    NotificationCenter.default.post(name: .suiseiNavFind, object: nil)
+                    engine.animatingPanels { engine.uiNavVisible = true }
+                }
 
-            Button("Breakpoints") {
-                engine.refreshBreakpoints()
-                NotificationCenter.default.post(name: .suiseiNavBreakpoints, object: nil)
-                engine.animatingPanels { engine.uiNavVisible = true }
-            }
+                Button("Breakpoints") {
+                    engine.refreshBreakpoints()
+                    NotificationCenter.default.post(name: .suiseiNavBreakpoints, object: nil)
+                    engine.animatingPanels { engine.uiNavVisible = true }
+                }
 
-            Divider()
+                Divider()
 
-            Button("Git Workbench") {
-                NotificationCenter.default.post(name: .suiseiOpenGitWorkbenchWindow, object: nil)
-            }
-            .keyboardShortcut("g", modifiers: [.control, .shift])
+                Button("Git Workbench") {
+                    NotificationCenter.default.post(name: .suiseiOpenGitWorkbenchWindow, object: nil)
+                }
+                .suiseiShortcut("git_workbench", engine.keys)
 
-            Button("Pretty Preview") {
-                engine.togglePreview()
+                Button("Pretty Preview") {
+                    engine.togglePreview()
+                }
+                .suiseiShortcut("preview", engine.keys)
             }
-            .keyboardShortcut("v", modifiers: [.command, .shift])
         }
 
         CommandMenu("Navigate") {
-            Button("Go to File…") {
-                engine.openFilePalette()
-            }
-            .keyboardShortcut("p", modifiers: .command)
+            Keyed(engine.keys) {
+                Button("Go to File…") {
+                    engine.openFilePalette()
+                }
+                .suiseiShortcut("open_file", engine.keys)
 
-            Button("Command Palette…") {
-                engine.openCommandPalette()
-            }
-            .keyboardShortcut("p", modifiers: [.command, .shift])
+                Button("Command Palette…") {
+                    engine.openCommandPalette()
+                }
+                .suiseiShortcut("palette", engine.keys)
 
-            Divider()
+                Divider()
 
-            Button("Go to Definition") {
-                engine.gotoDefinition()
-            }
-            .keyboardShortcut("j", modifiers: [.command, .control])
+                Button("Go to Definition") {
+                    engine.gotoDefinition()
+                }
+                .suiseiShortcut("definition", engine.keys)
 
-            Button("Find All References") {
-                engine.requestReferences()
-            }
-            .keyboardShortcut("r", modifiers: [.command, .shift])
+                Button("Find All References") {
+                    engine.requestReferences()
+                }
+                .suiseiShortcut("references", engine.keys)
 
-            Button("Rename Symbol…") {
-                engine.promptRenameSymbol()
+                Button("Rename Symbol…") {
+                    engine.promptRenameSymbol()
+                }
+                .suiseiShortcut("rename", engine.keys)
             }
-            .keyboardShortcut("r", modifiers: [.command, .control])
         }
 
         // Editor — LSP / edit actions reachable from the menu bar.
         CommandMenu("Editor") {
-            // The key pressed most often in this menu, so it goes first.
-            Button("Toggle Comment") {
-                engine.toggleComment()
+            Keyed(engine.keys) {
+                // The key pressed most often in this menu, so it goes first.
+                Button("Toggle Comment") {
+                    engine.toggleComment()
+                }
+                .suiseiShortcut("comment", engine.keys)
+
+                Button("Find and Replace…") {
+                    engine.openFindAndReplace()
+                }
+                .suiseiShortcut("find_replace", engine.keys)
+
+                Button("Format Document") {
+                    engine.formatDocument()
+                }
+                .suiseiShortcut("format", engine.keys)
+
+                Button("Code Actions…") {
+                    engine.requestCodeActions()
+                }
+                .suiseiShortcut("code_actions", engine.keys)
+
+                // The shape of this file, in the right rail, beside the code
+                // that is the text of it. The rail is the home; the pane below is
+                // for a wide read of a long function.
+                Button("Show Logic") {
+                    NotificationCenter.default.post(name: .suiseiRevealLogicInspector, object: nil)
+                }
+                .suiseiShortcut("logic", engine.keys)
+
+                Button("Open Logic in a Pane") {
+                    engine.openLogicView()
+                }
+
+                Divider()
+
+                Button("New Untitled Tab") {
+                    engine.openBlankTab()
+                }
+
+                Button("Next Tab") {
+                    engine.nextTab()
+                }
+
+                Button("Previous Tab") {
+                    engine.prevTab()
+                }
+
+                Divider()
+
+                SplitCommands(engine: engine)
+
+                Button("Larger Text") {
+                    engine.zoomFont(delta: 1)
+                }
+                .keyboardShortcut("+", modifiers: .command)
+
+                Button("Smaller Text") {
+                    engine.zoomFont(delta: -1)
+                }
+                .keyboardShortcut("-", modifiers: .command)
+
+                Button("Reset Text Size") {
+                    engine.resetFontZoom()
+                }
+                .keyboardShortcut("0", modifiers: [.command, .control])
             }
-            .keyboardShortcut("/", modifiers: .command)
-
-            Button("Find and Replace…") {
-                engine.openFindAndReplace()
-            }
-            .keyboardShortcut("f", modifiers: [.command, .option])
-
-            Button("Format Document") {
-                engine.formatDocument()
-            }
-            .keyboardShortcut("i", modifiers: [.command, .shift])
-
-            Button("Code Actions…") {
-                engine.requestCodeActions()
-            }
-            .keyboardShortcut(".", modifiers: .command)
-
-            // The shape of this file, in the right rail, beside the code
-            // that is the text of it. The rail is the home; the pane below is
-            // for a wide read of a long function.
-            Button("Show Logic") {
-                NotificationCenter.default.post(name: .suiseiRevealLogicInspector, object: nil)
-            }
-            .keyboardShortcut("l", modifiers: [.command, .control])
-
-            Button("Open Logic in a Pane") {
-                engine.openLogicView()
-            }
-
-            Divider()
-
-            Button("New Untitled Tab") {
-                engine.openBlankTab()
-            }
-
-            Button("Next Tab") {
-                engine.nextTab()
-            }
-
-            Button("Previous Tab") {
-                engine.prevTab()
-            }
-
-            Divider()
-
-            SplitCommands(engine: engine)
-
-            Button("Larger Text") {
-                engine.zoomFont(delta: 1)
-            }
-            .keyboardShortcut("+", modifiers: .command)
-
-            Button("Smaller Text") {
-                engine.zoomFont(delta: -1)
-            }
-            .keyboardShortcut("-", modifiers: .command)
-
-            Button("Reset Text Size") {
-                engine.resetFontZoom()
-            }
-            .keyboardShortcut("0", modifiers: [.command, .control])
         }
 
         // Terminal — shell surfaces (not only buried chords).
         CommandMenu("Debug") {
-            // Build, Run and Test lead, on the three keys every editor with a
-            // Product menu has used since Xcode 3. They do not need the
-            // debugger: `dap.rs` builds in order to LAUNCH, and this is the
-            // other half — running something because the output is the point.
-            //
-            // The panel follows the STATE rather than being opened from here,
-            // so pressing ⌘B from the menu and pressing Build in the panel land
-            // in exactly the same place.
-            Button("Build") { engine.buildRun(.build) }
-                .keyboardShortcut("b", modifiers: .command)
-            Button("Run") { engine.buildRun(.run) }
-                .keyboardShortcut("r", modifiers: .command)
-            Button("Test") { engine.buildRun(.test) }
-                .keyboardShortcut("u", modifiers: .command)
-            Button("Stop Build") { engine.buildStop() }
-                .keyboardShortcut("b", modifiers: [.command, .shift])
-            Divider()
+            Keyed(engine.keys) {
+                // Build, Run and Test lead, on the three keys every editor with a
+                // Product menu has used since Xcode 3. They do not need the
+                // debugger: `dap.rs` builds in order to LAUNCH, and this is the
+                // other half — running something because the output is the point.
+                //
+                // The panel follows the STATE rather than being opened from here,
+                // so pressing ⌘B from the menu and pressing Build in the panel land
+                // in exactly the same place.
+                Button("Build") { engine.buildRun(.build) }
+                    .suiseiShortcut("build", engine.keys)
+                Button("Run") { engine.buildRun(.run) }
+                    .suiseiShortcut("run", engine.keys)
+                Button("Test") { engine.buildRun(.test) }
+                    .suiseiShortcut("test", engine.keys)
+                Button("Stop Build") { engine.buildStop() }
+                    .suiseiShortcut("stop_build", engine.keys)
+                Divider()
 
-            // The debugger's own shortcuts, which are the same five keys in
-            // every tool that has one. Core has had all of this since before
-            // this face existed; until now there was no way to press it.
-            Button("Start / Continue") { engine.dapCommand(.startOrContinue) }
-                .keyboardShortcut(.functionKey(5), modifiers: [])
-            Button("Pause") { engine.dapCommand(.pause) }
-                .keyboardShortcut(.functionKey(6), modifiers: [])
-            Button("Stop") { engine.dapCommand(.stop) }
-                .keyboardShortcut(.functionKey(5), modifiers: .shift)
-            Divider()
-            Button("Step Over") { engine.dapCommand(.stepOver) }
-                .keyboardShortcut(.functionKey(10), modifiers: [])
-            Button("Step Into") { engine.dapCommand(.stepInto) }
-                .keyboardShortcut(.functionKey(11), modifiers: [])
-            Button("Step Out") { engine.dapCommand(.stepOut) }
-                .keyboardShortcut(.functionKey(11), modifiers: .shift)
-            Divider()
-            Button("Restart") { engine.dapCommand(.restart) }
-            Button("Toggle Breakpoint") { engine.toggleBreakpointAtCursor() }
-                .keyboardShortcut("\\", modifiers: .command)
-            Button("Remove All Breakpoints") { engine.dapCommand(.clearBreakpoints) }
+                // The debugger's own shortcuts, which are the same five keys in
+                // every tool that has one. Core has had all of this since before
+                // this face existed; until now there was no way to press it.
+                Button("Start / Continue") { engine.dapCommand(.startOrContinue) }
+                    .keyboardShortcut(.functionKey(5), modifiers: [])
+                Button("Pause") { engine.dapCommand(.pause) }
+                    .keyboardShortcut(.functionKey(6), modifiers: [])
+                Button("Stop") { engine.dapCommand(.stop) }
+                    .keyboardShortcut(.functionKey(5), modifiers: .shift)
+                Divider()
+                Button("Step Over") { engine.dapCommand(.stepOver) }
+                    .keyboardShortcut(.functionKey(10), modifiers: [])
+                Button("Step Into") { engine.dapCommand(.stepInto) }
+                    .keyboardShortcut(.functionKey(11), modifiers: [])
+                Button("Step Out") { engine.dapCommand(.stepOut) }
+                    .keyboardShortcut(.functionKey(11), modifiers: .shift)
+                Divider()
+                Button("Restart") { engine.dapCommand(.restart) }
+                Button("Toggle Breakpoint") { engine.toggleBreakpointAtCursor() }
+                    .suiseiShortcut("breakpoint", engine.keys)
+                Button("Remove All Breakpoints") { engine.dapCommand(.clearBreakpoints) }
+            }
         }
 
         CommandMenu("Terminal") {
-            // "Toggle Debug Area" used to lead this menu. It was View's
-            // Show/Hide Debug Area under a second name, on the SAME ⇧⌘Y — two
-            // menu items claiming one shortcut, of which macOS fires one — and
-            // it skipped `animatingPanels`, so the panel snapped from here and
-            // glided from there. One entry for one state; View owns it.
+            Keyed(engine.keys) {
+                // "Toggle Debug Area" used to lead this menu. It was View's
+                // Show/Hide Debug Area under a second name, on the SAME ⇧⌘Y — two
+                // menu items claiming one shortcut, of which macOS fires one — and
+                // it skipped `animatingPanels`, so the panel snapped from here and
+                // glided from there. One entry for one state; View owns it.
 
-            // Named for what Core does. `toggle_terminal_full` parks the
-            // focused pane, spawns a shell and gives it a TAB — it was never a
-            // window — and pressing it again closes that tab.
-            Button("New Terminal Tab") {
-                engine.toggleTerminalTab()
+                // Named for what Core does. `toggle_terminal_full` parks the
+                // focused pane, spawns a shell and gives it a TAB — it was never a
+                // window — and pressing it again closes that tab.
+                Button("New Terminal Tab") {
+                    engine.toggleTerminalTab()
+                }
+                .suiseiShortcut("terminal_tab", engine.keys)
             }
-            .keyboardShortcut("t", modifiers: [.command, .shift])
         }
     }
 
@@ -334,44 +344,50 @@ struct SuiseiApp: App {
         }
 
         CommandGroup(replacing: .appSettings) {
-            Button("Settings…") {
-                engine.openSettings()
-                openSettingsWindow()
+            Keyed(engine.keys) {
+                Button("Settings…") {
+                    engine.openSettings()
+                    openSettingsWindow()
+                }
+                .suiseiShortcut("settings", engine.keys)
             }
-            .keyboardShortcut(",", modifiers: .command)
         }
 
         CommandGroup(replacing: .newItem) {
-            Button("New Untitled…") {
-                engine.createNewProject()
-            }
-            .keyboardShortcut("n", modifiers: .command)
+            Keyed(engine.keys) {
+                Button("New Untitled…") {
+                    engine.createNewProject()
+                }
+                .suiseiShortcut("new_file", engine.keys)
 
-            Button("New Project…") {
-                engine.createProjectFolder()
-            }
-            .keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("New Project…") {
+                    engine.createProjectFolder()
+                }
+                .suiseiShortcut("new_project", engine.keys)
 
-            Button("Open…") {
-                engine.openProjectFolder()
-            }
-            .keyboardShortcut("o", modifiers: .command)
+                Button("Open…") {
+                    engine.openProjectFolder()
+                }
+                .suiseiShortcut("open", engine.keys)
 
-            Button("Clone Git Repository…") {
-                engine.cloneGitRepository()
+                Button("Clone Git Repository…") {
+                    engine.cloneGitRepository()
+                }
             }
         }
 
         CommandGroup(replacing: .saveItem) {
-            Button("Save") {
-                engine.save()
-            }
-            .keyboardShortcut("s", modifiers: .command)
+            Keyed(engine.keys) {
+                Button("Save") {
+                    engine.save()
+                }
+                .suiseiShortcut("save", engine.keys)
 
-            Button("Save As…") {
-                engine.saveAsPanel()
+                Button("Save As…") {
+                    engine.saveAsPanel()
+                }
+                .suiseiShortcut("save_as", engine.keys)
             }
-            .keyboardShortcut("s", modifiers: [.command, .shift])
         }
 
         CommandGroup(replacing: .undoRedo) {
@@ -393,17 +409,19 @@ struct SuiseiApp: App {
         }
 
         CommandGroup(replacing: .textEditing) {
-            Button("Find…") { engine.openFind() }
-                .keyboardShortcut("f", modifiers: .command)
-            Button("Find Next") { engine.findStep(forward: true) }
-                .keyboardShortcut("g", modifiers: .command)
-            Button("Find Previous") { engine.findStep(forward: false) }
-                .keyboardShortcut("g", modifiers: [.command, .shift])
-            Button("Find in Project…") {
-                NotificationCenter.default.post(name: .suiseiNavFind, object: nil)
-                engine.animatingPanels { engine.uiNavVisible = true }
+            Keyed(engine.keys) {
+                Button("Find…") { engine.openFind() }
+                    .suiseiShortcut("find", engine.keys)
+                Button("Find Next") { engine.findStep(forward: true) }
+                    .suiseiShortcut("find_next", engine.keys)
+                Button("Find Previous") { engine.findStep(forward: false) }
+                    .suiseiShortcut("find_prev", engine.keys)
+                Button("Find in Project…") {
+                    NotificationCenter.default.post(name: .suiseiNavFind, object: nil)
+                    engine.animatingPanels { engine.uiNavVisible = true }
+                }
+                .suiseiShortcut("find_project", engine.keys)
             }
-            .keyboardShortcut("f", modifiers: [.command, .shift])
         }
     }
 
@@ -818,10 +836,15 @@ private struct MinimapOptionsMenu: View {
 private struct PanelToggleCommands: View {
     let engine: EngineBridge
     @ObservedObject private var menu: MenuState
+    /// Observed here, not read through `engine`: these three items have to
+    /// REDRAW when a binding moves, and only an observed object makes that
+    /// happen.
+    @ObservedObject private var keys: KeymapState
 
     init(engine: EngineBridge) {
         self.engine = engine
         self.menu = engine.menu
+        self.keys = engine.keys
     }
 
     var body: some View {
@@ -831,12 +854,12 @@ private struct PanelToggleCommands: View {
         Button(menu.facts.navVisible ? "Hide Navigator" : "Show Navigator") {
             engine.animatingPanels { engine.uiNavVisible.toggle() }
         }
-        .keyboardShortcut("0", modifiers: .command)
+        .suiseiShortcut("nav", keys)
 
         Button(menu.facts.inspectorVisible ? "Hide Inspector" : "Show Inspector") {
             engine.animatingPanels { engine.uiInspectorVisible.toggle() }
         }
-        .keyboardShortcut("0", modifiers: [.command, .option])
+        .suiseiShortcut("inspector", keys)
 
         Button(menu.facts.debugVisible ? "Hide Debug Area" : "Show Debug Area") {
             let next = !engine.uiDebugVisible
@@ -846,7 +869,7 @@ private struct PanelToggleCommands: View {
                 }
             }
         }
-        .keyboardShortcut("y", modifiers: [.command, .shift])
+        .suiseiShortcut("debug_area", keys)
 
         MinimapOptionsMenu()
     }
