@@ -2481,10 +2481,29 @@ fn build_lines_at(
             break;
         }
         buffer_rows_taken += 1;
-        let raw = buf.line(row);
+        // Only the part of the line that can be SEEN, and cut before anything
+        // touches it rather than after.
+        //
+        // The row is truncated to `ROW_BYTES` either way — that is what the
+        // ellipsis below says — but the cut used to happen at the END of the
+        // work: tab expansion built a whole new copy of the line, and the
+        // span pass then walked it once per span to convert a byte offset into
+        // a visual column. On an ordinary line both are free. On the 8.2 MB
+        // minified `<script>` inside an HTML session dump they were 132 ms and
+        // 346 ms — half a second, per band pull, per frame, to show 480
+        // characters. Scrolling through that region is the reported "1600
+        // 라인부터 렌더링이 안되고 끊김": the engine was not stopping, it was
+        // spending a frame and a half on one row.
+        //
+        // Every use of `raw` below is about what gets drawn — spans, search
+        // matches, the caret, diagnostics — and nothing drawn lives past the
+        // cut. A span that starts beyond it converts to a zero-width column
+        // range and is dropped, which is what should happen to something off
+        // the end of a truncated line.
+        let raw = char_prefix(buf.line(row), ROW_BYTES + 1);
         let mut text = suisei_core::wrap::expand_tabs(raw, app.tab_width);
-        if text.len() > 480 {
-            let mut cut = 480;
+        if text.len() > ROW_BYTES {
+            let mut cut = ROW_BYTES;
             while cut > 0 && !text.is_char_boundary(cut) {
                 cut -= 1;
             }
@@ -2578,7 +2597,16 @@ fn build_lines_at(
                 .filter_map(|sp| {
                     let s = sp.start.max(base_col);
                     let e = sp.end.min(end_col);
-                    (e > s).then_some(SpanScene {
+                    // `then`, not `then_some`: the argument to `then_some` is
+                    // evaluated whatever the condition says, and these two
+                    // subtractions underflow for every span that ends before
+                    // this chunk begins — which is every span on the line
+                    // except the last few, once a long line is wrapped into
+                    // chunks and `base_col` is millions of columns in. The
+                    // wrapped result was thrown away by the very condition
+                    // that should have prevented computing it, so release
+                    // builds were silently fine and every debug build died.
+                    (e > s).then(|| SpanScene {
                         start: s - base_col,
                         end: e - base_col,
                         kind: sp.kind,
@@ -2878,6 +2906,25 @@ fn git_sign_for_row(app: &App, row: usize) -> u8 {
 
 /// Convert highlight tokens → visual-column spans for the face.
 /// Prefers tree-sitter; falls back to Core `highlight_line` (md/swift/etc.).
+/// How much of one line the editor will ever draw.
+///
+/// A row is cut to this and given an ellipsis. Everything that measures a line
+/// measures only this much of it — see the note at the cut in
+/// `build_editor_band`.
+pub(crate) const ROW_BYTES: usize = 480;
+
+/// The first `max_chars` characters, on a character boundary.
+///
+/// Bounded by the prefix rather than by the string: `char_indices().nth(n)`
+/// stops after n characters, which is the whole point on a line measured in
+/// megabytes.
+fn char_prefix(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
 fn syntax_spans_for_row(app: &App, row: usize, raw: &str) -> Vec<SpanScene> {
     let ts = app.syntax.tokens_for_row(row);
     let ext = app.file_extension();
@@ -2963,7 +3010,10 @@ pub(crate) fn selection_on_line(
     if row < start.row || row > end.row {
         return (None, None);
     }
-    let raw = app.buffer.line(row);
+    // The same prefix the row is drawn from: a selection cannot reach past
+    // the end of the text, and on a line measured in megabytes walking to
+    // `end.col` costs the frame it is drawn in.
+    let raw = char_prefix(app.buffer.line(row), ROW_BYTES + 1);
     // Selection coordinates below are DISPLAY columns. Counting Unicode
     // scalars here clamps a CJK selection to half its real width (한 == two
     // display cells), which in turn produces the wrong UTF-16 range for
