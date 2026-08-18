@@ -1666,8 +1666,11 @@ struct ContentView: View {
     /// A toggle is not a navigator mode, and the gap is what says so.
     private var navigatorModeStrip: some View {
         let separated = engine.uiDebugVisible
-        let p: CGFloat = separated ? 1 : 0
-        return GeometryReader { geo in
+        // `p` is no longer a step from 0 to 1 that the renderer is asked to
+        // smooth over. `NavStripMorph` interpolates it and re-runs everything
+        // below per frame — see its comment.
+        return NavStripMorph(p: separated ? 1 : 0) { p in
+        GeometryReader { geo in
             // Every width is computed rather than left to `maxWidth: .infinity`:
             // the metaball behind the glyphs has to land on the SAME numbers, and
             // a flexible layout can only be asked where it ended up, not told.
@@ -1838,6 +1841,7 @@ struct ContentView: View {
                     .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.14 : 0.36), radius: 4, y: 1)
             }
         }
+        }
         .frame(height: NavStrip.iconH + NavStrip.inset * 2)
         .animation(NavStrip.settle, value: separated)
         .padding(.horizontal, 10)
@@ -1857,6 +1861,37 @@ struct ContentView: View {
         // The bottom padding absorbs both, so the strip keeps its 40pt slot and
         // nothing below it — Project, the tree — moves at all.
         .padding(.bottom, 10)
+    }
+
+    /// The strip's split, driven by ONE interpolated number.
+    ///
+    /// The metaball and the toggle both read `p`, and they were both handed
+    /// the same spring — the trace says so, to the same `FluidSpringAnimation`
+    /// on the same frame. What differed is what each did with it. `SplitCapsule`
+    /// is a `Shape`: its `animatableData` is ticked per frame, so it draws
+    /// every intermediate. The toggle only had `.frame(width: toggleW)`, and a
+    /// frame RESOLVES immediately — a `GeometryReader` inside one reports the
+    /// final width 1.5 ms after the toggle, with the whole 0.4 s still to run.
+    /// Its smoothness was never layout; it was the renderer interpolating the
+    /// display list, and that is the part that goes missing.
+    ///
+    /// So the number stops being interpolated in two places. A `View` that
+    /// conforms to `Animatable` has its `body` re-evaluated on every frame of
+    /// the animation with `animatableData` holding the interpolated value, so
+    /// the widths are laid out at each intermediate rather than jumped to the
+    /// end and smoothed over. The strip's own comment already required this —
+    /// "the metaball behind the glyphs has to land on the SAME numbers" — and
+    /// now they cannot land anywhere else: same `p`, same frame, one owner.
+    private struct NavStripMorph<Content: View>: View, Animatable {
+        var p: CGFloat
+        @ViewBuilder var content: (CGFloat) -> Content
+
+        var animatableData: CGFloat {
+            get { p }
+            set { p = newValue }
+        }
+
+        var body: some View { content(p) }
     }
 
     /// Geometry and motion for the navigator strip. Kept together because the
