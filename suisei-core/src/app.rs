@@ -3808,6 +3808,39 @@ impl App {
         Some(self.exclusive_to_inclusive(s, e))
     }
 
+    /// The inclusive range that `row` should PAINT, out of the whole set.
+    ///
+    /// [`Self::selected_range`] answers for the primary, and until block
+    /// selection there was nothing else to answer for: a multi-cursor set built
+    /// by ⌘-click is all carets, and carets are drawn from
+    /// [`Self::secondary_caret_positions`]. A block is the first set where
+    /// every selection has WIDTH, and drawing only the primary's would
+    /// highlight the row under the pointer and leave the other twenty showing a
+    /// bare caret each.
+    ///
+    /// The primary wins when it covers the row, so a single-selection document
+    /// is answered without touching the rest of the set.
+    pub fn selection_on_row(&self, row: usize) -> Option<(Position, Position)> {
+        let primary = self.sel.primary();
+        if !primary.is_empty() {
+            let (s, e) = primary.range();
+            if s.row <= row && row <= e.row {
+                return Some(self.exclusive_to_inclusive(s, e));
+            }
+        }
+        if !self.sel.is_multi() {
+            return None;
+        }
+        self.sel.all().iter().find(|sel| {
+            let (s, e) = sel.range();
+            !sel.is_empty() && s.row <= row && row <= e.row
+        })
+        .map(|sel| {
+            let (s, e) = sel.range();
+            self.exclusive_to_inclusive(s, e)
+        })
+    }
+
     /// Heads of every selection in `self.sel` **except the primary** — the
     /// extra carets a GUI multi-cursor paints. The primary is already drawn
     /// through the per-line `caret_*`/`sel_*` fields (via [`Self::selected_range`]),

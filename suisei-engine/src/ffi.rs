@@ -985,6 +985,47 @@ pub extern "C" fn suisei_engine_drag(ptr: *mut SuiseiEngine, buffer_row: u32, vi
     }
 }
 
+/// ⌥-drag down: start a rectangle at this cell.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_block_click(
+    ptr: *mut SuiseiEngine,
+    buffer_row: u32,
+    visual_col: u32,
+) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.block_click_at(buffer_row, visual_col);
+    }
+}
+
+/// ⌥-drag move: the rectangle now reaches this cell.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_block_drag(
+    ptr: *mut SuiseiEngine,
+    buffer_row: u32,
+    visual_col: u32,
+) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.block_drag_to(buffer_row, visual_col);
+    }
+}
+
+/// ⌃⇧↑ / ⌃⇧↓ — grow a rectangle by a row, or start one at the caret.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_block_extend_rows(ptr: *mut SuiseiEngine, delta: i32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.block_extend_rows(delta);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_mouse_up(ptr: *mut SuiseiEngine) {
     if ptr.is_null() {

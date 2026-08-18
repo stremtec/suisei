@@ -158,6 +158,14 @@ pub struct Engine {
     pointer_down: bool,
     /// True once the pointer moved off the down cell (enters Visual).
     pointer_moved: bool,
+    /// Where an ⌥-drag started, as `(buffer_row, VISUAL column)`.
+    ///
+    /// Visual, and not the `Position` that `mouse.drag_anchor` keeps, because a
+    /// rectangle can start past the end of a short line — column 40 of a
+    /// three-character row. A `Position` clamps that to column 3 on the way in,
+    /// and dragging down to a long line would then take a block from column 3.
+    /// The screen column the pointer touched is the fact; each row converts it.
+    block_anchor: Option<(usize, usize)>,
     /// Outline is expensive on large files — rebuild only when buffer/path changes.
     outline_cache: Vec<crate::compositor::OutlineItemScene>,
     outline_cache_ver: u64,
@@ -279,6 +287,7 @@ impl Engine {
             git_wb_generation: 0,
             pointer_down: false,
             pointer_moved: false,
+            block_anchor: None,
             outline_cache: Vec::new(),
             outline_cache_ver: u64::MAX,
             outline_cache_path: None,
@@ -1398,6 +1407,8 @@ impl Engine {
             self.app.palette.close();
             self.app.mode = Mode::Editor;
         }
+        // A plain press ends any rectangle: the next drag is an ordinary one.
+        self.block_anchor = None;
         if select_word {
             // Double-click: select the word into the GUI model.
             self.app.select_word_gui(pos);
@@ -1453,11 +1464,75 @@ impl Engine {
         self.recompose_scroll();
     }
 
+    /// ⌥-**down**: start a rectangle here.
+    ///
+    /// Its own entry point rather than a flag on `click_at`, because the two
+    /// gestures disagree about what the pointer MEANS. `click_at` resolves the
+    /// cell to a `Position` and keeps that; a block has to keep the screen
+    /// column, or a drag that starts past the end of a short line loses where
+    /// it started (see `block_anchor`).
+    pub fn block_click_at(&mut self, buffer_row: u32, visual_col: u32) {
+        if self.app.buffer.line_count() == 0 {
+            return;
+        }
+        if matches!(self.app.mode, Mode::Palette | Mode::Explorer) {
+            self.app.palette.close();
+            self.app.mode = Mode::Editor;
+        }
+        let last = self.app.buffer.line_count().saturating_sub(1);
+        let row = (buffer_row as usize).min(last);
+        let vcol = visual_col as usize;
+        self.block_anchor = Some((row, vcol));
+        self.app.select_block(row, vcol, row, vcol);
+        self.app.mouse.dragging = true;
+        self.pointer_down = true;
+        self.pointer_moved = false;
+        self.app.hover_text = None;
+        self.app.update_scroll();
+        self.recompose_scroll();
+    }
+
+    /// ⌥-**move**: the rectangle now reaches here.
+    pub fn block_drag_to(&mut self, buffer_row: u32, visual_col: u32) {
+        let Some((arow, avcol)) = self.block_anchor else {
+            // Face skipped the down — treat this as one.
+            self.block_click_at(buffer_row, visual_col);
+            return;
+        };
+        let last = self.app.buffer.line_count().saturating_sub(1);
+        let row = (buffer_row as usize).min(last);
+        let vcol = visual_col as usize;
+        if row != arow || vcol != avcol {
+            self.pointer_moved = true;
+        }
+        self.app.completions.deactivate();
+        self.app.select_block(arow, avcol, row, vcol);
+        self.app.mouse.dragging = true;
+        self.app.update_scroll();
+        self.recompose_scroll();
+    }
+
+    /// ⌃⇧↑ / ⌃⇧↓ — start a rectangle at the caret, or grow the one that is
+    /// there by a row.
+    pub fn block_extend_rows(&mut self, delta: i32) {
+        if !self.text_editor_owns_keys() {
+            return;
+        }
+        // The keyboard is now the thing moving the block, so the pointer's
+        // anchor is stale — leaving it would make the next ⌥-drag resume from
+        // wherever the mouse last was.
+        self.block_anchor = None;
+        self.app.block_extend_rows(delta as isize);
+        self.app.update_scroll();
+        self.recompose();
+    }
+
     /// Mouse **up**: end pointer lifecycle; keep Visual if we moved.
     pub fn mouse_up(&mut self) {
         self.app.mouse.dragging = false;
         // Keep drag_anchor only while selecting? xei clears it; selection uses visual_anchor.
         self.app.mouse.drag_anchor = None;
+        self.block_anchor = None;
         self.pointer_down = false;
         // pointer_moved left as-is for tests; clear for next gesture
         let _ = self.pointer_moved;

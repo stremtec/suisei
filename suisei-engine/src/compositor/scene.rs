@@ -2454,6 +2454,11 @@ fn build_lines_at(
     } else {
         Vec::new()
     };
+    // A set with more than one selection may have WIDTH on every row — that is
+    // what a block selection is — and `sel` above is the PRIMARY's range only.
+    // Painting from it alone highlights the row under the pointer and leaves
+    // the rest of the rectangle showing a bare caret each.
+    let per_row_sel = use_live_syntax && app.sel.is_multi();
     let diags_active = is_current && app.has_diagnostics();
 
     // Visual row origin for first buffer line in this window (approx: 1:1 before scroll).
@@ -2504,7 +2509,11 @@ fn build_lines_at(
         let text = suisei_core::wrap::drawn_row(raw, app.tab_width);
         let is_cursor_row = row == cursor_row;
         let (sel_v0, sel_v1) = if use_live_syntax && is_current {
-            selection_on_line(app, row, &text, sel)
+            // `.or(sel)` keeps vim's visual range, which lives outside the GUI
+            // set: the fallback can only paint rows the primary already covers,
+            // because `selection_on_line` drops a range that misses the row.
+            let row_sel = if per_row_sel { app.selection_on_row(row).or(sel) } else { sel };
+            selection_on_line(app, row, &text, row_sel)
         } else {
             (None, None)
         };

@@ -296,6 +296,11 @@ void suisei_engine_drag(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t visual_
 void suisei_engine_click_utf16(
     SuiseiEngine *ptr, uint32_t buffer_row, uint32_t utf16_off, uint8_t select_word);
 void suisei_engine_drag_utf16(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t utf16_off);
+/* Column selection. The block gesture speaks VISUAL columns — a rectangle is a
+   rectangle on the screen, and a tab is one character and several columns. */
+void suisei_engine_block_click(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t visual_col);
+void suisei_engine_block_drag(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t visual_col);
+void suisei_engine_block_extend_rows(SuiseiEngine *ptr, int32_t delta);
 void suisei_engine_mouse_up(SuiseiEngine *ptr);
 uint8_t suisei_engine_hit_test(
     const SuiseiEngine *ptr,

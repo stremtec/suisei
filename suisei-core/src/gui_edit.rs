@@ -187,6 +187,128 @@ impl App {
         self.buffer.cursor = clamped;
     }
 
+    /// Select the RECTANGLE between two cells — ⌥-drag, and ⌃⇧↑/↓.
+    ///
+    /// A block selection is not a new kind of selection. It is one ordinary
+    /// selection per row, all on the same two columns, which is exactly what
+    /// `SelectionSet::spans` already holds and what every multi-cursor edit
+    /// already knows how to apply. Nothing downstream learns a new shape.
+    ///
+    /// The columns are **visual**, and that is the whole of the difficulty. A
+    /// rectangle is a rectangle on the SCREEN; a tab is one character and eight
+    /// columns, a CJK glyph is one character and two. Taking the block from
+    /// character columns would leave it ragged over exactly the lines a column
+    /// edit is for — a table, an indented block. So the caller passes what the
+    /// pointer touched, and each row converts that back to its own characters.
+    ///
+    /// A row too short to reach the block gets a **caret at its end** rather
+    /// than being skipped. That is what makes typing on a ragged block append
+    /// to the short lines instead of silently missing them.
+    pub fn select_block(
+        &mut self,
+        anchor_row: usize,
+        anchor_vcol: usize,
+        head_row: usize,
+        head_vcol: usize,
+    ) {
+        self.edit_run = crate::app::EditRun::None;
+        self.completions.deactivate();
+
+        let last = self.buffer.line_count().saturating_sub(1);
+        let (r0, r1) = (anchor_row.min(head_row).min(last), anchor_row.max(head_row).min(last));
+        let (v0, v1) = (anchor_vcol.min(head_vcol), anchor_vcol.max(head_vcol));
+        let tab = self.tab_width;
+
+        let mut spans = Vec::with_capacity(r1 - r0 + 1);
+        // The primary is the row the pointer is ON, so the caret the rest of
+        // the editor follows is where the user's hand is.
+        let mut primary = 0usize;
+        for (i, row) in (r0..=r1).enumerate() {
+            let a = self.buffer.screen_col_to_buffer_col(row, v0, tab);
+            let b = self.buffer.screen_col_to_buffer_col(row, v1, tab);
+            let len = self.buffer.line(row).chars().count();
+            let (a, b) = (a.min(len), b.min(len));
+            // Anchor and head keep the drag's DIRECTION, so shrinking the block
+            // back the way it came removes what it added.
+            let (anchor_col, head_col) = if head_vcol >= anchor_vcol { (a, b) } else { (b, a) };
+            spans.push(Selection::new(
+                Position::new(row, anchor_col),
+                Position::new(row, head_col),
+            ));
+            if row == head_row.min(last) {
+                primary = i;
+            }
+        }
+        if spans.is_empty() {
+            return;
+        }
+        self.buffer.cursor = spans[primary].head;
+        self.sel = crate::selection::SelectionSet::spans(spans, primary);
+    }
+
+    /// The block the current selection describes, in visual columns, if it is
+    /// one — `(anchor_row, anchor_vcol, head_row, head_vcol)`.
+    ///
+    /// What makes ⌃⇧↓ able to grow a block: the selection set does not record
+    /// that it came from a rectangle, so the columns are read back off it.
+    pub fn block_extent(&self) -> Option<(usize, usize, usize, usize)> {
+        let all = self.sel.all();
+        if all.len() < 2 {
+            return None;
+        }
+        let tab = self.tab_width;
+        let vcols = |s: &Selection| {
+            (
+                self.buffer.buffer_col_to_screen_col(s.anchor.row, s.anchor.col, tab),
+                self.buffer.buffer_col_to_screen_col(s.head.row, s.head.col, tab),
+            )
+        };
+        let (a0, h0) = vcols(&all[0]);
+        // One row each, consecutive, same two columns — anything else is a
+        // multi-cursor set the user built by hand, and growing THAT as a
+        // rectangle would throw their carets away.
+        for (i, s) in all.iter().enumerate() {
+            if s.anchor.row != s.head.row || s.anchor.row != all[0].anchor.row + i {
+                return None;
+            }
+            if vcols(s) != (a0, h0) {
+                return None;
+            }
+        }
+        let first = all[0].anchor.row;
+        let last = all[all.len() - 1].anchor.row;
+        let primary_row = self.sel.primary().head.row;
+        // Which end the head is at decides which way ⌃⇧↓ grows.
+        if primary_row == last {
+            Some((first, a0, last, h0))
+        } else {
+            Some((last, a0, first, h0))
+        }
+    }
+
+    /// ⌃⇧↑ / ⌃⇧↓ — start a block at the caret, or grow the one that is there.
+    pub fn block_extend_rows(&mut self, delta: isize) {
+        let last = self.buffer.line_count().saturating_sub(1);
+        let (a_row, a_vcol, h_row, h_vcol) = match self.block_extent() {
+            Some(b) => b,
+            None => {
+                let c = self.sel.primary();
+                let tab = self.tab_width;
+                (
+                    c.anchor.row,
+                    self.buffer.buffer_col_to_screen_col(c.anchor.row, c.anchor.col, tab),
+                    c.head.row,
+                    self.buffer.buffer_col_to_screen_col(c.head.row, c.head.col, tab),
+                )
+            }
+        };
+        let next = h_row as isize + delta;
+        if next < 0 || next as usize > last {
+            return;
+        }
+        self.select_block(a_row, a_vcol, next as usize, h_vcol);
+    }
+
     /// Add a caret at `pos` (⌘-click multi-cursor).
     pub fn caret_add(&mut self, pos: Position) {
         self.edit_run = crate::app::EditRun::None;
