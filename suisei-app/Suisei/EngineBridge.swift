@@ -7597,6 +7597,75 @@ extension EngineBridge {
 // MARK: - Shortcuts
 
 /// One rebindable command, as the Shortcuts page shows it.
+struct ComponentItem: Identifiable, Equatable {
+    enum State: Equatable {
+        case missing
+        case present(String)
+        case bundled
+    }
+
+    var id: String
+    var title: String
+    var group: String
+    var detail: String
+    /// The line that installs it. Empty when there is nothing to run.
+    var install: String
+    var state: State
+
+    var isPresent: Bool { state != .missing }
+}
+
+/// Probing the machine, and nothing else.
+///
+/// A free enum rather than a method on `EngineBridge`, because it takes no
+/// engine pointer and must not look like it does. `components::catalog()` reads
+/// static tables and the filesystem and touches no `App` state — that is
+/// exactly what makes it safe to call OFF the main thread, which it has to be:
+/// `debugpy` ships no console script, so the only honest test is whether an
+/// interpreter can import it, and that is a process start.
+enum ComponentProbe {
+    /// Re-probe and read back. Safe from any thread; slow enough to deserve one.
+    static func scan() -> [ComponentItem] {
+        let n = Int(suisei_engine_components_refresh())
+        var out: [ComponentItem] = []
+        out.reserveCapacity(n)
+        for i in 0..<n {
+            var row = SuiseiComponentC()
+            guard suisei_engine_components_row(UInt32(i), &row) != 0 else { continue }
+            let state: ComponentItem.State
+            switch row.state {
+            case 2: state = .bundled
+            case 1: state = .present(cstr(&row.path))
+            default: state = .missing
+            }
+            out.append(ComponentItem(
+                id: cstr(&row.id),
+                title: cstr(&row.title),
+                group: cstr(&row.group),
+                detail: cstr(&row.detail),
+                install: cstr(&row.install),
+                state: state
+            ))
+        }
+        return out
+    }
+
+    /// Why nothing on the page can be downloaded yet, or empty once it can.
+    static func blockedReason() -> String {
+        var buf = [CChar](repeating: 0, count: 512)
+        _ = suisei_engine_components_blocked_reason(&buf, 512)
+        return String(cString: buf)
+    }
+
+    /// `EngineBridge.text` is private to that type; this is the same read of a
+    /// fixed-size C char array, for a type that is not it.
+    private static func cstr<T>(_ tuple: inout T) -> String {
+        withUnsafeBytes(of: &tuple) { raw in
+            String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
+        }
+    }
+}
+
 struct KeyBindingItem: Identifiable, Equatable {
     var id: String
     var title: String

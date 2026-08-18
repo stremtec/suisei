@@ -450,3 +450,30 @@ fn key_binding_row_layout() {
     assert_eq!(offset_of!(SuiseiKeyBindingC, id), 0);
     assert_eq!(offset_of!(SuiseiKeyBindingC, title), 64);
 }
+
+#[test]
+fn component_row_layout() {
+    use suisei_engine::ffi::{
+        SUISEI_COMPONENT_DETAIL_CAP, SUISEI_COMPONENT_INSTALL_CAP, SUISEI_COMPONENT_PATH_CAP,
+        SUISEI_TITLE_CAP, SuiseiComponentC,
+    };
+    assert_eq!(
+        size_of::<SuiseiComponentC>(),
+        64 + SUISEI_TITLE_CAP
+            + 32
+            + SUISEI_COMPONENT_DETAIL_CAP
+            + SUISEI_COMPONENT_INSTALL_CAP
+            + SUISEI_COMPONENT_PATH_CAP
+            + 8,
+        "SuiseiComponentC size — update suisei_engine.h with it"
+    );
+    assert_eq!(offset_of!(SuiseiComponentC, id), 0);
+    assert_eq!(offset_of!(SuiseiComponentC, title), 64);
+    assert_eq!(offset_of!(SuiseiComponentC, group), 64 + SUISEI_TITLE_CAP);
+    // The detail string is the longest field and the one most likely to be
+    // grown; if it moves, every field after it moves with it.
+    assert_eq!(
+        offset_of!(SuiseiComponentC, detail),
+        64 + SUISEI_TITLE_CAP + 32
+    );
+}

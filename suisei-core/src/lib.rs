@@ -4,6 +4,7 @@ pub mod build;
 pub mod call_hierarchy;
 pub mod clipboard;
 pub mod completion;
+pub mod components;
 pub mod config;
 pub mod dap;
 pub mod dap_cmds;

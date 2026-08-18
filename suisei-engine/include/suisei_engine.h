@@ -1350,6 +1350,25 @@ typedef struct SuiseiKeyBindingC {
   uint8_t _pad[7];
 } SuiseiKeyBindingC;
 
+/* Settings → Components. Detection only: what the machine has, and the line
+   that installs what it does not. Downloading needs a signed release. */
+typedef struct {
+  char id[64];
+  char title[96];
+  char group[32];
+  char detail[320];
+  char install[192];
+  char path[320];
+  uint8_t state; /* 0 missing · 1 present · 2 bundled */
+  uint8_t _pad[7];
+} SuiseiComponentC;
+
+/* No engine pointer: probing touches no App state, which is what makes it safe
+   to call from a background thread. */
+uint32_t suisei_engine_components_refresh(void);
+uint8_t suisei_engine_components_row(uint32_t index, SuiseiComponentC *out);
+uint32_t suisei_engine_components_blocked_reason(char *out, uint32_t cap);
+
 uint32_t suisei_engine_keymap_count(void);
 uint8_t suisei_engine_keymap_row(const SuiseiEngine *ptr, uint32_t index,
                                  SuiseiKeyBindingC *out);

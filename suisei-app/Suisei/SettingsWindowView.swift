@@ -121,6 +121,7 @@ struct SettingsWindowView: View {
         case languageServers
         case sourceControl
         case extensions
+        case components
         case shortcuts
         case softwareUpdate
         case softwareUpdateAutomatic
@@ -196,6 +197,13 @@ struct SettingsWindowView: View {
         Page(
             id: .extensions, title: "Extensions", symbol: "puzzlepiece.extension",
             searchTerms: "extension language syntax grammar vscode", corePage: 2
+        ),
+        Page(
+            id: .components, title: "Components", symbol: "shippingbox",
+            searchTerms:
+                "component download install debugger debug adapter lldb debugpy delve "
+                + "language server bundle grammar package",
+            corePage: 1
         ),
         Page(
             id: .shortcuts, title: "Shortcuts", symbol: "keyboard",
@@ -566,6 +574,8 @@ struct SettingsWindowView: View {
                     )
                 case .softwareUpdateBeta:
                     SoftwareUpdateBetaPage(store: EngineBridge.shared.softwareUpdate)
+                case .components:
+                    ComponentsPage()
                 case .accounts:
                     GitHubAccountRootPage(
                         store: accountStore,

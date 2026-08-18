@@ -6490,6 +6490,99 @@ pub struct SuiseiKeyBindingC {
     pub _pad: [u8; 7],
 }
 
+// ── Components ──
+
+pub const SUISEI_COMPONENT_DETAIL_CAP: usize = 320;
+pub const SUISEI_COMPONENT_INSTALL_CAP: usize = 192;
+pub const SUISEI_COMPONENT_PATH_CAP: usize = 320;
+
+/// One row of Settings → Components.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SuiseiComponentC {
+    pub id: [c_char; 64],
+    pub title: [c_char; SUISEI_TITLE_CAP],
+    pub group: [c_char; 32],
+    /// What it does, or the command the editor runs.
+    pub detail: [c_char; SUISEI_COMPONENT_DETAIL_CAP],
+    /// The line that installs it. Empty when there is nothing to run.
+    pub install: [c_char; SUISEI_COMPONENT_INSTALL_CAP],
+    /// WHERE it was found — a developer Mac has three `clangd`s and a stale one
+    /// first, so which copy answered is the useful half of "installed".
+    pub path: [c_char; SUISEI_COMPONENT_PATH_CAP],
+    /// 0 missing · 1 present · 2 bundled.
+    pub state: u8,
+    pub _pad: [u8; 7],
+}
+
+/// The last probe's answers.
+///
+/// **No engine pointer, deliberately.** `components::catalog()` reads static
+/// tables and the filesystem and touches no `App` state, so it is the rare
+/// thing here that is safe to run anywhere — and that is what lets the face
+/// probe on a BACKGROUND thread. Threading it through the engine would have
+/// forced the work onto the main thread, where one of the probes starts a
+/// Python interpreter (`debugpy` ships no console script, so importing it is
+/// the only honest test) and would hold the UI while it did.
+static COMPONENTS: std::sync::Mutex<Vec<suisei_core::components::Component>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Re-probe the machine and keep the answers. Returns the row count.
+///
+/// Two calls — refresh, then read — so the probing is paid once and not once
+/// per row.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_components_refresh() -> u32 {
+    let fresh = suisei_core::components::catalog();
+    let n = fresh.len() as u32;
+    if let Ok(mut slot) = COMPONENTS.lock() {
+        *slot = fresh;
+        n
+    } else {
+        0
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_components_row(index: u32, out: *mut SuiseiComponentC) -> u8 {
+    if out.is_null() {
+        return 0;
+    }
+    let Ok(slot) = COMPONENTS.lock() else {
+        return 0;
+    };
+    let Some(c) = slot.get(index as usize) else {
+        return 0;
+    };
+    let o = unsafe { &mut *out };
+    write_cstr(&mut o.id, &c.id);
+    write_cstr(&mut o.title, &c.title);
+    write_cstr(&mut o.group, c.group);
+    write_cstr(&mut o.detail, &c.detail);
+    write_cstr(&mut o.install, &c.install);
+    let (state, path) = match &c.state {
+        suisei_core::components::Availability::Bundled => (2u8, String::new()),
+        suisei_core::components::Availability::Present(p) => (1u8, p.display().to_string()),
+        suisei_core::components::Availability::Missing => (0u8, String::new()),
+    };
+    write_cstr(&mut o.path, &path);
+    o.state = state;
+    o._pad = [0; 7];
+    1
+}
+
+/// Why nothing on the page can be downloaded yet, or empty once it can.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_components_blocked_reason(out: *mut c_char, cap: u32) -> u32 {
+    if out.is_null() || cap == 0 {
+        return 0;
+    }
+    let reason = suisei_core::components::download_blocked_reason();
+    let buf = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(buf, reason);
+    reason.len().min(cap as usize - 1) as u32
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_keymap_count() -> u32 {
     suisei_core::keymap::CATALOG.len() as u32

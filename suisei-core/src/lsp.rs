@@ -2386,23 +2386,50 @@ fn extract_json_array(s: &str) -> Option<String> {
     None
 }
 
+/// The line that installs `bin`, and nothing else around it.
+///
+/// Split out of `install_hint` so the Components page and the editor's error
+/// message read the SAME table. They are one fact — how you get this server —
+/// and two copies of it would drift the moment one of them was corrected.
+/// A page that shows a command the user can copy needs the command alone; the
+/// error message wraps it in a sentence.
+pub fn install_command(bin: &str) -> &'static str {
+    match bin {
+        "rust-analyzer" => "rustup component add rust-analyzer",
+        "pyright-langserver" | "pyright" => "npm i -g pyright",
+        "typescript-language-server" => "npm i -g typescript-language-server typescript",
+        "clangd" => "brew install llvm",
+        "gopls" => "go install golang.org/x/tools/gopls@latest",
+        "lua-language-server" => "brew install lua-language-server",
+        "marksman" => "brew install marksman",
+        "yaml-language-server" => "npm i -g yaml-language-server",
+        "taplo" => "cargo install taplo-cli --locked",
+        "bash-language-server" => "npm i -g bash-language-server",
+        "zls" => "see https://github.com/zigtools/zls",
+        "jdtls" => "brew install jdtls",
+        "vscode-json-language-server" | "vscode-html-language-server"
+        | "vscode-css-language-server" => "npm i -g vscode-langservers-extracted",
+        "intelephense" => "npm i -g intelephense",
+        "solargraph" => "gem install solargraph",
+        "sourcekit-lsp" => "xcode-select --install",
+        "csharp-ls" => "dotnet tool install --global csharp-ls",
+        "kotlin-language-server" => "brew install kotlin-language-server",
+        "metals" => "brew install coursier/formulas/coursier && cs install metals",
+        "haskell-language-server-wrapper" => "ghcup install hls",
+        "elixir-ls" => "brew install elixir-ls",
+        "nimlsp" => "nimble install nimlsp",
+        "dart" => "install the Dart SDK",
+        "r-languageserver" => "R -e 'install.packages(\"languageserver\")'",
+        "lemminx" => "brew install lemminx",
+        "cmake-language-server" => "pipx install cmake-language-server",
+        "vue-language-server" => "npm i -g @vue/language-server",
+        "svelteserver" => "npm i -g svelte-language-server",
+        _ => "install the language server, or set its command in Settings",
+    }
+}
+
 fn install_hint(bin: &str) -> String {
-    let hint = match bin {
-        "rust-analyzer" => "install: rustup component add rust-analyzer",
-        "pyright-langserver" | "pyright" => "install: npm i -g pyright",
-        "typescript-language-server" => "install: npm i -g typescript-language-server typescript",
-        "clangd" => "install: brew install llvm  (or apt install clangd)",
-        "gopls" => "install: go install golang.org/x/tools/gopls@latest",
-        "lua-language-server" => "install: brew install lua-language-server",
-        "marksman" => "install: brew install marksman",
-        "yaml-language-server" => "install: npm i -g yaml-language-server",
-        "taplo" => "install: cargo install taplo-cli --locked",
-        "bash-language-server" => "install: npm i -g bash-language-server",
-        "zls" => "install: see https://github.com/zigtools/zls",
-        "jdtls" => "install: brew install jdtls",
-        _ => "install the language server or :LspStart <cmd>",
-    };
-    format!("LSP `{bin}` not found — {hint}")
+    format!("LSP `{bin}` not found — install: {}", install_command(bin))
 }
 
 /// Build a valid `initialize` request body (tested for brace-balance).
