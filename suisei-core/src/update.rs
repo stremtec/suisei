@@ -42,6 +42,15 @@ pub struct UpdateState {
     /// `:update` before any check finished — install as soon as one lands.
     install_after_check: bool,
     install_rx: Option<Receiver<Result<String, String>>>,
+    /// Bumped whenever anything the Software Update page draws changes.
+    ///
+    /// The page is pulled, not pushed: the face re-reads the snapshot only when
+    /// this moves. Tying the bump to `poll` RETURNING A MESSAGE — which is what
+    /// it used to be — made "you are up to date" invisible, because that is the
+    /// one outcome with nothing to say. The spinner then ran forever, and only
+    /// for users who were already current. A state change and a status line are
+    /// different things and the page needs the first one.
+    generation: u64,
 }
 
 impl UpdateState {
@@ -198,7 +207,43 @@ impl UpdateState {
         moved
     }
 
+    /// How many times the drawn state has changed. See the field.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Deliver a finished check without a network or a thread.
+    ///
+    /// The transition lives in `poll`, so a test has to go THROUGH it — setting
+    /// `latest` by hand would assert on the assignment rather than on the thing
+    /// that was broken, which was a branch of `poll` that changed state and
+    /// told nobody. Dropping the sender here is deliberate: the value stays
+    /// buffered and `try_recv` still yields it before reporting the hangup.
+    #[doc(hidden)]
+    pub fn deliver_check_for_test(&mut self, found: Option<LatestRelease>) {
+        let (tx, rx) = mpsc::channel();
+        let _ = tx.send(found);
+        self.check_rx = Some(rx);
+    }
+
+    /// A check that is running and will never answer — the panicked worker.
+    #[doc(hidden)]
+    pub fn abandon_check_for_test(&mut self) {
+        let (tx, rx) = mpsc::channel::<Option<LatestRelease>>();
+        drop(tx);
+        self.check_rx = Some(rx);
+    }
+
+    fn changed(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     /// Drain background results; returns a status message when one lands.
+    ///
+    /// A message is OPTIONAL and a state change is not: every branch that ends
+    /// a check or an install calls `changed()`, including the ones that have
+    /// nothing to print and the ones where the worker thread died. Whatever
+    /// happens, `is_checking` stops being true and the page gets to hear it.
     pub fn poll(&mut self) -> Option<String> {
         if let Some(rx) = self.check_rx.take() {
             match rx.try_recv() {
@@ -214,18 +259,27 @@ impl UpdateState {
                             self.notes.clear();
                         }
                     }
+                    self.changed();
                     let auto = std::mem::take(&mut self.install_after_check);
                     if self.latest.is_some() {
                         if auto {
                             return Some(self.start_install());
                         }
-                        return Some("This is not a valid Suisei release.".into());
+                        // Finding an update is not a status line — the page
+                        // draws it as "Update Available" from the snapshot, and
+                        // it has a button. This used to return the gate string
+                        // from `start_install`, so a check that SUCCEEDED
+                        // printed "This is not a valid Suisei release."
+                        return None;
                     } else if auto {
                         return Some("Already up to date".into());
                     }
                 }
                 Err(TryRecvError::Empty) => self.check_rx = Some(rx),
-                Err(TryRecvError::Disconnected) => {}
+                // The thread panicked before it could send. Nothing to report,
+                // but the check is over — and a spinner that never stops is a
+                // worse answer than the wrong one.
+                Err(TryRecvError::Disconnected) => self.changed(),
             }
         }
         if let Some(rx) = self.install_rx.take() {
@@ -234,14 +288,19 @@ impl UpdateState {
                     self.installing = false;
                     self.installed = true;
                     self.latest = None;
+                    self.changed();
                     return Some(msg);
                 }
                 Ok(Err(e)) => {
                     self.installing = false;
+                    self.changed();
                     return Some(format!("update failed: {e}"));
                 }
                 Err(TryRecvError::Empty) => self.install_rx = Some(rx),
-                Err(TryRecvError::Disconnected) => self.installing = false,
+                Err(TryRecvError::Disconnected) => {
+                    self.installing = false;
+                    self.changed();
+                }
             }
         }
         None

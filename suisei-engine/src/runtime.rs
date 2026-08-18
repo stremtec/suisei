@@ -933,8 +933,15 @@ impl Engine {
         if self.app.update.poll_build() {
             need_full = true;
         }
+        // The generation moves on a STATE change, not on a message. "Already
+        // up to date" is the outcome with nothing to print, so keying the face's
+        // refresh off the message left the page spinning for exactly the users
+        // who had nothing to do.
+        let update_before = self.app.update.generation();
         if let Some(msg) = self.app.update.poll() {
             self.app.message = msg;
+        }
+        if self.app.update.generation() != update_before {
             self.update_generation = self.update_generation.wrapping_add(1);
         }
         // A background parse landed — paint the fresh tokens (paint-only).

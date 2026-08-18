@@ -419,16 +419,13 @@ impl Step {
         Step::Helpers,
         Step::Finishing,
     ];
-
-    /// Everything before this step, as a fraction.
-    fn before(self) -> f32 {
-        Step::ORDER
-            .iter()
-            .take_while(|s| **s != self)
-            .map(|s| s.weight())
-            .sum()
-    }
 }
+
+// `Step::before` lived here: everything before this step as a fraction, summed
+// from the STATIC weights. Calibration replaced it — `ProgressModel` derives the
+// same quantity from `seconds_per_step`, which uses what the last successful
+// build on this machine actually took. Leaving both would have left two owners
+// of one number, and the wrong one was the one that was easier to call.
 
 /// Seconds each step took, last time a build succeeded here.
 ///

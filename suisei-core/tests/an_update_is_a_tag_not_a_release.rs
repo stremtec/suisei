@@ -129,6 +129,39 @@ fn a_repository_whose_only_tag_is_not_a_version_offers_nothing() {
 }
 
 #[test]
+fn a_third_tag_supersedes_the_second_and_the_first() {
+    // The shipped situation, spelled out with the real tag names rather than
+    // stand-ins: v0.1.0 and v0.1.1 are published, v0.1.2 lands beside them.
+    // Every tag stays on the remote forever — publishing a new one does not
+    // retire the old ones — so "the newest" has to be DECIDED on every check
+    // and not inferred from the order the remote happens to list them in.
+    let text = "\
+89a6caf783c6de4836109b69682044b61239de94\trefs/tags/v0.1.0
+f93cd9c5b39dad482c71c02f31613c98aff96492\trefs/tags/v0.1.0^{}
+dd5d338a293076633f1b4c6262787d68eff12817\trefs/tags/v0.1.1
+cecb7969f276803fdf086b92c6829073a8e50f6f\trefs/tags/v0.1.1^{}
+1111111111111111111111111111111111111111\trefs/tags/v0.1.2
+2222222222222222222222222222222222222222\trefs/tags/v0.1.2^{}
+";
+    let r = update::parse_ls_remote_for_test(text).expect("a release");
+    assert_eq!(r.tag, "0.1.2");
+    // And it builds v0.1.2's COMMIT, not its tag object.
+    assert_eq!(r.sha, "2222222222222222222222222222222222222222");
+}
+
+#[test]
+fn the_newest_tag_wins_however_the_remote_orders_them() {
+    // `git ls-remote` sorts by refname, which is alphabetical — so v0.1.10
+    // arrives BEFORE v0.1.9 and the last line read is not the answer.
+    let text = "\
+1111111111111111111111111111111111111111\trefs/tags/v0.1.10
+2222222222222222222222222222222222222222\trefs/tags/v0.1.9
+";
+    let r = update::parse_ls_remote_for_test(text).expect("a release");
+    assert_eq!(r.tag, "0.1.10");
+}
+
+#[test]
 fn the_repository_is_the_one_the_licence_names() {
     // A self-updater pointed at the wrong repository is a supply chain, so
     // this is worth an assertion rather than a reading.
