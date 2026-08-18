@@ -613,14 +613,18 @@ impl Build {
             // The compiler's own rendering, which is what a shell would have
             // shown. Its first line carries the severity, and the frame under
             // it (`--> `, `|`, the source echo) is context for that line.
+            // The kind comes from the message's LEVEL, not from re-reading the
+            // text that level produced. Asking `severity_of_text` here made
+            // "For more information about this error, try `rustc --explain`"
+            // — a `failure-note` — arrive as the program's own output, at full
+            // strength, beside the error it is a footnote to.
+            let head = match msg.get("level").and_then(|l| l.as_str()) {
+                Some("error") | Some("error: internal compiler error") => LogKind::Error,
+                _ => LogKind::Note,
+            };
             for (i, l) in rendered.trim_end().lines().enumerate() {
                 let l = strip_ansi(l);
-                let kind = if i == 0 {
-                    severity_of_text(&l)
-                } else {
-                    LogKind::Note
-                };
-                self.push_output(kind, l);
+                self.push_output(if i == 0 { head } else { LogKind::Note }, l);
             }
         }
         let severity = match msg.get("level").and_then(|l| l.as_str()) {
@@ -874,19 +878,26 @@ fn plural(n: usize) -> &'static str {
 /// recognisable as one — `cargo` prints its failures on stderr as ordinary
 /// text, and stderr is where a program's own output lives too.
 fn severity_of_text(line: &str) -> LogKind {
+    // Cargo narrating its own progress. The verb is right-aligned into a
+    // twelve-column gutter, and that indent is half of how the line identifies
+    // itself — tested on the RAW line, because a program of its own that
+    // prints "Compiling shaders" at column zero is talking to the reader.
+    if line.starts_with("   ") {
+        let word = line.trim_start().split_whitespace().next().unwrap_or("");
+        const CARGO: [&str; 14] = [
+            "Compiling", "Checking", "Finished", "Running", "Building", "Blocking",
+            "Fresh", "Updating", "Downloading", "Downloaded", "Installing",
+            "Documenting", "Packaging", "Removing",
+        ];
+        if CARGO.contains(&word) {
+            return LogKind::Adapter;
+        }
+    }
     let t = line.trim_start();
     if t.starts_with("error") || t.starts_with("fatal error") || t.starts_with("FAILED") {
         LogKind::Error
     } else if t.starts_with("warning") {
         LogKind::Note
-    } else if t.starts_with("   Compiling")
-        || t.starts_with("    Finished")
-        || t.starts_with("     Running")
-        || t.starts_with("   Building")
-        || t.starts_with("    Blocking")
-    {
-        // Cargo narrating its own progress, in the column it indents them to.
-        LogKind::Adapter
     } else {
         LogKind::Program
     }
@@ -1301,6 +1312,36 @@ mod tests {
         let p = &b.problems[0];
         assert_eq!((p.path.as_str(), p.row, p.col), ("/w/src/lib.rs", 30, 8));
         assert_eq!(p.message, "assertion `left == right` failed");
+    }
+
+    /// Read off a real `cargo build` of a file with one undefined name. Two
+    /// things this got wrong the first time, both found by looking at the
+    /// actual output rather than at what cargo's documentation implies:
+    /// its progress lines arrived as the program's own output, and so did the
+    /// `failure-note` footnote under the error.
+    #[test]
+    fn cargos_narration_is_not_the_programs_voice() {
+        let mut b = build_in("/proj");
+        b.feed("   Compiling broken v0.1.0 (/proj)");
+        b.feed("    Finished `dev` profile in 0.42s");
+        b.feed(
+            r#"{"reason":"compiler-message","message":{"level":"failure-note","message":"For more information about this error, try `rustc --explain E0425`.","rendered":"For more information about this error, try `rustc --explain E0425`.\n","spans":[]}}"#,
+        );
+        b.feed("Compiling shaders…");
+        let kinds: Vec<LogKind> = b.output.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                LogKind::Adapter,
+                LogKind::Adapter,
+                LogKind::Note,
+                // Column zero, so it is a program of its own saying something.
+                LogKind::Program,
+            ],
+            "{:?}",
+            b.output
+        );
+        assert!(b.problems.is_empty(), "a footnote is not a problem");
     }
 
     #[test]
