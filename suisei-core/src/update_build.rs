@@ -430,6 +430,113 @@ impl Step {
     }
 }
 
+/// Seconds each step took, last time a build succeeded here.
+///
+/// **This is the answer to "why is the estimate wrong on the first run".**
+/// `swiftc -whole-module-optimization` compiles the module as ONE job — measured
+/// with `-parseable-output`, WMO emits exactly two events, a compile and a link,
+/// so there is nothing to count inside ten minutes of silence. Turning WMO off
+/// does give per-file jobs, and the packager's own note says why that is not on
+/// the table: without it the driver re-optimises for every primary file, and
+/// `EngineBridge.swift` alone took seventeen minutes.
+///
+/// So the un-countable steps are TIMED instead. A build that finishes writes
+/// what each step actually cost on this machine, and the next update weights
+/// itself with those numbers rather than with guesses. The first update on a
+/// machine estimates; every one after it measures.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Calibration {
+    /// `(step index in `Step::ORDER`, seconds)`.
+    pub secs: Vec<(usize, u64)>,
+}
+
+impl Calibration {
+    pub fn serialise(&self) -> String {
+        self.secs
+            .iter()
+            .map(|(i, s)| format!("{i}={s}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Anything unparseable is no calibration, not a partial one — half a set
+    /// of weights is worse than the defaults, because it is wrong in a way that
+    /// looks measured.
+    pub fn parse(text: &str) -> Option<Calibration> {
+        let mut secs = Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let (i, s) = line.split_once('=')?;
+            secs.push((i.trim().parse().ok()?, s.trim().parse().ok()?));
+        }
+        (!secs.is_empty()).then_some(Calibration { secs })
+    }
+
+    /// Weight for a step, on a basis where every step's weight sums to one.
+    ///
+    /// The obvious version — measured share for measured steps, the default
+    /// weight for the rest — does NOT sum to one, and a bar built on it walks
+    /// off the end and sits clamped. A partial measurement is the ordinary
+    /// case: a build that failed part way, or a step that was skipped because
+    /// something was already up to date.
+    ///
+    /// So an unmeasured step is given a plausible duration first — its default
+    /// share of what was measured — and only then is everything normalised.
+    fn weight(&self, step: Step) -> f32 {
+        let seconds = self.seconds_per_step();
+        let total: f32 = seconds.iter().sum();
+        if total <= 0.0 {
+            return step.weight();
+        }
+        let idx = Step::ORDER.iter().position(|s| *s == step).unwrap_or(0);
+        seconds[idx] / total
+    }
+
+    /// Every step's duration, measured where we have it and inferred where we
+    /// do not, on one consistent scale.
+    fn seconds_per_step(&self) -> [f32; Step::ORDER.len()] {
+        let mut out = [0.0f32; Step::ORDER.len()];
+        let measured_total: u64 = self.secs.iter().map(|(_, s)| *s).sum();
+        if measured_total == 0 {
+            for (i, step) in Step::ORDER.iter().enumerate() {
+                out[i] = step.weight();
+            }
+            return out;
+        }
+        // What one unit of "default weight" was worth in seconds, judged from
+        // the steps we did measure.
+        let measured_weight: f32 = self
+            .secs
+            .iter()
+            .filter_map(|(i, _)| Step::ORDER.get(*i))
+            .map(|s| s.weight())
+            .sum();
+        let scale = if measured_weight > 0.0 {
+            measured_total as f32 / measured_weight
+        } else {
+            measured_total as f32
+        };
+        for (i, step) in Step::ORDER.iter().enumerate() {
+            out[i] = match self.secs.iter().find(|(j, _)| *j == i) {
+                Some((_, s)) => *s as f32,
+                None => step.weight() * scale,
+            };
+        }
+        out
+    }
+
+    fn before(&self, step: Step) -> f32 {
+        Step::ORDER
+            .iter()
+            .take_while(|s| **s != step)
+            .map(|s| self.weight(*s))
+            .sum()
+    }
+}
+
+pub fn calibration_path() -> PathBuf {
+    work_dir().join("timings")
+}
+
 /// Turns build output into a fraction. Pure, so the mapping is testable
 /// without running a twenty-minute build to see what it says.
 #[derive(Debug, Clone)]
@@ -438,17 +545,50 @@ pub struct ProgressModel {
     /// Packages in the clone's `Cargo.lock` — the engine step's denominator.
     crates_total: u32,
     crates_done: u32,
+    /// Measured step durations from the last successful build here.
+    cal: Calibration,
+    /// When each step started, so the next build can be calibrated from this
+    /// one and so a timed step can interpolate within itself.
+    started: Vec<(usize, u64)>,
+    /// Seconds since the build began, as of the last `observe`.
+    now: u64,
 }
 
 impl ProgressModel {
     pub fn new(crates_total: u32) -> Self {
+        Self::with_calibration(crates_total, Calibration::default())
+    }
+
+    pub fn with_calibration(crates_total: u32, cal: Calibration) -> Self {
         Self {
             step: Step::Preparing,
             // Never zero: this is a divisor, and a lock file we could not read
             // must degrade to "no granularity" rather than to a crash.
             crates_total: crates_total.max(1),
             crates_done: 0,
+            cal,
+            started: vec![(0, 0)],
+            now: 0,
         }
+    }
+
+    /// Tell the model what time it is, so a timed step can move within itself.
+    pub fn tick(&mut self, elapsed_secs: u64) {
+        self.now = elapsed_secs;
+    }
+
+    /// What each step cost, for the next build to weight itself with.
+    pub fn measured(&self, total_secs: u64) -> Calibration {
+        let mut secs = Vec::new();
+        for (n, (idx, start)) in self.started.iter().enumerate() {
+            let end = self
+                .started
+                .get(n + 1)
+                .map(|(_, s)| *s)
+                .unwrap_or(total_secs);
+            secs.push((*idx, end.saturating_sub(*start)));
+        }
+        Calibration { secs }
     }
 
     /// Read one line of build output.
@@ -479,10 +619,12 @@ impl ProgressModel {
         // believe. Build output is a stream someone may reorder later; this is
         // the guard that makes that a cosmetic change rather than a bug report.
         if let Some(next) = seen {
-            if Step::ORDER.iter().position(|s| *s == next)
-                > Step::ORDER.iter().position(|s| *s == self.step)
-            {
+            let ni = Step::ORDER.iter().position(|s| *s == next);
+            if ni > Step::ORDER.iter().position(|s| *s == self.step) {
                 self.step = next;
+                if let Some(i) = ni {
+                    self.started.push((i, self.now));
+                }
             }
         }
         // Counted, not guessed. Only while the engine is the step: SwiftPM
@@ -495,14 +637,22 @@ impl ProgressModel {
 
     pub fn progress(&self, elapsed_secs: u64) -> BuildProgress {
         let within = if self.step == Step::Engine {
+            // Counted: one `Compiling` line per package in the lock file.
             (self.crates_done as f32 / self.crates_total as f32).min(1.0)
+        } else if let Some(expected) = self.expected_secs(self.step) {
+            // Timed, but only because a previous build on THIS machine measured
+            // it. Capped just short of the step's end: a clock may run out
+            // before the work does, and a bar that sits at "done" while the
+            // step continues is the same lie as one that finishes early.
+            let in_step = elapsed_secs.saturating_sub(self.step_started());
+            (in_step as f32 / expected as f32).min(0.95)
         } else {
-            // Nothing to count inside the other steps, so they read as their
-            // own start until they end. Better a bar that pauses honestly than
-            // one that creeps on a timer and arrives before the work does.
+            // Nothing to count and nothing measured. The bar holds still rather
+            // than creeping on a guess and arriving before the work does.
             0.0
         };
-        let fraction = (self.step.before() + self.step.weight() * within).clamp(0.0, 0.99);
+        let fraction =
+            (self.cal.before(self.step) + self.cal.weight(self.step) * within).clamp(0.0, 0.99);
         // Enough elapsed AND enough done — either alone divides by something
         // too small and reports an hour on a build that has thirty seconds
         // left, or a minute on one that has twenty.
@@ -515,6 +665,24 @@ impl ProgressModel {
             eta_secs,
             headline: self.step.headline().into(),
         }
+    }
+}
+
+impl ProgressModel {
+    fn step_started(&self) -> u64 {
+        self.started.last().map(|(_, s)| *s).unwrap_or(0)
+    }
+
+    /// How long this step took last time, in seconds. `None` when it has never
+    /// been measured here — the first update on a machine.
+    fn expected_secs(&self, step: Step) -> Option<u64> {
+        let idx = Step::ORDER.iter().position(|s| *s == step)?;
+        self.cal
+            .secs
+            .iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(_, s)| *s)
+            .filter(|s| *s > 0)
     }
 }
 
@@ -683,7 +851,13 @@ fn run_build(
         .map_err(|e| format!("could not start the build: {e}"))?;
 
     let mut file = std::fs::File::create(log).ok();
-    let mut model = ProgressModel::new(crate_count(src));
+    // Last build's measured step durations, when there was one. The first
+    // update on a machine has none and estimates; every one after it measures.
+    let cal = std::fs::read_to_string(calibration_path())
+        .ok()
+        .and_then(|t| Calibration::parse(&t))
+        .unwrap_or_default();
+    let mut model = ProgressModel::with_calibration(crate_count(src), cal);
     let started = std::time::Instant::now();
     let mut last_sent = 0.0f32;
     if let Some(stdout) = child.stdout.take() {
@@ -691,6 +865,7 @@ fn run_build(
             if let Some(f) = file.as_mut() {
                 let _ = writeln!(f, "{line}");
             }
+            model.tick(started.elapsed().as_secs());
             model.observe(&line);
             let p = model.progress(started.elapsed().as_secs());
             // Only when it actually moved. A cold build prints thousands of
@@ -716,6 +891,12 @@ fn run_build(
             log.display()
         ));
     }
+    // Only a build that WORKED gets to teach the next one. A failed build's
+    // timings describe how long it took to break, which is not the same shape.
+    let _ = std::fs::write(
+        calibration_path(),
+        model.measured(started.elapsed().as_secs()).serialise(),
+    );
     Ok(app)
 }
 

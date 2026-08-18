@@ -315,3 +315,128 @@ fn the_headline_says_what_it_is_doing_in_the_users_words() {
     assert!(h.contains("engine"), "{h}");
     assert!(!h.contains("cargo"), "leaked the build system's words: {h}");
 }
+
+// ── Calibrating from the last build ────────────────────────────────────────
+
+use suisei_core::update_build::Calibration;
+
+#[test]
+fn timings_survive_a_round_trip() {
+    let c = Calibration {
+        secs: vec![(0, 3), (3, 400), (4, 600)],
+    };
+    assert_eq!(Calibration::parse(&c.serialise()), Some(c));
+}
+
+#[test]
+fn half_a_set_of_timings_is_no_timings() {
+    // Worse than the defaults, because it is wrong in a way that looks
+    // measured — the bar would weight two steps from real numbers and the rest
+    // from guesses, and land somewhere neither.
+    for bad in ["", "0", "0=", "=5", "x=5", "0=abc", "0=3\nbroken"] {
+        assert_eq!(Calibration::parse(bad), None, "accepted {bad:?}");
+    }
+}
+
+#[test]
+fn the_swift_step_moves_once_it_has_been_measured_before() {
+    // The point of the whole mechanism. `swiftc -whole-module-optimization`
+    // emits ONE compile job — verified with `-parseable-output`, which reports
+    // exactly two events for the module — so there is nothing to count inside
+    // it. With a previous build's duration, it can be timed instead.
+    let cal = Calibration {
+        secs: vec![(0, 1), (1, 1), (2, 60), (3, 300), (4, 600), (5, 30), (6, 5)],
+    };
+    let mut m = ProgressModel::with_calibration(81, cal);
+    m.tick(400);
+    m.observe("→ swiftc → Contents/MacOS/Suisei");
+
+    m.tick(400);
+    let at_start = m.progress(400).fraction;
+    m.tick(700);
+    let halfway = m.progress(700).fraction;
+
+    assert!(halfway > at_start, "the bar stalled: {at_start} → {halfway}");
+}
+
+#[test]
+fn a_timed_step_never_reaches_its_own_end() {
+    // A clock can run out before the work does. A bar parked at "this step is
+    // finished" while the step is still running is the same lie as one that
+    // finishes early — and the Swift step is exactly where an estimate is
+    // most likely to be short.
+    let cal = Calibration {
+        secs: vec![(0, 1), (4, 100)],
+    };
+    let mut m = ProgressModel::with_calibration(81, cal);
+    m.tick(0);
+    m.observe("→ swiftc → x");
+    let entered = m.progress(0).fraction;
+    m.tick(100_000);
+    let overrun = m.progress(100_000).fraction;
+
+    // It advanced through the step, and stopped short of consuming all of it —
+    // the steps after Swift still have room, which is what says "not finished".
+    assert!(overrun > entered, "the bar stalled");
+    assert!(
+        overrun < 0.99,
+        "a clock that ran out claimed the build was done: {overrun}"
+    );
+}
+
+#[test]
+fn with_nothing_measured_the_bar_holds_still_rather_than_guessing() {
+    // First update on a machine. Better a bar that pauses honestly than one
+    // that creeps on a guess and arrives before the work does.
+    let mut m = ProgressModel::new(81);
+    m.tick(0);
+    m.observe("→ swiftc → x");
+    let a = m.progress(10).fraction;
+    m.tick(9_000);
+    let b = m.progress(9_000).fraction;
+    assert_eq!(a, b, "invented movement with nothing to go on");
+}
+
+#[test]
+fn a_build_reports_what_each_step_cost() {
+    // What the next build weights itself with.
+    let mut m = ProgressModel::new(81);
+    m.tick(0);
+    m.observe("▸ Welcome art");
+    m.tick(10);
+    m.observe("→ cargo build -p suisei-engine --release");
+    m.tick(310);
+    m.observe("→ swiftc → x");
+    let measured = m.measured(910);
+
+    assert!(!measured.secs.is_empty());
+    let total: u64 = measured.secs.iter().map(|(_, s)| *s).sum();
+    assert_eq!(total, 910, "the parts must add up to the whole");
+    // The engine step ran from 10s to 310s.
+    let engine = measured.secs.iter().find(|(i, _)| *i == 3).map(|(_, s)| *s);
+    assert_eq!(engine, Some(300));
+}
+
+#[test]
+fn measured_weights_replace_the_estimated_ones() {
+    // A machine where Swift dominates should show the engine step finishing
+    // sooner than the default weights say, because on THAT machine it does.
+    let swift_heavy = Calibration {
+        secs: vec![(3, 100), (4, 900)],
+    };
+    let mut estimated = ProgressModel::new(10);
+    let mut measured = ProgressModel::with_calibration(10, swift_heavy);
+    for m in [&mut estimated, &mut measured] {
+        m.tick(0);
+        m.observe("→ cargo build -p suisei-engine --release");
+        for i in 0..10 {
+            m.observe(&format!("Compiling c{i} v1.0"));
+        }
+    }
+    assert!(
+        measured.progress(60).fraction < estimated.progress(60).fraction,
+        "measured {} vs estimated {}",
+        measured.progress(60).fraction,
+        estimated.progress(60).fraction
+    );
+}

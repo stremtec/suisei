@@ -245,15 +245,27 @@ struct SoftwareUpdatePage: View {
             ProgressView()
                 .controlSize(.small)
                 .padding(.trailing, 4)
+        } else if buildPhase > 0, buildPhase < 4 {
+            // The press has to land somewhere immediately. Cloning starts on a
+            // background thread and the first line of build output is seconds
+            // away, so a button still reading "Update Now" invites a second
+            // press — and the second press is deliberately ignored, which reads
+            // as the first one not having worked.
+            Button("Updating…") {}
+                .disabled(true)
+        } else if buildPhase == 4 {
+            // The build is staged and the swap happens at the next launch, so
+            // the only thing left to do is the restart. Naming it is better
+            // than leaving a button that would start the same build again.
+            Button("Restart to Finish") { NSApp.terminate(nil) }
+                .buttonStyle(.borderedProminent)
         } else if snap.available {
-            // "Update Now" is what this said, and it opens a web page. The row
-            // directly below it says the update CANNOT be installed from here —
-            // so the button was contradicting the sentence explaining it.
-            //
-            // It is also the only control now: the blocked row used to carry a
-            // second button doing the identical thing under a different name.
-            // A blocking fact is a status line, and a status line does not need
-            // its own button when the action is the prominent one above it.
+            // This used to open a web page while saying "Update Now", which
+            // contradicted the row directly below explaining that the update
+            // could not be installed from here. It builds now, so the label is
+            // true — and it is the only control: a blocking fact is a status
+            // line, and a status line does not need its own button when the
+            // action is the prominent one above it.
             Button("Update Now", action: onUpdate)
                 .buttonStyle(.borderedProminent)
         } else {
