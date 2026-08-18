@@ -1154,6 +1154,8 @@ void suisei_engine_dap_set_panel(SuiseiEngine *ptr, uint8_t open);
 #define SUISEI_MAX_LOGIC_RUNS 16
 #define SUISEI_LOGIC_RUN_SELECTED 1
 #define SUISEI_LOGIC_RUN_RUNTIME 2
+#define SUISEI_LOGIC_RUN_ARM_YES 4
+#define SUISEI_LOGIC_RUN_ARM_NO 8
 
 typedef struct SuiseiLogicSnapshot {
   uint8_t ok;
@@ -1195,5 +1197,7 @@ void suisei_engine_logic_select(SuiseiEngine *ptr, const char *path, uint32_t in
 void suisei_engine_logic_reveal(SuiseiEngine *ptr, const char *path, uint32_t index);
 /* The rail catching up with the caret. Returns 1 when something moved. */
 uint8_t suisei_engine_logic_follow(SuiseiEngine *ptr, const char *path, uint32_t line);
+/* Ask what a branch's two arms are. UINT32_MAX clears it. */
+void suisei_engine_logic_peek(SuiseiEngine *ptr, const char *path, uint32_t index);
 void suisei_engine_logic_open(SuiseiEngine *ptr);
 uint8_t suisei_engine_logic_available(const SuiseiEngine *ptr);

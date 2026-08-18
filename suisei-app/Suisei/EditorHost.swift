@@ -2669,6 +2669,21 @@ final class EditorCanvasView: NSView {
         for run in runs {
             let start = Int(run.startRow)
             let end = Int(run.endRow)
+
+            // An arm of a branch being asked about: the rows themselves, not
+            // a guide beside them. Both arms in the accent at two weights
+            // rather than in green and red — the gutter already spends those
+            // two on git, and a red band across code reads as a diff.
+            if let holds = run.arm {
+                let top = visualY(start)
+                let bottom = visualY(end) + lineH
+                out.append((
+                    CGRect(x: 0, y: top, width: bounds.width, height: bottom - top),
+                    colors.logicBand.withAlphaComponent(holds ? 0.13 : 0.06)
+                ))
+                continue
+            }
+
             let ink = run.runtime ? colors.debugStopInk.withAlphaComponent(0.55) : colors.logicGuide
 
             // The band, on the head row, for a selection only — the debugger

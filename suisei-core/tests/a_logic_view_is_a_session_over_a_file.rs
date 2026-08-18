@@ -186,6 +186,42 @@ fn closing_the_debug_panel_takes_the_runtime_marks_with_it() {
     assert!(marks.iter().all(|m| !m.runtime), "nothing amber survives: {marks:?}");
 }
 
+/// A branch is the one thing you cannot read by looking at one line, so
+/// pointing at one answers "what are the two ways out of here" on the code.
+#[test]
+fn peeking_a_branch_marks_both_of_its_arms() {
+    let mut s = session();
+    s.toggle(0);
+    let branch = s.rows().iter().position(|r| r.label == "x > 0").unwrap();
+    s.peek = Some(branch);
+
+    let arms: Vec<_> = s
+        .marks(&LogicRuntime::default(), false, 4)
+        .into_iter()
+        .filter(|m| m.arm.is_some())
+        .collect();
+    assert_eq!(arms.len(), 1, "this `if` has one arm written: {arms:?}");
+    assert_eq!(arms[0].arm, Some(true), "and it is the one taken when it holds");
+    assert_eq!(arms[0].start_row, 2, "`return x;`");
+
+    // A peek is a question, not a place: withdrawing it leaves the selection.
+    let was = s.selected;
+    s.peek = None;
+    assert!(s.marks(&LogicRuntime::default(), false, 4).iter().all(|m| m.arm.is_none()));
+    assert_eq!(s.selected, was);
+}
+
+/// Only a branch has arms. Pointing at a step answers nothing rather than
+/// answering about the wrong thing.
+#[test]
+fn peeking_something_that_is_not_a_branch_says_nothing() {
+    let mut s = session();
+    s.toggle(0);
+    let step = s.rows().iter().position(|r| r.label == "return x").unwrap();
+    s.peek = Some(step);
+    assert!(s.marks(&LogicRuntime::default(), false, 4).iter().all(|m| m.arm.is_none()));
+}
+
 /// Two Logic tabs are two sessions, and switching between them does not close
 /// everything the reader had opened in the other.
 #[test]

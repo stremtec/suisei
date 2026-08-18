@@ -67,6 +67,9 @@ struct LogicRun: Equatable {
     var selected: Bool
     /// The program is stopped inside this: amber, the debugger's voice.
     var runtime: Bool
+    /// One arm of the branch the pointer is over: the way taken when the test
+    /// holds, and the way taken when it does not.
+    var arm: Bool?
 }
 
 struct LogicSnap: Equatable {
@@ -151,7 +154,8 @@ struct LogicRail: View {
                             selected: row.id == snap.selected,
                             palette: palette,
                             onTap: { engine.logicReveal(path, row.id) },
-                            onToggle: { engine.logicToggle(path, row.id) }
+                            onToggle: { engine.logicToggle(path, row.id) },
+                            onPeek: { on in engine.logicPeek(path, on ? row.id : nil) }
                         )
                         .id(row.id)
                     }
@@ -191,6 +195,7 @@ private struct LogicRailRow: View {
     let palette: ViewerPalette
     let onTap: () -> Void
     let onToggle: () -> Void
+    let onPeek: (Bool) -> Void
 
     @State private var hovering = false
 
@@ -215,7 +220,12 @@ private struct LogicRailRow: View {
         .frame(height: Self.height)
         .background(background)
         .contentShape(Rectangle())
-        .onHover { hovering = $0 }
+        .onHover { over in
+            hovering = over
+            // Only a branch has arms to show, and asking about anything else
+            // would clear the answer the reader is looking at.
+            if row.kind == .decision { onPeek(over) }
+        }
         .onTapGesture { onTap() }
         .help(row.label)
     }

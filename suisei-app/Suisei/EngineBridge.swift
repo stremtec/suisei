@@ -6863,6 +6863,19 @@ extension EngineBridge {
         refreshLogicIfNeeded()
     }
 
+    /// Ask what a branch's two arms are, for as long as the pointer is on it.
+    ///
+    /// A question, not a place: it leaves the selection alone, and `nil`
+    /// withdraws it.
+    func logicPeek(_ path: String, _ index: Int?) {
+        guard let engine else { return }
+        path.withCString {
+            suisei_engine_logic_peek(engine, $0, index.map(UInt32.init) ?? UInt32.max)
+        }
+        logicFingerprints.removeValue(forKey: path)
+        refreshLogicIfNeeded()
+    }
+
     /// Take the reader to the source this row came from — in the other pane,
     /// which is what the pairing is for.
     func logicReveal(_ path: String, _ index: Int) {
@@ -6942,12 +6955,16 @@ extension EngineBridge {
                 let endList = ends.bindMemory(to: UInt32.self)
                 let colList = cols.bindMemory(to: UInt16.self)
                 for i in 0..<min(Int(snap.run_count), Int(SUISEI_MAX_LOGIC_RUNS)) {
+                    let f = flags[i]
+                    let yes = f & UInt8(SUISEI_LOGIC_RUN_ARM_YES) != 0
+                    let no = f & UInt8(SUISEI_LOGIC_RUN_ARM_NO) != 0
                     out.runs.append(LogicRun(
                         startRow: startList[i],
                         endRow: endList[i],
                         col: Int(colList[i]),
-                        selected: flags[i] & UInt8(SUISEI_LOGIC_RUN_SELECTED) != 0,
-                        runtime: flags[i] & UInt8(SUISEI_LOGIC_RUN_RUNTIME) != 0
+                        selected: f & UInt8(SUISEI_LOGIC_RUN_SELECTED) != 0,
+                        runtime: f & UInt8(SUISEI_LOGIC_RUN_RUNTIME) != 0,
+                        arm: yes ? true : (no ? false : nil)
                     ))
                 }
             }

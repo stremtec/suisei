@@ -50,6 +50,12 @@ pub struct LogicSession {
     /// to all three. Same rule as the model viewer's — "nothing here" and "I
     /// could not read this" need different reactions.
     pub note: Option<String>,
+    /// The row the pointer is over, when the reader is asking about a branch.
+    ///
+    /// Separate from `selected` because it is a QUESTION, not a place: it
+    /// lasts as long as the pointer does, and moving the pointer away must
+    /// leave the reader exactly where they were.
+    pub peek: Option<usize>,
     src: String,
     ts: Option<tree_sitter::Tree>,
 }
@@ -68,6 +74,7 @@ impl LogicSession {
             tree: LogicTree::default(),
             selected: 0,
             note: None,
+            peek: None,
             src: String::new(),
             ts: None,
         };
@@ -263,6 +270,9 @@ pub struct LogicMark {
     pub selected: bool,
     /// The program is stopped inside this.
     pub runtime: bool,
+    /// One arm of a branch the pointer is over: `Some(true)` when the branch
+    /// held, `Some(false)` when it did not.
+    pub arm: Option<bool>,
 }
 
 impl LogicSession {
@@ -287,12 +297,13 @@ impl LogicSession {
                 col: self.guide_col(self.selected, tab_width).unwrap_or(0),
                 selected: true,
                 runtime: false,
+                arm: None,
             });
         }
-        if !runtime_allowed {
-            return out;
-        }
-        for &i in &rt.enclosing {
+        // The panel gate is the RUNTIME marks' gate and nothing else's. It was
+        // an early return, which took the branch peek with it — a question
+        // about a branch has nothing to do with whether a debugger is open.
+        for &i in rt.enclosing.iter().filter(|_| runtime_allowed) {
             let Some(row) = self.tree.rows.get(i) else { continue };
             // Not the function itself. "You are inside `process`" is what the
             // whole view already says, and a guide down a whole function is a
@@ -306,6 +317,47 @@ impl LogicSession {
                 col: self.guide_col(i, tab_width).unwrap_or(0),
                 selected: false,
                 runtime: true,
+                arm: None,
+            });
+        }
+        out.extend(self.arms());
+        out
+    }
+
+    /// Both arms of the branch the pointer is over.
+    ///
+    /// A branch is the one thing in a file you cannot read by looking at one
+    /// line, and this is the question "what are the two ways out of here"
+    /// answered on the code itself. Transient, because it is a question.
+    fn arms(&self) -> Vec<LogicMark> {
+        let Some(at) = self.peek else { return Vec::new() };
+        let Some(head) = self.tree.rows.get(at) else { return Vec::new() };
+        if !matches!(head.kind, LogicKind::Decision) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut arm: Option<bool> = None;
+        for row in self.tree.rows.iter().skip(at + 1) {
+            // Out of the branch entirely: what follows it is not an arm of it.
+            if row.depth <= head.depth {
+                break;
+            }
+            // The label the graph put on the edge that reaches this row is
+            // what says which arm it is — and a row deeper than an arm's own
+            // level inherits the arm it is inside.
+            match row.edge {
+                crate::logic::EdgeLabel::Yes => arm = Some(true),
+                crate::logic::EdgeLabel::No => arm = Some(false),
+                _ => {}
+            }
+            let Some(which) = arm else { continue };
+            out.push(LogicMark {
+                start_row: row.start_row,
+                end_row: row.end_row,
+                col: 0,
+                selected: false,
+                runtime: false,
+                arm: Some(which),
             });
         }
         out

@@ -5342,6 +5342,10 @@ pub const SUISEI_LOGIC_RUN_SELECTED: u8 = 1;
 /// The program is stopped INSIDE this. Amber, because that is the debugger
 /// speaking and the debugger speaks in one colour.
 pub const SUISEI_LOGIC_RUN_RUNTIME: u8 = 2;
+/// An arm of the branch the pointer is over — the one taken when the test
+/// holds, and the one taken when it does not.
+pub const SUISEI_LOGIC_RUN_ARM_YES: u8 = 4;
+pub const SUISEI_LOGIC_RUN_ARM_NO: u8 = 8;
 
 #[repr(C)]
 pub struct SuiseiLogicSnapshot {
@@ -5427,6 +5431,7 @@ pub extern "C" fn suisei_engine_logic_fingerprint(
     if let Some(session) = app.logic_views.peek(&p) {
         mix(session.rows().len() as u64);
         mix(session.selected as u64);
+        mix(session.peek.map_or(u64::MAX, |i| i as u64));
         for row in session.rows() {
             mix(u64::from(row.expanded) | (row.start_row as u64) << 1);
         }
@@ -5558,7 +5563,9 @@ pub extern "C" fn suisei_engine_logic(
         o.run_end[i] = m.end_row as u32;
         o.run_col[i] = m.col as u16;
         o.run_flags[i] = u8::from(m.selected) * SUISEI_LOGIC_RUN_SELECTED
-            | u8::from(m.runtime) * SUISEI_LOGIC_RUN_RUNTIME;
+            | u8::from(m.runtime) * SUISEI_LOGIC_RUN_RUNTIME
+            | u8::from(m.arm == Some(true)) * SUISEI_LOGIC_RUN_ARM_YES
+            | u8::from(m.arm == Some(false)) * SUISEI_LOGIC_RUN_ARM_NO;
     }
 
     o.ok = 1;
@@ -5601,6 +5608,31 @@ pub extern "C" fn suisei_engine_logic_select(
         if index as usize <= session.rows().len() {
             session.selected = index as usize;
         }
+    }
+}
+
+/// Ask about a branch: which lines its two arms are.
+///
+/// `u32::MAX` clears it. A peek is a QUESTION rather than a place — it lasts
+/// as long as the pointer is over the row, and leaves the selection alone.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_logic_peek(
+    ptr: *mut SuiseiEngine,
+    path: *const c_char,
+    index: u32,
+) {
+    let Some(p) = logic_path(path) else { return };
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let app = (*ptr).0.app_mut();
+        let session = app.logic_session(&p);
+        session.peek = if index == u32::MAX {
+            None
+        } else {
+            Some(index as usize)
+        };
     }
 }
 
