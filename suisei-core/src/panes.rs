@@ -528,6 +528,26 @@ impl App {
         self.buffer.clamp_col();
         self.scroll = pane.scroll.min(max_row);
         self.hscroll = if self.wrap_lines { 0 } else { pane.hscroll };
+        // Nothing to place. The pane the focus just arrived at has been on
+        // screen the whole time, at the pixel it was left on — moving focus
+        // does not move a viewport.
+        //
+        // `restore_state_from_tab` above raises `ScrollIntent::Restore`, which
+        // is right for what it is FOR (a pane changing which document it shows)
+        // and wrong here, where the only thing that changed is which pane the
+        // keyboard is in. The face obeyed it and ran `setClipTo(line:hCols:)`
+        // against `App::scroll` and `App::hscroll` — and those are INTEGERS.
+        // `syncCorePosition` floors the clip to a line and a column, so a view
+        // resting anywhere but exactly on a cell boundary came back rounded:
+        // up by the lost sub-line, left by the lost sub-column. That is
+        // "포커싱 전환할 때 막 가로 스크롤 이상하게 튀고 위로 스크롤 튀고", and
+        // it is worse than a rounding error — the pane's own clip was the only
+        // copy that still had the exact position, and the restore overwrote it
+        // with the rounded one.
+        //
+        // Core's `scroll`/`hscroll` are still correct for painting; they are
+        // just not an instruction to move anything.
+        self.scroll_intent = crate::app::ScrollIntent::None;
         // NO `update_scroll()`. It re-derives the scroll from the CARET, so a
         // pane scrolled away from its cursor — scrolled with the wheel, which
         // does not move the caret — snapped straight back to the top the

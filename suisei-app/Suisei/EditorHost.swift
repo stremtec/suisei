@@ -568,7 +568,12 @@ final class EditorScrollView: NSScrollView {
         let focusedPane = engine?.editorSplit.isSplit != true
             || paneIndex == engine?.editorSplit.focus
         let coreLine = Int(docScroll)
-        let clipLine = Int(floor(documentVisibleRect.minY / max(1, lineH)))
+        // BUFFER row, because `coreLine` is one. Dividing the clip by the line
+        // height gives a VISUAL row, and with wrapping on those are different
+        // numbers — see `syncCorePosition`.
+        let clipLine = canvas.bufferRowOfVisual(
+            Int(floor(documentVisibleRect.minY / max(1, lineH)))
+        )
         if focusedPane, !isUserScrolling, !canvas.isLiveScrolling, !canvas.isTrackingDrag,
            scrollIntent != 0
         {
@@ -728,7 +733,7 @@ final class EditorScrollView: NSScrollView {
     /// the indicator visibly step ("버벅"). Cheap: one int compare per event.
     private func postLiveMinimapLine() {
         let lineH = max(1, EditorMetrics.lineHeight)
-        let v0 = max(0, Int(floor(documentVisibleRect.minY / lineH)))
+        let v0 = canvas.bufferRowOfVisual(Int(floor(documentVisibleRect.minY / lineH)))
         guard v0 != lastMinimapLine else { return }
         lastMinimapLine = v0
         if engine?.editorSplit.isSplit != true || paneIndex == engine?.editorSplit.focus {
@@ -747,7 +752,24 @@ final class EditorScrollView: NSScrollView {
         lastPosSyncTime = now
         let lineH = max(1, EditorMetrics.lineHeight)
         let cell = max(1, EditorMetrics.cellWidth)
-        let v0 = max(0, Int(floor(documentVisibleRect.minY / lineH)))
+        // A BUFFER row. `minY / lineH` is a VISUAL row — the count of drawn
+        // rows above the clip — and `App::scroll` is a line index. Wrapped off
+        // they are the same number, which is why this was invisible for as long
+        // as it was, and why the report ends "no wrapping 옵션 키면 귀신같이
+        // 사라짐". Wrapped on, every sync wrote a visual row into a line field:
+        // core's idea of where the pane sits ran further and further past the
+        // truth, `park_focused_pane` stored that, and the next `setClipTo` —
+        // which converts the other way, through `visualY` — placed the view
+        // somewhere the user had never been.
+        //
+        // Nothing showed while the pane was simply being scrolled, because the
+        // canvas paints from its own clip (`nearestBufferRow(atY:)`, converted).
+        // Core's copy is only read back when a pane is restored, which is
+        // exactly when the jump was reported.
+        //
+        // `wrap_buffer_at` exists for this — "turning a click or a viewport top
+        // back into a line" — and had no caller for the viewport half.
+        let v0 = canvas.bufferRowOfVisual(Int(floor(documentVisibleRect.minY / lineH)))
         let hCols = max(0, Int(floor(documentVisibleRect.minX / cell)))
         lastHCols = hCols
         if engine?.editorSplit.isSplit != true || paneIndex == engine?.editorSplit.focus {
@@ -5060,7 +5082,8 @@ extension EditorScrollView {
         // Re-sync once the wheel settles (throttle-free).
         let lineH = max(1, EditorMetrics.lineHeight)
         let cell = max(1, EditorMetrics.cellWidth)
-        let v0 = max(0, Int(floor(documentVisibleRect.minY / lineH)))
+        // Buffer row — same conversion, same reason as `syncCorePosition`.
+        let v0 = canvas.bufferRowOfVisual(Int(floor(documentVisibleRect.minY / lineH)))
         let hCols = max(0, Int(floor(documentVisibleRect.minX / cell)))
         if engine?.editorSplit.isSplit != true || paneIndex == engine?.editorSplit.focus {
             engine?.scrollSync(line: UInt32(v0), hscroll: UInt32(hCols))
