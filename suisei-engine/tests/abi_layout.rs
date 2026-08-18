@@ -79,6 +79,13 @@ fn editor_line_c_layout() {
     assert_eq!(offset_of!(SuiseiEditorLineC, sel_u1), 28);
     assert_eq!(offset_of!(SuiseiEditorLineC, text), 32);
     assert_eq!(offset_of!(SuiseiEditorLineC, spans), 32 + SUISEI_LINE_CAP);
+    // Fold state is APPENDED. The assertion that matters is not its own
+    // offset but that nothing before it moved — every field above is read by
+    // Swift at a hardcoded offset, and the lines above are that guard.
+    assert_eq!(
+        offset_of!(SuiseiEditorLineC, fold),
+        32 + SUISEI_LINE_CAP + SUISEI_MAX_SPANS * size_of::<SuiseiSpanC>()
+    );
 
     // Total stride used by Swift's MemoryLayout<SuiseiEditorLineC>.stride
     let expected_size = 32 + SUISEI_LINE_CAP + SUISEI_MAX_SPANS * size_of::<SuiseiSpanC>();

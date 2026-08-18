@@ -47,6 +47,11 @@ pub struct WrapMap {
     version: u64,
     tab_width: u16,
     wide_ratio: u16,
+    /// [`crate::fold::FoldState::generation`] this was built from.
+    ///
+    /// Folding changes the map without changing a byte of the document, so the
+    /// buffer version alone cannot see it.
+    fold_gen: u64,
 }
 
 impl WrapMap {
@@ -61,12 +66,14 @@ impl WrapMap {
         cols: u16,
         tab_width: u16,
         wide_ratio: u16,
+        fold_gen: u64,
     ) -> bool {
         !self.starts.is_empty()
             && self.version == version
             && self.cols == cols
             && self.tab_width == tab_width
             && self.wide_ratio == wide_ratio
+            && self.fold_gen == fold_gen
     }
 
     /// Build the map for `lines` at `cols` columns.
@@ -74,19 +81,30 @@ impl WrapMap {
     /// `cols == 0` disables wrapping: every line is one row. That is the same
     /// shape as the wrapped map rather than a separate mode, so nothing above
     /// has to branch on whether wrapping is on.
+    ///
+    /// **A row hidden inside a closed fold takes ZERO rows**, which is the
+    /// whole of what folding is. Putting it here rather than in the renderer
+    /// means the scroll extent, the scrollbar, hit-testing and the drawn band
+    /// cannot disagree about how tall the document is — they all read this one
+    /// map. `folds` is `None` for callers with no document to fold.
     pub fn build(
         lines: &[String],
         version: u64,
         cols: u16,
         tab_width: u16,
         wide_ratio: u16,
+        folds: Option<&crate::fold::FoldState>,
     ) -> Self {
         let tab = tab_width.max(1) as usize;
         let mut starts = Vec::with_capacity(lines.len() + 1);
         let mut at = 0u32;
-        for line in lines {
+        for (row, line) in lines.iter().enumerate() {
             starts.push(at);
-            at = at.saturating_add(rows_for(line, cols, tab, wide_ratio) as u32);
+            let height = match folds {
+                Some(f) if f.is_hidden(row) => 0,
+                _ => rows_for(line, cols, tab, wide_ratio) as u32,
+            };
+            at = at.saturating_add(height);
         }
         starts.push(at);
         Self {
@@ -95,6 +113,7 @@ impl WrapMap {
             version,
             tab_width,
             wide_ratio,
+            fold_gen: folds.map(|f| f.generation()).unwrap_or(0),
         }
     }
 
@@ -117,15 +136,23 @@ impl WrapMap {
         }
     }
 
-    /// How many visual rows a buffer row takes.
+    /// How many visual rows a buffer row takes. **Zero when it is folded away.**
+    ///
+    /// The `.max(1)` this used to end with was a guard against a row of no
+    /// height, which was impossible before folding and is now the point. It
+    /// survives only for a row the document does not have, where the old
+    /// defensive answer is still the right one.
     pub fn rows_of(&self, buffer_row: usize) -> u32 {
+        if buffer_row >= self.line_count() {
+            return 1;
+        }
         let a = self.visual_of(buffer_row);
         let b = self
             .starts
             .get(buffer_row + 1)
             .copied()
             .unwrap_or_else(|| self.starts.last().copied().unwrap_or(0));
-        b.saturating_sub(a).max(1)
+        b.saturating_sub(a)
     }
 
     /// The buffer row drawn at a visual row, and which segment of it.
@@ -404,7 +431,7 @@ mod tests {
     #[test]
     fn no_wrap_is_one_row_per_line() {
         let d = doc(&["", "short", &"x".repeat(500)]);
-        let m = WrapMap::build(&d, 1, 0, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&d, 1, 0, 4, WIDE_TWO_CELLS, None);
         assert_eq!(m.total_rows(), 3);
         for row in 0..3 {
             assert_eq!(m.rows_of(row), 1);
@@ -416,7 +443,7 @@ mod tests {
     /// An empty line is a row you can put the caret on, not zero rows.
     #[test]
     fn an_empty_line_still_occupies_a_row() {
-        let m = WrapMap::build(&doc(&["", "", ""]), 1, 10, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&doc(&["", "", ""]), 1, 10, 4, WIDE_TWO_CELLS, None);
         assert_eq!(m.total_rows(), 3);
         assert_eq!(m.visual_of(2), 2);
     }
@@ -426,11 +453,11 @@ mod tests {
     /// document does not contain.
     #[test]
     fn an_exact_fit_does_not_spill_a_blank_row() {
-        let m = WrapMap::build(&doc(&["abcdefghij"]), 1, 10, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&doc(&["abcdefghij"]), 1, 10, 4, WIDE_TWO_CELLS, None);
         assert_eq!(m.rows_of(0), 1);
         assert_eq!(m.total_rows(), 1);
 
-        let m = WrapMap::build(&doc(&["abcdefghijk"]), 1, 10, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&doc(&["abcdefghijk"]), 1, 10, 4, WIDE_TWO_CELLS, None);
         assert_eq!(m.rows_of(0), 2, "one cell over is two rows");
     }
 
@@ -439,7 +466,7 @@ mod tests {
     #[test]
     fn visual_and_buffer_are_inverses() {
         let d = doc(&["a", &"b".repeat(25), "", &"c".repeat(10), "d"]);
-        let m = WrapMap::build(&d, 1, 10, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&d, 1, 10, 4, WIDE_TWO_CELLS, None);
         // 1 + 3 + 1 + 1 + 1
         assert_eq!(m.total_rows(), 7);
         assert_eq!(m.visual_of(0), 0);
@@ -467,7 +494,7 @@ mod tests {
         assert_eq!(display_columns("\t", 4), 4);
         assert_eq!(display_columns("a\t", 4), 4, "advance TO the stop");
         assert_eq!(display_columns("\t\t\t\t", 4), 16);
-        let m = WrapMap::build(&doc(&["\t\t\t\t"]), 1, 10, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&doc(&["\t\t\t\t"]), 1, 10, 4, WIDE_TWO_CELLS, None);
         assert_eq!(m.rows_of(0), 2);
     }
 
@@ -477,7 +504,7 @@ mod tests {
     #[test]
     fn wide_glyphs_take_two_cells() {
         assert_eq!(display_columns("한글", 4), 4);
-        let m = WrapMap::build(&doc(&["한글한글한글"]), 1, 10, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&doc(&["한글한글한글"]), 1, 10, 4, WIDE_TWO_CELLS, None);
         assert_eq!(m.rows_of(0), 2, "12 columns at width 10");
     }
 
@@ -485,13 +512,13 @@ mod tests {
     /// of rows at a different tab stop, and nothing else would notice.
     #[test]
     fn validity_covers_width_version_and_tab_stop() {
-        let m = WrapMap::build(&doc(&["\t\ta"]), 7, 10, 4, WIDE_TWO_CELLS);
-        assert!(m.is_valid_for(7, 10, 4, WIDE_TWO_CELLS));
-        assert!(!m.is_valid_for(8, 10, 4, WIDE_TWO_CELLS), "an edit");
-        assert!(!m.is_valid_for(7, 12, 4, WIDE_TWO_CELLS), "a resize");
-        assert!(!m.is_valid_for(7, 10, 8, WIDE_TWO_CELLS), "a tab-width change");
+        let m = WrapMap::build(&doc(&["\t\ta"]), 7, 10, 4, WIDE_TWO_CELLS, None);
+        assert!(m.is_valid_for(7, 10, 4, WIDE_TWO_CELLS, 0));
+        assert!(!m.is_valid_for(8, 10, 4, WIDE_TWO_CELLS, 0), "an edit");
+        assert!(!m.is_valid_for(7, 12, 4, WIDE_TWO_CELLS, 0), "a resize");
+        assert!(!m.is_valid_for(7, 10, 8, WIDE_TWO_CELLS, 0), "a tab-width change");
         assert!(
-            !WrapMap::default().is_valid_for(0, 0, 4, WIDE_TWO_CELLS),
+            !WrapMap::default().is_valid_for(0, 0, 4, WIDE_TWO_CELLS, 0),
             "a map that was never built describes nothing"
         );
     }
@@ -500,7 +527,7 @@ mod tests {
     /// bands asynchronously and can ask about a row an edit has just removed.
     #[test]
     fn out_of_range_rows_clamp() {
-        let m = WrapMap::build(&doc(&["a", "b"]), 1, 10, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&doc(&["a", "b"]), 1, 10, 4, WIDE_TWO_CELLS, None);
         assert_eq!(m.visual_of(99), m.total_rows());
         assert_eq!(m.rows_of(99), 1);
         assert_eq!(m.buffer_at(999), (1, 0));
@@ -510,11 +537,11 @@ mod tests {
     /// says "all of it".
     #[test]
     fn segments_carve_the_line_into_columns() {
-        let m = WrapMap::build(&doc(&[&"x".repeat(25)]), 1, 10, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&doc(&[&"x".repeat(25)]), 1, 10, 4, WIDE_TWO_CELLS, None);
         assert_eq!(m.segment_columns(0), (0, 10));
         assert_eq!(m.segment_columns(1), (10, 20));
         assert_eq!(m.segment_columns(2), (20, 30));
-        let flat = WrapMap::build(&doc(&["x"]), 1, 0, 4, WIDE_TWO_CELLS);
+        let flat = WrapMap::build(&doc(&["x"]), 1, 0, 4, WIDE_TWO_CELLS, None);
         assert_eq!(flat.segment_columns(0), (0, usize::MAX));
     }
 
@@ -599,7 +626,7 @@ mod tests {
     fn a_line_of_megabytes_is_as_tall_as_it_draws() {
         let monster = "a.b(1),".repeat(1_200_000);
         assert!(monster.len() > 8_000_000);
-        let m = WrapMap::build(&doc(&[&monster, "after"]), 1, 150, 4, WIDE_TWO_CELLS);
+        let m = WrapMap::build(&doc(&[&monster, "after"]), 1, 150, 4, WIDE_TWO_CELLS, None);
         let drawn = visual_chunks(&drawn_row(&monster, 4), 150, WIDE_TWO_CELLS).len();
         assert_eq!(m.rows_of(0) as usize, drawn);
         assert!(drawn <= 5, "four rows and a bit, not a skyscraper");
@@ -689,7 +716,7 @@ mod tests {
     /// An empty document is one row, because the caret is somewhere.
     #[test]
     fn an_empty_document_is_one_row() {
-        assert_eq!(WrapMap::build(&[], 1, 10, 4, WIDE_TWO_CELLS).total_rows(), 1);
-        assert_eq!(WrapMap::build(&doc(&[""]), 1, 10, 4, WIDE_TWO_CELLS).total_rows(), 1);
+        assert_eq!(WrapMap::build(&[], 1, 10, 4, WIDE_TWO_CELLS, None).total_rows(), 1);
+        assert_eq!(WrapMap::build(&doc(&[""]), 1, 10, 4, WIDE_TWO_CELLS, None).total_rows(), 1);
     }
 }

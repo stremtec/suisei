@@ -4252,9 +4252,20 @@ impl App {
     pub fn wrap_map(&self, cols: u16, wide: u16) -> std::cell::Ref<'_, crate::wrap::WrapMap> {
         let version = self.buffer.version();
         let tab = self.tab_width.max(1).min(u16::MAX as usize) as u16;
-        if !self.wrap_map.borrow().is_valid_for(version, cols, tab, wide) {
-            *self.wrap_map.borrow_mut() =
-                crate::wrap::WrapMap::build(self.buffer.lines(), version, cols, tab, wide);
+        let fold_gen = self.folds.generation();
+        if !self
+            .wrap_map
+            .borrow()
+            .is_valid_for(version, cols, tab, wide, fold_gen)
+        {
+            *self.wrap_map.borrow_mut() = crate::wrap::WrapMap::build(
+                self.buffer.lines(),
+                version,
+                cols,
+                tab,
+                wide,
+                Some(&self.folds),
+            );
         }
         self.wrap_map.borrow()
     }

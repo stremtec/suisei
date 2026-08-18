@@ -67,6 +67,12 @@ typedef struct SuiseiEditorLineC {
   uint32_t sel_u1;
   char text[SUISEI_LINE_CAP];
   SuiseiSpanC spans[SUISEI_MAX_SPANS];
+  /* Fold marker: 0 none, 1 an open fold starts here, 2 a closed one does.
+     Appended, never inserted — the Swift decoder reads the fields above at
+     hardcoded offsets. */
+  uint8_t fold;
+  uint8_t _fold_pad;
+  uint16_t fold_lines;
 } SuiseiEditorLineC;
 
 /* SuiseiPaneC::kind — mirrors suisei_core::media::FileKind. */
@@ -301,6 +307,11 @@ void suisei_engine_drag_utf16(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t u
 void suisei_engine_block_click(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t visual_col);
 void suisei_engine_block_drag(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t visual_col);
 void suisei_engine_block_extend_rows(SuiseiEngine *ptr, int32_t delta);
+
+/* Code folding. The row is a BUFFER row — the gutter is clicked where the eye
+   is, not where the caret is. */
+void suisei_engine_fold_toggle_row(SuiseiEngine *ptr, uint32_t row);
+void suisei_engine_fold_all(SuiseiEngine *ptr, uint8_t close);
 void suisei_engine_mouse_up(SuiseiEngine *ptr);
 uint8_t suisei_engine_hit_test(
     const SuiseiEngine *ptr,

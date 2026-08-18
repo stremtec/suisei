@@ -64,6 +64,16 @@ pub struct SuiseiEditorLineC {
     pub sel_u1: u32,
     pub text: [c_char; SUISEI_LINE_CAP],
     pub spans: [SuiseiSpanC; SUISEI_MAX_SPANS],
+    /// Fold marker: 0 none, 1 an open fold starts here, 2 a closed one does.
+    ///
+    /// **Appended**, not inserted. The Swift decoder reads the fields above at
+    /// hardcoded offsets, so a new byte in the middle would silently shift
+    /// every one of them; at the end it costs only the stride, which Swift
+    /// computes rather than hardcodes.
+    pub fold: u8,
+    pub _fold_pad: u8,
+    /// Lines hidden under this row when `fold == 2`.
+    pub fold_lines: u16,
 }
 
 #[repr(C)]
@@ -698,6 +708,9 @@ fn write_editor_line(dst: &mut SuiseiEditorLineC, line: &crate::compositor::Edit
     dst.sel_u1 = line.sel_u1;
     dst.sel_v0 = line.sel_v0.unwrap_or(u32::MAX);
     dst.sel_v1 = line.sel_v1.unwrap_or(u32::MAX);
+    dst.fold = line.fold;
+    dst._fold_pad = 0;
+    dst.fold_lines = line.fold_lines;
     write_cstr(&mut dst.text, &line.text);
     let sn = line.spans.len().min(SUISEI_MAX_SPANS);
     dst.span_count = sn as u8;
@@ -1012,6 +1025,28 @@ pub extern "C" fn suisei_engine_block_drag(
     }
     unsafe {
         (*ptr).0.block_drag_to(buffer_row, visual_col);
+    }
+}
+
+/// Toggle the fold on a buffer row (gutter click, or ⌥⌘← / ⌥⌘→).
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_fold_toggle_row(ptr: *mut SuiseiEngine, row: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.fold_toggle_row(row);
+    }
+}
+
+/// Fold every block in the file, or open every one.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_fold_all(ptr: *mut SuiseiEngine, close: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.fold_all(close != 0);
     }
 }
 

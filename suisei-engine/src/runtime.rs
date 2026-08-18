@@ -1512,6 +1512,82 @@ impl Engine {
         self.recompose_scroll();
     }
 
+    // ── Code folding ──
+
+    /// Toggle the fold on a buffer row — the gutter triangle, and ⌥⌘← / ⌥⌘→.
+    ///
+    /// Takes the row rather than using the caret, because the gutter is clicked
+    /// where the eye is, not where the caret is. Folding a block you are not
+    /// standing in is the ordinary case.
+    ///
+    /// **Header rows only**, which is where this parts company with
+    /// `App::fold_toggle`. That one is vim's `za`: on a body row it falls back
+    /// to the ENCLOSING block, which is right for a key pressed with the caret
+    /// somewhere inside. A triangle is drawn on the header and nowhere else, so
+    /// a click that folded a block the user did not click on would be the
+    /// gesture disagreeing with the thing it was aimed at.
+    pub fn fold_toggle_row(&mut self, row: u32) {
+        if !self.text_editor_owns_keys() {
+            return;
+        }
+        self.app.rebuild_folds();
+        let row = (row as usize).min(self.app.buffer.line_count().saturating_sub(1));
+        if self.app.folds.fold_at(row).is_none() {
+            return;
+        }
+        if self.app.folds.is_closed(row) {
+            self.app.folds.open_at(row);
+        } else {
+            self.app.folds.close_at(row);
+        }
+        self.keep_caret_visible_after_fold();
+        self.app.update_scroll();
+        self.recompose();
+    }
+
+    /// Fold every block in the file, or open every one.
+    pub fn fold_all(&mut self, close: bool) {
+        if !self.text_editor_owns_keys() {
+            return;
+        }
+        self.app.rebuild_folds();
+        if close {
+            self.app.folds.close_all();
+        } else {
+            self.app.folds.open_all();
+        }
+        self.keep_caret_visible_after_fold();
+        self.app.update_scroll();
+        self.recompose();
+    }
+
+    /// A caret inside a fold that just closed has nowhere to be.
+    ///
+    /// It is pulled up to the fold's header, which is the row that now stands
+    /// for it. Leaving it where it was would put the caret on a line nobody can
+    /// see, and the next keystroke would edit text off the screen.
+    fn keep_caret_visible_after_fold(&mut self) {
+        let row = self.app.buffer.cursor.row;
+        if !self.app.folds.is_hidden(row) {
+            return;
+        }
+        let header = self
+            .app
+            .folds
+            .ranges
+            .iter()
+            .filter(|r| self.app.folds.is_closed(r.start) && row > r.start && row <= r.end)
+            .map(|r| r.start)
+            .max();
+        if let Some(start) = header {
+            self.app.buffer.cursor.row = start;
+            self.app.buffer.clamp_col();
+            self.app.sel = suisei_core::selection::SelectionSet::single(
+                suisei_core::selection::Selection::caret(self.app.buffer.cursor()),
+            );
+        }
+    }
+
     /// ⌃⇧↑ / ⌃⇧↓ — start a rectangle at the caret, or grow the one that is
     /// there by a row.
     pub fn block_extend_rows(&mut self, delta: i32) {
@@ -1931,8 +2007,18 @@ impl Engine {
             cache.resize_with(slot + 1, || (usize::MAX, WrapMap::default()));
         }
         let entry = &mut cache[slot];
-        if entry.0 != tab || !entry.1.is_valid_for(version, cols, tab_w, wide) {
-            *entry = (tab, WrapMap::build(buf.lines(), version, cols, tab_w, wide));
+        // Folds belong to the ACTIVE document only: `App::folds` is one state,
+        // and a background tab's band is drawn unfolded. Passing them for a
+        // pane showing some other buffer would hide rows by line NUMBER in a
+        // file that never folded them.
+        let active = tab == self.app.current_buffer();
+        let folds = active.then_some(&self.app.folds);
+        let fold_gen = folds.map(|f| f.generation()).unwrap_or(0);
+        if entry.0 != tab || !entry.1.is_valid_for(version, cols, tab_w, wide, fold_gen) {
+            *entry = (
+                tab,
+                WrapMap::build(buf.lines(), version, cols, tab_w, wide, folds),
+            );
         }
         f(&entry.1)
     }

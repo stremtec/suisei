@@ -41,7 +41,7 @@ fn ragged() -> Vec<String> {
 }
 
 fn map_of(lines: &[String], cols: u16) -> WrapMap {
-    WrapMap::build(lines, 1, cols, 4, 2)
+    WrapMap::build(lines, 1, cols, 4, 2, None)
 }
 
 /// The two directions are inverses at every line: the first visual row of a

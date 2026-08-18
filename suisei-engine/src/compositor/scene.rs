@@ -102,6 +102,10 @@ pub struct EditorLineScene {
     pub git_sign: u8,
     /// Absolute visual row (0-based) for native paint Y when soft-wrap expands lines.
     pub visual_row: u32,
+    /// Fold marker: 0 none, 1 an open fold starts here, 2 a closed one does.
+    pub fold: u8,
+    /// Lines hidden under this row when `fold == 2`, for the "⋯ N" chip.
+    pub fold_lines: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -2477,15 +2481,31 @@ fn build_lines_at(
 
     let mut visual_row = band_start as u32;
     let mut lines = Vec::with_capacity(rows.saturating_mul(if wrap { 2 } else { 1 }));
-    let mut buffer_rows_taken = 0usize;
+    // Folding belongs to the ACTIVE document. `App::folds` is one state, so a
+    // background pane showing another file must draw it whole — hiding rows by
+    // line NUMBER in a file that never folded them is the alternative.
+    let folds = is_current.then_some(&app.folds);
+    // The budget counts rows DRAWN, and a closed fold is stepped over in ONE
+    // hop. Counting rows WALKED would spend the whole band inside a closed
+    // fold and draw nothing below it; walking row by row would make a single
+    // closed fold over 100k lines cost 100k lookups per frame.
+    let mut row = band_start;
+    let mut drawn_rows = 0usize;
     // Cap matches the FFI packed budget (SUISEI_MAX_LINES = 256) minus headroom;
     // must stay ≥ OVERSCAN_ABOVE + viewport rows or the visible bottom goes blank.
-    while buffer_rows_taken < rows && lines.len() < 240 {
-        let row = band_start + buffer_rows_taken;
+    while drawn_rows < rows && lines.len() < 240 {
         if row >= total {
             break;
         }
-        buffer_rows_taken += 1;
+        drawn_rows += 1;
+        // Where this buffer row's first drawn segment lands, so a soft-wrapped
+        // line puts the marker on its head and not on every continuation.
+        let row_first_visual = visual_row;
+        let (fold_mark, fold_lines) = match folds.and_then(|f| f.fold_at(row).map(|r| (f, r))) {
+            Some((f, r)) if f.is_closed(row) => (2u8, (r.end - r.start) as u16),
+            Some(_) => (1u8, 0u16),
+            None => (0u8, 0u16),
+        };
         // Only the part of the line that can be SEEN, and cut before anything
         // touches it rather than after.
         //
@@ -2787,9 +2807,17 @@ fn build_lines_at(
                 git_sign: gsign,
                 debug_sign: dsign,
                 visual_row,
+                // Only the FIRST visual row of a soft-wrapped line owns the
+                // marker; the continuation rows carry a blank gutter already.
+                fold: if visual_row == row_first_visual { fold_mark } else { 0 },
+                fold_lines,
             });
             visual_row = visual_row.saturating_add(1);
         }
+        row = match folds {
+            Some(f) => f.next_visible(row),
+            None => row + 1,
+        };
     }
     lines
 }
