@@ -3157,6 +3157,47 @@ final class EngineBridge: ObservableObject {
         }
     }
 
+    // MARK: - Column selection
+
+    /// ⌥-down: start a rectangle at this cell.
+    ///
+    /// Its own pair rather than a flag on `pointerDown…`, because the two
+    /// gestures speak different units. The ordinary path prefers UTF-16 offsets
+    /// (CoreText resolves the caret against real glyph advances, which is what
+    /// makes clicking the right half of a glyph land after it). A rectangle is
+    /// a rectangle on the CELL GRID, so it goes down the visual-column path —
+    /// that is the unit the block is defined in on the core side too.
+    func blockPointerDown(row: UInt32, col: UInt32) {
+        guard let engine else { return }
+        guard !floatingChromeBlocksEditor else { return }
+        exitPanelFocusForEditorClick()
+        suisei_engine_block_click(engine, row, col)
+        pointerSession = true
+        refreshChrome()
+        ensureEditorFocus()
+    }
+
+    /// ⌥-move: the rectangle now reaches this cell.
+    func blockPointerDrag(row: UInt32, col: UInt32) {
+        guard let engine else { return }
+        guard !floatingChromeBlocksEditor else { return }
+        guard NSEvent.pressedMouseButtons & (1 << 0) != 0 else { return }
+        if !pointerSession {
+            suisei_engine_block_click(engine, row, col)
+            pointerSession = true
+        } else {
+            suisei_engine_block_drag(engine, row, col)
+        }
+        // Same reason as `pointerDragAbsolute`: no chrome pull at drag rate.
+    }
+
+    /// ⌃⇧↑ / ⌃⇧↓ — grow a rectangle by a row, or start one at the caret.
+    func blockExtendRows(_ delta: Int32) {
+        guard let engine else { return }
+        suisei_engine_block_extend_rows(engine, delta)
+        refreshChrome()
+    }
+
     func pointerUp() {
         guard let engine else { return }
         if pointerSession {

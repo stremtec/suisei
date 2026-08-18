@@ -1259,6 +1259,10 @@ final class EditorCanvasView: NSView {
     private var tracking = false
     /// The pointer actually moved during this gesture — click vs drag.
     private var dragMoved = false
+    /// This gesture is a column selection, decided at PRESS and held for its
+    /// whole life. Reading ⌥ live inside the tracking loop would let the drag
+    /// change meaning halfway through, which is not a gesture the hand can aim.
+    private var isBlockDrag = false
     /// Bracket hint: which match is showing, and since when. Xcode shows this
     /// as a brief flash rather than a persistent highlight, so the timing lives
     /// here — the core just reports the position (span kind 254).
@@ -4423,7 +4427,15 @@ final class EditorCanvasView: NSView {
         tracking = true
         isTrackingDrag = true
         dragMoved = false
-        if let (row, u16) = absoluteHitUTF16(p) {
+        // ⌥ at PRESS time, latched for the gesture — Xcode's rule, and the one
+        // that keeps the drag from changing meaning halfway through because a
+        // finger came off a key. ⌘ still wins: that is the multi-cursor click.
+        isBlockDrag = event.modifierFlags.contains(.option)
+            && !event.modifierFlags.contains(.command)
+        if isBlockDrag {
+            let (row, col) = blockHit(p)
+            engine.blockPointerDown(row: row, col: col)
+        } else if let (row, u16) = absoluteHitUTF16(p) {
             engine.pointerDownUTF16(row: row, utf16: u16)
         } else {
             let (row, col) = absoluteHit(p)
@@ -4553,6 +4565,12 @@ final class EditorCanvasView: NSView {
         // that actually exists after autoscrolling.
         let v = visibleRect
         let clamped = CGPoint(x: point.x, y: min(max(point.y, v.minY + 1), v.maxY - 1))
+        if isBlockDrag {
+            let (row, col) = blockHit(clamped)
+            engine.blockPointerDrag(row: row, col: col)
+            noteContentChanged()
+            return
+        }
         if let (row, u16) = absoluteHitUTF16(clamped) {
             engine.pointerDragUTF16(row: row, utf16: u16)
         } else {
@@ -4572,6 +4590,7 @@ final class EditorCanvasView: NSView {
         }
         engine.pointerUp()
         engine.refreshChrome()
+        isBlockDrag = false
         // A plain click places the caret and resumes typing; a drag leaves its
         // selection alone (typing over it replaces it).
         if !dragMoved, event.clickCount == 1 {
@@ -4956,6 +4975,19 @@ final class EditorCanvasView: NSView {
         let gutter = EditorMetrics.gutter
         let row = UInt32(nearestBufferRow(atY: docPoint.y))
         let col = UInt32(max(0, floor((docPoint.x - gutter) / cell)))
+        return (row, col)
+    }
+
+    /// The cell BOUNDARY nearest the pointer, for a rectangle.
+    ///
+    /// `round`, where `absoluteHit` floors. A caret sits IN a cell, so flooring
+    /// names the cell it is in; both edges of a rectangle are boundaries
+    /// BETWEEN cells, and flooring them means dragging the right edge across a
+    /// glyph never takes it until the pointer is fully past.
+    private func blockHit(_ docPoint: CGPoint) -> (UInt32, UInt32) {
+        let cell = max(1, EditorMetrics.cellWidth)
+        let row = UInt32(nearestBufferRow(atY: docPoint.y))
+        let col = UInt32(max(0, (docPoint.x - EditorMetrics.gutter) / cell).rounded())
         return (row, col)
     }
 

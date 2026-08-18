@@ -61,6 +61,11 @@ pub const CATALOG: &[Command] = &[
     Command { id: "comment",         title: "Toggle Comment",          group: "Editing", default: "⌘/" },
     Command { id: "format",          title: "Format Document",         group: "Editing", default: "⇧⌘I" },
     Command { id: "code_actions",    title: "Code Actions…",           group: "Editing", default: "⌘." },
+    // Xcode's chords for the same gesture. From a bare caret they add one
+    // above/below; from a rectangle they grow it by a row — which is the same
+    // act, because a column of carets IS a zero-width rectangle.
+    Command { id: "cursor_above",    title: "Add Cursor Above",        group: "Editing", default: "⌃⇧↑" },
+    Command { id: "cursor_below",    title: "Add Cursor Below",        group: "Editing", default: "⌃⇧↓" },
     // Navigate
     Command { id: "open_file",       title: "Go to File…",             group: "Navigate", default: "⌘P" },
     Command { id: "palette",         title: "Command Palette…",        group: "Navigate", default: "⇧⌘P" },

@@ -224,6 +224,22 @@ struct SuiseiApp: App {
                 }
                 .suiseiShortcut("code_actions", engine.keys)
 
+                Divider()
+
+                // Column selection from the keyboard. ⌥-drag is the gesture;
+                // these are the same rectangle grown a row at a time, and from
+                // a bare caret they are simply "add a cursor" — a column of
+                // carets is a zero-width rectangle.
+                Button("Add Cursor Above") {
+                    engine.blockExtendRows(-1)
+                }
+                .suiseiShortcut("cursor_above", engine.keys)
+
+                Button("Add Cursor Below") {
+                    engine.blockExtendRows(1)
+                }
+                .suiseiShortcut("cursor_below", engine.keys)
+
                 // The shape of this file, in the right rail, beside the code
                 // that is the text of it. The rail is the home; the pane below is
                 // for a wide read of a long function.
