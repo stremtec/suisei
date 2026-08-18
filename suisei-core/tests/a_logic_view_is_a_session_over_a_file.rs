@@ -122,6 +122,49 @@ fn following_the_caret_opens_the_function_the_caret_is_in() {
     assert_eq!(s.rows()[s.selected].label, "0");
 }
 
+/// What the caret opened, the caret closes.
+///
+/// Nothing ever closed one, so reading through a file left every function it
+/// passed through open and the rail became the whole file flattened — which is
+/// what "읽기 불편함" was looking at.
+#[test]
+fn moving_to_another_function_closes_the_one_the_caret_opened() {
+    let mut s = session();
+    s.follow_caret(2); // inside `helper`
+    assert!(s.rows()[0].expanded);
+
+    s.follow_caret(8); // inside `main`
+    let helper = s.rows().iter().find(|r| r.label == "helper").unwrap();
+    let main = s.rows().iter().find(|r| r.label == "main").unwrap();
+    assert!(!helper.expanded, "the one behind us closed");
+    assert!(main.expanded, "and the one we are in opened");
+}
+
+/// A function the READER opened is not the caret's to close.
+#[test]
+fn a_function_opened_by_hand_stays_open() {
+    let mut s = session();
+    s.toggle(0); // the reader opens `helper`
+    s.follow_caret(8); // and then reads `main`
+
+    let helper = s.rows().iter().find(|r| r.label == "helper").unwrap();
+    assert!(helper.expanded, "theirs, not the caret's");
+    assert!(s.rows().iter().any(|r| r.label == "main" && r.expanded));
+}
+
+/// And closing one by hand while the caret is still inside it does not spring
+/// back open — that would be the view arguing with the reader.
+#[test]
+fn closing_by_hand_beats_the_caret() {
+    let mut s = session();
+    s.follow_caret(2);
+    let helper = s.rows().iter().position(|r| r.label == "helper").unwrap();
+    s.toggle(helper); // closed by hand, caret still inside
+
+    s.follow_caret(3); // still in `helper`
+    assert!(!s.rows()[helper].expanded, "it stays closed");
+}
+
 // ── What the editor draws ──────────────────────────────────────────────────
 
 /// A guide runs at the node's OWN indentation, down what the node covers —

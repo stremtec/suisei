@@ -56,6 +56,21 @@ pub struct LogicSession {
     /// lasts as long as the pointer does, and moving the pointer away must
     /// leave the reader exactly where they were.
     pub peek: Option<usize>,
+    /// The function the CARET opened, by the row it starts on.
+    ///
+    /// Following the caret opens a function, and nothing ever closed one
+    /// again — so reading through a file left every function it passed through
+    /// open, and the rail ended up as the whole file flattened.
+    auto_open: Option<usize>,
+    /// Functions the READER has opened or closed by hand, by name.
+    ///
+    /// One rule, both directions: **once the reader touches a function, the
+    /// caret stops managing it.** Opening one and having it shut behind you,
+    /// or closing one and having it spring back because the caret is still
+    /// inside, are the same fault — the view arguing with the person using it.
+    ///
+    /// By name so it survives an edit, which is when the tree is rebuilt.
+    hand: Vec<String>,
     src: String,
     ts: Option<tree_sitter::Tree>,
 }
@@ -75,6 +90,8 @@ impl LogicSession {
             selected: 0,
             note: None,
             peek: None,
+            auto_open: None,
+            hand: Vec::new(),
             src: String::new(),
             ts: None,
         };
@@ -111,6 +128,9 @@ impl LogicSession {
 
     fn rebuild(&mut self, text: &str, ready: Option<tree_sitter::Tree>) {
         self.src = text.to_string();
+        // `hand` is deliberately NOT cleared: it is by name, and an edit does
+        // not change the reader's mind about which functions they are reading.
+        self.auto_open = None;
         self.tree = LogicTree::default();
         self.ts = None;
         self.note = None;
@@ -171,7 +191,20 @@ impl LogicSession {
     }
 
     /// Open or close the row at `index`. Returns whether anything moved.
+    ///
+    /// A row the reader touches becomes THEIRS: the caret stops closing it,
+    /// either way round. Opening it means they want it; closing it means they
+    /// do not, and re-opening it behind them because the caret is still inside
+    /// would be the view arguing.
     pub fn toggle(&mut self, index: usize) -> bool {
+        if let Some(row) = self.tree.rows.get(index) {
+            if row.kind == LogicKind::Entry && !self.hand.contains(&row.label) {
+                self.hand.push(row.label.clone());
+            }
+            if Some(row.start_row) == self.auto_open {
+                self.auto_open = None;
+            }
+        }
         match self.tree.rows.get(index) {
             Some(r) if r.expanded => logic::collapse(&mut self.tree, index),
             Some(_) => self.expand(index),
@@ -244,13 +277,49 @@ impl LogicSession {
     /// thing the collapse exists to prevent.
     pub fn follow_caret(&mut self, line: usize) -> bool {
         let mut moved = false;
-        if let Some(i) = logic::row_at(&self.tree, line) {
-            let row = &self.tree.rows[i];
-            if row.kind == LogicKind::Entry && row.expandable && !row.expanded {
-                moved = self.expand(i);
+        let here = self.function_at(line);
+        if here != self.auto_open {
+            // Close the one the caret opened before this. Only that one: a
+            // function the reader opened is not the caret's to close.
+            if let Some(prev) = self.auto_open.take() {
+                if let Some(j) = self.function_row(prev) {
+                    if self.tree.rows[j].expanded {
+                        moved |= logic::collapse(&mut self.tree, j);
+                    }
+                }
+            }
+            // Found again after the collapse: closing a function above this
+            // one moves every index below it.
+            if let Some(start) = here {
+                if let Some(i) = self.function_row(start) {
+                    let theirs = self.hand.contains(&self.tree.rows[i].label);
+                    if !theirs && !self.tree.rows[i].expanded && self.expand(i) {
+                        self.auto_open = Some(start);
+                        moved = true;
+                    }
+                }
             }
         }
         self.follow_source(line) || moved
+    }
+
+    /// The row a function starts on, as an index. Identity is the START ROW
+    /// rather than the index: indices move when anything above them opens.
+    fn function_row(&self, start_row: usize) -> Option<usize> {
+        self.tree
+            .rows
+            .iter()
+            .position(|r| r.kind == LogicKind::Entry && r.start_row == start_row)
+    }
+
+    /// Which function holds `line`, by the row it starts on.
+    fn function_at(&self, line: usize) -> Option<usize> {
+        self.tree
+            .rows
+            .iter()
+            .filter(|r| r.kind == LogicKind::Entry && line >= r.start_row && line <= r.end_row)
+            .map(|r| r.start_row)
+            .max()
     }
 }
 

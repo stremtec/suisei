@@ -88,6 +88,19 @@ struct LogicSnap: Equatable {
 }
 
 // MARK: - The rail
+
+/// One line of the rail: a node, or a fold of several ordinary steps.
+private struct LogicEntry: Identifiable {
+    enum Kind {
+        case row(LogicRowSnap)
+        /// How many, where the first one is, and whether the caret is in there.
+        case steps(Int, Int, Bool)
+    }
+    let id: String
+    let depth: Int
+    let kind: Kind
+}
+
 //
 // The right-rail form, and the primary one. §6b of the plan: in a pane the
 // view must reproduce the code, because the code is not on screen — and
@@ -148,16 +161,28 @@ struct LogicRail: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(snap.rows) { row in
-                        LogicRailRow(
-                            row: row,
-                            selected: row.id == snap.selected,
-                            palette: palette,
-                            onTap: { engine.logicReveal(path, row.id) },
-                            onToggle: { engine.logicToggle(path, row.id) },
-                            onPeek: { on in engine.logicPeek(path, on ? row.id : nil) }
-                        )
-                        .id(row.id)
+                    ForEach(entries) { entry in
+                        switch entry.kind {
+                        case .row(let row):
+                            LogicRailRow(
+                                row: row,
+                                selected: row.id == snap.selected,
+                                palette: palette,
+                                onTap: { engine.logicReveal(path, row.id) },
+                                onToggle: { engine.logicToggle(path, row.id) },
+                                onPeek: { on in engine.logicPeek(path, on ? row.id : nil) }
+                            )
+                            .id(row.id)
+                        case .steps(let count, let first, let holdsSelection):
+                            LogicStepsRow(
+                                count: count,
+                                depth: entry.depth,
+                                selected: holdsSelection,
+                                palette: palette,
+                                onTap: { engine.logicReveal(path, first) }
+                            )
+                            .id(entry.id)
+                        }
                     }
                 }
                 .padding(.vertical, 4)
@@ -170,9 +195,58 @@ struct LogicRail: View {
         }
     }
 
+    /// What the rail actually draws, which is not one row per node.
+    ///
+    /// A run of ordinary steps is folded into a single quiet line. This is the
+    /// change that made the rail readable: `let old_score = self.score;` is
+    /// not logic — it is text, and the text is one column to the left. What is
+    /// left after folding is the shape: the branches, the loops, the ways out,
+    /// and the calls, which are the edges to somewhere else.
+    ///
+    /// A fold is never broken open for the selection. If the caret is on an
+    /// ordinary step, the fold holding it is what lights up — the exact line
+    /// is already under the caret, and a list that reflows as the caret moves
+    /// is a list nobody can keep their place in.
+    private var entries: [LogicEntry] {
+        var out: [LogicEntry] = []
+        var run: [LogicRowSnap] = []
+
+        func flush() {
+            guard let first = run.first else { return }
+            if run.count == 1 {
+                out.append(LogicEntry(id: "row-\(first.id)", depth: first.depth, kind: .row(first)))
+            } else {
+                let holds = run.contains { $0.id == snap.selected }
+                out.append(LogicEntry(
+                    id: "steps-\(first.id)",
+                    depth: first.depth,
+                    kind: .steps(run.count, first.id, holds)
+                ))
+            }
+            run.removeAll()
+        }
+
+        for row in snap.rows {
+            // Foldable: an ordinary step that goes nowhere and says nothing
+            // about control flow. A call is an edge and stays; anything the
+            // extractor could not read stays, because dropping it quietly is
+            // the one thing this view must never do.
+            let plain = row.kind == .process && !row.expandable
+                && !row.stopped && !row.enclosing && !row.caller && !row.breakpoint
+            if plain, run.last.map({ $0.depth == row.depth }) ?? true {
+                run.append(row)
+                continue
+            }
+            flush()
+            out.append(LogicEntry(id: "row-\(row.id)", depth: row.depth, kind: .row(row)))
+        }
+        flush()
+        return out
+    }
+
     private func note(_ text: String) -> some View {
         VStack(spacing: 6) {
-            Image(systemName: "arrow.trianglehead.branch")
+            Image(systemName: "smallcircle.filled.circle")
                 .font(.system(size: 18))
                 .foregroundStyle(.tertiary)
             // Never a bare emptiness: a language with no table, a file that
@@ -187,8 +261,17 @@ struct LogicRail: View {
     }
 }
 
-/// One row of the rail: rails for the levels above, a shape for what it is, a
-/// truncated line of source, and the line number.
+/// One row of the rail.
+///
+/// The first version drew every node the same: one size, one weight, one
+/// colour, a marker glyph on each, a line number on each. Forty of those is a
+/// wall — "읽기 불편함" — and nothing in it tells the eye where to stop.
+///
+/// So the hierarchy is carried by TYPE rather than by decoration. A function
+/// is the anchor and reads as one: heavier, brighter, with air above it. A
+/// step is quieter than the function it is in, and the ways out of a function
+/// are brighter than the steps between them. Nothing is bold that is not
+/// worth stopping at.
 private struct LogicRailRow: View {
     let row: LogicRowSnap
     let selected: Bool
@@ -199,25 +282,30 @@ private struct LogicRailRow: View {
 
     @State private var hovering = false
 
-    private static let step: CGFloat = 10
-    private static let height: CGFloat = 22
+    private static let step: CGFloat = 12
+    private var isFunction: Bool { row.kind == .entry }
 
     var body: some View {
         HStack(spacing: 0) {
             rails
-            marker
+            // Before the shape, not after it: the row reads "on the YES side,
+            // this leaves the function", and that is the order the words go in.
             arm
+            marker
             Text(row.label)
-                .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: isFunction ? 11.5 : 10.5, design: .monospaced))
+                .fontWeight(isFunction ? .medium : .regular)
                 .foregroundStyle(labelColor)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 4)
             trailing
         }
-        .padding(.leading, 6)
-        .padding(.trailing, 6)
-        .frame(height: Self.height)
+        .padding(.horizontal, 6)
+        .frame(height: isFunction ? 24 : 20)
+        // Air above a function, and only there: it is what turns one list of
+        // fifty lines into five groups of ten.
+        .padding(.top, isFunction ? 6 : 0)
         .background(background)
         .contentShape(Rectangle())
         .onHover { over in
@@ -232,10 +320,8 @@ private struct LogicRailRow: View {
 
     /// The spine, one segment per level above this row.
     ///
-    /// Contiguous rows make them continuous rules, which is the git bar's and
-    /// the value bracket's shape saying what it says there: these belong to
-    /// one run. A branch's arms sit inside its rail; what follows the branch
-    /// is back outside it.
+    /// Faint on purpose. It is there to say what belongs to what, and a rule
+    /// that competes with the text it is organising has stopped organising it.
     private var rails: some View {
         HStack(spacing: 0) {
             ForEach(0..<row.depth, id: \.self) { level in
@@ -245,9 +331,11 @@ private struct LogicRailRow: View {
                     .frame(width: Self.step, alignment: .leading)
             }
         }
-        .frame(height: Self.height)
+        .frame(maxHeight: .infinity)
     }
 
+    /// A shape for what this is — and no shape where the label already says
+    /// it. A bullet in front of every ordinary step is fifty bullets.
     private var marker: some View {
         Group {
             switch row.kind {
@@ -255,37 +343,43 @@ private struct LogicRailRow: View {
                 Image(systemName: row.expanded ? "chevron.down" : "chevron.right")
                     .font(.system(size: 8, weight: .semibold))
             case .decision:
-                Image(systemName: "diamond").font(.system(size: 7, weight: .semibold))
+                // The flowchart's rhombus, not a version-control branch: the
+                // left rail's Source Control tab owns that glyph.
+                Image(systemName: "diamond").font(.system(size: 7.5, weight: .medium))
             case .loop:
-                Image(systemName: "repeat").font(.system(size: 7, weight: .semibold))
+                Image(systemName: "arrow.trianglehead.clockwise").font(.system(size: 8.5))
             case .exit:
-                Image(systemName: "arrow.turn.down.right").font(.system(size: 7, weight: .semibold))
+                Image(systemName: "arrow.uturn.left").font(.system(size: 8.5))
             case .opaque:
-                Image(systemName: "ellipsis").font(.system(size: 7, weight: .semibold))
+                Image(systemName: "questionmark").font(.system(size: 8))
             case .process:
-                Circle().frame(width: 3, height: 3)
+                // A call: an edge to somewhere else, and the only ordinary
+                // step that survives the fold.
+                Image(systemName: "arrow.right").font(.system(size: 8))
+                    .opacity(row.expandable ? 1 : 0)
             }
         }
         .foregroundStyle(markerColor)
-        .frame(width: 14)
+        .frame(width: 15, alignment: .leading)
         .contentShape(Rectangle())
         .onTapGesture { row.expandable ? onToggle() : onTap() }
     }
 
-    /// `Y` / `N`, not `YES` / `NO`: at this width a two-letter chip costs a
-    /// word of label, and an arm still has to read as an arm.
+    /// `Y` / `N` — a letter, not a chip. A pill behind every arm is a second
+    /// decoration on the one row that already has a shape and an indent.
     @ViewBuilder
     private var arm: some View {
         if row.edge == .yes || row.edge == .no {
             Text(row.edge == .yes ? "Y" : "N")
-                .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(palette.dim)
-                .frame(width: 11, height: 11)
-                .background(palette.dim.opacity(0.14), in: RoundedRectangle(cornerRadius: 2.5))
-                .padding(.trailing, 4)
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundStyle(palette.dim.opacity(0.85))
+                .frame(width: 9)
+                .padding(.trailing, 5)
         }
     }
 
+    /// The line number earns its place on a function, which is a destination.
+    /// On a step it is forty more grey digits, so it waits to be asked for.
     private var trailing: some View {
         HStack(spacing: 5) {
             if row.breakpoint {
@@ -296,11 +390,11 @@ private struct LogicRailRow: View {
                     .font(.system(size: 7, weight: .semibold))
                     .foregroundStyle(LogicPaneViewer.amber.opacity(0.8))
             }
-            // The line number, right-aligned in small mono — the Outline's
-            // column, so the two rails have the same right edge.
-            Text("\(row.startRow + 1)")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.tertiary)
+            if isFunction || selected || hovering {
+                Text("\(row.startRow + 1)")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(palette.dim.opacity(isFunction ? 0.7 : 0.5))
+            }
         }
     }
 
@@ -312,11 +406,11 @@ private struct LogicRailRow: View {
             LogicPaneViewer.amber.opacity(0.17)
         } else if selected {
             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(palette.fg.opacity(0.10))
+                .fill(palette.fg.opacity(0.08))
                 .padding(.horizontal, 2)
         } else if hovering {
             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(palette.fg.opacity(0.05))
+                .fill(palette.fg.opacity(0.04))
                 .padding(.horizontal, 2)
         } else {
             Color.clear
@@ -324,30 +418,79 @@ private struct LogicRailRow: View {
     }
 
     /// The rail for one level above this row. Amber where the program is
-    /// inside it — which is the runtime path, drawn as the structure it runs
-    /// through rather than as a second list.
+    /// inside it — the runtime path drawn as the structure it runs through
+    /// rather than as a second list.
     private func railColor(_ level: Int) -> Color {
         if (row.stopped || row.enclosing) && level >= row.depth - 1 {
-            return LogicPaneViewer.amber.opacity(0.55)
+            return LogicPaneViewer.amber.opacity(0.5)
         }
-        return palette.dim.opacity(0.30)
+        return palette.dim.opacity(0.18)
     }
 
     private var markerColor: Color {
         if row.stopped { return LogicPaneViewer.amber }
         switch row.kind {
-        case .opaque: return palette.dim.opacity(0.6)
-        case .decision, .loop, .exit: return palette.fg.opacity(0.7)
-        default: return palette.dim
+        case .entry: return palette.dim.opacity(0.8)
+        case .opaque: return palette.dim.opacity(0.5)
+        case .decision, .loop: return palette.fg.opacity(0.5)
+        case .exit: return palette.fg.opacity(0.45)
+        case .process: return palette.dim.opacity(0.55)
         }
     }
 
     private var labelColor: Color {
         if row.stopped { return palette.fg }
-        // Opaque is visibly less certain than the rest, because it is.
-        if row.kind == .opaque { return palette.dim.opacity(0.75) }
-        if row.kind == .entry { return palette.fg }
-        return palette.fg.opacity(0.85)
+        switch row.kind {
+        // The anchor. Everything else in the list is subordinate to it.
+        case .entry: return palette.fg.opacity(0.95)
+        // Visibly less certain than the rest, because it is: it means "there
+        // is something here I did not read".
+        case .opaque: return palette.dim.opacity(0.6)
+        case .decision, .loop, .exit: return palette.fg.opacity(0.72)
+        case .process: return palette.fg.opacity(0.6)
+        }
+    }
+}
+
+/// A run of ordinary steps, folded.
+///
+/// It says how many and nothing else. That is the honest amount: these lines
+/// do not branch, do not loop and do not leave — and if the reader wants to
+/// know what they say, the text is one column to the left, which is what the
+/// rail exists to leave room for.
+private struct LogicStepsRow: View {
+    let count: Int
+    let depth: Int
+    let selected: Bool
+    let palette: ViewerPalette
+    let onTap: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(0..<depth, id: \.self) { _ in
+                Rectangle()
+                    .fill(palette.dim.opacity(0.18))
+                    .frame(width: 1)
+                    .frame(width: 12, alignment: .leading)
+            }
+            Color.clear.frame(width: 15)
+            Text("\(count) steps")
+                .font(.system(size: 9.5))
+                .foregroundStyle(palette.dim.opacity(selected ? 0.85 : 0.5))
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 18)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(palette.fg.opacity(selected ? 0.07 : (hovering ? 0.04 : 0)))
+                .padding(.horizontal, 2)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture { onTap() }
     }
 }
 
@@ -412,7 +555,7 @@ struct LogicPaneViewer: View {
     private var emptyState: some View {
         VStack(spacing: 6) {
             Spacer()
-            Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
+            Image(systemName: "smallcircle.filled.circle")
                 .font(.system(size: 22, weight: .light))
                 .foregroundStyle(palette.dim.opacity(0.7))
             // The note, never a bare emptiness: a language with no table, a

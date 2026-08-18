@@ -298,7 +298,11 @@ struct ContentView: View {
         var systemImage: String {
             switch self {
             case .outline: return "list.bullet.indent"
-            case .logic: return "arrow.trianglehead.branch"
+            // A record: the groove and the label at the middle. NOT a branch
+            // glyph — the navigator's Source Control tab is already a branch,
+            // and two rails on two sides of one window showing the same
+            // symbol for different things is the rail saying nothing.
+            case .logic: return "smallcircle.filled.circle"
             case .file: return "doc"
             case .quickHelp: return "questionmark.circle"
             }
@@ -6108,7 +6112,7 @@ struct ContentView: View {
         case .pdf: return "doc.richtext.fill"
         case .audio: return "waveform"
         case .model: return "cube.fill"
-        case .logic: return "point.topleft.down.to.point.bottomright.curvepath"
+        case .logic: return "smallcircle.filled.circle"
         case .binary: return "doc.fill"
         }
     }
