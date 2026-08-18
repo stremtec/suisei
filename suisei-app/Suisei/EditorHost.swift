@@ -690,11 +690,18 @@ final class EditorScrollView: NSScrollView {
 
     /// Smooth ease-in-out glide to a buffer line (outline / minimap / goto).
     func scrollToLineAnimated(_ line: Int, center: Bool) {
-        let lineH = EditorMetrics.lineHeight
-        let visRows = Int(contentView.bounds.height / max(1, lineH))
-        let target = center ? max(0, line - visRows / 2) : line
+        // Centre in POINTS, not by subtracting rows from a line.
+        //
+        // It was `line - visRows / 2`, and `visRows` is a count of DRAWN rows
+        // while `line` is a line index — the same confusion as the scroll sync,
+        // and wrong the same way once anything wraps: half a viewport of rows
+        // is fewer than half a viewport of lines, so centring overshot upward
+        // by however much the lines above had wrapped. `visualY` already gives
+        // the line's exact position; half the viewport is a distance, so take
+        // it as one.
         let maxY = max(0, canvas.frame.height - contentView.bounds.height)
-        let wantY = min(max(0, visualY(target)), maxY)
+        let lead = center ? contentView.bounds.height / 2 : 0
+        let wantY = min(max(0, visualY(line) - lead), maxY)
         let current = contentView.bounds.origin.y
         guard abs(wantY - current) > 0.5 else { return }
         suppressPush = true

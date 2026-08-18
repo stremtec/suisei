@@ -4259,12 +4259,47 @@ error: aborting due to 1 previous error
         assert_eq!(cfgs[1].host.as_deref(), Some("127.0.0.1"));
     }
 
+    /// `wait_for_tcp` gives up, and gives up on time.
+    ///
+    /// This was the workspace's one flaky test, and the flake was the test's.
+    /// `free_localhost_port` binds port 0, reads the number the OS chose and
+    /// RELEASES it — so "nothing is listening there" is true at the instant it
+    /// returns and can stop being true immediately after. Under a loaded
+    /// parallel run something else took the port inside the window, the wait
+    /// connected, and the assertion failed for a reason that had nothing to do
+    /// with the code under test.
+    ///
+    /// A precondition has to be established, not assumed. Confirm the port is
+    /// closed, run the check, and if it was taken mid-flight discard that
+    /// attempt rather than blaming the code — the test cannot tell the two
+    /// apart, so it must not pretend to.
     #[test]
     fn free_port_and_wait_helpers() {
-        let port = free_localhost_port().expect("port");
-        // Nothing listening — wait should fail quickly
-        let err = wait_for_tcp("127.0.0.1", port, Duration::from_millis(80));
-        assert!(err.is_err());
+        const BUDGET: Duration = Duration::from_millis(80);
+        for _ in 0..8 {
+            let port = free_localhost_port().expect("port");
+            // Closed right now?
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                continue;
+            }
+            let t = Instant::now();
+            let got = wait_for_tcp("127.0.0.1", port, BUDGET);
+            if got.is_ok() {
+                // Somebody bound it during the wait. Not an answer about
+                // `wait_for_tcp`, so it is not one this test may report.
+                continue;
+            }
+            // It gave up, and near the budget rather than whenever: the retry
+            // loop sleeps 40 ms a turn, so a wait that ignored its deadline
+            // would run visibly long.
+            let took = t.elapsed();
+            assert!(
+                took < BUDGET * 6,
+                "wait_for_tcp took {took:?} against a {BUDGET:?} budget"
+            );
+            return;
+        }
+        panic!("no closed localhost port in eight tries — the machine is busy");
     }
 
     #[test]
