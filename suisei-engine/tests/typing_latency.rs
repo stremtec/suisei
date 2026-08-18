@@ -135,7 +135,16 @@ fn measure(lines: usize, keys: usize, mode: Keys) -> Cost {
     // rather than quietly measuring a cold engine.
     engine.flush_syntax();
 
+    // INTERLEAVED, and that is not a detail. What the assertion below actually
+    // looks at is `median(per_key) - median(snapshot)`, and at 20,000 lines the
+    // snapshot is ~87% of the keystroke — so a three-percent difference in the
+    // conditions the two are measured under moves the residual by a quarter.
+    // Measured in two consecutive loops, the second one ran on a warmer cache
+    // against a buffer that had stopped changing, and the residual swung by
+    // 2x between builds that typed at exactly the same speed. Paired samples
+    // share the conditions, so what is left is the difference itself.
     let mut out = Vec::with_capacity(keys);
+    let mut snapshot = Vec::with_capacity(keys);
     for k in 0..keys {
         let returns = mode == Keys::WithReturns && k % 8 == 7;
         let t = Instant::now();
@@ -148,10 +157,7 @@ fn measure(lines: usize, keys: usize, mode: Keys) -> Cost {
             engine.gui_type_char('x');
         }
         out.push(t.elapsed().as_secs_f64() * 1000.0);
-    }
 
-    let mut snapshot = Vec::with_capacity(keys);
-    for _ in 0..keys {
         let t = Instant::now();
         let text = engine.app.buffer.text();
         snapshot.push(t.elapsed().as_secs_f64() * 1000.0);

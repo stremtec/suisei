@@ -32,7 +32,7 @@
               }
             }
           ],
-          "glass" : false,
+          "glass" : true,
           "image-name" : "제목을 입력해주세요. (12).png",
           "name" : "제목을 입력해주세요. (12)",
           "position" : {
@@ -47,7 +47,7 @@
           "fill" : {
             "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
           },
-          "glass" : false,
+          "glass" : true,
           "image-name" : "제목을 입력해주세요. (11).png",
           "name" : "제목을 입력해주세요. (11)",
           "position" : {
@@ -80,12 +80,13 @@
               }
             }
           ],
+          "glass" : true,
           "image-name" : "suisei-pane-knot-left.svg",
           "name" : "suisei-pane-knot-left"
         },
         {
           "fill" : {
-            "solid" : "srgb:0.21545,0.35910,1.00000,0.64714"
+            "solid" : "srgb:0.00000,0.00000,0.00000,0.00000"
           },
           "glass" : true,
           "image-name" : "suisei-pane-knot-right.svg",

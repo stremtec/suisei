@@ -203,6 +203,10 @@ pub struct DapClient {
 
     pub state: DapState,
     pub adapter_name: String,
+    /// How the last program ended, when it said. Kept beside the console
+    /// because the console is where a reader looks for it and four hundred
+    /// lines later "exited with code 0" has scrolled away.
+    pub exit_code: Option<i32>,
     pub error: Option<String>,
     /// Soft hint (adapter missing, etc.)
     pub soft_error: Option<String>,
@@ -212,7 +216,15 @@ pub struct DapClient {
     pub stack: Vec<StackFrameInfo>,
     /// Flattened Variables tree (scope roots + expanded children).
     pub vars: Vec<VarNode>,
-    pub console: Vec<String>,
+    /// The console, with each line's KIND beside it.
+    ///
+    /// The kind used to be a text prefix — `[stdout] 16`, `[console] Process
+    /// 95777 exited with status = 0` — which is the protocol's vocabulary
+    /// printed at a reader who did not ask for it, and it made the ONE line
+    /// that matters (what the program printed) look exactly like the four that
+    /// announce, in four different ways, that it is over. A kind can be
+    /// coloured; a prefix can only be read.
+    pub console: Vec<LogLine>,
     /// (thread id, name) from the last `threads` response / thread events.
     pub threads: Vec<(i64, String)>,
 
@@ -308,6 +320,40 @@ pub struct DapClient {
     pub(crate) sent: Vec<Value>,
 }
 
+/// What a console line IS, so the face can show the program's own output as
+/// the thing the reader ran, and the plumbing as plumbing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogKind {
+    /// The program's stdout/stderr. The reason the run happened.
+    Program,
+    /// Suisei narrating: "⚙ cargo build…", "✓ launching".
+    Note,
+    /// The adapter talking about itself, or about the program.
+    Adapter,
+    /// Something went wrong.
+    Error,
+    /// How it ended.
+    Result,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogLine {
+    pub kind: LogKind,
+    pub text: String,
+}
+
+impl LogLine {
+    pub fn code(&self) -> u8 {
+        match self.kind {
+            LogKind::Program => 0,
+            LogKind::Note => 1,
+            LogKind::Adapter => 2,
+            LogKind::Error => 3,
+            LogKind::Result => 4,
+        }
+    }
+}
+
 impl Default for DapClient {
     fn default() -> Self {
         Self::new()
@@ -325,6 +371,7 @@ impl DapClient {
             pending_datatip: HashMap::new(),
             state: DapState::Idle,
             adapter_name: String::new(),
+            exit_code: None,
             error: None,
             soft_error: None,
             breakpoints: HashMap::new(),
@@ -406,8 +453,16 @@ impl DapClient {
     // ── Console ────────────────────────────────────────────────────────
 
     pub fn log(&mut self, msg: impl Into<String>) {
+        self.log_kind(LogKind::Note, msg);
+    }
+
+    /// A console line that says what KIND of thing it is.
+    pub fn log_kind(&mut self, kind: LogKind, msg: impl Into<String>) {
         let was_tail = self.pane == DebugPane::Console && self.focus_row + 1 >= self.console.len();
-        self.console.push(msg.into());
+        self.console.push(LogLine {
+            kind,
+            text: msg.into(),
+        });
         if self.console.len() > 400 {
             let drop_n = self.console.len() - 300;
             self.console.drain(0..drop_n);
@@ -726,6 +781,8 @@ impl DapClient {
         }
         self.finish_shutdown();
         self.canon_cache.clear();
+        // Last run's ending is not this run's.
+        self.exit_code = None;
 
         let program_path = PathBuf::from(program);
         let abs_prog =
@@ -2229,7 +2286,12 @@ impl DapClient {
                 self.apply_breakpoint_event(&body);
             }
             "terminated" => {
-                self.log("■ terminated");
+                // Only when nothing has said how it ended. The adapter, the
+                // `exited` event and the shutdown each used to announce it, and
+                // three endings read as three things going wrong.
+                if self.exit_code.is_none() {
+                    self.log_kind(LogKind::Result, "terminated");
+                }
                 self.finish_shutdown();
             }
             "exited" => {
@@ -2238,13 +2300,19 @@ impl DapClient {
                     .and_then(|c| c.as_i64())
                     .unwrap_or_default();
                 // Exit info only — `terminated` ends the session.
-                self.log(format!("program exited with code {code}"));
+                self.exit_code = Some(code as i32);
+                self.log_kind(LogKind::Result, format!("exited with code {code}"));
             }
             "output" => {
-                let cat = body
-                    .get("category")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("console");
+                // The category decides how the line READS, not what it says.
+                // `stdout` and `stderr` are the program itself — the reason
+                // anyone pressed Run — and `console` is the adapter talking
+                // about the program, which is background by definition.
+                let kind = match body.get("category").and_then(|c| c.as_str()) {
+                    Some("stdout") | Some("stderr") => LogKind::Program,
+                    Some("important") => LogKind::Error,
+                    _ => LogKind::Adapter,
+                };
                 let out = body
                     .get("output")
                     .and_then(|o| o.as_str())
@@ -2253,7 +2321,7 @@ impl DapClient {
                     .to_string();
                 if !out.is_empty() {
                     for line in out.lines() {
-                        self.log(format!("[{cat}] {line}"));
+                        self.log_kind(kind, line);
                     }
                 }
             }
@@ -3442,7 +3510,7 @@ mod tests {
         d.supports_set_variable = false;
         d.set_variable(1, "9");
         assert!(d.sent.is_empty());
-        assert!(d.console.last().unwrap().contains("cannot change"));
+        assert!(d.console.last().unwrap().text.contains("cannot change"));
     }
 
     /// A disabled breakpoint is not armed, and the response still lands on the
@@ -3570,7 +3638,11 @@ mod tests {
         }));
 
         assert!(d.watchpoints.is_empty());
-        let said = d.console[before..].join("\n");
+        let said = d.console[before..]
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(said.contains("no more hardware watchpoints"), "{said}");
     }
 
@@ -3643,7 +3715,7 @@ mod tests {
         d.watch("bottom");
 
         assert!(d.sent.is_empty());
-        assert!(d.console.last().unwrap().contains("cannot watch"));
+        assert!(d.console.last().unwrap().text.contains("cannot watch"));
     }
 
     /// A breakpoint the adapter moved says where it went.
@@ -3667,7 +3739,11 @@ mod tests {
         ));
 
         assert_eq!(d.breakpoints[&path][0].line, 86, "moved to line 87");
-        let said = d.console[before..].join("\n");
+        let said = d.console[before..]
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(said.contains("85"), "names where it was asked for: {said}");
         assert!(said.contains("87"), "and where it went: {said}");
     }
@@ -4056,6 +4132,59 @@ error: aborting due to 1 previous error
             "command": command,
             "body": body
         })
+    }
+
+    /// The program's own output is the reason anyone pressed Run, and it used
+    /// to arrive tagged `[stdout]` — the protocol's word for its own pipe —
+    /// looking exactly like the adapter's chatter beside it.
+    #[test]
+    fn what_the_program_printed_is_not_filed_under_the_adapters_vocabulary() {
+        let mut d = DapClient::new();
+        d.handle_msg(event(
+            "output",
+            json!({"category": "stdout", "output": "16\n"}),
+        ));
+        d.handle_msg(event(
+            "output",
+            json!({"category": "console", "output": "Process 95777 exited with status = 0\n"}),
+        ));
+        let program: Vec<&LogLine> = d
+            .console
+            .iter()
+            .filter(|l| l.kind == LogKind::Program)
+            .collect();
+        assert_eq!(program.len(), 1);
+        assert_eq!(program[0].text, "16", "no prefix — it is what it printed");
+        assert_eq!(d.console[1].kind, LogKind::Adapter, "background, and dimmed");
+    }
+
+    /// It ended once. The `exited` event, the `terminated` event and the
+    /// shutdown each used to announce it, and three endings in a row read as
+    /// three things having gone wrong.
+    #[test]
+    fn a_run_that_ends_says_so_once() {
+        let mut d = DapClient::new();
+        d.handle_msg(event("exited", json!({"exitCode": 0})));
+        d.handle_msg(event("terminated", json!({})));
+        let results: Vec<&LogLine> = d
+            .console
+            .iter()
+            .filter(|l| l.kind == LogKind::Result)
+            .collect();
+        assert_eq!(results.len(), 1, "{:?}", d.console);
+        assert_eq!(results[0].text, "exited with code 0");
+        assert_eq!(d.exit_code, Some(0), "and the panel can say it in a chip");
+
+        // A program killed before it could exit still gets its one line.
+        let mut d = DapClient::new();
+        d.handle_msg(event("terminated", json!({})));
+        assert_eq!(
+            d.console
+                .iter()
+                .filter(|l| l.kind == LogKind::Result)
+                .count(),
+            1
+        );
     }
 
     fn event(name: &str, body: Value) -> Value {

@@ -4843,6 +4843,15 @@ pub struct SuiseiDapSnapshot {
     pub current_path: [c_char; SUISEI_PATH_CAP],
     /// 0-based.
     pub current_line: u32,
+    /// What each console line IS: 0 program output, 1 note, 2 adapter,
+    /// 3 error, 4 result. Appended, so every offset above is unmoved.
+    ///
+    /// The kind used to be a prefix inside the text — `[stdout] 16` — which
+    /// made the program's own output look like the adapter's chatter. A face
+    /// can colour a kind; it can only print a prefix.
+    pub console_kinds: [u8; SUISEI_MAX_DAP_CONSOLE],
+    /// How the last program ended; `i32::MIN` when it did not say.
+    pub exit_code: i32,
 }
 
 /// Cheap identity of everything `suisei_engine_dap` would copy.
@@ -4956,8 +4965,10 @@ pub extern "C" fn suisei_engine_dap(ptr: *const SuiseiEngine, out: *mut SuiseiDa
     let cn = dap.console.len() - skip;
     o.console_count = cn as u32;
     for (i, line) in dap.console.iter().skip(skip).enumerate() {
-        write_cstr(&mut o.console[i], line);
+        write_cstr(&mut o.console[i], &line.text);
+        o.console_kinds[i] = line.code();
     }
+    o.exit_code = dap.exit_code.unwrap_or(i32::MIN);
 
     if let (Some(path), Some(line)) = (dap.current_path.as_deref(), dap.current_line) {
         write_cstr(&mut o.current_path, path);
@@ -5802,6 +5813,13 @@ pub struct SuiseiProjectSnapshot {
     pub lsp_count: u32,
     pub lsp_langs: [[c_char; 32]; SUISEI_MAX_PROJECT_LSP],
     pub lsp_cmds: [[c_char; 192]; SUISEI_MAX_PROJECT_LSP],
+    /// What Build / Run / Test mean here, in that order. Empty means the
+    /// manifest on disk decides — see `build::plan`.
+    ///
+    /// Appended after the language servers, so every offset above is where it
+    /// was. Three fixed slots rather than a map: there are three buttons, and
+    /// a fourth key would be a setting with nothing to press.
+    pub commands: [[c_char; 192]; 3],
 }
 
 /// Open a file as TEXT whatever kind it would otherwise be — the escape hatch
@@ -5852,6 +5870,11 @@ pub extern "C" fn suisei_engine_project(
     for (i, (lang, cmd)) in project.settings.lsp_servers.iter().take(n).enumerate() {
         write_cstr(&mut o.lsp_langs[i], lang);
         write_cstr(&mut o.lsp_cmds[i], cmd);
+    }
+    for (i, key) in ["build", "run", "test"].iter().enumerate() {
+        if let Some(cmd) = project.settings.commands.get(*key) {
+            write_cstr(&mut o.commands[i], cmd);
+        }
     }
     1
 }
@@ -6157,5 +6180,232 @@ pub extern "C" fn suisei_engine_ax_set_selection(ptr: *mut SuiseiEngine, start: 
         app.buffer.cursor = head;
         app.update_scroll();
         (*ptr).0.recompose();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Build & Run — the command, its console, and the places it complained about.
+//
+// The same arrangement as the debugger's snapshot above, for the same reason:
+// one pull gated on a fingerprint, the newest N console lines with the true
+// total beside them so the face can say what it is not showing.
+//
+// The problems carry no PATH. A row in this list is clicked by INDEX —
+// `suisei_engine_build_goto` — and core opens the file, because core is the
+// only side that knows whether that path is already open in a tab. What
+// crosses is the file's NAME, which is all a narrow list can show anyway.
+
+pub const SUISEI_MAX_BUILD_CONSOLE: usize = 300;
+pub const SUISEI_BUILD_LINE: usize = 200;
+pub const SUISEI_MAX_BUILD_PROBLEMS: usize = 64;
+
+#[repr(C)]
+pub struct SuiseiBuildSnapshot {
+    /// 0 idle, 1 running, 2 ok, 3 failed.
+    pub state: u8,
+    /// 0 build, 1 run, 2 test — 255 when nothing has run.
+    pub kind: u8,
+    pub open: u8,
+    pub _pad: u8,
+    /// The process's exit code; `i32::MIN` while it is still running.
+    pub exit: i32,
+    pub took_ms: u32,
+    pub errors: u32,
+    pub warnings: u32,
+    /// Problems found past the cap and therefore not kept.
+    pub dropped: u32,
+    pub label: [c_char; 96],
+    pub summary: [c_char; 240],
+    pub console_count: u32,
+    pub console_total: u32,
+    pub console: [[c_char; SUISEI_BUILD_LINE]; SUISEI_MAX_BUILD_CONSOLE],
+    pub problem_count: u32,
+    pub problem_total: u32,
+    pub problem_rows: [u32; SUISEI_MAX_BUILD_PROBLEMS],
+    pub problem_cols: [u32; SUISEI_MAX_BUILD_PROBLEMS],
+    /// 0 error, 1 warning, 2 info.
+    pub problem_severities: [u8; SUISEI_MAX_BUILD_PROBLEMS],
+    /// 1 when the problem names a place that can be gone to.
+    pub problem_locatable: [u8; SUISEI_MAX_BUILD_PROBLEMS],
+    pub problem_files: [[c_char; 64]; SUISEI_MAX_BUILD_PROBLEMS],
+    pub problem_messages: [[c_char; SUISEI_BUILD_LINE]; SUISEI_MAX_BUILD_PROBLEMS],
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_build_fingerprint(ptr: *const SuiseiEngine) -> u64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    use std::hash::{Hash, Hasher};
+    let b = &unsafe { &*ptr }.0.app().build;
+    if b.state == suisei_core::build::BuildState::Idle {
+        return 0;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(&b.state).hash(&mut h);
+    b.revision.hash(&mut h);
+    b.output.len().hash(&mut h);
+    b.exit.hash(&mut h);
+    b.open.hash(&mut h);
+    // The last line, so a run that prints without adding problems still ticks.
+    if let Some(last) = b.output.back() {
+        last.hash(&mut h);
+    }
+    h.finish() | 1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_build(
+    ptr: *const SuiseiEngine,
+    out: *mut SuiseiBuildSnapshot,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    unsafe {
+        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiBuildSnapshot>());
+    }
+    let b = &unsafe { &*ptr }.0.app().build;
+    let o = unsafe { &mut *out };
+    o.state = match b.state {
+        suisei_core::build::BuildState::Idle => 0,
+        suisei_core::build::BuildState::Running => 1,
+        suisei_core::build::BuildState::Ok => 2,
+        suisei_core::build::BuildState::Failed => 3,
+    };
+    o.kind = match b.kind {
+        Some(suisei_core::build::BuildKind::Build) => 0,
+        Some(suisei_core::build::BuildKind::Run) => 1,
+        Some(suisei_core::build::BuildKind::Test) => 2,
+        None => 255,
+    };
+    o.open = b.open as u8;
+    o.exit = b.exit.unwrap_or(i32::MIN);
+    o.took_ms = b.took.map(|d| d.as_millis().min(u128::from(u32::MAX)) as u32).unwrap_or(0);
+    o.errors = b.error_count() as u32;
+    o.warnings = b.warning_count() as u32;
+    o.dropped = b.dropped as u32;
+    write_cstr(&mut o.label, &b.label);
+    write_cstr(&mut o.summary, &b.summary());
+
+    o.console_total = b.output.len() as u32;
+    let skip = b.output.len().saturating_sub(SUISEI_MAX_BUILD_CONSOLE);
+    let n = b.output.len().min(SUISEI_MAX_BUILD_CONSOLE);
+    o.console_count = n as u32;
+    for (i, line) in b.output.iter().skip(skip).take(n).enumerate() {
+        write_cstr(&mut o.console[i], line);
+    }
+
+    o.problem_total = b.problems.len() as u32;
+    let pn = b.problems.len().min(SUISEI_MAX_BUILD_PROBLEMS);
+    o.problem_count = pn as u32;
+    for (i, p) in b.problems.iter().take(pn).enumerate() {
+        o.problem_rows[i] = p.row as u32;
+        o.problem_cols[i] = p.col as u32;
+        o.problem_severities[i] = match p.severity {
+            suisei_core::lsp::DiagnosticSeverity::Error => 0,
+            suisei_core::lsp::DiagnosticSeverity::Warning => 1,
+            _ => 2,
+        };
+        o.problem_locatable[i] = u8::from(!p.path.is_empty());
+        let name = p
+            .path
+            .rsplit('/')
+            .next()
+            .filter(|_| !p.path.is_empty())
+            .unwrap_or_default();
+        write_cstr(&mut o.problem_files[i], name);
+        let msg = if p.code.is_empty() {
+            p.message.clone()
+        } else {
+            format!("{} [{}]", p.message, p.code)
+        };
+        write_cstr(&mut o.problem_messages[i], &msg);
+    }
+    1
+}
+
+/// 0 build, 1 run, 2 test.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_build_run(ptr: *mut SuiseiEngine, kind: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    let kind = match kind {
+        1 => suisei_core::build::BuildKind::Run,
+        2 => suisei_core::build::BuildKind::Test,
+        _ => suisei_core::build::BuildKind::Build,
+    };
+    unsafe {
+        (*ptr).0.app_mut().start_build(kind);
+        (*ptr).0.recompose();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_build_stop(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().stop_build();
+        (*ptr).0.recompose();
+    }
+}
+
+/// Go to the `index`th problem, opening its file if it is not the one open.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_build_goto(ptr: *mut SuiseiEngine, index: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().goto_build_problem(index as usize);
+        (*ptr).0.recompose();
+    }
+}
+
+/// Whether the reader is looking at the build rather than at the debugger.
+///
+/// The flag lives in core for the reason the debug panel's `panel_open` does:
+/// a face-side `@State` that only exists while the tab is showing can say
+/// "open" and can never say "closed".
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_build_set_open(ptr: *mut SuiseiEngine, open: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().build.open = open != 0;
+    }
+}
+
+/// Set (or, with an empty command, clear) what Build / Run / Test mean here.
+/// `which` is 0 build, 1 run, 2 test.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_project_set_command(
+    ptr: *mut SuiseiEngine,
+    which: u32,
+    cmd: *const c_char,
+) {
+    if ptr.is_null() || cmd.is_null() {
+        return;
+    }
+    let cmd = unsafe { CStr::from_ptr(cmd) }.to_string_lossy().to_string();
+    let key = match which {
+        1 => "run",
+        2 => "test",
+        _ => "build",
+    };
+    unsafe {
+        edit_project(&mut *ptr, |p| {
+            if cmd.trim().is_empty() {
+                p.settings.commands.remove(key);
+            } else {
+                p.settings
+                    .commands
+                    .insert(key.to_string(), cmd.trim().to_string());
+            }
+        });
     }
 }

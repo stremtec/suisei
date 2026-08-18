@@ -1088,6 +1088,13 @@ typedef struct SuiseiDapSnapshot {
   char console[SUISEI_MAX_DAP_CONSOLE][SUISEI_DAP_LINE];
   char current_path[SUISEI_PATH_CAP];
   uint32_t current_line; /* 0-based */
+  /* What each console line IS: 0 program output, 1 note, 2 adapter, 3 error,
+     4 result. Appended, so every offset above is unmoved. The kind used to be
+     a prefix inside the text (`[stdout] 16`), which made what the program
+     printed look like the adapter talking about it. */
+  uint8_t console_kinds[SUISEI_MAX_DAP_CONSOLE];
+  /* How the last program ended; INT32_MIN when it did not say. */
+  int32_t exit_code;
 } SuiseiDapSnapshot;
 
 uint64_t suisei_engine_dap_fingerprint(const SuiseiEngine *ptr);
@@ -1232,6 +1239,9 @@ typedef struct SuiseiProjectSnapshot {
   uint32_t lsp_count;
   char lsp_langs[SUISEI_MAX_PROJECT_LSP][32];
   char lsp_cmds[SUISEI_MAX_PROJECT_LSP][192];
+  /* What Build / Run / Test mean here, in that order; "" = the manifest on
+     disk decides. Appended, so every offset above is where it was. */
+  char commands[3][192];
 } SuiseiProjectSnapshot;
 
 /* Open a file as TEXT whatever kind it is — the escape hatch under a viewer. */
@@ -1243,6 +1253,8 @@ void suisei_engine_project_set_name(SuiseiEngine *ptr, const char *name);
 void suisei_engine_project_set_tab_width(SuiseiEngine *ptr, uint32_t width);
 /* An empty command removes the entry. */
 void suisei_engine_project_set_lsp(SuiseiEngine *ptr, const char *lang, const char *cmd);
+/* 0 build, 1 run, 2 test; an empty command hands it back to the manifest. */
+void suisei_engine_project_set_command(SuiseiEngine *ptr, uint32_t which, const char *cmd);
 
 /* What kind of file a NAME is, and which language — no disk, no engine.
    `out_lang` gets the language's canonical extension (`js` for `jsx`/`mjs`),
@@ -1265,3 +1277,52 @@ uint64_t suisei_engine_ax_offset_of_row(const SuiseiEngine *ptr, uint32_t row);
 uint32_t suisei_engine_ax_row_of_offset(const SuiseiEngine *ptr, uint64_t offset);
 void suisei_engine_ax_selection(const SuiseiEngine *ptr, uint64_t *out_start, uint64_t *out_len);
 void suisei_engine_ax_set_selection(SuiseiEngine *ptr, uint64_t start, uint64_t len);
+
+/* ── Build & Run ───────────────────────────────────────────────────────────
+   feature.txt #9's other half. The debugger builds in order to LAUNCH; this
+   runs a command because the output is the point — and turns the lines that
+   name a place into diagnostics, which is why a compile error can now be
+   jumped to instead of read.
+
+   One pull gated on a fingerprint, like the debugger's snapshot: the newest
+   console lines with the true total beside them, so the face can say what it
+   is not showing. A problem carries no path — a row is clicked by INDEX and
+   core opens the file, because only core knows whether it is already in a
+   tab. */
+
+#define SUISEI_MAX_BUILD_CONSOLE 300
+#define SUISEI_BUILD_LINE 200
+#define SUISEI_MAX_BUILD_PROBLEMS 64
+
+typedef struct SuiseiBuildSnapshot {
+  uint8_t state; /* 0 idle, 1 running, 2 ok, 3 failed */
+  uint8_t kind;  /* 0 build, 1 run, 2 test; 255 = nothing has run */
+  uint8_t open;
+  uint8_t _pad;
+  int32_t exit; /* INT32_MIN while it is still running */
+  uint32_t took_ms;
+  uint32_t errors;
+  uint32_t warnings;
+  uint32_t dropped; /* found past the cap, and therefore not kept */
+  char label[96];
+  char summary[240];
+  uint32_t console_count;
+  uint32_t console_total;
+  char console[SUISEI_MAX_BUILD_CONSOLE][SUISEI_BUILD_LINE];
+  uint32_t problem_count;
+  uint32_t problem_total;
+  uint32_t problem_rows[SUISEI_MAX_BUILD_PROBLEMS]; /* 0-based */
+  uint32_t problem_cols[SUISEI_MAX_BUILD_PROBLEMS]; /* 0-based, chars */
+  uint8_t problem_severities[SUISEI_MAX_BUILD_PROBLEMS]; /* 0 error 1 warn 2 info */
+  uint8_t problem_locatable[SUISEI_MAX_BUILD_PROBLEMS]; /* 0 = names no place */
+  char problem_files[SUISEI_MAX_BUILD_PROBLEMS][64];
+  char problem_messages[SUISEI_MAX_BUILD_PROBLEMS][SUISEI_BUILD_LINE];
+} SuiseiBuildSnapshot;
+
+uint64_t suisei_engine_build_fingerprint(const SuiseiEngine *ptr);
+uint8_t suisei_engine_build(const SuiseiEngine *ptr, SuiseiBuildSnapshot *out);
+/* 0 build, 1 run, 2 test. */
+void suisei_engine_build_run(SuiseiEngine *ptr, uint32_t kind);
+void suisei_engine_build_stop(SuiseiEngine *ptr);
+void suisei_engine_build_goto(SuiseiEngine *ptr, uint32_t index);
+void suisei_engine_build_set_open(SuiseiEngine *ptr, uint8_t open);

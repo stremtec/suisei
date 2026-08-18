@@ -393,5 +393,43 @@ fn project_snapshot_layout() {
     assert_eq!(offset_of!(SuiseiProjectSnapshot, lsp_count), 748);
     assert_eq!(offset_of!(SuiseiProjectSnapshot, lsp_langs), 752);
     assert_eq!(offset_of!(SuiseiProjectSnapshot, lsp_cmds), 752 + 24 * 32);
-    assert_eq!(size_of::<SuiseiProjectSnapshot>(), 6128);
+    // Appended after the language servers, so every offset above is unmoved.
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, commands), 6128);
+    assert_eq!(size_of::<SuiseiProjectSnapshot>(), 6128 + 3 * 192);
+}
+
+// ─── SuiseiBuildSnapshot ──────────────────────────────────────────────────────
+
+/// Build & Run. The face reads this with a Swift struct laid out by hand, so
+/// every offset here is a promise; a field inserted rather than appended would
+/// shift the console and the panel would render other fields' bytes as text.
+#[test]
+fn build_snapshot_layout() {
+    use suisei_engine::ffi::{
+        SUISEI_BUILD_LINE, SUISEI_MAX_BUILD_CONSOLE, SUISEI_MAX_BUILD_PROBLEMS,
+        SuiseiBuildSnapshot,
+    };
+    assert_eq!(SUISEI_MAX_BUILD_CONSOLE, 300);
+    assert_eq!(SUISEI_BUILD_LINE, 200);
+    assert_eq!(SUISEI_MAX_BUILD_PROBLEMS, 64);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, state), 0);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, kind), 1);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, open), 2);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, exit), 4);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, took_ms), 8);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, errors), 12);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, warnings), 16);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, dropped), 20);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, label), 24);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, summary), 120);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, console_count), 360);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, console_total), 364);
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, console), 368);
+    let after_console = 368 + SUISEI_MAX_BUILD_CONSOLE * SUISEI_BUILD_LINE;
+    assert_eq!(offset_of!(SuiseiBuildSnapshot, problem_count), after_console);
+    assert_eq!(
+        offset_of!(SuiseiBuildSnapshot, problem_messages),
+        after_console + 8 + 64 * 4 + 64 * 4 + 64 + 64 + 64 * 64
+    );
+    assert_eq!(size_of::<SuiseiBuildSnapshot>(), 77912);
 }
