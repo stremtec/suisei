@@ -1826,7 +1826,11 @@ impl DapClient {
     /// Nothing is logged. The console belongs to what the user typed.
     pub fn request_datatip(&mut self, expression: &str) {
         let expr = expression.trim();
-        if expr.is_empty() || self.state != DapState::Stopped {
+        // A reader who closed the panel is not debugging, and a value under
+        // the pointer is the debugger talking. Refused HERE as well as gated
+        // in the face: one fact, one place that can say no, so a face that
+        // forgets to stop asking cannot bring the hover back.
+        if !self.panel_open || expr.is_empty() || self.state != DapState::Stopped {
             self.datatip = None;
             self.datatip_pending = false;
             return;
@@ -3757,6 +3761,7 @@ error: aborting due to 1 previous error
     #[test]
     fn a_datatip_asks_quietly_and_in_the_hover_context() {
         let mut d = DapClient::default();
+        d.panel_open = true;
         d.state = DapState::Stopped;
         d.stack = vec![StackFrameInfo {
             id: 7,
@@ -3802,6 +3807,7 @@ error: aborting due to 1 previous error
     #[test]
     fn a_datatip_answer_carries_the_word_it_was_asked_about() {
         let mut d = DapClient::default();
+        d.panel_open = true;
         d.state = DapState::Stopped;
         d.stack = vec![StackFrameInfo {
             id: 1,
@@ -3834,8 +3840,37 @@ error: aborting due to 1 previous error
     /// own arm there the pending flag stayed set forever and the popover span
     /// on a keyword that was never going to have a value.
     #[test]
+    /// Closing the debug panel stops the hover.
+    ///
+    /// Reported twice. The first time the face was telling core the wrong
+    /// thing; the second time it had stopped telling core anything, because
+    /// the observer lived on a view inside `if panel_is_open`. So the refusal
+    /// is here too: one fact, one place that can say no.
+    #[test]
+    fn a_closed_panel_answers_no_hover_at_all() {
+        let mut d = DapClient::default();
+        d.panel_open = false;
+        d.state = DapState::Stopped;
+        d.stack = vec![StackFrameInfo {
+            id: 1,
+            name: "f".into(),
+            path: "/tmp/x.rs".into(),
+            line: 1,
+            column: 0,
+        }];
+        d.datatip = Some(("bottom".into(), "3".into(), "i32".into()));
+        d.datatip_pending = true;
+
+        d.request_datatip("bottom");
+
+        assert!(d.sent.is_empty(), "nothing was asked");
+        assert!(d.datatip.is_none(), "and the answer on screen was taken down");
+        assert!(!d.datatip_pending);
+    }
+
     fn a_refused_datatip_stops_waiting_and_says_nothing() {
         let mut d = DapClient::default();
+        d.panel_open = true;
         d.state = DapState::Stopped;
         d.stack = vec![StackFrameInfo {
             id: 1,

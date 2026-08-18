@@ -2417,7 +2417,16 @@ fn build_lines_at(
     // — so it is dropped past a bound. Better to say nothing than to say
     // "everywhere".
     const MAX_EXTENT_ROWS: usize = 400;
-    let extent: Option<(usize, usize)> = if is_current && debugging && !app.lsp.highlights.is_empty()
+    // A SESSION, not just the panel. The bracket says where a value lives
+    // while you step, so with nothing running there is nothing to step and a
+    // rule drawn round every symbol the caret touches is noise. Two gates
+    // rather than one because they fail differently: the panel can be closed
+    // with a program still stopped, and a program can be gone with the panel
+    // still up.
+    let extent: Option<(usize, usize)> = if is_current
+        && debugging
+        && app.dap.is_session()
+        && !app.lsp.highlights.is_empty()
     {
         let rows_hl = app.lsp.highlights.iter().map(|h| h.row);
         let lo = rows_hl.clone().min().unwrap_or(0);

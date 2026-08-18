@@ -41,11 +41,17 @@ fn engine_at(path_name: &str) -> (Engine, String) {
     engine.resize(1600.0, 1000.0, 18.0, 8.0, 2.0);
     engine.app = suisei_core::app::App::open_file(path.to_str().unwrap());
     engine.flush_syntax();
-    // The debugger's marks are gated on its panel being on screen — a stop
-    // band left behind after the panel closes is the editor still talking
-    // about a session nobody is watching. These tests are about what is drawn
-    // WHILE debugging, so they open it.
+    // The debugger's marks are gated on TWO facts, because they fail
+    // differently: the panel can be closed with a program still stopped, and a
+    // program can be gone with the panel still up. A stop band left behind
+    // after the panel closes is the editor talking about a session nobody is
+    // watching; a value bracket with nothing running is a rule drawn round
+    // every symbol the caret touches, for a value that is not live.
+    //
+    // These tests are about what is drawn WHILE debugging, so they establish
+    // both.
     engine.app.dap.panel_open = true;
+    engine.app.dap.state = suisei_core::dap::DapState::Running;
     let p = path.to_string_lossy().to_string();
     (engine, p)
 }
@@ -175,6 +181,32 @@ fn frame(id: i64, path: &str, line: usize) -> suisei_core::dap::StackFrameInfo {
 }
 
 /// The value extent: a capped run from the symbol's first occurrence to its
+/// A bracket with nothing running is a rule drawn round every symbol the
+/// caret touches, for a value that is not live.
+///
+/// The panel and the session are two gates because they fail differently, and
+/// this is the half the panel gate cannot cover: the debug area can be open
+/// with no program in it at all — setting breakpoints, reading the console
+/// from last time — and that is not debugging.
+#[test]
+fn a_bracket_needs_a_program_and_not_only_a_panel() {
+    use suisei_core::lsp::SymbolOccurrence;
+    use suisei_engine::compositor::VALUE_EXTENT;
+
+    let (mut engine, _) = engine_at("no_session.rs");
+    engine.app.dap.state = suisei_core::dap::DapState::Idle;
+    engine.app.lsp.highlights = vec![
+        SymbolOccurrence { row: 2, write: true },
+        SymbolOccurrence { row: 4, write: false },
+    ];
+
+    let (lines, _) = build_editor_band(&engine.app, 0, 0, 32, 0, 200);
+    assert!(
+        lines.iter().all(|l| l.debug_sign & VALUE_EXTENT == 0),
+        "the panel is open, but nothing is running"
+    );
+}
+
 /// last, with the writes ticked.
 ///
 /// The kind is the whole feature. A read is where a value is used; a write is

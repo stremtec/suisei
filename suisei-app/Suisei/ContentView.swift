@@ -3201,13 +3201,14 @@ struct ContentView: View {
     /// handed the keyboard to the first field it could find — the navigator's
     /// Filter. Exactly the bug the tap handler below documents, still live at
     /// this one call site.
-    /// Tell core whether the debugger's panel is on screen.
+    /// Hand the tab half of the answer to the bridge, which owns the other
+    /// half and does the telling.
     ///
-    /// Both inputs: the dock has to be open AND the debug tab has to be the
-    /// one showing. Either alone is a lie, and core gates the stop band, the
-    /// value bracket and the inline values on the answer.
+    /// Not `dapSetPanel` from here any more. This runs on a view inside
+    /// `if uiDebugVisible { … }`, so it can say "the debugger is showing" and
+    /// can never say the opposite — the dock closing takes this view with it.
     private func syncDebugPanel() {
-        engine.dapSetPanel(engine.uiDebugVisible && debugTab == .debug)
+        engine.debugTabIsDebugger = (debugTab == .debug)
     }
 
     private func openDebugTerminal() {

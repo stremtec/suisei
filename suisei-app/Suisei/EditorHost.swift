@@ -3840,7 +3840,9 @@ final class EditorCanvasView: NSView {
         // dwell + round-trip and it read as "팝오버가 넘 늦게뜸". Now the
         // answer is usually already in by the time the card appears.
         let ask = DispatchWorkItem { [weak self] in
-            guard let self, let engine = self.engine, engine.dap.state == .stopped else { return }
+            guard let self, let engine = self.engine,
+                  engine.dap.state == .stopped, engine.uiDebugVisible
+            else { return }
             engine.requestDatatip(token.symbol)
         }
         datatipAsk = ask
@@ -3861,7 +3863,10 @@ final class EditorCanvasView: NSView {
     private static let datatipDwell: TimeInterval = 0.20
 
     private func showDatatip(_ symbol: String, at token: CGRect) {
-        guard let engine, engine.dap.state == .stopped else { return }
+        // The panel too, not only the state: this runs on a timer, so the
+        // dock can close in the 200ms between the pointer settling and the
+        // card being due.
+        guard let engine, engine.dap.state == .stopped, engine.uiDebugVisible else { return }
         // Normally the ask already went out on the earlier clock; this covers
         // the case where it was cancelled or the state changed under it.
         if engine.datatip == nil, !engine.datatipPending {

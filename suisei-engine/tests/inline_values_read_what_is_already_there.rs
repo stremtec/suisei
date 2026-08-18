@@ -35,6 +35,7 @@ fn stopped_engine(named: &str) -> (Engine, String) {
 
     let p = path.to_string_lossy().to_string();
     let dap = &mut engine.app.dap;
+    dap.panel_open = true;
     dap.state = DapState::Stopped;
     dap.current_path = Some(p.clone());
     dap.current_line = Some(3);
@@ -97,6 +98,20 @@ fn a_row_is_annotated_with_the_locals_it_names() {
     // A row that mentions nothing in scope gets nothing.
     assert!(by_row.get(&4).is_none(), "`let other = 1;` names no local");
     assert!(by_row.get(&0).is_none(), "`fn main() {{` names none either");
+}
+
+/// And not once the panel is closed.
+///
+/// The values are the debugger talking, and a reader who closed the panel is
+/// not debugging. This was missing: closing the debug area left `count = 3`
+/// sitting at the end of every line it had annotated, and the only thing that
+/// had ever removed them was the session ending.
+#[test]
+fn nothing_is_annotated_once_the_panel_is_closed() {
+    let (mut engine, _) = stopped_engine("closed.rs");
+    assert!(!engine.inline_values(0, 6).is_empty(), "shown while it is open");
+    engine.app.dap.panel_open = false;
+    assert!(engine.inline_values(0, 6).is_empty(), "and gone when it is not");
 }
 
 /// Not while running, and not in another file. A local called `count` means

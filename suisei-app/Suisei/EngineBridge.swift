@@ -1363,7 +1363,31 @@ final class EngineBridge: ObservableObject {
     private var searchGeneration: UInt64 = 0
     /// Shared UI chrome toggles (menus + shell).
     @Published var uiNavVisible: Bool = true { didSet { syncMenu() } }
-    @Published var uiDebugVisible: Bool = false { didSet { syncMenu() } }
+    @Published var uiDebugVisible: Bool = false {
+        didSet {
+            syncMenu()
+            pushDapPanel()
+        }
+    }
+    /// The bottom dock is showing the DEBUGGER rather than a shell.
+    ///
+    /// Half of the answer core needs, and it lives here rather than in the
+    /// view for the reason `pushDapPanel` gives.
+    @Published var debugTabIsDebugger: Bool = true { didSet { pushDapPanel() } }
+
+    /// Tell core whether the debugger's panel is on screen — from the two
+    /// flags themselves, never from a view.
+    ///
+    /// It used to be a `.task(id:)` on the debug area, which is inside
+    /// `if uiDebugVisible { … }`. So closing the dock REMOVED the observer
+    /// instead of running it, core went on believing the panel was up, and
+    /// everything gated on that flag stayed drawn: the bracket, the inline
+    /// values, the hover. Reported twice, and the second time it was this —
+    /// the observer of a fact living on a view that only exists while the
+    /// fact is true can never report it becoming false.
+    private func pushDapPanel() {
+        dapSetPanel(uiDebugVisible && debugTabIsDebugger)
+    }
     @Published var uiInspectorVisible: Bool = true { didSet { syncMenu() } }
     /// True while the tab strip is changing its structure (close/reorder or a
     /// layout presentation step). The strip uses this to suppress its normal

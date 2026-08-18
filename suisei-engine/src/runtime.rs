@@ -1994,7 +1994,13 @@ impl Engine {
     /// there would be paid for on every frame of every file, debugging or not,
     /// to carry something that is empty except while stopped.
     pub fn inline_values(&self, first: usize, count: usize) -> Vec<(u32, String)> {
-        if self.app.dap.state != suisei_core::dap::DapState::Stopped {
+        // Gated on the panel exactly like the stop band and the bracket. This
+        // was missing: closing the debug area left `count = 3` sitting at the
+        // end of every line it had annotated, because the only thing that had
+        // ever removed them was the session ending.
+        if !self.app.dap.panel_open
+            || self.app.dap.state != suisei_core::dap::DapState::Stopped
+        {
             return Vec::new();
         }
         // Only in the file the program is actually stopped in. A local called
