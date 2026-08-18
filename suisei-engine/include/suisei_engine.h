@@ -1211,3 +1211,35 @@ uint8_t suisei_engine_logic_follow(SuiseiEngine *ptr, const char *path, uint32_t
 void suisei_engine_logic_peek(SuiseiEngine *ptr, const char *path, uint32_t index);
 void suisei_engine_logic_open(SuiseiEngine *ptr);
 uint8_t suisei_engine_logic_available(const SuiseiEngine *ptr);
+
+/* ── The project marker ────────────────────────────────────────────────────
+   `project.suiseiprj` opens as a screen rather than as raw JSON. A VIEWER
+   pane, so ⌘S cannot write an empty buffer over a file the team shares: the
+   pane asks core to write the project, and core owns the format. */
+
+#define SUISEI_MAX_PROJECT_LSP 24
+
+typedef struct SuiseiProjectSnapshot {
+  uint8_t ok;
+  /* Zero is a legal indent width and a wrong answer for "not set". */
+  uint8_t has_tab_width;
+  uint8_t _pad[2];
+  uint32_t schema;
+  uint32_t tab_width;
+  char root[SUISEI_PATH_CAP];
+  char name[128];
+  char project_id[96];
+  uint32_t lsp_count;
+  char lsp_langs[SUISEI_MAX_PROJECT_LSP][32];
+  char lsp_cmds[SUISEI_MAX_PROJECT_LSP][192];
+} SuiseiProjectSnapshot;
+
+/* Open a file as TEXT whatever kind it is — the escape hatch under a viewer. */
+void suisei_engine_open_as_text(SuiseiEngine *ptr, const char *path);
+
+uint8_t suisei_engine_project(const SuiseiEngine *ptr, SuiseiProjectSnapshot *out);
+void suisei_engine_project_set_name(SuiseiEngine *ptr, const char *name);
+/* 0 clears it back to "inherit the global setting". */
+void suisei_engine_project_set_tab_width(SuiseiEngine *ptr, uint32_t width);
+/* An empty command removes the entry. */
+void suisei_engine_project_set_lsp(SuiseiEngine *ptr, const char *lang, const char *cmd);

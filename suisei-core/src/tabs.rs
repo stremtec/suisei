@@ -612,7 +612,22 @@ impl App {
         std::fs::read_to_string(path).unwrap_or_default()
     }
 
+    /// Open `path` in the focused pane, as the kind it IS.
     pub fn open_new_tab(&mut self, path: &str) {
+        self.open_tab_as(path, None);
+    }
+
+    /// Open `path` as TEXT, whatever kind it would otherwise be.
+    ///
+    /// The escape hatch under every viewer: a screen cannot know every key a
+    /// later version of a format will add, and someone will need to fix one by
+    /// hand. `project.suiseiprj` is the first to need it and will not be the
+    /// last.
+    pub fn open_text_tab(&mut self, path: &str) {
+        self.open_tab_as(path, Some(crate::media::FileKind::Text));
+    }
+
+    fn open_tab_as(&mut self, path: &str, force: Option<crate::media::FileKind>) {
         // No "displaced document" to record. Opening replaces what the focused
         // pane shows (S2: `App` IS the focused pane), and an active layout's
         // membership IS its panes — so the opened file joins it and the
@@ -636,16 +651,20 @@ impl App {
         // Identity is the filesystem's canonical path when available; retain
         // `abs_path` itself for display and for files that do not exist yet.
         let requested_identity = fs::canonicalize(&abs_path).unwrap_or_else(|_| abs_path.clone());
+        // What this open is FOR, decided before the search: a tab is
+        // identified by its path AND its kind, because two views of one file
+        // are two tabs. A Logic View carries the source file's path and is not
+        // that file; the project screen and the project's raw JSON are two
+        // ways of looking at one marker. Matching on the path alone made
+        // opening `foo.rs` focus its Logic pane and the text never appeared.
+        let raw = fs::read(&abs_path).ok();
+        let wanted = force.unwrap_or_else(|| crate::media::classify_bytes(&abs_path, raw.as_deref()));
         let existing = self
             .tabs
             .buffers
             .iter()
             .find(|tab| {
-                // A Logic View tab carries the SOURCE file's path — it is a
-                // view of that file, not that file. Without this, opening
-                // `foo.rs` while its logic is open focused the logic pane and
-                // the text never appeared.
-                tab.kind != crate::media::FileKind::Logic
+                tab.kind == wanted
                     && tab.filename.as_ref().is_some_and(|open_path| {
                         fs::canonicalize(open_path).unwrap_or_else(|_| open_path.clone())
                             == requested_identity
@@ -666,8 +685,7 @@ impl App {
         // was fixed for — and this is the path the explorer actually uses, so
         // it is the one that mattered. A PNG failed UTF-8, became an empty
         // document, and ⌘S wrote the emptiness back over the file.
-        let raw = fs::read(&abs_path).ok();
-        let kind = crate::media::classify_bytes(&abs_path, raw.as_deref());
+        let kind = wanted;
         let content = match raw {
             Some(b) if !kind.is_viewer() => String::from_utf8_lossy(&b).into_owned(),
             // A viewer's document stays empty on purpose: there is no text to

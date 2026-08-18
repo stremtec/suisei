@@ -6168,6 +6168,7 @@ struct ContentView: View {
         case .audio: return "waveform"
         case .model: return "cube.fill"
         case .logic: return "smallcircle.filled.circle"
+        case .project: return "shippingbox"
         case .binary: return "doc.fill"
         }
     }

@@ -108,6 +108,8 @@ enum PaneKind: UInt8 {
     /// path, so the code and its logic can be open side by side — which is
     /// the reason this is a pane rather than a panel.
     case logic = 7
+    /// `project.suiseiprj` — the project's own settings, as a screen.
+    case project = 8
 
     /// An unknown value can only come from an engine newer than this face.
     /// Fall back to the editor: showing text for something we cannot name is
@@ -119,7 +121,7 @@ enum PaneKind: UInt8 {
     var isViewer: Bool {
         switch self {
         case .text, .terminal: return false
-        case .image, .pdf, .audio, .binary, .model, .logic: return true
+        case .image, .pdf, .audio, .binary, .model, .logic, .project: return true
         }
     }
 
@@ -134,6 +136,7 @@ enum PaneKind: UInt8 {
         case .binary: return "Binary"
         case .model: return "3D Model"
         case .logic: return "Logic"
+        case .project: return "Project"
         }
     }
 }
@@ -6872,6 +6875,65 @@ enum DapCommand: UInt32 {
     case stop = 5
     case restart = 6
     case clearBreakpoints = 7
+}
+
+// MARK: - The project marker
+
+extension EngineBridge {
+    func loadProject() -> ProjectSnap {
+        guard let engine else { return ProjectSnap() }
+        var snap = SuiseiProjectSnapshot()
+        guard suisei_engine_project(engine, &snap) != 0 else { return ProjectSnap() }
+
+        var out = ProjectSnap()
+        out.ok = true
+        out.root = withUnsafeBytes(of: snap.root) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
+        out.name = withUnsafeBytes(of: snap.name) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
+        out.projectId = withUnsafeBytes(of: snap.project_id) { String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
+        out.schema = snap.schema
+        out.tabWidth = snap.has_tab_width != 0 ? Int(snap.tab_width) : nil
+
+        func text(_ raw: UnsafeRawBufferPointer, _ i: Int, _ cap: Int) -> String {
+            String(cString: raw.baseAddress!.advanced(by: i * cap).assumingMemoryBound(to: CChar.self))
+        }
+        withUnsafeBytes(of: snap.lsp_langs) { langs in
+            withUnsafeBytes(of: snap.lsp_cmds) { cmds in
+                for i in 0..<min(Int(snap.lsp_count), Int(SUISEI_MAX_PROJECT_LSP)) {
+                    out.lspServers.append((text(langs, i, 32), text(cmds, i, 192)))
+                }
+            }
+        }
+        return out
+    }
+
+    /// Open the marker itself, as text.
+    func openProjectAsText(_ path: String) {
+        guard let engine else { return }
+        path.withCString { suisei_engine_open_as_text(engine, $0) }
+        refreshChrome()
+    }
+
+    func projectSetName(_ name: String) {
+        guard let engine else { return }
+        name.withCString { suisei_engine_project_set_name(engine, $0) }
+        refreshChrome()
+    }
+
+    /// `0` clears it back to "inherit".
+    func projectSetTabWidth(_ width: Int) {
+        guard let engine else { return }
+        suisei_engine_project_set_tab_width(engine, UInt32(max(0, width)))
+        refreshChrome()
+    }
+
+    /// An empty command removes the entry.
+    func projectSetLsp(_ lang: String, _ cmd: String) {
+        guard let engine else { return }
+        lang.withCString { l in cmd.withCString { c in
+            suisei_engine_project_set_lsp(engine, l, c)
+        } }
+        refreshChrome()
+    }
 }
 
 // MARK: - Bridge

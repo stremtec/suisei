@@ -5777,3 +5777,170 @@ pub extern "C" fn suisei_engine_logic_available(ptr: *const SuiseiEngine) -> u8 
         .is_some_and(|p| suisei_core::logic::grammar_for_path(p).is_some());
     u8::from(has)
 }
+
+// ── The project marker ─────────────────────────────────────────────────────
+//
+// `project.suiseiprj` opens as a screen rather than as raw JSON. It is a
+// VIEWER pane, which is what keeps ⌘S from writing an empty buffer over a file
+// the whole team shares — the pane never writes text, it asks core to write
+// the project, and core owns the format.
+
+pub const SUISEI_MAX_PROJECT_LSP: usize = 24;
+
+#[repr(C)]
+pub struct SuiseiProjectSnapshot {
+    pub ok: u8,
+    /// This project sets an indent width. Zero would be a legal number and a
+    /// wrong answer for "not set", so it travels as its own flag.
+    pub has_tab_width: u8,
+    pub _pad: [u8; 2],
+    pub schema: u32,
+    pub tab_width: u32,
+    pub root: [c_char; SUISEI_PATH_CAP],
+    pub name: [c_char; 128],
+    pub project_id: [c_char; 96],
+    pub lsp_count: u32,
+    pub lsp_langs: [[c_char; 32]; SUISEI_MAX_PROJECT_LSP],
+    pub lsp_cmds: [[c_char; 192]; SUISEI_MAX_PROJECT_LSP],
+}
+
+/// Open a file as TEXT whatever kind it would otherwise be — the escape hatch
+/// under every viewer.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_open_as_text(ptr: *mut SuiseiEngine, path: *const c_char) {
+    if ptr.is_null() || path.is_null() {
+        return;
+    }
+    let path = unsafe { CStr::from_ptr(path) }.to_string_lossy().to_string();
+    unsafe {
+        (*ptr).0.app_mut().open_text_tab(&path);
+        (*ptr).0.recompose();
+    }
+}
+
+/// The project this session is in, if it is in one.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_project(
+    ptr: *const SuiseiEngine,
+    out: *mut SuiseiProjectSnapshot,
+) -> u8 {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    unsafe {
+        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiProjectSnapshot>());
+    }
+    let app = unsafe { &*ptr }.0.app();
+    let Some(root) = project_root_of(app) else {
+        return 0;
+    };
+    let Some(project) = suisei_core::project::read(&root) else {
+        return 0;
+    };
+    let o = unsafe { &mut *out };
+    o.ok = 1;
+    o.schema = project.schema;
+    write_cstr(&mut o.root, &root.to_string_lossy());
+    write_cstr(&mut o.name, &project.name);
+    write_cstr(&mut o.project_id, &project.project_id);
+    if let Some(w) = project.settings.tab_width {
+        o.has_tab_width = 1;
+        o.tab_width = w as u32;
+    }
+    let n = project.settings.lsp_servers.len().min(SUISEI_MAX_PROJECT_LSP);
+    o.lsp_count = n as u32;
+    for (i, (lang, cmd)) in project.settings.lsp_servers.iter().take(n).enumerate() {
+        write_cstr(&mut o.lsp_langs[i], lang);
+        write_cstr(&mut o.lsp_cmds[i], cmd);
+    }
+    1
+}
+
+/// Where the marker is, for a session that is in a project.
+fn project_root_of(app: &suisei_core::app::App) -> Option<std::path::PathBuf> {
+    let from = if app.explorer.cwd.as_os_str().is_empty() {
+        app.project_root()
+    } else {
+        app.explorer.cwd.clone()
+    };
+    suisei_core::project::find_root(&from)
+}
+
+/// Set the project's display name.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_project_set_name(ptr: *mut SuiseiEngine, name: *const c_char) {
+    if ptr.is_null() || name.is_null() {
+        return;
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().to_string();
+    unsafe {
+        edit_project(&mut *ptr, |p| p.name = name.trim().to_string());
+    }
+}
+
+/// Set the project's indent width. `0` clears it back to "inherit".
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_project_set_tab_width(ptr: *mut SuiseiEngine, width: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        edit_project(&mut *ptr, |p| {
+            p.settings.tab_width = (width > 0).then(|| (width as usize).clamp(1, 16));
+        });
+    }
+}
+
+/// Set (or, with an empty command, clear) a language server for this project.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_project_set_lsp(
+    ptr: *mut SuiseiEngine,
+    lang: *const c_char,
+    cmd: *const c_char,
+) {
+    if ptr.is_null() || lang.is_null() || cmd.is_null() {
+        return;
+    }
+    let lang = unsafe { CStr::from_ptr(lang) }.to_string_lossy().to_string();
+    let cmd = unsafe { CStr::from_ptr(cmd) }.to_string_lossy().to_string();
+    if lang.trim().is_empty() {
+        return;
+    }
+    unsafe {
+        edit_project(&mut *ptr, |p| {
+            if cmd.trim().is_empty() {
+                p.settings.lsp_servers.remove(lang.trim());
+            } else {
+                p.settings
+                    .lsp_servers
+                    .insert(lang.trim().to_string(), cmd.trim().to_string());
+            }
+        });
+    }
+}
+
+/// Read, change, write, and take the new settings up immediately.
+///
+/// The write goes through `project::write` because core owns the format: the
+/// pane has no business knowing that this file is JSON, and the file is
+/// committed to a repository where its shape is a promise.
+fn edit_project(engine: &mut SuiseiEngine, change: impl FnOnce(&mut suisei_core::project::Project)) {
+    let app = engine.0.app_mut();
+    let Some(root) = project_root_of(app) else {
+        return;
+    };
+    let Some(mut project) = suisei_core::project::read(&root) else {
+        return;
+    };
+    change(&mut project);
+    match suisei_core::project::write(&root, &project) {
+        Ok(()) => {
+            // Applied now rather than at the next launch. A setting you cannot
+            // see take effect is a setting you cannot tell you have set.
+            app.apply_config();
+            app.message = format!("Project saved: {}", project.name);
+        }
+        Err(e) => app.message = format!("Could not save the project: {e}"),
+    }
+    engine.0.recompose();
+}

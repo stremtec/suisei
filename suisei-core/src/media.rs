@@ -116,6 +116,9 @@ pub enum FileKind {
     /// tab of the same file can be open at once and sit side by side. That is
     /// the whole point of it being a pane.
     Logic = 7,
+    /// `project.suiseiprj`. Recognised by NAME rather than by extension —
+    /// there is exactly one of these per project and its name is the marker.
+    Project = 8,
 }
 
 impl FileKind {
@@ -135,6 +138,7 @@ impl FileKind {
             FileKind::Binary => "Binary file",
             FileKind::Model => "3D model",
             FileKind::Logic => "Logic View",
+            FileKind::Project => "Project",
         }
     }
 }
@@ -159,6 +163,16 @@ fn is_native_image_ext(ext: &str) -> bool {
 
 /// What the extension alone can say. `None` means it did not decide and the
 /// bytes have to be asked.
+/// The one file recognised by its NAME.
+///
+/// `project.suiseiprj` has no extension anyone else uses and there is exactly
+/// one per project. It is JSON on disk and would otherwise open as text —
+/// which is what the raw-JSON escape hatch is still for, deliberately, but not
+/// what should happen when someone clicks it in the tree.
+fn classify_name(path: &Path) -> Option<FileKind> {
+    (path.file_name()?.to_str()? == crate::project::MARKER).then_some(FileKind::Project)
+}
+
 fn classify_ext(path: &Path) -> Option<FileKind> {
     let ext = path.extension().and_then(|e| e.to_str())?;
     if is_image_ext(ext) || is_native_image_ext(ext) {
@@ -181,7 +195,7 @@ fn classify_ext(path: &Path) -> Option<FileKind> {
 /// Not cheap enough to call per frame even so: the fallback reads 8 KiB. Call
 /// it when a document is opened and keep the answer (see `BufferTab::kind`).
 pub fn classify_path(path: &Path) -> FileKind {
-    if let Some(k) = classify_ext(path) {
+    if let Some(k) = classify_name(path).or_else(|| classify_ext(path)) {
         return k;
     }
     // No extension, or one we have no opinion about. Ask the bytes — which is
@@ -202,7 +216,7 @@ pub fn classify_path(path: &Path) -> FileKind {
 /// `bytes` is `None` when the read itself failed; that is not a binary file,
 /// it is an unreadable one, and the caller reports it as such.
 pub fn classify_bytes(path: &Path, bytes: Option<&[u8]>) -> FileKind {
-    if let Some(k) = classify_ext(path) {
+    if let Some(k) = classify_name(path).or_else(|| classify_ext(path)) {
         return k;
     }
     match bytes {

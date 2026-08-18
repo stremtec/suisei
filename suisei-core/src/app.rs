@@ -829,6 +829,10 @@ impl App {
     pub fn apply_config(&mut self) {
         let cfg = config::load();
         self.tab_width = cfg.tab_width;
+        // A project's settings sit ON TOP of the person's, and only where it
+        // has an opinion. `~/.suisei.toml` is how you like to work; the marker
+        // is how this repository is written, and a repository that indents by
+        // two indents by two for whoever clones it.
         self.clipboard_sync = cfg.clipboard_sync;
         self.relative_number = cfg.relative_number;
         self.wrap_lines = cfg.wrap_lines;
@@ -840,8 +844,9 @@ impl App {
         self.gpu_hyperlinks = cfg.gpu_hyperlinks;
         self.gpu_acc = cfg.gpu_acc;
         self.key_hints = cfg.key_hints;
-        self.lsp
-            .apply_config(cfg.lsp_enabled, cfg.lsp_servers.clone());
+        let mut servers = cfg.lsp_servers.clone();
+        self.overlay_project_settings(&mut servers);
+        self.lsp.apply_config(cfg.lsp_enabled, servers);
         if cfg.update_check {
             self.update.start_check(env!("CARGO_PKG_VERSION"));
         }
@@ -1917,8 +1922,11 @@ impl App {
         self.gpu_hyperlinks = cfg.gpu_hyperlinks;
         self.gpu_acc = cfg.gpu_acc;
         self.key_hints = cfg.key_hints;
-        self.lsp
-            .apply_config(cfg.lsp_enabled, cfg.lsp_servers.clone());
+        // Saving YOUR settings must not drop the PROJECT's. The two apply
+        // sites are the only places either is read, so both overlay.
+        let mut servers = cfg.lsp_servers.clone();
+        self.overlay_project_settings(&mut servers);
+        self.lsp.apply_config(cfg.lsp_enabled, servers);
         if cfg.update_check {
             self.update.start_check(env!("CARGO_PKG_VERSION"));
         }
@@ -1927,6 +1935,24 @@ impl App {
         self.theme = theme::effective(&cfg.theme, &cfg, self.system_is_dark);
         // Restart LSP for current file with new server map
         self.lsp_restart_for_current();
+    }
+
+    /// Lay the project's decisions over the person's.
+    ///
+    /// `~/.suisei.toml` is how you like to work; `project.suiseiprj` is how
+    /// this repository is written. A repository that indents by two indents by
+    /// two for whoever clones it, and one that needs a particular language
+    /// server gets it — and where the project has no opinion, yours stands.
+    fn overlay_project_settings(&mut self, servers: &mut std::collections::HashMap<String, String>) {
+        let Some(project) = self.open_project() else {
+            return;
+        };
+        if let Some(width) = project.settings.tab_width {
+            self.tab_width = width;
+        }
+        for (lang, cmd) in &project.settings.lsp_servers {
+            servers.insert(lang.clone(), cmd.clone());
+        }
     }
 
     /// Whether a pane terminal's close-confirm dialog is open. Dispatch gates
@@ -2945,6 +2971,21 @@ impl App {
         self.buffer.clamp_col();
         self.update_scroll();
         self.message = format!("→ {}:{}:{}", path, row + 1, col + 1);
+    }
+
+    /// The marker of the project this session is in, if there is one.
+    ///
+    /// Looked up rather than cached: it is one small read, it happens when the
+    /// configuration is applied rather than per keystroke, and a cache would
+    /// be a second copy of a file the user can edit in the next pane.
+    pub fn open_project(&self) -> Option<crate::project::Project> {
+        let from = if self.explorer.cwd.as_os_str().is_empty() {
+            self.project_root()
+        } else {
+            self.explorer.cwd.clone()
+        };
+        let root = crate::project::find_root(&from)?;
+        crate::project::read(&root)
     }
 
     pub fn project_root(&self) -> std::path::PathBuf {

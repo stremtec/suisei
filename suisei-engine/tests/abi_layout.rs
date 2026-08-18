@@ -376,3 +376,22 @@ fn logic_snapshot_layout() {
     assert_eq!(offset_of!(SuiseiLogicSnapshot, run_flags), 96880);
     assert_eq!(size_of::<SuiseiLogicSnapshot>(), 96896);
 }
+
+// ─── SuiseiProjectSnapshot ────────────────────────────────────────────────────
+
+#[test]
+fn project_snapshot_layout() {
+    use suisei_engine::ffi::{SUISEI_MAX_PROJECT_LSP, SuiseiProjectSnapshot};
+    assert_eq!(SUISEI_MAX_PROJECT_LSP, 24);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, ok), 0);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, has_tab_width), 1);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, schema), 4);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, tab_width), 8);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, root), 12);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, name), 12 + SUISEI_PATH_CAP);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, project_id), 652);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, lsp_count), 748);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, lsp_langs), 752);
+    assert_eq!(offset_of!(SuiseiProjectSnapshot, lsp_cmds), 752 + 24 * 32);
+    assert_eq!(size_of::<SuiseiProjectSnapshot>(), 6128);
+}

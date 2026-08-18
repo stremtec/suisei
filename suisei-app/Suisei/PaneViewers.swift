@@ -44,6 +44,8 @@ struct PaneViewer: View {
             ModelPaneViewer(path: path, palette: palette)
         case .logic:
             LogicPaneViewer(path: path, palette: palette)
+        case .project:
+            ProjectPaneViewer(path: path, palette: palette)
         case .binary:
             FilePlaceholderView(path: path, kind: kind, palette: palette)
         }
@@ -457,6 +459,7 @@ extension PaneKind {
         case .audio: return "Audio"
         case .model: return "3D Model"
         case .logic: return "Logic View"
+        case .project: return "Project"
         case .binary: return "Binary File"
         }
     }

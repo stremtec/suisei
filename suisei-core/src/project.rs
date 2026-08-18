@@ -25,6 +25,7 @@
 //! authorise anything.
 
 use std::io;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The marker's filename. Committed to the repository on purpose — a project
@@ -42,19 +43,84 @@ pub struct Project {
     /// Display name at creation. Advisory: the folder's name wins if they
     /// disagree, because that is what the user sees in Finder.
     pub name: String,
+    /// Settings everyone who clones this repository gets.
+    pub settings: ProjectSettings,
+}
+
+/// The settings a PROJECT gets to decide, as opposed to a person.
+///
+/// The dividing line is whether the answer is about the code or about the
+/// reader. Indent width is about the code — a repository that indents by two
+/// indents by two for everyone. Soft wrap, line numbers and the theme are
+/// about the reader, and a project that reached out and changed them would be
+/// overstepping.
+///
+/// Every field is optional, and `None` means "inherit". A project file that
+/// does not mention a setting must not quietly impose a default on a team —
+/// the absence of an opinion is not an opinion.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectSettings {
+    /// Spaces per indent, for everyone in this repository.
+    pub tab_width: Option<usize>,
+    /// Language server command per language id, overriding the global one.
+    ///
+    /// A repository can need a particular server — one pinned by its
+    /// toolchain, or one built from the repository itself — and that is a fact
+    /// about the project rather than about whoever cloned it.
+    pub lsp_servers: BTreeMap<String, String>,
+}
+
+impl ProjectSettings {
+    /// Nothing is set, so nothing needs writing.
+    pub fn is_empty(&self) -> bool {
+        self.tab_width.is_none() && self.lsp_servers.is_empty()
+    }
 }
 
 impl Project {
-    fn to_json(&self) -> String {
-        // Written by hand rather than through a serializer so the file on disk
-        // is stable, readable and diff-friendly — it lives in a repository and
-        // a human will open it.
-        format!(
-            "{{\n  \"schema\": {},\n  \"project_id\": {},\n  \"name\": {}\n}}\n",
+    /// The file's text.
+    ///
+    /// Written by hand rather than through a serializer so the file on disk is
+    /// stable, readable and diff-friendly — it lives in a repository and a
+    /// human will open it, and a serializer's key order is not ours to
+    /// promise.
+    pub fn to_json(&self) -> String {
+        let mut out = format!(
+            "{{\n  \"schema\": {},\n  \"project_id\": {},\n  \"name\": {}",
             self.schema,
             json_string(&self.project_id),
             json_string(&self.name),
-        )
+        );
+        // Omitted entirely when empty. An empty `"settings": {}` is a line of
+        // noise in a file a team reads, and worse, it looks like a decision.
+        if !self.settings.is_empty() {
+            out.push_str(",\n  \"settings\": {");
+            let mut first = true;
+            if let Some(w) = self.settings.tab_width {
+                out.push_str(&format!("\n    \"tab_width\": {w}"));
+                first = false;
+            }
+            if !self.settings.lsp_servers.is_empty() {
+                if !first {
+                    out.push(',');
+                }
+                out.push_str("\n    \"lsp_servers\": {");
+                for (i, (lang, cmd)) in self.settings.lsp_servers.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&format!(
+                        "\n      {}: {}",
+                        json_string(lang),
+                        json_string(cmd)
+                    ));
+                }
+                out.push_str("\n    }");
+            }
+            out.push_str("\n  }");
+        }
+        out.push_str("\n}\n");
+        out
     }
 }
 
@@ -108,7 +174,42 @@ pub fn read(dir: &Path) -> Option<Project> {
             .and_then(|x| x.as_str())
             .map(str::to_string)
             .unwrap_or_else(|| dir_name(dir)),
+        settings: read_settings(v.get("settings")),
     })
+}
+
+fn read_settings(v: Option<&serde_json::Value>) -> ProjectSettings {
+    let Some(v) = v else {
+        return ProjectSettings::default();
+    };
+    ProjectSettings {
+        // Clamped where it is read, not where it is written: a hand-edited
+        // file is the point of this format, and `"tab_width": 0` would divide
+        // by zero somewhere far from here.
+        tab_width: v
+            .get("tab_width")
+            .and_then(|x| x.as_u64())
+            .map(|n| (n as usize).clamp(1, 16)),
+        lsp_servers: v
+            .get("lsp_servers")
+            .and_then(|x| x.as_object())
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(k, val)| Some((k.clone(), val.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Write the marker back, whole.
+///
+/// The pane that edits these settings goes through here rather than writing
+/// text: a viewer pane's buffer is empty on purpose, and the one thing that
+/// must never happen is the editor saving that emptiness over a file a team
+/// shares.
+pub fn write(dir: &Path, project: &Project) -> io::Result<()> {
+    std::fs::write(dir.join(MARKER), project.to_json())
 }
 
 /// Mark `dir` as a project, or return the marker it already has.
@@ -125,6 +226,7 @@ pub fn ensure(dir: &Path) -> io::Result<Project> {
         schema: 1,
         project_id: new_id(dir),
         name: dir_name(dir),
+        settings: ProjectSettings::default(),
     };
     // Written whole rather than appended: this is a small file and a partial
     // one is worse than none.
