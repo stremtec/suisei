@@ -159,6 +159,16 @@ fn wal_writer(queue: Arc<WalQueue>) {
     }
 }
 
+/// What a scan decides about one WAL file on disk.
+enum Verdict {
+    /// Show it to the reader.
+    Offer,
+    /// Not now — but the file stays, because the reason may pass.
+    Hide,
+    /// Rubbish. Remove it.
+    Delete,
+}
+
 /// One pending recovery entry found on startup.
 #[derive(Debug, Clone)]
 pub struct RecoveryEntry {
@@ -172,7 +182,10 @@ pub struct RecoveryEntry {
 
 /// Shadow WAL journal — owns the `~/.suisei/journal/` directory.
 pub struct Journal {
-    wal_dir: PathBuf,
+    /// `None` when this journal records nothing. See [`Journal::disabled`],
+    /// which is the DEFAULT — writing into a developer's home directory is
+    /// something only the product does.
+    wal_dir: Option<PathBuf>,
     /// file_path → journal file name (hash-based).
     tracked: HashMap<String, String>,
     /// Instant of last successful flush.
@@ -189,10 +202,49 @@ pub struct Journal {
 }
 
 impl Journal {
-    /// Create the journal at the default location (`~/.xei/journal/`),
+    /// Create the journal at the default location (`~/.suisei/journal/`),
     /// scanning for existing recovery entries.
+    ///
+    /// **Only the product calls this** — `suisei_engine_new`, beside
+    /// `start_daemon_reporting`, and for the same reason that one gives. A
+    /// journal is a side effect on the machine it runs on, and `Engine::new()`
+    /// is what every test in this workspace builds.
+    ///
+    /// It was the default, and the bill came due exactly as you would expect:
+    /// one engine test types a character into a temp file and deletes it, and
+    /// each run left a WAL behind in the developer's real journal — under a
+    /// fresh pid, so a fresh hash, so a fresh file. Forty-six of them, and the
+    /// app offered to recover all forty-six at every launch. The machinery
+    /// that says "you have unsaved work" is the one thing in an editor that
+    /// must never cry wolf; that is the whole bug, and this is where it was.
     pub fn new() -> Self {
         Self::with_dir(Self::wal_dir())
+    }
+
+    /// A journal that records nothing, keeps no thread and touches no disk.
+    ///
+    /// The default for a bare `Engine`, so linking this crate is never enough
+    /// to write into somebody's home.
+    pub fn disabled() -> Self {
+        Self {
+            wal_dir: None,
+            tracked: HashMap::new(),
+            last_flush: Instant::now(),
+            pending_bytes: 0,
+            last_version: 0,
+            pending_recovery: Vec::new(),
+            queue: Arc::new(WalQueue::new()),
+            writer: None,
+        }
+    }
+
+    /// Where this journal writes, or `None` when it is recording nothing.
+    pub fn dir(&self) -> Option<&Path> {
+        self.wal_dir.as_deref()
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.wal_dir.is_some()
     }
 
     /// Create the journal at a custom directory (tests, alternate profiles).
@@ -206,7 +258,7 @@ impl Journal {
             .spawn(move || wal_writer(mine))
             .ok();
         Self {
-            wal_dir: dir,
+            wal_dir: Some(dir),
             tracked: HashMap::new(),
             last_flush: Instant::now(),
             pending_bytes: 0,
@@ -245,9 +297,9 @@ impl Journal {
     pub fn discard_recovery(&mut self, idx: usize) {
         if idx < self.pending_recovery.len() {
             let entry = self.pending_recovery.remove(idx);
-            let name = Self::hash_name(&entry.file_path);
-            let wal_path = self.wal_dir.join(&name);
-            let _ = fs::remove_file(wal_path);
+            if let Some(dir) = &self.wal_dir {
+                let _ = fs::remove_file(dir.join(Self::hash_name(&entry.file_path)));
+            }
         }
     }
 
@@ -255,9 +307,9 @@ impl Journal {
     pub fn accept_recovery(&mut self, idx: usize) -> Option<RecoveryEntry> {
         if idx < self.pending_recovery.len() {
             let entry = self.pending_recovery.remove(idx);
-            let name = Self::hash_name(&entry.file_path);
-            let wal_path = self.wal_dir.join(&name);
-            let _ = fs::remove_file(wal_path);
+            if let Some(dir) = &self.wal_dir {
+                let _ = fs::remove_file(dir.join(Self::hash_name(&entry.file_path)));
+            }
             Some(entry)
         } else {
             None
@@ -290,6 +342,9 @@ impl Journal {
         scroll: u32,
         dirty: bool,
     ) {
+        if self.wal_dir.is_none() {
+            return;
+        }
         if !dirty || file_path.is_empty() {
             // Nothing to journal (clean buffer or untitled).
             // If it WAS tracked and is now clean, remove the entry.
@@ -325,8 +380,8 @@ impl Journal {
     /// file the user had already saved. In the queue the delete supersedes the
     /// write instead.
     pub fn on_saved(&mut self, file_path: &str) {
-        if let Some(name) = self.tracked.remove(file_path) {
-            let wal = self.wal_dir.join(&name);
+        if let (Some(dir), Some(name)) = (&self.wal_dir, self.tracked.remove(file_path)) {
+            let wal = dir.join(&name);
             self.queue.push(wal.clone(), WalJob::Remove { wal });
         }
         self.pending_bytes = 0;
@@ -347,8 +402,9 @@ impl Journal {
         cursor_col: u32,
         scroll: u32,
     ) {
+        let Some(dir) = &self.wal_dir else { return };
         let name = Self::hash_name(file_path);
-        let wal = self.wal_dir.join(&name);
+        let wal = dir.join(&name);
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -393,17 +449,32 @@ impl Journal {
         format!("{:016x}.wal", hash)
     }
 
-    /// Scan the WAL directory for valid recovery entries.
+    /// Scan the WAL directory for entries worth offering.
+    ///
+    /// Every parseable WAL used to be offered, which is how a journal ends up
+    /// asking about work that does not exist. Two questions decide it, and
+    /// they are the two a person would ask: **is there anything to recover**,
+    /// and **is there anywhere to put it**.
     fn scan_recovery(wal_dir: &Path) -> Vec<RecoveryEntry> {
         let mut entries = Vec::new();
         let Ok(dir) = fs::read_dir(wal_dir) else {
             return entries;
         };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         for item in dir.flatten() {
             let path = item.path();
             if path.extension().map(|e| e == "wal").unwrap_or(false) {
                 if let Some(entry) = Self::parse_wal(&path) {
-                    entries.push(entry);
+                    match Self::triage(&entry, now) {
+                        Verdict::Offer => entries.push(entry),
+                        Verdict::Hide => {}
+                        Verdict::Delete => {
+                            let _ = fs::remove_file(&path);
+                        }
+                    }
                 }
             }
         }
@@ -412,9 +483,52 @@ impl Journal {
         entries
     }
 
+    /// What to do with one entry found on disk.
+    fn triage(entry: &RecoveryEntry, now: u64) -> Verdict {
+        let path = Path::new(&entry.file_path);
+
+        // Nowhere to put it. The FOLDER is gone, not just the file — a file
+        // deleted out from under unsaved edits is a case this editor supports
+        // and must still offer, but a recovery that cannot be saved anywhere
+        // is a question with no answers in it.
+        //
+        // Hidden rather than deleted, because "the folder is not there" is
+        // also what an unmounted volume looks like, and the entry becomes
+        // offerable again the moment it comes back. Only age settles it: after
+        // a week the crash it belongs to is over.
+        let reachable = path.parent().map(Path::is_dir).unwrap_or(false);
+        if !reachable {
+            const A_WEEK: u64 = 7 * 24 * 60 * 60;
+            return if entry.timestamp > 0 && now.saturating_sub(entry.timestamp) > A_WEEK {
+                Verdict::Delete
+            } else {
+                Verdict::Hide
+            };
+        }
+
+        // Nothing to recover: the file on disk already says what the journal
+        // was holding. That happens whenever a save landed and the WAL delete
+        // did not — a crash between the two, or another editor writing the
+        // same text.
+        if let Ok(on_disk) = fs::read_to_string(path) {
+            if on_disk == entry.text {
+                return Verdict::Delete;
+            }
+        }
+        Verdict::Offer
+    }
+
+    /// One WAL file back into an entry.
+    ///
+    /// The body is taken **verbatim** from after the separator, not rebuilt
+    /// from `lines()`. Rebuilding cost the document its final newline — every
+    /// Rust, Go and C file on disk ends with one — so a recovered file came
+    /// back subtly different from the one that was lost, and it showed up as a
+    /// diff on the last line of everything anyone ever recovered.
     fn parse_wal(path: &Path) -> Option<RecoveryEntry> {
         let content = fs::read_to_string(path).ok()?;
-        let mut lines = content.lines();
+        let (head, body) = content.split_once("\n---\n")?;
+        let mut lines = head.lines();
 
         // Header: "SUISEI-WAL v1"
         let magic = lines.next()?;
@@ -428,11 +542,7 @@ impl Journal {
         let mut scroll = 0u32;
         let mut timestamp = 0u64;
 
-        // Metadata lines until "---"
-        for line in lines.by_ref() {
-            if line == "---" {
-                break;
-            }
+        for line in lines {
             if let Some(v) = line.strip_prefix("path: ") {
                 file_path = v.to_string();
             } else if let Some(v) = line.strip_prefix("cursor_row: ") {
@@ -450,8 +560,7 @@ impl Journal {
             return None;
         }
 
-        // Rest is buffer text.
-        let text: String = lines.collect::<Vec<_>>().join("\n");
+        let text = body.to_string();
 
         Some(RecoveryEntry {
             file_path,

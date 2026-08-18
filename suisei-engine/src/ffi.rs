@@ -254,8 +254,10 @@ fn write_cstr(dst: &mut [c_char], s: &str) {
 pub extern "C" fn suisei_engine_new() -> *mut SuiseiEngine {
     let mut engine = Engine::new();
     // Only the real app reports; a test run must not push into the developer's
-    // running daemon.
+    // running daemon. The crash journal is the same rule with the same reason,
+    // and it learned it the hard way — see `start_crash_journal`.
     engine.start_daemon_reporting();
+    engine.start_crash_journal();
     engine.recompose();
     Box::into_raw(Box::new(SuiseiEngine(engine)))
 }

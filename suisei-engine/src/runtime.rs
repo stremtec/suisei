@@ -290,7 +290,9 @@ impl Engine {
             every_report: Every::default(),
             missing_tab_ids: std::collections::HashSet::new(),
             wrap_maps: std::cell::RefCell::new(Vec::new()),
-            journal: crate::journal::Journal::new(),
+            // Records nothing until the product says so — see
+            // `start_crash_journal`.
+            journal: crate::journal::Journal::disabled(),
             reporter: None,
             syntax_worker: suisei_core::syntax_worker::SyntaxWorker::start(),
             syntax_requested: None,
@@ -308,6 +310,23 @@ impl Engine {
     pub fn start_daemon_reporting(&mut self) {
         if self.reporter.is_none() {
             self.reporter = Some(crate::daemon_report::Reporter::spawn());
+        }
+    }
+
+    /// Start recording unsaved buffers to `~/.suisei/journal`, and pick up
+    /// whatever the last session left there.
+    ///
+    /// Beside `start_daemon_reporting` and for exactly its reason. This used
+    /// to be the default in `Engine::new()`, so every test that typed a
+    /// character wrote a WAL into the developer's home — one engine test does
+    /// that to a temp file and then deletes the file, and since the temp
+    /// directory carries the pid, every run left a NEW one. Forty-six had
+    /// piled up, and the app offered to recover all forty-six at every launch.
+    /// A journal that cries wolf is worse than no journal, because the one
+    /// time it is right is the time it gets dismissed unread.
+    pub fn start_crash_journal(&mut self) {
+        if !self.journal.is_recording() {
+            self.journal = crate::journal::Journal::new();
         }
     }
 
