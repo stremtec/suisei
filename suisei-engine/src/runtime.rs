@@ -930,6 +930,9 @@ impl Engine {
         // Settings account login / profile fetch. Does not dirty chrome —
         // the face probes `github_account.generation` on its own object.
         let _ = self.github_account.poll();
+        if self.app.update.poll_build() {
+            need_full = true;
+        }
         if let Some(msg) = self.app.update.poll() {
             self.app.message = msg;
             self.update_generation = self.update_generation.wrapping_add(1);

@@ -31,6 +31,12 @@ pub struct UpdateState {
     pub installed: bool,
     pub installing: bool,
     check_rx: Option<Receiver<Option<LatestRelease>>>,
+    /// A source build in flight: its progress channel, and the last thing it
+    /// said. A build runs for tens of minutes, so "no output" and "hung" have
+    /// to look different.
+    build_rx: Option<Receiver<crate::update_build::Progress>>,
+    pub build_phase: Option<crate::update_build::Phase>,
+    pub build_line: String,
     /// `:update` before any check finished — install as soon as one lands.
     install_after_check: bool,
     install_rx: Option<Receiver<Result<String, String>>>,
@@ -89,6 +95,100 @@ impl UpdateState {
         self.install_after_check = true;
         self.spawn_check(current);
         "⟳ checking for updates…".into()
+    }
+
+    /// Start building the tagged release on this machine.
+    ///
+    /// Returns the blockers instead when there are any — checked here, before
+    /// a byte is downloaded, because the alternative is spending someone's
+    /// evening to tell them `swiftc` was never installed.
+    pub fn start_source_update(
+        &mut self,
+        app_path: &std::path::Path,
+    ) -> Result<(), Vec<crate::update_build::Blocker>> {
+        use crate::update_build as ub;
+        let blockers = ub::blockers(&ub::Machine::probe(app_path));
+        if !blockers.is_empty() {
+            return Err(blockers);
+        }
+        if self.build_rx.is_some() {
+            return Ok(());
+        }
+        let (Some(version), sha) = (self.latest.clone(), self.latest_sha.clone().unwrap_or_default())
+        else {
+            return Ok(());
+        };
+        let (tx, rx) = mpsc::channel();
+        self.build_rx = Some(rx);
+        self.build_phase = Some(ub::Phase::Cloning);
+        self.build_line.clear();
+        std::thread::spawn(move || {
+            let send = |p: ub::Progress| {
+                let _ = tx.send(p);
+            };
+            if let Err(message) = ub::run(&version, &sha, REPO_URL, &send) {
+                // Every failure lands here, and every one of them leaves the
+                // installed app untouched — the swap is the only step that
+                // could have changed it, and it has not run.
+                let log = ub::build_log(&version);
+                send(ub::Progress::Phase(ub::Phase::Failed {
+                    message,
+                    log: log.is_file().then_some(log),
+                }));
+            }
+        });
+        Ok(())
+    }
+
+    pub fn is_building(&self) -> bool {
+        matches!(
+            self.build_phase,
+            Some(crate::update_build::Phase::Cloning)
+                | Some(crate::update_build::Phase::Building)
+                | Some(crate::update_build::Phase::Staging)
+        )
+    }
+
+    /// Drain the build channel. Cheap enough for the frame tick.
+    pub fn poll_build(&mut self) -> bool {
+        use crate::update_build::{Phase, Progress};
+        let Some(rx) = self.build_rx.as_ref() else {
+            return false;
+        };
+        let mut moved = false;
+        loop {
+            match rx.try_recv() {
+                Ok(Progress::Phase(p)) => {
+                    let done = matches!(p, Phase::Ready(_) | Phase::Failed { .. });
+                    self.build_phase = Some(p);
+                    moved = true;
+                    if done {
+                        self.build_rx = None;
+                        break;
+                    }
+                }
+                Ok(Progress::Line(l)) => {
+                    self.build_line = l;
+                    moved = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    // The thread died without reporting. Treat silence as
+                    // failure rather than as success — the alternative is an
+                    // update that claims to be staged and is not.
+                    if self.is_building() {
+                        self.build_phase = Some(Phase::Failed {
+                            message: "The build stopped without saying why.".into(),
+                            log: None,
+                        });
+                    }
+                    self.build_rx = None;
+                    moved = true;
+                    break;
+                }
+            }
+        }
+        moved
     }
 
     /// Drain background results; returns a status message when one lands.

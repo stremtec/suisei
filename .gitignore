@@ -23,3 +23,32 @@ third_party/*/.build/
 
 # Release artefacts — a .dmg is a build output, not a source.
 dist/
+
+# ── Not part of the published source ──
+# Working notes and plan documents. They are how the project is developed,
+# not how it is built, and several are long enough to bury the code.
+docs/
+feature.txt
+
+# Scratch that accumulated in the root while building the editor: sample
+# documents opened to reproduce a bug, a session dump, personal audio used to
+# test the audio viewer. Named in source comments as EXAMPLES — the comments
+# describe what went wrong with them, and do not read them.
+/test
+/test.rs
+/test2.rs
+/study.cpp
+/ddd
+/Untitled.txt
+/Report.md
+/PAPER.pdf
+/prime-agent-session-*.html
+/after.todo.txt
+/anime-bocchi.gif
+스크린샷*.png
+/*.png
+*.mp3
+
+# One-off UI probes. Each answered a question about an AppKit control once and
+# has no caller.
+scripts/*_probe*.swift

@@ -17,6 +17,8 @@ struct SettingsWindowView: View {
     @State private var keyBindings: [KeyBindingItem] = []
     /// The command whose key field is armed, if any. One at a time — a second
     /// armed field would race the first for the key press.
+    /// What stopped an update before it started, as one block of text.
+    @State private var updateBlockers = ""
     @State private var recordingCommand: String?
     /// Why the last chord was refused. Cleared the moment another is offered.
     @State private var shortcutError: String?
@@ -561,7 +563,14 @@ struct SettingsWindowView: View {
                         onOpenAutomatic: { navigate(to: .softwareUpdateAutomatic) },
                         onOpenBeta: { navigate(to: .softwareUpdateBeta) },
                         onCheckNow: { engine.checkForSoftwareUpdate() },
-                        onInfo: { engine.openSoftwareUpdateNotes() }
+                        onInfo: { engine.openSoftwareUpdateNotes() },
+                        onUpdate: {
+                            if !engine.startSourceUpdate() {
+                                updateBlockers = engine.sourceUpdateBlockers()
+                            }
+                        },
+                        buildPhase: engine.sourceUpdatePhase(),
+                        buildDetail: engine.sourceUpdateDetail()
                     )
                 case .softwareUpdateAutomatic:
                     SoftwareUpdateAutomaticPage(
@@ -625,6 +634,20 @@ struct SettingsWindowView: View {
         // from another window. Leaving the page disarms whatever was recording,
         // so a field cannot sit waiting for a key nobody is going to press.
         .task(id: engine.keymapGeneration) { keyBindings = engine.keyBindings() }
+        // What stopped the update, before anything was downloaded. An alert
+        // rather than a status line: the user just pressed a button and is
+        // owed an answer about that press.
+        .alert(
+            "Suisei cannot update itself here",
+            isPresented: Binding(
+                get: { !updateBlockers.isEmpty },
+                set: { if !$0 { updateBlockers = "" } }
+            )
+        ) {
+            Button("OK", role: .cancel) { updateBlockers = "" }
+        } message: {
+            Text(updateBlockers)
+        }
         .onChange(of: selectedPageID) { _, _ in
             recordingCommand = nil
             shortcutError = nil

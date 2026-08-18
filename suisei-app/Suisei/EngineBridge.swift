@@ -7704,6 +7704,48 @@ enum ComponentProbe {
     }
 }
 
+extension EngineBridge {
+    /// Start building the tagged release on this machine.
+    ///
+    /// Returns false when something blocks it — a missing toolchain, no disk,
+    /// an app that cannot be replaced. Those are checked BEFORE anything is
+    /// downloaded, because a build that fails twenty minutes in to report
+    /// something knowable at the click is worse than no updater.
+    func startSourceUpdate() -> Bool {
+        guard let engine else { return false }
+        let rc = SoftwareUpdateApply.appPath.withCString {
+            suisei_engine_update_start(engine, $0)
+        }
+        refreshChrome()
+        return rc == 0
+    }
+
+    /// Everything standing in the way, newline-joined. Empty when nothing is.
+    func sourceUpdateBlockers() -> String {
+        guard let engine else { return "" }
+        var buf = [CChar](repeating: 0, count: 1024)
+        _ = SoftwareUpdateApply.appPath.withCString {
+            suisei_engine_update_blockers(engine, $0, &buf, 1024)
+        }
+        return String(cString: buf)
+    }
+
+    /// 0 idle · 1 cloning · 2 building · 3 staging · 4 ready · 5 failed.
+    func sourceUpdatePhase() -> UInt8 {
+        guard let engine else { return 0 }
+        return suisei_engine_update_phase(engine)
+    }
+
+    /// The last line the build printed, or the failure and where its log is.
+    func sourceUpdateDetail() -> String {
+        guard let engine else { return "" }
+        var buf = [CChar](repeating: 0, count: 1024)
+        _ = suisei_engine_update_detail(engine, &buf, 1024)
+        return String(cString: buf)
+    }
+
+}
+
 struct KeyBindingItem: Identifiable, Equatable {
     var id: String
     var title: String

@@ -51,6 +51,11 @@ struct SoftwareUpdatePage: View {
     var onOpenBeta: () -> Void
     var onCheckNow: () -> Void
     var onInfo: () -> Void
+    /// Build the tagged release on this machine and stage it for next launch.
+    var onUpdate: () -> Void = {}
+    /// 0 idle · 1 cloning · 2 building · 3 staging · 4 ready · 5 failed.
+    var buildPhase: UInt8 = 0
+    var buildDetail: String = ""
 
     private var snap: SoftwareUpdateSnap { store.snap }
     private var automaticOn: Bool { automaticUpdates?.valueIndex != 0 }
@@ -82,7 +87,9 @@ struct SoftwareUpdatePage: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.vertical, 2)
                 }
-                if snap.available {
+                if buildPhase > 0 {
+                    buildRow
+                } else if snap.available {
                     blockedRow
                 }
             }
@@ -137,6 +144,51 @@ struct SoftwareUpdatePage: View {
         .padding(.vertical, 4)
     }
 
+
+    /// What the build is doing, once one is running.
+    ///
+    /// The last line it printed, not a percentage. A source build runs for tens
+    /// of minutes with no reliable notion of how far along it is, and a bar
+    /// that does not move is indistinguishable from a hang — where "Compiling
+    /// suisei-core" plainly is not.
+    @ViewBuilder private var buildRow: some View {
+        if buildPhase > 0 {
+            HStack(alignment: .top, spacing: 10) {
+                if buildPhase < 4 {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: buildPhase == 4
+                          ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color(nsColor: buildPhase == 4 ? .systemGreen : .systemRed))
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(buildHeadline).font(.subheadline.weight(.medium))
+                    if !buildDetail.isEmpty {
+                        Text(buildDetail)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private var buildHeadline: String {
+        switch buildPhase {
+        case 1: return "Downloading the source…"
+        case 2: return "Building. This takes a while — you can keep working."
+        case 3: return "Almost done…"
+        case 4: return "Ready. Quit and reopen Suisei to finish updating."
+        case 5: return "The update did not finish. Suisei is unchanged."
+        default: return ""
+        }
+    }
+
     /// Why the button above will not finish the job, and the way that does.
     private var blockedRow: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -144,9 +196,9 @@ struct SoftwareUpdatePage: View {
                 .foregroundStyle(Color(nsColor: .systemYellow))
                 .font(.system(size: 14))
             VStack(alignment: .leading, spacing: 2) {
-                Text("Signed in-place updates are not published yet")
+                Text("Updating builds Suisei on this Mac")
                     .font(.subheadline.weight(.medium))
-                Text("Download this release from GitHub and replace the app.")
+                Text("Suisei is not signed, so a downloaded build would ask macOS for permission every time. Building the tagged source here does not. It needs Rust and Xcode's tools, and takes a while.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -170,7 +222,7 @@ struct SoftwareUpdatePage: View {
             // second button doing the identical thing under a different name.
             // A blocking fact is a status line, and a status line does not need
             // its own button when the action is the prominent one above it.
-            Button("Download…", action: onInfo)
+            Button("Update Now", action: onUpdate)
                 .buttonStyle(.borderedProminent)
         } else {
             Button("Check Now", action: onCheckNow)

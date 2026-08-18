@@ -302,6 +302,18 @@ void suisei_engine_drag(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t visual_
 void suisei_engine_click_utf16(
     SuiseiEngine *ptr, uint32_t buffer_row, uint32_t utf16_off, uint8_t select_word);
 void suisei_engine_drag_utf16(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t utf16_off);
+/* Source updates: clone the tagged commit, build it here, and exchange the
+   bundle at the next launch. `_apply` is the only call that can change the
+   installed app, and it is one atomic rename. */
+uint8_t suisei_engine_update_start(SuiseiEngine *ptr, const char *app_path);
+uint32_t suisei_engine_update_blockers(const SuiseiEngine *ptr, const char *app_path,
+                                       char *out, uint32_t cap);
+uint8_t suisei_engine_update_phase(const SuiseiEngine *ptr);
+uint32_t suisei_engine_update_detail(const SuiseiEngine *ptr, char *out, uint32_t cap);
+uint32_t suisei_engine_update_pending(const char *current, char *out, uint32_t cap);
+uint8_t suisei_engine_update_apply(const char *current, const char *app_path,
+                                   char *err, uint32_t cap);
+
 /* Column selection. The block gesture speaks VISUAL columns — a rectangle is a
    rectangle on the screen, and a tab is one character and several columns. */
 void suisei_engine_block_click(SuiseiEngine *ptr, uint32_t buffer_row, uint32_t visual_col);

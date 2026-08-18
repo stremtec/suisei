@@ -998,6 +998,159 @@ pub extern "C" fn suisei_engine_drag(ptr: *mut SuiseiEngine, buffer_row: u32, vi
     }
 }
 
+// ── Source updates ──
+
+/// Start building the tagged release. 0 = started, 1 = blocked (see below).
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_start(ptr: *mut SuiseiEngine, app_path: *const c_char) -> u8 {
+    if ptr.is_null() || app_path.is_null() {
+        return 1;
+    }
+    let path = unsafe { std::ffi::CStr::from_ptr(app_path) }
+        .to_string_lossy()
+        .to_string();
+    let e = unsafe { &mut *ptr };
+    match e.0.app.update.start_source_update(std::path::Path::new(&path)) {
+        Ok(()) => 0,
+        Err(blockers) => {
+            e.0.app.message = blockers
+                .iter()
+                .map(|b| b.message())
+                .collect::<Vec<_>>()
+                .join("  ");
+            1
+        }
+    }
+}
+
+/// Everything standing in the way, as one newline-joined block. Empty when
+/// nothing is.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_blockers(
+    ptr: *const SuiseiEngine,
+    app_path: *const c_char,
+    out: *mut c_char,
+    cap: u32,
+) -> u32 {
+    if ptr.is_null() || app_path.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let path = unsafe { std::ffi::CStr::from_ptr(app_path) }
+        .to_string_lossy()
+        .to_string();
+    let m = suisei_core::update_build::Machine::probe(std::path::Path::new(&path));
+    let text = suisei_core::update_build::blockers(&m)
+        .iter()
+        .map(|b| b.message())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let buf = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(buf, &text);
+    text.len().min(cap as usize - 1) as u32
+}
+
+/// 0 idle · 1 cloning · 2 building · 3 staging · 4 ready · 5 failed.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_phase(ptr: *const SuiseiEngine) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    use suisei_core::update_build::Phase;
+    match &unsafe { &*ptr }.0.app.update.build_phase {
+        None => 0,
+        Some(Phase::Cloning) => 1,
+        Some(Phase::Building) => 2,
+        Some(Phase::Staging) => 3,
+        Some(Phase::Ready(_)) => 4,
+        Some(Phase::Failed { .. }) => 5,
+    }
+}
+
+/// The last line the build printed, or the failure's message.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_detail(
+    ptr: *const SuiseiEngine,
+    out: *mut c_char,
+    cap: u32,
+) -> u32 {
+    if ptr.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    use suisei_core::update_build::Phase;
+    let u = &unsafe { &*ptr }.0.app.update;
+    let text = match &u.build_phase {
+        Some(Phase::Failed { message, log }) => match log {
+            Some(p) => format!("{message}\n{}", p.display()),
+            None => message.clone(),
+        },
+        _ => u.build_line.clone(),
+    };
+    let buf = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(buf, &text);
+    text.len().min(cap as usize - 1) as u32
+}
+
+/// The version staged for the next launch, or empty.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_pending(
+    current: *const c_char,
+    out: *mut c_char,
+    cap: u32,
+) -> u32 {
+    if current.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let cur = unsafe { std::ffi::CStr::from_ptr(current) }
+        .to_string_lossy()
+        .to_string();
+    let text = suisei_core::update_build::pending_for(&cur)
+        .map(|p| p.version)
+        .unwrap_or_default();
+    let buf = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(buf, &text);
+    text.len() as u32
+}
+
+/// Apply the staged update by exchanging it with the installed bundle.
+///
+/// **The only call in the codebase that can change the installed app.** It is
+/// one atomic rename, so it either happened or it did not; there is no state
+/// in between for a crash to leave behind. Returns 0 on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_apply(
+    current: *const c_char,
+    app_path: *const c_char,
+    err: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if current.is_null() || app_path.is_null() {
+        return 1;
+    }
+    let cur = unsafe { std::ffi::CStr::from_ptr(current) }
+        .to_string_lossy()
+        .to_string();
+    let app = unsafe { std::ffi::CStr::from_ptr(app_path) }
+        .to_string_lossy()
+        .to_string();
+    let Some(p) = suisei_core::update_build::pending_for(&cur) else {
+        return 1;
+    };
+    let outcome = suisei_core::update_build::swap(&p.app, std::path::Path::new(&app));
+    // Cleared either way. A marker that survives its own attempt would retry
+    // the same failing swap on every launch from here on.
+    suisei_core::update_build::clear_pending();
+    match outcome {
+        Ok(()) => 0,
+        Err(e) => {
+            if !err.is_null() && cap > 0 {
+                let buf = unsafe { std::slice::from_raw_parts_mut(err, cap as usize) };
+                write_cstr(buf, &e);
+            }
+            1
+        }
+    }
+}
+
 /// ⌥-drag down: start a rectangle at this cell.
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_block_click(

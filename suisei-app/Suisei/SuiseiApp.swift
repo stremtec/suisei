@@ -652,6 +652,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        // Before anything else sets itself up: if a build is staged for this
+        // launch, this replaces the bundle and relaunches, and nothing below
+        // needs to have happened.
+        if SoftwareUpdateApply.applyIfPending() { return }
         // No native window tabbing, anywhere in this app.
         //
         // AppKit's tab bar groups WINDOWS; the editor's tab strip groups
