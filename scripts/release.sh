@@ -48,6 +48,15 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 step()  { printf '\n\033[1;34m▸ %s\033[0m\n' "$*"; }
 note()  { printf '  %s\n' "$*"; }
 die()   { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+# `die` with the tool's own words. A quiet command behind `|| die` reports that
+# something failed and destroys the only sentence that said what — which is
+# exactly how the first run of this script lost `hdiutil`'s reason.
+run()   { local what="$1"; shift; local out
+          if ! out="$("$@" 2>&1)"; then
+            printf '\033[1;31m✗ %s\033[0m\n' "$what" >&2
+            [[ -n "$out" ]] && printf '  %s\n' "$out" >&2
+            exit 1
+          fi; }
 
 human() { du -sh "$1" 2>/dev/null | cut -f1; }
 
@@ -212,8 +221,12 @@ TXT
 LAYOUT_OK=0
 DMG_RW="$BUILD/Suisei-rw.dmg"
 rm -f "$DMG_RW"
-hdiutil create -srcfolder "$STAGE" -volname "$VOLNAME" -fs HFS+ \
-  -format UDRW -ov -quiet "$DMG_RW" || die "hdiutil create failed"
+# No `-fs`. Naming one is what broke the first run of this script: `-fs HFS+`
+# fails on this machine with "no mountable file systems", and so does JHFS+.
+# hdiutil picks a filesystem the host can actually create, and the app already
+# requires a macOS far newer than the HFS+-only ones.
+run "hdiutil create failed" \
+  hdiutil create -srcfolder "$STAGE" -volname "$VOLNAME" -format UDRW -ov -quiet "$DMG_RW"
 
 # Mounted at /Volumes, not a temp dir: the AppleScript below addresses the
 # volume by NAME, and Finder cannot find one mounted anywhere else.
@@ -252,8 +265,8 @@ else
 fi
 
 # UDZO: compressed and read-only, which is what a download should be.
-hdiutil convert "$DMG_RW" -format UDZO -imagekey zlib-level=9 -ov -quiet -o "$DMG" \
-  || die "hdiutil convert failed"
+run "hdiutil convert failed" \
+  hdiutil convert "$DMG_RW" -format UDZO -imagekey zlib-level=9 -ov -quiet -o "$DMG"
 rm -f "$DMG_RW"
 rm -rf "$STAGE"
 
