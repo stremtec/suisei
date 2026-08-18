@@ -32,6 +32,14 @@ pub struct SearchState {
     /// `true` = forward `/`, `false` = reverse `?`. `n` follows this, `N`
     /// opposes it.
     pub forward: bool,
+    /// The replacement, and whether the bar is showing a field for it.
+    ///
+    /// Replacing across the PROJECT has worked since `workspace_search.rs` was
+    /// written — `replace_in_file`, `replace_all_in_file`, `replace_hits` —
+    /// and the file on screen was the one place it could not be done. The
+    /// machine was in the next module along.
+    pub replace_input: String,
+    pub replace_open: bool,
 }
 
 impl Default for SearchState {
@@ -45,6 +53,8 @@ impl Default for SearchState {
             scroll_origin: 0,
             pattern_backup: None,
             forward: true,
+            replace_input: String::new(),
+            replace_open: false,
         }
     }
 }

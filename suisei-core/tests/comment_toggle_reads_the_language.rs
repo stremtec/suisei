@@ -174,3 +174,17 @@ fn multi_cursor_comments_each_line_once() {
     assert_eq!(app.buffer.line(1), "b();", "nobody was on this line");
     assert_eq!(app.buffer.line(2), "// c();");
 }
+
+/// `Position::col` is a CHAR column, and the obvious way to find the indent —
+/// `line.len() - trimmed.len()` — is a byte count. They agree for ASCII, which
+/// is how this kind of bug hides.
+#[test]
+fn a_line_whose_text_is_not_ascii_is_cut_in_the_right_place() {
+    let mut app = app_with("wide.rs", "fn f() {\n    let 이름 = \"값\";\n}\n");
+    caret(&mut app, 1, 4);
+    app.toggle_line_comment();
+    assert_eq!(app.buffer.line(1), "    // let 이름 = \"값\";");
+
+    app.toggle_line_comment();
+    assert_eq!(app.buffer.line(1), "    let 이름 = \"값\";", "and back exactly");
+}

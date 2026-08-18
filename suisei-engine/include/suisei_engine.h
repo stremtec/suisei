@@ -433,10 +433,18 @@ typedef struct SuiseiSearchSnapshot {
   uint32_t match_count;
   uint32_t match_index;
   char input[256];
+  /* Appended: an older face reads the same first five fields. */
+  uint8_t replace_open;
+  char replace_input[256];
 } SuiseiSearchSnapshot;
 
 uint8_t suisei_engine_palette(const SuiseiEngine *ptr, SuiseiPaletteSnapshot *out);
 uint8_t suisei_engine_search(const SuiseiEngine *ptr, SuiseiSearchSnapshot *out);
+/* Find and replace, in the buffer on screen. */
+void suisei_engine_find_set_replace_open(SuiseiEngine *ptr, uint8_t open);
+void suisei_engine_find_set_replace(SuiseiEngine *ptr, const char *text);
+uint8_t suisei_engine_replace_current(SuiseiEngine *ptr);
+uint32_t suisei_engine_replace_all(SuiseiEngine *ptr);
 void suisei_engine_goto_tab(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_close_tab(SuiseiEngine *ptr, uint32_t index);
 void suisei_engine_open_blank_tab(SuiseiEngine *ptr);

@@ -1282,7 +1282,7 @@ impl App {
         if line.trim().is_empty() && !alone {
             return;
         }
-        let at = byte_col_for_visual(&line, col, self.tab_width);
+        let at = char_col_for_visual(&line, col, self.tab_width);
         self.buffer.cursor = Position { row, col: at };
         self.buffer.insert_str(&format!("{token} "));
     }
@@ -1293,10 +1293,14 @@ impl App {
         if !trimmed.starts_with(token) {
             return;
         }
-        let indent = line.len() - trimmed.len();
+        // CHARACTERS, not bytes: `Position::col` is a char column everywhere
+        // in this codebase, and `line.len() - trimmed.len()` is a byte count
+        // that agrees with it only while the indentation is ASCII. A no-break
+        // space in the indent would have put the cut in the wrong place.
+        let indent = line.chars().count() - trimmed.chars().count();
         // The token, and ONE space after it if the comment was written the way
         // this writes them. Two spaces are the reader's, not ours.
-        let mut width = token.len();
+        let mut width = token.chars().count();
         if trimmed[token.len()..].starts_with(' ') {
             width += 1;
         }
@@ -1346,10 +1350,14 @@ fn visual_indent(line: &str, tab_width: usize) -> usize {
     col
 }
 
-/// The byte offset a visual column lands on, clamped to the line's own indent.
-fn byte_col_for_visual(line: &str, want: usize, tab_width: usize) -> usize {
+/// The CHAR column a visual column lands on, clamped to the line's own indent.
+///
+/// Chars rather than bytes because that is what `Position::col` is. The two
+/// agree for ASCII indentation, which is nearly all of it — and "nearly" is
+/// how a tab-vs-space bug hides for a year.
+fn char_col_for_visual(line: &str, want: usize, tab_width: usize) -> usize {
     let mut col = 0;
-    for (i, c) in line.char_indices() {
+    for (i, c) in line.chars().enumerate() {
         if col >= want {
             return i;
         }
@@ -1361,5 +1369,119 @@ fn byte_col_for_visual(line: &str, want: usize, tab_width: usize) -> usize {
             _ => return i,
         }
     }
-    line.len()
+    line.chars().count()
+}
+
+// ── Find and replace, in the file on screen ────────────────────────────────
+//
+// Replacing across the project has worked since `workspace_search.rs` was
+// written. The file in front of you was the one place it could not be done,
+// which is backwards — and the two are not the same job: that one rewrites
+// files on disk, and this one goes through the buffer, so it lands in undo,
+// reaches the language server, and can be done to a document that has never
+// been saved.
+
+impl App {
+    /// Replace the match the caret is on, and move to the next.
+    ///
+    /// Returns false when there is nothing to replace.
+    pub fn replace_current(&mut self) -> bool {
+        let Some(pattern) = self.search.pattern.clone().filter(|p| !p.is_empty()) else {
+            return false;
+        };
+        let with = self.search.replace_input.clone();
+        let Some(&at) = self.search.matches.get(self.search.current) else {
+            return false;
+        };
+        self.push_undo();
+        self.edit_run = crate::app::EditRun::None;
+        self.splice_match(at, &pattern, &with);
+        self.recollect_matches(at, &with);
+        true
+    }
+
+    /// Replace every match in this buffer, as one edit.
+    ///
+    /// Returns how many. Overlapping matches count once: searching `aa` in
+    /// `aaaa` finds three (the collector allows overlap on purpose, so `n`
+    /// steps through them), and replacing all three would consume text twice.
+    pub fn replace_all_in_buffer(&mut self) -> usize {
+        let Some(pattern) = self.search.pattern.clone().filter(|p| !p.is_empty()) else {
+            return 0;
+        };
+        let with = self.search.replace_input.clone();
+        let width = pattern.chars().count();
+        let mut accepted: Vec<Position> = Vec::new();
+        for &m in &self.search.matches {
+            match accepted.last() {
+                Some(prev) if prev.row == m.row && m.col < prev.col + width => continue,
+                _ => accepted.push(m),
+            }
+        }
+        if accepted.is_empty() {
+            return 0;
+        }
+        self.push_undo();
+        self.edit_run = crate::app::EditRun::None;
+        // Last to first: a replacement of a different length moves everything
+        // after it on that line, and nothing before it.
+        for &at in accepted.iter().rev() {
+            self.splice_match(at, &pattern, &with);
+        }
+        let n = accepted.len();
+        let last = *accepted.last().expect("checked non-empty");
+        self.recollect_matches(last, &with);
+        self.message = format!("Replaced {n}");
+        n
+    }
+
+    /// Swap one occurrence for the replacement, keeping the text that is there.
+    ///
+    /// The pattern's LENGTH is what is removed, not the pattern itself: the
+    /// search is smart-case, so `foo` matches `Foo`, and cutting by length is
+    /// what removes the text that actually matched rather than the query that
+    /// found it.
+    fn splice_match(&mut self, at: Position, pattern: &str, with: &str) {
+        let width = pattern.chars().count();
+        let end = Position {
+            row: at.row,
+            col: at.col + width,
+        };
+        self.buffer.delete_range(at, end);
+        self.buffer.cursor = at;
+        if !with.is_empty() {
+            self.buffer.insert_str(with);
+        }
+    }
+
+    /// Rebuild the match list and land on the next one after the edit.
+    ///
+    /// Positions are stale the moment the text moves, and a stale list is
+    /// worse than no list: `n` would walk to a column that no longer holds a
+    /// match and the highlight would be drawn over ordinary text.
+    fn recollect_matches(&mut self, edited: Position, with: &str) {
+        let Some(pattern) = self.search.pattern.clone() else {
+            return;
+        };
+        self.search.matches =
+            crate::search::SearchState::collect(self.buffer.lines(), &pattern);
+        let after = Position {
+            row: edited.row,
+            col: edited.col + with.chars().count(),
+        };
+        self.search.current = self
+            .search
+            .matches
+            .iter()
+            .position(|m| *m >= after)
+            .unwrap_or(0);
+        if let Some(&next) = self.search.matches.get(self.search.current) {
+            self.buffer.cursor = next;
+            self.sel = crate::selection::SelectionSet::single(Selection::caret(next));
+        } else {
+            self.buffer.cursor = after;
+            self.sel = crate::selection::SelectionSet::single(Selection::caret(after));
+        }
+        self.update_scroll();
+    }
 }

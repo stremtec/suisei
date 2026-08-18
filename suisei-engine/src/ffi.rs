@@ -1290,6 +1290,57 @@ pub extern "C" fn suisei_engine_find_cancel(ptr: *mut SuiseiEngine) {
     }
 }
 
+/// Show or hide the find bar's replace field.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_find_set_replace_open(ptr: *mut SuiseiEngine, open: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().search.replace_open = open != 0;
+        (*ptr).0.recompose();
+    }
+}
+
+/// The replacement text, as typed.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_find_set_replace(ptr: *mut SuiseiEngine, text: *const c_char) {
+    if ptr.is_null() || text.is_null() {
+        return;
+    }
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy().to_string();
+    unsafe {
+        (*ptr).0.app_mut().search.replace_input = text;
+        (*ptr).0.recompose();
+    }
+}
+
+/// Replace the match the caret is on and move to the next.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_replace_current(ptr: *mut SuiseiEngine) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let did = (*ptr).0.app_mut().replace_current();
+        (*ptr).0.recompose();
+        u8::from(did)
+    }
+}
+
+/// Replace every match in this buffer. Returns how many.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_replace_all(ptr: *mut SuiseiEngine) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let n = (*ptr).0.app_mut().replace_all_in_buffer();
+        (*ptr).0.recompose();
+        n as u32
+    }
+}
+
 /// Replace the native GUI palette field's full value.
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_palette_set_query(ptr: *mut SuiseiEngine, query: *const c_char) {
@@ -1804,6 +1855,10 @@ pub struct SuiseiSearchSnapshot {
     pub match_count: u32,
     pub match_index: u32,
     pub input: [c_char; 256],
+    /// The bar is showing its replace field, and what is in it. Appended, so
+    /// a face built against an older engine reads the same first five fields.
+    pub replace_open: u8,
+    pub replace_input: [c_char; 256],
 }
 
 #[unsafe(no_mangle)]
@@ -1858,6 +1913,8 @@ pub extern "C" fn suisei_engine_search(
     o.match_count = s.match_count;
     o.match_index = s.match_index;
     write_cstr(&mut o.input, &s.input);
+    o.replace_open = u8::from(s.replace_open);
+    write_cstr(&mut o.replace_input, &s.replace_input);
     1
 }
 

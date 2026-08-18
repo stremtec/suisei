@@ -204,6 +204,11 @@ struct SuiseiApp: App {
             }
             .keyboardShortcut("/", modifiers: .command)
 
+            Button("Find and Replace…") {
+                engine.openFindAndReplace()
+            }
+            .keyboardShortcut("f", modifiers: [.command, .option])
+
             Button("Format Document") {
                 engine.formatDocument()
             }

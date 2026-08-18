@@ -4594,8 +4594,79 @@ struct ContentView: View {
 
     // MARK: - Find bar (⌘F — Xcode-style strip at the top of the editor)
 
+    /// The find bar, and — when asked for — the replace row under it.
+    ///
+    /// Replacing across the project has worked since the workspace search was
+    /// written; the file in front of you was the one place it could not be
+    /// done. The row is disclosed rather than always present: most finds are
+    /// finds, and a field nobody is using is a field in the way.
     private var findBar: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            findRow
+            if engine.chrome.search.replaceOpen {
+                replaceRow
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .frame(minWidth: 420, idealWidth: 500, maxWidth: 560)
+        .glassEffect(
+            SuiseiGlass.chrome(light: isLightTheme, style: engine.glassStyle),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(fg.opacity(0.08), lineWidth: 0.5)
+        )
+        .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.12 : 0.32), radius: 6, y: 2)
+        .padding(.top, 8)
+        .padding(.trailing, 12)
+        .animation(.snappy(duration: 0.18), value: engine.chrome.search.replaceOpen)
+    }
+
+    private var replaceRow: some View {
         HStack(spacing: 8) {
+            NativeReplaceField(
+                text: Binding(
+                    get: { engine.chrome.search.replaceInput },
+                    set: { engine.setReplaceInput($0) }
+                ),
+                onCommit: { engine.replaceCurrent() }
+            )
+            .frame(minWidth: 230, maxWidth: .infinity)
+            .frame(height: 24)
+
+            Button("Replace") { engine.replaceCurrent() }
+                .controlSize(.small)
+                .disabled(engine.chrome.search.matchCount == 0)
+                .help("Replace this one and move on")
+
+            Button("All") { engine.replaceAll() }
+                .controlSize(.small)
+                .disabled(engine.chrome.search.matchCount == 0)
+                .help("Replace every match in this file · one undo")
+        }
+        // Lined up with the field above rather than with the bar: the two
+        // fields are one control and their left edges have to agree.
+        .padding(.leading, 24)
+    }
+
+    private var findRow: some View {
+        HStack(spacing: 8) {
+            // The disclosure, first, so the two fields sit in one column.
+            Button {
+                engine.setReplaceOpen(!engine.chrome.search.replaceOpen)
+            } label: {
+                Image(systemName: engine.chrome.search.replaceOpen
+                    ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Replace · ⌥⌘F")
+
             NativeFindSearchField(
                 text: Binding(
                     get: { engine.chrome.search.input },
@@ -4659,22 +4730,6 @@ struct ContentView: View {
             .keyboardShortcut(.return, modifiers: [])
             .help("Done · Return")
         }
-        // Wider than the vertical padding on purpose: a capsule's ends are
-        // half-circles, so content laid out to 8 sat inside the curve.
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .frame(minWidth: 420, idealWidth: 480, maxWidth: 540)
-        .glassEffect(
-            SuiseiGlass.chrome(light: isLightTheme, style: engine.glassStyle),
-            in: Capsule(style: .continuous)
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(fg.opacity(0.08), lineWidth: 0.5)
-        )
-        .shadow(color: theme.shadowInk.opacity(isLightTheme ? 0.12 : 0.32), radius: 6, y: 2)
-        .padding(.top, 8)
-        .padding(.trailing, 12)
     }
 
     // MARK: - Palette overlay (Ctrl/Cmd+P)
@@ -6893,6 +6948,54 @@ private struct NavigatorSearchField: View {
 /// control rather than a plain text field with a separately drawn icon and
 /// bezel, so the clear button, focus ring, text metrics and accessibility all
 /// follow the current macOS appearance automatically.
+/// The replace field.
+///
+/// A plain `NSTextField` rather than a `NSSearchField`: this one is not a
+/// search, it has no magnifier and no history, and Return in it means "replace
+/// this one" rather than "find again".
+private struct NativeReplaceField: NSViewRepresentable {
+    @Binding var text: String
+    let onCommit: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        field.placeholderString = "Replace"
+        field.controlSize = .small
+        field.font = .systemFont(ofSize: 12)
+        field.bezelStyle = .roundedBezel
+        field.isBordered = true
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.commit(_:))
+        field.setAccessibilityLabel("Replace")
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: NativeReplaceField
+        init(parent: NativeReplaceField) { self.parent = parent }
+
+        func controlTextDidChange(_ note: Notification) {
+            guard let field = note.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+
+        @objc func commit(_ sender: NSTextField) {
+            parent.text = sender.stringValue
+            parent.onCommit()
+        }
+    }
+}
+
 private struct NativeFindSearchField: NSViewRepresentable {
     @Binding var text: String
 

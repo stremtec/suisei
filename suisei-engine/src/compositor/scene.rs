@@ -185,6 +185,9 @@ pub struct SearchScene {
     pub input: String,
     pub match_count: u32,
     pub match_index: u32,
+    /// The find bar is showing its replace field, and what is in it.
+    pub replace_open: bool,
+    pub replace_input: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1971,6 +1974,8 @@ fn build_search(app: &App) -> SearchScene {
         } else {
             0
         },
+        replace_open: open && app.search.replace_open,
+        replace_input: app.search.replace_input.clone(),
     }
 }
 

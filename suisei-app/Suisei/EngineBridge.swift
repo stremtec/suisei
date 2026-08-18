@@ -450,6 +450,9 @@ struct SearchSnap: Equatable {
     var input: String
     var matchCount: UInt32
     var matchIndex: UInt32
+    /// The bar is showing its replace field, and what is in it.
+    var replaceOpen: Bool = false
+    var replaceInput: String = ""
     static let empty = SearchSnap(open: false, forward: true, input: "", matchCount: 0, matchIndex: 0)
 }
 
@@ -3494,6 +3497,47 @@ final class EngineBridge: ObservableObject {
         guard let engine, input != chrome.search.input else { return }
         input.withCString { suisei_engine_find_set_input(engine, $0) }
         refreshEditorPaintOnly()
+    }
+
+    /// ⌥⌘F — open the find bar with its replace row already showing.
+    func openFindAndReplace() {
+        guard let engine else { return }
+        if !chrome.search.open {
+            suisei_engine_find_open(engine)
+        }
+        suisei_engine_find_set_replace_open(engine, 1)
+        refreshChrome()
+    }
+
+    /// Show or hide the replace field. ⌥⌘F, and the disclosure beside Find.
+    func setReplaceOpen(_ open: Bool) {
+        guard let engine else { return }
+        suisei_engine_find_set_replace_open(engine, open ? 1 : 0)
+        refreshChrome()
+    }
+
+    func setReplaceInput(_ text: String) {
+        guard let engine, text != chrome.search.replaceInput else { return }
+        text.withCString { suisei_engine_find_set_replace(engine, $0) }
+        refreshEditorPaintOnly()
+    }
+
+    /// Replace the match the caret is on and step to the next.
+    @discardableResult
+    func replaceCurrent() -> Bool {
+        guard let engine else { return false }
+        let did = suisei_engine_replace_current(engine) != 0
+        refreshChrome()
+        return did
+    }
+
+    /// Replace every match in this buffer, as one edit.
+    @discardableResult
+    func replaceAll() -> Int {
+        guard let engine else { return 0 }
+        let n = Int(suisei_engine_replace_all(engine))
+        refreshChrome()
+        return n
     }
 
     func setPaletteQuery(_ query: String) {
@@ -6654,7 +6698,9 @@ final class EngineBridge: ObservableObject {
             forward: snap.forward != 0,
             input: cStringField(snap.input),
             matchCount: snap.match_count,
-            matchIndex: snap.match_index
+            matchIndex: snap.match_index,
+            replaceOpen: snap.replace_open != 0,
+            replaceInput: cStringField(snap.replace_input)
         )
     }
 
