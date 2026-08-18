@@ -246,6 +246,57 @@ impl App {
         }
         self.message = "Terminal closed".into();
     }
+    /// A terminal tab is on **at most one pane**. Enforced here, right after
+    /// the split that would otherwise break it.
+    ///
+    /// `split_focused` copies the focused pane's slot into the new pane — the
+    /// VS Code rule, and the right one for a file: two views of one document is
+    /// a feature. A terminal is not a document. There is one shell behind it
+    /// and one view of that shell, and `TerminalHostView.mount` moves that view
+    /// to whichever pane asked last, so the other pane goes black. Splitting a
+    /// terminal produced two panes fighting over one process, and from there
+    /// nothing else worked either: ⌃⇧T read the new pane as "already showing a
+    /// terminal" and closed the shell instead of opening a second one.
+    ///
+    /// The new pane gets a document instead. Not a second shell — ⌘\ must not
+    /// fork a process, and the shells this was reported against are running
+    /// agents. ⌃⇧T in the new pane now does that, correctly.
+    fn keep_the_shell_in_one_pane(&mut self) {
+        let here = self.split.focused_pane().buffer;
+        if !self.is_terminal_tab(here) {
+            return;
+        }
+        if self.split.panes.iter().filter(|p| p.buffer == here).count() < 2 {
+            return;
+        }
+        let doc = self.doc_beside_a_terminal(here);
+        self.save_state_to_tab();
+        self.split.focused_pane_mut().buffer = doc;
+        self.restore_state_from_tab();
+        self.park_focused_pane();
+    }
+
+    /// What to show in a pane split off one that is running a shell.
+    ///
+    /// The document the terminal displaced, which `terminal_replaced` has been
+    /// remembering since the shell opened for exactly this kind of restore.
+    /// Failing that any open document, and failing that a new blank one — a
+    /// pane has to show something, and every tab being a terminal is a state
+    /// the user can reach.
+    fn doc_beside_a_terminal(&mut self, terminal_tab: BufferId) -> BufferId {
+        if let Some(&replaced) = self.terminal_replaced.get(&terminal_tab)
+            && self.buffer_index(replaced).is_some()
+            && !self.is_terminal_tab(replaced)
+        {
+            return replaced;
+        }
+        if let Some(tab) = self.tabs.buffers.iter().find(|t| t.terminal.is_none()) {
+            return tab.id;
+        }
+        self.open_blank_tab();
+        self.current_buffer_id()
+    }
+
     pub fn split_vertical(&mut self) {
         self.open_split_kind(crate::split::Axis::Col, "Vertical");
     }
@@ -265,6 +316,7 @@ impl App {
         // new pane, and the focused slot is stale until parked (see S2).
         self.park_focused_pane();
         let r = self.split.split_focused(axis);
+        self.keep_the_shell_in_one_pane();
         self.message = match r {
             SplitAdd::Opened => {
                 format!("{label} split · Ctrl+W w cycle · Ctrl+W q close")
@@ -281,6 +333,7 @@ impl App {
         self.save_state_to_tab();
         self.park_focused_pane();
         let r = self.split.split_focused_before(axis);
+        self.keep_the_shell_in_one_pane();
         self.message = match r {
             SplitAdd::Opened => {
                 format!("{label} · Ctrl+W w cycle · Ctrl+W q close")

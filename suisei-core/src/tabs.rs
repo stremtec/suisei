@@ -202,6 +202,26 @@ impl App {
         }
         let target = self.tabs.buffers[idx].id;
 
+        // A terminal tab already on a pane is REVEALED, never copied onto a
+        // second one. One shell, one view of it: the face moves that view to
+        // whichever pane asked last and the other pane goes black — reported as
+        // "A페인도 codex 탭으로 바꿔버리면 B pane 은 검정색으로 가득차고 작동을
+        // 안함", which is the shell still running in a pane that no longer has
+        // its screen.
+        //
+        // A document has no such limit and keeps none: two panes on one file is
+        // the whole point of a split. The rule is about the process behind the
+        // tab, so it is asked of `terminal`, not of the tab.
+        if self.is_terminal_tab(target)
+            && let Some(pidx) = self.split.panes.iter().position(|p| p.buffer == target)
+        {
+            if pidx != self.split.focus_index() {
+                self.focus_pane_to(pidx);
+            }
+            self.message = format!("Tab {}", idx + 1);
+            return;
+        }
+
         if let Some(lid) = self.active_layout {
             let in_layout = self.layout_holds(lid, target);
             if in_layout {
