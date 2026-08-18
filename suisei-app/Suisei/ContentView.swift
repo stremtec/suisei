@@ -6159,9 +6159,14 @@ struct ContentView: View {
     }
 
     /// The glyph for a pane's header, by what the pane holds.
-    private func paneHeaderSymbol(_ kind: PaneKind) -> String {
+    ///
+    /// A TEXT pane defers to the file's own glyph — the same `FileSymbol`
+    /// table the tree and the tab strip read — so a split of `main.rs` and
+    /// `notes.md` is two different glyphs here too. The other kinds answer
+    /// for themselves: there is one image viewer and it looks like one.
+    private func paneHeaderSymbol(_ kind: PaneKind, title: String = "") -> String {
         switch kind {
-        case .text: return "doc.text.fill"
+        case .text: return title.isEmpty ? "doc.text.fill" : FileSymbol.symbol(for: title)
         case .terminal: return "terminal.fill"
         case .image: return "photo.fill"
         case .pdf: return "doc.richtext.fill"
@@ -6184,7 +6189,7 @@ struct ContentView: View {
             // The pane's own kind. Every pane's header claimed `doc.text.fill`,
             // so a split of a PDF and a PNG showed two identical text-document
             // glyphs — the row meant to tell you which pane you are in.
-            Image(systemName: paneHeaderSymbol(pane.kind))
+            Image(systemName: paneHeaderSymbol(pane.kind, title: title))
                 .font(.system(size: 10))
                 .foregroundStyle(pane.focused ? accent : dim)
             Text("\(title)\(dirty ? " ●" : "")")

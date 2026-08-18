@@ -225,6 +225,50 @@ pub fn classify_bytes(path: &Path, bytes: Option<&[u8]>) -> FileKind {
     }
 }
 
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The face asks this about every row in the file tree and every tab chip,
+    /// so it has to answer without touching the disk — and it has to be the
+    /// ONLY answer. Three copies of this switch lived in the face and had
+    /// already drifted: `gltf`, `glb` and `fbx` opened in the model viewer and
+    /// drew as plain documents in the tree.
+    #[test]
+    fn a_name_alone_decides_what_a_file_is() {
+        let kind = |name: &str| classify_bytes(Path::new(name), None);
+        assert_eq!(kind("main.rs"), FileKind::Text);
+        assert_eq!(kind("paper.pdf"), FileKind::Pdf);
+        assert_eq!(kind("song.mp3"), FileKind::Audio);
+        assert_eq!(kind("shot.png"), FileKind::Image);
+        for model in ["scene.gltf", "scene.glb", "rig.fbx", "a.usdz", "b.obj", "c.dae"] {
+            assert_eq!(kind(model), FileKind::Model, "{model}");
+        }
+        // The one file recognised by its whole name.
+        assert_eq!(kind(crate::project::MARKER), FileKind::Project);
+        assert_eq!(kind("notes"), FileKind::Text, "no extension, no bytes read");
+    }
+
+    /// The language arrives normalised, so the face's table has one row for a
+    /// family instead of one per spelling.
+    #[test]
+    fn the_language_is_answered_in_its_canonical_spelling() {
+        let canon = |name: &str| {
+            Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .and_then(crate::lang::Lang::from_ext)
+                .map(|l| l.extensions()[0])
+        };
+        assert_eq!(canon("a.jsx"), Some("js"));
+        assert_eq!(canon("a.mjs"), Some("js"));
+        assert_eq!(canon("a.pyi"), Some("py"));
+        assert_eq!(canon("a.rs"), Some("rs"));
+        assert_eq!(canon("a.unknownext"), None);
+    }
+}
+
 // ── Image ───────────────────────────────────────────────────────────────
 
 #[derive(Clone)]

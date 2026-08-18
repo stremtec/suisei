@@ -5944,3 +5944,44 @@ fn edit_project(engine: &mut SuiseiEngine, change: impl FnOnce(&mut suisei_core:
     }
     engine.0.recompose();
 }
+
+/// What kind of file a NAME is, and which language, without touching the disk.
+///
+/// The authority crossing over. The face had three separate extension switches
+/// — the tree's glyph, the tree's colour, the tab chip — and they had already
+/// drifted: `gltf`, `glb` and `fbx` opened in the model viewer and drew as
+/// plain documents in the tree, because `is_model_ext` grew and the copies did
+/// not. One question, asked of the one thing that knows.
+///
+/// `out_lang` receives the language's CANONICAL extension (`rs`, `py`, `ts`),
+/// so the face's table is keyed by a normalised id rather than by whatever the
+/// user's file happened to be called: `jsx`, `mjs` and `cjs` all answer `js`.
+/// Empty for a file with no language.
+///
+/// Returns the `FileKind` discriminant. Pure — no engine, no state, no disk,
+/// so a face may call it per row and cache by extension.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_classify_name(
+    name: *const c_char,
+    out_lang: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if name.is_null() {
+        return suisei_core::media::FileKind::Text as u8;
+    }
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().to_string();
+    let path = std::path::Path::new(&name);
+    if !out_lang.is_null() && cap > 0 {
+        let lang = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(suisei_core::lang::Lang::from_ext)
+            .map(|l| l.extensions()[0])
+            .unwrap_or("");
+        let dst = unsafe { std::slice::from_raw_parts_mut(out_lang, cap as usize) };
+        write_cstr(dst, lang);
+    }
+    // Bytes deliberately not read: this answers about a NAME, and a tree row
+    // is a name. The disk-reading classifier is for opening a document.
+    suisei_core::media::classify_bytes(path, None) as u8
+}

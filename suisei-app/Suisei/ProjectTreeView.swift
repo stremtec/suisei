@@ -786,38 +786,16 @@ struct ProjectTreeView: View {
 
     // MARK: - Icons (Xcode-ish)
 
+    /// The glyph for a row.
+    ///
+    /// Three switches on the extension used to live in this file and the tab
+    /// strip — the glyph, the colour, the chip — and they had drifted: `gltf`,
+    /// `glb` and `fbx` opened in the model viewer and drew here as plain
+    /// documents. `FileSymbol` asks core what the file IS, so that cannot
+    /// happen again.
     private func iconName(name: String, isDir: Bool, isRoot: Bool) -> String {
-        if isRoot { return "folder.fill" }
-        if isDir { return "folder.fill" }
-        let ext = (name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "rs": return "chevron.left.forwardslash.chevron.right"
-        case "swift": return "swift"
-        case "js", "ts", "jsx", "tsx", "mjs": return "curlybraces"
-        case "json", "toml", "yaml", "yml": return "doc.badge.gearshape"
-        case "md", "txt", "rst": return "doc.plaintext"
-        case "png", "jpg", "jpeg", "gif", "svg", "webp": return "photo"
-        // Kept in step with `suisei_core::media::is_model_ext`, which is the
-        // authority on what opens in the model viewer. A tree icon promising a
-        // viewer that will not open is worse than a plain document.
-        case "usdz", "usda", "usdc", "usd", "obj", "dae", "scn", "stl", "ply",
-             "gltf", "glb", "fbx":
-            return "cube"
-        case "scnp": return "sparkles"
-        case "sh", "bash", "zsh": return "terminal"
-        case "html", "css", "scss": return "globe"
-        case "lock": return "lock.doc"
-        default:
-            // Filled, against the other manifests' outline: it names the
-            // project the way they name a package, and it is the only one of
-            // them Suisei wrote itself.
-            if name == SuiseiProject.marker { return "shippingbox.fill" }
-            if name == "Cargo.toml" || name == "Package.swift" || name == "package.json" {
-                return "shippingbox"
-            }
-            if name.hasPrefix(".") { return "doc" }
-            return "doc"
-        }
+        if isRoot || isDir { return "folder.fill" }
+        return FileSymbol.symbol(for: name)
     }
 
     /// The project marker's purple.
@@ -838,18 +816,15 @@ struct ProjectTreeView: View {
         // The icon sits against the name; leaving it grey beside a glowing
         // purple word reads as a rendering fault rather than as emphasis.
         if name == SuiseiProject.marker { return Self.projectInk }
-        let ext = (name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "rs": return Color(nsColor: .systemOrange)
-        case "swift": return Color(nsColor: .systemOrange)
-        case "js", "mjs": return Color(nsColor: .systemYellow)
-        case "ts", "tsx": return Color(nsColor: .systemBlue)
-        case "md": return dim
-        case "json", "toml", "yaml", "yml": return Color(nsColor: .systemGreen)
-        case "png", "jpg", "jpeg", "gif", "svg": return Color(nsColor: .systemPink)
-        case "usdz", "usda", "usdc", "usd", "obj", "dae", "scn", "stl", "ply":
-            return Color(nsColor: .systemTeal)
-        default: return dim.opacity(0.9)
+        switch FileSymbol.look(for: name).hue {
+        case .dim: return dim.opacity(0.9)
+        case .orange: return Color(nsColor: .systemOrange)
+        case .yellow: return Color(nsColor: .systemYellow)
+        case .blue: return Color(nsColor: .systemBlue)
+        case .green: return Color(nsColor: .systemGreen)
+        case .pink: return Color(nsColor: .systemPink)
+        case .teal: return Color(nsColor: .systemTeal)
+        case .purple: return Color(nsColor: .systemPurple)
         }
     }
 }

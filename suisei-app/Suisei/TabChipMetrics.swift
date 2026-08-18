@@ -52,10 +52,22 @@ enum TabChipMetrics {
         return w
     }
 
-    /// Icon the chip shows, matching `ToolbarTabChip`'s own choice.
-    static func symbolName(isLayout: Bool, deleted: Bool) -> String {
+    /// Icon the chip shows.
+    ///
+    /// Every document chip used to be `doc.text.fill` — a strip of twelve
+    /// identical glyphs, which is a strip with no glyph at all. It is the
+    /// file's own now, from the same `FileSymbol` table the tree reads, so a
+    /// `.rs` looks like a `.rs` in both places or in neither.
+    ///
+    /// The width arithmetic asks the same question, so the two cannot disagree
+    /// about how much room the glyph takes.
+    static func symbolName(
+        title: String, isLayout: Bool, isTerminal: Bool, deleted: Bool
+    ) -> String {
         if deleted { return "exclamationmark.triangle.fill" }
-        return isLayout ? "square.on.square" : "doc.text.fill"
+        if isLayout { return "square.on.square" }
+        if isTerminal { return "terminal.fill" }
+        return FileSymbol.symbol(for: title)
     }
 
     /// Total chip width.
@@ -66,10 +78,13 @@ enum TabChipMetrics {
         title: String,
         active: Bool,
         isLayout: Bool,
+        isTerminal: Bool = false,
         deleted: Bool,
         showsTrailing: Bool = true
     ) -> CGFloat {
-        let icon = symbolWidth(symbolName(isLayout: isLayout, deleted: deleted))
+        let icon = symbolWidth(
+            symbolName(title: title, isLayout: isLayout, isTerminal: isTerminal, deleted: deleted)
+        )
         let text = titleWidth(title, active: active)
         var w = TabChipBox.horizontalPadding * 2
             + icon + TabChipBox.interItemGap + text

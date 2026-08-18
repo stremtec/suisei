@@ -473,7 +473,8 @@ final class TabStripHostView: NSView {
                 let t = tabs[slot]
                 return TabChipMetrics.width(
                     title: t.title, active: t.active,
-                    isLayout: t.isLayout, deleted: t.deleted
+                    isLayout: t.isLayout, isTerminal: t.isTerminal,
+                    deleted: t.deleted
                 )
             }
         )
@@ -1154,7 +1155,8 @@ final class TabStripHostView: NSView {
 
         var pen = rect.minX + TabChipBox.horizontalPadding
         let iconName = TabChipMetrics.symbolName(
-            isLayout: tab.isLayout, deleted: tab.deleted
+            title: tab.title, isLayout: tab.isLayout,
+            isTerminal: tab.isTerminal, deleted: tab.deleted
         )
         let iconW = TabChipMetrics.symbolWidth(iconName)
         drawSymbol(

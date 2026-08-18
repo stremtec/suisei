@@ -1243,3 +1243,8 @@ void suisei_engine_project_set_name(SuiseiEngine *ptr, const char *name);
 void suisei_engine_project_set_tab_width(SuiseiEngine *ptr, uint32_t width);
 /* An empty command removes the entry. */
 void suisei_engine_project_set_lsp(SuiseiEngine *ptr, const char *lang, const char *cmd);
+
+/* What kind of file a NAME is, and which language — no disk, no engine.
+   `out_lang` gets the language's canonical extension (`js` for `jsx`/`mjs`),
+   or "". Returns the FileKind discriminant. */
+uint8_t suisei_engine_classify_name(const char *name, char *out_lang, uint32_t cap);
