@@ -825,7 +825,7 @@ pub fn audio_info_lines(path: &Path, playing: bool) -> Vec<PreviewLine> {
 }
 
 fn pl(spans: Vec<(String, PreviewStyle)>) -> PreviewLine {
-    PreviewLine { spans, image: None }
+    PreviewLine { spans, image: None, block: crate::preview::PreviewBlock::Flow }
 }
 
 #[cfg(test)]

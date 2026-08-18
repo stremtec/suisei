@@ -431,6 +431,18 @@ pub struct PreviewLineScene {
     pub text: String,
     /// Dominant PreviewStyle as small enum code (see face).
     pub style: u8,
+    /// Structural role: 0 flow · 1 rule · 2 quote · 3 code · 4 table row.
+    /// The face draws a rule, a background and a grid from these, instead of
+    /// the box-drawing characters a terminal has to use. See
+    /// `suisei_core::preview::PreviewBlock`.
+    pub block: u8,
+    /// Per-kind payload. Quote: nesting depth. Code: bit0 first, bit1 last.
+    /// Table: bit0 header, bit1 first, bit2 last.
+    pub block_arg: u8,
+    /// Table rows only: 2 bits of column alignment each, low column first
+    /// (0 left, 1 centre, 2 right). Eight columns fit; past that the face
+    /// left-aligns, which is the default anyway.
+    pub aligns: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -516,7 +528,7 @@ pub fn build_editor_band(
         0
     };
     let sel = if focused { app.selected_range() } else { None };
-    let lines = build_lines_at(app, tab, start, rows, Some(caret_vcol), sel, focused, wrap_cols, wide_ratio);
+    let lines = build_lines_at(app, tab, start, rows, Some(caret_vcol), sel, focused, wrap_cols, wide_ratio, None);
     (lines, total)
 }
 
@@ -736,6 +748,41 @@ pub fn compose(app: &App, frame_gen: u64, outline: &[OutlineItemScene]) -> Frame
     }
 }
 
+/// `PreviewBlock` → the three numbers the wire carries.
+///
+/// A small enum plus a payload byte rather than three parallel booleans: the
+/// kinds are mutually exclusive by construction, and the face's `switch` on
+/// this is the same shape as the core's `match`, so a kind added on one side is
+/// a compile error on the other rather than a row that silently draws as flow.
+fn preview_block_code(b: &suisei_core::preview::PreviewBlock) -> (u8, u8, u16) {
+    use suisei_core::preview::{ColAlign, PreviewBlock};
+    match b {
+        PreviewBlock::Flow => (0, 0, 0),
+        PreviewBlock::Rule => (1, 0, 0),
+        PreviewBlock::Quote { depth } => (2, *depth, 0),
+        PreviewBlock::Code { first, last } => {
+            (3, u8::from(*first) | (u8::from(*last) << 1), 0)
+        }
+        PreviewBlock::TableRow { aligns, header, first, last, .. } => {
+            let packed = aligns
+                .iter()
+                .take(8)
+                .enumerate()
+                .fold(0u16, |acc, (i, a)| {
+                    let bits = match a {
+                        ColAlign::Left => 0u16,
+                        ColAlign::Center => 1,
+                        ColAlign::Right => 2,
+                    };
+                    acc | (bits << (i * 2))
+                });
+            let flags =
+                u8::from(*header) | (u8::from(*first) << 1) | (u8::from(*last) << 2);
+            (4, flags, packed)
+        }
+    }
+}
+
 fn build_preview(app: &App) -> PreviewScene {
     if !app.preview.open {
         return PreviewScene::default();
@@ -812,7 +859,8 @@ fn build_preview(app: &App) -> PreviewScene {
             text.truncate(cut);
             text.push('…');
         }
-        lines.push(PreviewLineScene { text, style });
+        let (block, block_arg, aligns) = preview_block_code(&pl.block);
+        lines.push(PreviewLineScene { text, style, block, block_arg, aligns });
     }
     PreviewScene {
         open: true,
@@ -866,6 +914,15 @@ fn preview_style_rank(code: u8) -> u8 {
 
 /// Lightweight structure scan for Inspector / jump-bar (no LSP required).
 fn build_outline(app: &App) -> Vec<OutlineItemScene> {
+    // U5: the tree first, and the scan only where a tree cannot answer.
+    //
+    // The scan below is kept, not orphaned — it still owns Markdown headings,
+    // which are not declarations, and the languages with no logic table. What
+    // it no longer owns is any file we can actually parse, where it was reading
+    // `fn` out of comments and strings and stopping at two hundred items.
+    if let Some(rows) = tree_outline(app) {
+        return rows;
+    }
     let ext = app
         .filename
         .as_ref()
@@ -923,6 +980,33 @@ fn build_outline(app: &App) -> Vec<OutlineItemScene> {
         }
     }
     out
+}
+
+/// The outline off the live syntax tree, when there is one to read.
+///
+/// `None` means "the scan should answer this one": no parse yet, or a language
+/// with no logic table. Returning an empty `Vec` instead would blank the panel
+/// for Markdown, whose headings the scan handles and the tree does not.
+///
+/// The tree is the one already parsed for highlighting — `live_tree` hands back
+/// the tree AND the text it was parsed from, together, because a tree indexed
+/// against stale text yields byte offsets that name the wrong identifiers.
+fn tree_outline(app: &App) -> Option<Vec<OutlineItemScene>> {
+    let ext = app.filename.as_ref()?.extension()?.to_str()?;
+    let lang = suisei_core::lang::Lang::from_ext(&ext.to_ascii_lowercase())?;
+    let (tree, text) = app.syntax.live_tree()?;
+    let rows = suisei_core::logic::file_outline(tree, text, lang)?;
+    Some(
+        rows.into_iter()
+            .map(|r| OutlineItemScene {
+                name: r.name,
+                // The scene speaks in 1-based rows; the tree in 0-based.
+                row: (r.row + 1) as u32,
+                kind: r.kind,
+                depth: r.depth,
+            })
+            .collect(),
+    )
 }
 
 fn outline_code_line(trimmed: &str, line_idx: usize) -> Option<OutlineItemScene> {
@@ -2299,6 +2383,7 @@ fn build_visible_lines_from_buffer(
         // chrome snapshot, which the GUI does not render from.
         0,
         scene_wide_default(),
+        None,
     )
 }
 
@@ -2322,6 +2407,16 @@ fn build_lines_at(
     // a pushed value has an ordering question that a parameter does not.
     wrap_cols: u16,
     wide_ratio: u16,
+    // When set, draw exactly THESE buffer rows instead of walking forward from
+    // `band_start`. Sticky scroll needs a handful of rows from a handful of
+    // places in the file, assembled with the band's own styling so a pinned
+    // header and the same line scrolled into view are the same picture.
+    //
+    // A row list rather than N calls: the setup above this loop resolves the
+    // breakpoint map and the debugger's stopped file, and both canonicalize
+    // paths — syscalls. Five calls to the contiguous form would pay for that
+    // five times per frame, while scrolling.
+    explicit: Option<&[usize]>,
 ) -> Vec<EditorLineScene> {
     let buf = buffer_for_tab(app, tab);
     let total = buf.line_count();
@@ -2492,11 +2587,21 @@ fn build_lines_at(
     // hop. Counting rows WALKED would spend the whole band inside a closed
     // fold and draw nothing below it; walking row by row would make a single
     // closed fold over 100k lines cost 100k lookups per frame.
-    let mut row = band_start;
+    // An explicit list drives the walk from its own first entry; `band_start`
+    // is then only the visual origin, and the caller passes 0 for it.
+    let mut at = 0usize;
+    let mut row = match explicit {
+        Some(e) => match e.first() {
+            Some(r) => *r,
+            None => return lines,
+        },
+        None => band_start,
+    };
+    let budget = explicit.map_or(rows, <[usize]>::len);
     let mut drawn_rows = 0usize;
     // Cap matches the FFI packed budget (SUISEI_MAX_LINES = 256) minus headroom;
     // must stay ≥ OVERSCAN_ABOVE + viewport rows or the visible bottom goes blank.
-    while drawn_rows < rows && lines.len() < 240 {
+    while drawn_rows < budget && lines.len() < 240 {
         if row >= total {
             break;
         }
@@ -2530,8 +2635,18 @@ fn build_lines_at(
         // the end of a truncated line.
         let raw = char_prefix(buf.line(row), ROW_BYTES + 1);
         let text = suisei_core::wrap::drawn_row(raw, app.tab_width);
-        let is_cursor_row = row == cursor_row;
-        let (sel_v0, sel_v1) = if use_live_syntax && is_current {
+        // A band that is a WINDOW onto the document carries the caret and the
+        // selection. An explicit row list is not a window — it is a set of
+        // copies pinned above one — and a caret drawn on the pinned copy of the
+        // caret's line shows the user two of them.
+        //
+        // The suppression has to be HERE and not at the call site: `is_cursor`
+        // comes from comparing row numbers and the selection is looked up from
+        // the app, so passing `caret_vcol: None` and `sel: None` suppresses
+        // neither. A test caught exactly that.
+        let decorated = explicit.is_none();
+        let is_cursor_row = decorated && row == cursor_row;
+        let (sel_v0, sel_v1) = if decorated && use_live_syntax && is_current {
             // `.or(sel)` keeps vim's visual range, which lives outside the GUI
             // set: the fallback can only paint rows the primary already covers,
             // because `selection_on_line` drops a range that misses the row.
@@ -2817,12 +2932,77 @@ fn build_lines_at(
             });
             visual_row = visual_row.saturating_add(1);
         }
-        row = match folds {
-            Some(f) => f.next_visible(row),
-            None => row + 1,
+        row = match explicit {
+            // A list is a list — folds do not get to skip entries in it. The
+            // rows were already chosen by someone who knew which were visible.
+            Some(e) => {
+                at += 1;
+                match e.get(at) {
+                    Some(r) => *r,
+                    None => break,
+                }
+            }
+            None => match folds {
+                Some(f) => f.next_visible(row),
+                None => row + 1,
+            },
         };
     }
     lines
+}
+
+/// The scope headers to pin above the viewport, drawn as ordinary editor rows.
+///
+/// Built through `build_lines_at` rather than a renderer of its own, so a
+/// pinned `fn foo() {` and the same line scrolled into view are the same
+/// picture — same syntax spans, same tab expansion, same truncation. A second
+/// assembler here would be a second place for the theme to be applied, and it
+/// would drift.
+///
+/// `wrap_cols` is 0 on purpose: a pinned header is one row. Soft-wrapping it
+/// would push the document down by a variable amount as you scroll.
+pub fn build_sticky_band(
+    app: &App,
+    pane: usize,
+    top_row: usize,
+    max: usize,
+    wide_ratio: u16,
+) -> Vec<EditorLineScene> {
+    let live_panes = if app.split.is_split() {
+        app.split.pane_count()
+    } else {
+        1
+    };
+    if pane >= live_panes || max == 0 {
+        return Vec::new();
+    }
+    // Folding is the ACTIVE document's, and so is the fold structure sticky
+    // scroll reads. A background pane would be pinning headers computed from
+    // another file's indentation.
+    let (tab, focused) = if !app.split.is_split() {
+        (app.current_buffer(), true)
+    } else {
+        let n = app.split.pane_count().max(1);
+        let idx = pane.min(n.saturating_sub(1));
+        (
+            if idx == app.split.focus_index() {
+                app.current_buffer()
+            } else {
+                app.split.panes.get(idx).map(|p| app.pane_tab(p)).unwrap_or(0)
+            },
+            idx == app.split.focus_index(),
+        )
+    };
+    if !focused || tab != app.current_buffer() {
+        return Vec::new();
+    }
+    let rows = app.sticky_headers(top_row, max);
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    // No caret and no selection: the caret is down in the document, and
+    // painting it on a pinned copy of its line would show two.
+    build_lines_at(app, tab, 0, rows.len(), None, None, true, 0, wide_ratio, Some(&rows))
 }
 
 
@@ -3142,7 +3322,7 @@ mod unicode_overlay_tests {
         app.search.input = "한글".into();
         app.recompute_search("한글", false);
         app.search.current = 1;
-        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200);
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200, None);
         let kinds: Vec<u8> = lines[0]
             .spans
             .iter()
@@ -3164,7 +3344,7 @@ mod unicode_overlay_tests {
         assert_eq!(app.search.pattern.as_deref(), Some("suisei"));
         assert_eq!(app.search.matches.len(), 2);
 
-        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200);
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200, None);
         assert!(
             lines[0]
                 .spans

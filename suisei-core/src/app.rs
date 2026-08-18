@@ -276,6 +276,9 @@ pub struct App {
     pub blame: GitBlame,
     /// Indent-based folds (`za` / `zc` / `zo` / `zM` / `zR`)
     pub folds: FoldState,
+    /// (buffer version, tab width) the fold ranges were scanned from.
+    /// `None` = never scanned. See `folds_refresh`.
+    folds_key: Option<(u64, usize)>,
     /// Extra carets (primary = `buffer.cursor`)
     /// Light Source Control side panel (Ctrl+G)
     pub scm: ScmPanel,
@@ -659,6 +662,7 @@ impl Default for App {
             git: GitGutter::new(),
             blame: GitBlame::default(),
             folds: FoldState::new(),
+            folds_key: None,
             scm: ScmPanel::new(),
             git_wb: GitWorkbench::new(),
             settings: SettingsPanel::new(),
@@ -1519,6 +1523,42 @@ impl App {
     pub fn rebuild_folds(&mut self) {
         let lines = self.buffer.lines();
         self.folds.rebuild(&lines, self.tab_width.max(1));
+        self.folds_key = Some((self.buffer.version(), self.tab_width.max(1)));
+    }
+
+    /// Rescan folds only if the document or the tab width moved since the last
+    /// scan.
+    ///
+    /// `rebuild_folds` is unconditional and O(document) — it clones every line
+    /// and re-measures every indent. That was affordable when `za` was the only
+    /// caller. **Sticky scroll asks which folds enclose the top row on every
+    /// composed frame**, so the scan has to be keyed or scrolling a large file
+    /// would pay for a full re-index per frame.
+    ///
+    /// The tab width is in the key because it is an INPUT to the scan
+    /// (`line_indent` expands tabs with it) and it can change without the
+    /// buffer version moving. Keying on the version alone would leave a
+    /// document folded by the old indent rule until the next keystroke.
+    pub fn folds_refresh(&mut self) {
+        if self.folds_key == Some((self.buffer.version(), self.tab_width.max(1))) {
+            return;
+        }
+        self.rebuild_folds();
+    }
+
+    /// Rows to pin above the viewport when `top` is its first visible line.
+    ///
+    /// Outermost first, and truncated from the INNER end: with more nesting
+    /// than room, `mod` + `impl` + `fn` tells you where you are and the three
+    /// innermost `if`s do not. This is also what VS Code shows, which matters
+    /// less than the reason but is worth not gratuitously differing from.
+    pub fn sticky_headers(&self, top: usize, max: usize) -> Vec<usize> {
+        if max == 0 {
+            return Vec::new();
+        }
+        let mut rows = self.folds.enclosing(top);
+        rows.truncate(max);
+        rows
     }
 
     /// Toggle blame side panel (`Ctrl+B` / `gb`) with slide animation.
@@ -2162,6 +2202,7 @@ impl App {
                                 crate::preview::PreviewStyle::AlertWarning,
                             )],
                             image: None,
+                            block: crate::preview::PreviewBlock::Flow,
                         });
                         self.message = e;
                     }

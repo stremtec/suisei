@@ -148,6 +148,37 @@ impl FoldState {
         self.hidden.contains(&row)
     }
 
+    /// The fold headers that CONTAIN `row`, outermost first.
+    ///
+    /// This is what sticky scroll pins. A row scrolled to the top of the
+    /// viewport is still inside its function, its `impl`, its class — and the
+    /// lines that SAY so have gone off the top. The fold ranges already know
+    /// the nesting, so this is a question the existing structure answers rather
+    /// than a second model of the document.
+    ///
+    /// `row > r.start` is strict: a header is not its own ancestor, and a
+    /// viewport whose first line is `fn foo() {` needs nothing pinned above it
+    /// because the answer is already on screen.
+    ///
+    /// Hidden headers are dropped. That cannot happen for a row the renderer
+    /// actually drew — if an ancestor were closed, `row` would be hidden too and
+    /// could not be the top line — but this is a public query and the guard
+    /// costs one set lookup per level.
+    pub fn enclosing(&self, row: usize) -> Vec<usize> {
+        let mut starts: Vec<usize> = self
+            .ranges
+            .iter()
+            .filter(|r| row > r.start && row <= r.end)
+            .map(|r| r.start)
+            .filter(|s| !self.is_hidden(*s))
+            .collect();
+        // `ranges` can hold more than one range per start line; `starts` keeps
+        // the widest, and for this question they are the same header twice.
+        starts.sort_unstable();
+        starts.dedup();
+        starts
+    }
+
     pub fn toggle(&mut self, row: usize) -> Option<&'static str> {
         // Prefer fold starting at row; else enclosing fold start
         let start = if self.starts.contains_key(&row) {

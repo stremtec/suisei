@@ -102,6 +102,11 @@ impl LogicGraph {
 pub struct LogicGrammar {
     /// A function, method or closure — where a graph starts.
     pub function: &'static [&'static str],
+    /// A named thing that HOLDS functions: a struct, a class, an `impl`, a
+    /// module. Not control flow, so the graph walk ignores it — it exists for
+    /// the file outline, which has to nest a method under the type that owns
+    /// it rather than listing forty `new`s at the top level.
+    pub container: &'static [&'static str],
     /// The name field to read off a function node.
     pub name_field: &'static str,
     /// Branches. Their condition is the first named child.
@@ -133,6 +138,9 @@ pub fn grammar_for(lang: Lang) -> Option<LogicGrammar> {
     Some(match lang {
         Lang::Rust => LogicGrammar {
             function: &["function_item", "closure_expression"],
+            container: &[
+                "struct_item", "enum_item", "trait_item", "impl_item", "mod_item", "union_item",
+            ],
             name_field: "name",
             decision: &["if_expression", "match_expression"],
             loops: &["for_expression", "while_expression", "loop_expression"],
@@ -155,6 +163,7 @@ pub fn grammar_for(lang: Lang) -> Option<LogicGrammar> {
         },
         Lang::Python => LogicGrammar {
             function: &["function_definition", "lambda"],
+            container: &["class_definition"],
             name_field: "name",
             decision: &["if_statement", "match_statement", "try_statement"],
             loops: &["for_statement", "while_statement"],
@@ -172,6 +181,7 @@ pub fn grammar_for(lang: Lang) -> Option<LogicGrammar> {
                 "arrow_function",
                 "method_definition",
             ],
+            container: &["class_declaration", "interface_declaration", "enum_declaration"],
             name_field: "name",
             decision: &["if_statement", "switch_statement", "try_statement"],
             loops: &["for_statement", "for_in_statement", "while_statement", "do_statement"],
@@ -184,6 +194,7 @@ pub fn grammar_for(lang: Lang) -> Option<LogicGrammar> {
         },
         Lang::Go => LogicGrammar {
             function: &["function_declaration", "method_declaration", "func_literal"],
+            container: &["type_declaration"],
             name_field: "name",
             decision: &["if_statement", "type_switch_statement", "expression_switch_statement"],
             loops: &["for_statement"],
@@ -196,6 +207,7 @@ pub fn grammar_for(lang: Lang) -> Option<LogicGrammar> {
         },
         Lang::C | Lang::Cpp => LogicGrammar {
             function: &["function_definition", "lambda_expression"],
+            container: &["struct_specifier", "class_specifier", "enum_specifier", "namespace_definition"],
             name_field: "declarator",
             decision: &["if_statement", "switch_statement"],
             loops: &["for_statement", "while_statement", "do_statement"],
@@ -549,6 +561,103 @@ pub fn outline(tree: &tree_sitter::Tree, src: &str, lang: Lang) -> Option<LogicT
     }
     rows.sort_by_key(|r| r.start_row);
     Some(LogicTree { rows })
+}
+
+/// One row of the document outline, read off the syntax tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineRow {
+    pub name: String,
+    /// 0-based buffer row.
+    pub row: usize,
+    /// 0 heading · 1 function · 2 type/container.
+    pub kind: u8,
+    /// Nesting: a method inside a class is 1.
+    pub depth: u8,
+}
+
+/// The file's declarations, from the TREE rather than from a scan of the text.
+///
+/// This is U5 of the Logic View plan, and it is the same tree the logic graph
+/// is built from — which is the point. The outline used to be a line-by-line
+/// string match: `trimmed.strip_prefix("fn ")` and sixteen friends. That is
+/// wrong in ways a parser cannot be:
+///
+///   · **A call in a comment is a symbol.** `// class Foo does the thing`
+///     listed `Foo`. So did a `fn` inside a string literal.
+///   · **A declaration that wraps is invisible.** A signature broken across
+///     lines starts with an argument, not with `fn`.
+///   · **It stopped at 200 items** because a linear scan of a big file had no
+///     cheaper way to bound itself. A tree walk visits declarations, not lines.
+///   · **Nesting was guessed from indentation** where it was guessed at all,
+///     so a method and its class were siblings.
+///
+/// Returns `None` when the language has no table — the caller keeps its text
+/// scan for those, and for Markdown headings, which are not declarations.
+pub fn file_outline(tree: &tree_sitter::Tree, src: &str, lang: Lang) -> Option<Vec<OutlineRow>> {
+    let g = grammar_for(lang)?;
+    let mut out = Vec::new();
+    // (node, depth). Explicit stack rather than recursion: a generated file can
+    // nest deeply enough to matter, and this runs on the compose path.
+    let mut cursor = tree.root_node().walk();
+    let mut stack: Vec<(Node<'_>, u8)> = tree
+        .root_node()
+        .named_children(&mut cursor)
+        .map(|n| (n, 0u8))
+        .collect();
+    stack.reverse();
+
+    while let Some((n, depth)) = stack.pop() {
+        let is_fn = g.function.contains(&n.kind());
+        let is_container = g.container.contains(&n.kind());
+        if is_fn || is_container {
+            let label = declaration_label(n, &g, src);
+            // A closure has no name, and a row called `fn` in a list of forty
+            // is worse than no row: it takes a line and answers nothing.
+            if !label.is_empty() {
+                out.push(OutlineRow {
+                    name: label,
+                    row: n.start_position().row,
+                    kind: if is_fn { 1 } else { 2 },
+                    depth,
+                });
+            }
+        }
+        // Descend regardless — a method lives inside a class, and a nested
+        // function inside a function. Only the DEPTH changes, and only when
+        // the thing we just listed can hold others.
+        let child_depth = if is_container || is_fn {
+            depth.saturating_add(1)
+        } else {
+            depth
+        };
+        let mut c = n.walk();
+        let kids: Vec<Node<'_>> = n.named_children(&mut c).collect();
+        for k in kids.into_iter().rev() {
+            stack.push((k, child_depth));
+        }
+    }
+    out.sort_by_key(|r| r.row);
+    Some(out)
+}
+
+/// The name to show for a declaration, or empty when it has none.
+///
+/// `impl Foo` and `impl Trait for Foo` have no `name` field — the type is in
+/// `type`/`trait`. Falling through to the function label's `"fn"` default would
+/// have listed every `impl` in a Rust file under the same word.
+fn declaration_label(n: Node<'_>, g: &LogicGrammar, src: &str) -> String {
+    for field in [g.name_field, "name", "type", "declarator"] {
+        if let Some(text) = n
+            .child_by_field_name(field)
+            .and_then(|x| x.utf8_text(src.as_bytes()).ok())
+        {
+            let one = text.lines().next().unwrap_or("").trim();
+            if !one.is_empty() {
+                return one.to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 fn function_label(n: Node<'_>, g: &LogicGrammar, src: &str) -> String {

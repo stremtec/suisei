@@ -98,6 +98,55 @@ pub struct PreviewLine {
     pub spans: Vec<(String, PreviewStyle)>,
     /// Set on an image anchor row (`![alt](local-file)` on its own line).
     pub image: Option<ImageBlock>,
+    /// What this row is STRUCTURALLY. See [`PreviewBlock`].
+    pub block: PreviewBlock,
+}
+
+/// A row's structural role, for a renderer that can draw views.
+///
+/// This module opens by calling itself a TUI renderer, and that is the whole
+/// problem: a terminal's only way to say "table" is `┌──┬──┐`, and its only way
+/// to say "quote" is a `│` in column one. Both are drawn by padding text to a
+/// width measured in monospace cells — so the moment the face renders them in a
+/// proportional font, or at any size other than the one the padding assumed,
+/// the box is crooked and the rule is ragged.
+///
+/// So the row carries what it IS, and the face draws it: a table row hands over
+/// its cells and lets the face measure them, a rule is a rule rather than
+/// fifty-six `─`, and a code block is a run of rows the face can put a
+/// background behind. The text of a row never contains box-drawing again.
+///
+/// The spans stay. Inline formatting — bold, links, code — is genuinely a
+/// property of the text, and it survives a change of font.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PreviewBlock {
+    /// Ordinary flowed text: a paragraph, a heading, a list item.
+    #[default]
+    Flow,
+    /// A thematic break. The row carries no text.
+    Rule,
+    /// Inside a block quote or a GitHub alert, nested `depth` deep.
+    /// The `│ ` prefix is NOT in the spans — the face draws the rule.
+    Quote { depth: u8 },
+    /// A line of a fenced or indented code block.
+    ///
+    /// `first`/`last` bracket the run so the face can round the corners of one
+    /// background rather than draw a box per row. On the first row the spans
+    /// hold the language, or nothing when the fence named none.
+    Code { first: bool, last: bool },
+    /// One row of a table, cell by cell.
+    ///
+    /// Cells are un-padded: the whole point is that the face measures them in
+    /// the font it is about to draw with. `aligns` is per column and comes from
+    /// the `:---:` separator, which is the only thing that row was ever for —
+    /// it is not emitted as a row of its own.
+    TableRow {
+        cells: Vec<Vec<(String, PreviewStyle)>>,
+        aligns: Vec<ColAlign>,
+        header: bool,
+        first: bool,
+        last: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,14 +347,17 @@ impl PreviewState {
                     PreviewLine {
                         spans: vec![("  Image preview".into(), PreviewStyle::H2)],
                         image: None,
+                        block: PreviewBlock::Flow,
                     },
                     PreviewLine {
                         spans: vec![(format!("  {name}"), PreviewStyle::Dim)],
                         image: None,
+                        block: PreviewBlock::Flow,
                     },
                     PreviewLine {
                         spans: vec![("".into(), PreviewStyle::Normal)],
                         image: None,
+                        block: PreviewBlock::Flow,
                     },
                     PreviewLine {
                         spans: vec![(
@@ -313,6 +365,7 @@ impl PreviewState {
                             PreviewStyle::Dim,
                         )],
                         image: None,
+                        block: PreviewBlock::Flow,
                     },
                     PreviewLine {
                         spans: vec![(
@@ -320,6 +373,7 @@ impl PreviewState {
                             PreviewStyle::Dim,
                         )],
                         image: None,
+                        block: PreviewBlock::Flow,
                     },
                 ];
                 self.source_len = 0;
@@ -486,10 +540,11 @@ fn render_markdown(text: &str, base: Option<&Path>, cell: (u32, u32)) -> Vec<Pre
                         in_code = false;
                         code_fence.clear();
                         code_lang.clear();
-                        out.push(pl(vec![(
-                            "└────────────────────────".into(),
-                            PreviewStyle::Dim,
-                        )]));
+                        // No closing row. The fence's job was to say where the
+                        // block ends, and `Code { last: true }` on the row
+                        // above says it without spending a line of the page on
+                        // a drawing of a corner.
+                        mark_code_last(&mut out);
                         li += 1;
                         continue;
                     }
@@ -504,15 +559,18 @@ fn render_markdown(text: &str, base: Option<&Path>, cell: (u32, u32)) -> Vec<Pre
                 code_lang = rest.trim().to_string();
                 // strip info string extras (filename etc.) — first token is lang
                 let lang = code_lang.split_whitespace().next().unwrap_or("");
-                let header = if lang.is_empty() {
-                    "┌ code".to_string()
-                } else {
-                    format!("┌ {lang}")
-                };
-                out.push(pl(vec![
-                    (header, PreviewStyle::CodeLang),
-                    (" ────────────────".into(), PreviewStyle::Dim),
-                ]));
+                // The language, and only the language. A fence that named none
+                // gets an empty row that the face draws as the top of the
+                // block — it does not get the word "code", which said nothing
+                // a background does not already say.
+                out.push(pb(
+                    if lang.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![(lang.to_string(), PreviewStyle::CodeLang)]
+                    },
+                    PreviewBlock::Code { first: true, last: false },
+                ));
                 li += 1;
                 continue;
             }
@@ -560,7 +618,7 @@ fn render_markdown(text: &str, base: Option<&Path>, cell: (u32, u32)) -> Vec<Pre
 
         // HR (before list/heading misparse)
         if is_hr(line) {
-            out.push(pl(vec![("─".repeat(56), PreviewStyle::Hr)]));
+            out.push(pb(Vec::new(), PreviewBlock::Rule));
             li += 1;
             continue;
         }
@@ -588,14 +646,14 @@ fn render_markdown(text: &str, base: Option<&Path>, cell: (u32, u32)) -> Vec<Pre
                 }
                 li += 1;
             }
-            out.push(pl(vec![("┌ code".into(), PreviewStyle::CodeLang)]));
-            for b in block {
-                out.push(code_body_line(&b));
+            // An indented block names no language, so there is no header row
+            // to spend: the first body row IS the first row of the block.
+            let last = block.len().saturating_sub(1);
+            for (i, b) in block.iter().enumerate() {
+                let mut row = code_body_line(b);
+                row.block = PreviewBlock::Code { first: i == 0, last: i == last };
+                out.push(row);
             }
-            out.push(pl(vec![(
-                "└────────────────────────".into(),
-                PreviewStyle::Dim,
-            )]));
             continue;
         }
 
@@ -660,7 +718,7 @@ fn render_markdown(text: &str, base: Option<&Path>, cell: (u32, u32)) -> Vec<Pre
     // Footnotes appendix
     if !footnotes.is_empty() {
         out.push(pl(vec![("".into(), PreviewStyle::Normal)]));
-        out.push(pl(vec![("─".repeat(40), PreviewStyle::Hr)]));
+        out.push(pb(Vec::new(), PreviewBlock::Rule));
         out.push(pl(vec![("Footnotes".into(), PreviewStyle::H4)]));
         for (id, body) in footnotes {
             let mut spans = vec![(format!("[^{id}]  "), PreviewStyle::Footnote)];
@@ -698,10 +756,25 @@ fn detect_fence(line: &str) -> Option<(String, String)> {
 }
 
 fn code_body_line(line: &str) -> PreviewLine {
-    pl(vec![
-        ("│ ".into(), PreviewStyle::Dim),
-        (line.to_string(), PreviewStyle::CodeBlock),
-    ])
+    // No `│` in the text. The bar was a terminal drawing the left edge of a
+    // box; the face draws a background, and a bar baked into the string would
+    // sit inside it looking like part of the code.
+    pb(
+        vec![(line.to_string(), PreviewStyle::CodeBlock)],
+        PreviewBlock::Code { first: false, last: false },
+    )
+}
+
+/// Close the code run that `out` ends with.
+///
+/// The fence that closes a block is read AFTER its last body row, so `last`
+/// cannot be set when that row is pushed. Reaching back one row is the whole
+/// of it — and if the block is empty, the row reached back to is the opening
+/// row, which correctly becomes both `first` and `last`.
+fn mark_code_last(out: &mut [PreviewLine]) {
+    if let Some(PreviewBlock::Code { last, .. }) = out.last_mut().map(|l| &mut l.block) {
+        *last = true;
+    }
 }
 
 fn parse_footnote_def(line: &str) -> Option<(String, String)> {
@@ -919,41 +992,33 @@ fn render_blockquote(raw_lines: &[&str]) -> Vec<PreviewLine> {
 
     let depth = quote_depth(raw_lines[0]);
 
+    // The bar is GONE from the text. `│ ` and `┃ ` were a terminal drawing a
+    // left edge; the face draws a rule beside the row, at the depth the block
+    // says. Baking it into the string also made the quote un-copyable — the
+    // bars came with the words.
+    let block = PreviewBlock::Quote { depth: depth.max(1).min(255) as u8 };
+
     if let Some(k) = alert {
         let (st, label) = alert_style(k);
-        let bar = "┃ ".repeat(depth.max(1));
-        out.push(pl(vec![(bar.clone(), st), (format!("⚠ {label}"), st)]));
+        out.push(pb(vec![(format!("⚠ {label}"), st)], block.clone()));
         for b in bodies.iter().skip(start) {
-            if b.trim().is_empty() {
-                out.push(pl(vec![(bar.clone(), st)]));
-            } else {
-                let mut spans = vec![(bar.clone(), st)];
-                let mut body = inline_md(b);
-                for s in &mut body {
-                    if s.1 == PreviewStyle::Normal {
-                        s.1 = st;
-                    }
+            let mut body = inline_md(b);
+            for s in &mut body {
+                if s.1 == PreviewStyle::Normal {
+                    s.1 = st;
                 }
-                spans.extend(body);
-                out.push(pl(spans));
             }
+            out.push(pb(body, block.clone()));
         }
     } else {
         for b in &bodies {
-            let bar = "│ ".repeat(depth.max(1));
-            if b.trim().is_empty() {
-                out.push(pl(vec![(bar, PreviewStyle::Quote)]));
-            } else {
-                let mut spans = vec![(bar, PreviewStyle::Quote)];
-                let mut body = inline_md(b);
-                for s in &mut body {
-                    if s.1 == PreviewStyle::Normal {
-                        s.1 = PreviewStyle::Quote;
-                    }
+            let mut body = inline_md(b);
+            for s in &mut body {
+                if s.1 == PreviewStyle::Normal {
+                    s.1 = PreviewStyle::Quote;
                 }
-                spans.extend(body);
-                out.push(pl(spans));
             }
+            out.push(pb(body, block.clone()));
         }
     }
     out
@@ -1209,9 +1274,13 @@ fn collect_paragraph<'a>(lines: &[&'a str]) -> (Vec<&'a str>, usize) {
 }
 
 // ── Tables ──────────────────────────────────────────────
+//
+// `make_table_border` and `strip_md_for_width` lived here. Both existed only to
+// draw `┌──┬──┐` and to guess how wide a cell would be in monospace cells so the
+// padding lined up. A face that measures its own glyphs needs neither.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ColAlign {
+pub enum ColAlign {
     Left,
     Center,
     Right,
@@ -1245,7 +1314,6 @@ fn parse_table_aligns(sep: &str) -> Vec<ColAlign> {
 }
 
 fn render_table(rows: &[&str], aligns: &[ColAlign]) -> Vec<PreviewLine> {
-    use unicode_width::UnicodeWidthStr;
     let mut out = Vec::new();
     if rows.is_empty() {
         return out;
@@ -1261,96 +1329,69 @@ fn render_table(rows: &[&str], aligns: &[ColAlign]) -> Vec<PreviewLine> {
     }
 
     let n_cols = cells_all.iter().map(|r| r.len()).max().unwrap_or(1);
-    // measure raw text width (without markdown markers ideally — use stripped approx)
-    let mut col_widths = vec![3usize; n_cols];
-    for row in &cells_all {
-        for (i, cell) in row.iter().enumerate() {
-            let plain = strip_md_for_width(cell.trim());
-            let w = UnicodeWidthStr::width(plain.as_str());
-            if i < col_widths.len() && w > col_widths[i] {
-                col_widths[i] = w;
-            }
-        }
-    }
-
     let is_header = rows.len() >= 2;
-    out.push(pl(vec![(
-        make_table_border(&col_widths, '┌', '┬', '┐'),
-        PreviewStyle::Hr,
-    )]));
+    let last = cells_all.len().saturating_sub(1);
+    // Column alignment is the separator row's entire contribution, so it rides
+    // on every row rather than being emitted as a row of its own — a `:---:`
+    // line is a spec, not content, and it never belonged on the page.
+    let aligns: Vec<ColAlign> = (0..n_cols)
+        .map(|i| aligns.get(i).copied().unwrap_or(ColAlign::Left))
+        .collect();
 
     for (row_i, row) in cells_all.iter().enumerate() {
-        let mut spans = vec![("│".into(), PreviewStyle::Hr)];
-        for i in 0..n_cols {
-            let w = col_widths[i];
-            let raw = row.get(i).map(|s| s.trim()).unwrap_or("");
-            let align = aligns.get(i).copied().unwrap_or(ColAlign::Left);
-            let cell_spans = if row_i == 0 && is_header {
-                let mut s = inline_md(raw);
-                for p in &mut s {
-                    if p.1 == PreviewStyle::Normal {
-                        p.1 = PreviewStyle::Bold;
+        // Un-padded. Padding to a width measured in monospace cells is exactly
+        // what made the old table crooked in a proportional font: the face is
+        // the only side that knows what its glyphs actually measure, so it
+        // gets the text and does the measuring.
+        let cells: Vec<Vec<(String, PreviewStyle)>> = (0..n_cols)
+            .map(|i| {
+                let raw = row.get(i).map(|s| s.trim()).unwrap_or("");
+                let mut spans = inline_md(raw);
+                if row_i == 0 && is_header {
+                    for p in &mut spans {
+                        if p.1 == PreviewStyle::Normal {
+                            p.1 = PreviewStyle::Bold;
+                        }
                     }
                 }
-                s
-            } else {
-                inline_md(raw)
-            };
-            let content_w: usize = cell_spans
-                .iter()
-                .map(|(t, _)| UnicodeWidthStr::width(t.as_str()))
-                .sum();
-            let pad = w.saturating_sub(content_w);
-            let (left_pad, right_pad) = match align {
-                ColAlign::Left => (0, pad),
-                ColAlign::Right => (pad, 0),
-                ColAlign::Center => (pad / 2, pad - pad / 2),
-            };
-            spans.push((" ".into(), PreviewStyle::Normal));
-            if left_pad > 0 {
-                spans.push((" ".repeat(left_pad), PreviewStyle::Normal));
-            }
-            spans.extend(cell_spans);
-            if right_pad > 0 {
-                spans.push((" ".repeat(right_pad), PreviewStyle::Normal));
-            }
-            spans.push((" │".into(), PreviewStyle::Hr));
-        }
-        out.push(pl(spans));
-        if row_i == 0 && is_header {
-            out.push(pl(vec![(
-                make_table_border(&col_widths, '├', '┼', '┤'),
-                PreviewStyle::Hr,
-            )]));
-        }
-    }
-    out.push(pl(vec![(
-        make_table_border(&col_widths, '└', '┴', '┘'),
-        PreviewStyle::Hr,
-    )]));
-    out
-}
-
-fn strip_md_for_width(s: &str) -> String {
-    // rough: remove common markers for measurement
-    let mut out = s.to_string();
-    for m in ["**", "__", "~~", "*", "_", "`"] {
-        out = out.replace(m, "");
+                spans
+            })
+            .collect();
+        // `spans` keeps a flat rendering of the row — tab-separated, no box —
+        // so anything that only knows how to read text (a copy, a search, a
+        // fallback renderer) still gets something true rather than a grid of
+        // pipes. The face draws from `cells`.
+        let flat: Vec<(String, PreviewStyle)> = cells
+            .iter()
+            .enumerate()
+            .flat_map(|(i, c)| {
+                let mut v: Vec<(String, PreviewStyle)> = Vec::new();
+                if i > 0 {
+                    // ASCII Unit Separator. A cell boundary has to be a
+                    // character that cannot occur INSIDE a cell, and a tab can
+                    // — markdown splits rows on `|`, so a literal tab in a cell
+                    // survives into the text and would have split it again.
+                    v.push(("\u{1F}".into(), PreviewStyle::Normal));
+                }
+                v.extend(c.iter().cloned());
+                v
+            })
+            .collect();
+        out.push(pb(
+            flat,
+            PreviewBlock::TableRow {
+                cells,
+                aligns: aligns.clone(),
+                header: row_i == 0 && is_header,
+                first: row_i == 0,
+                last: row_i == last,
+            },
+        ));
     }
     out
 }
 
-fn make_table_border(col_widths: &[usize], left: char, mid: char, right: char) -> String {
-    let mut s = String::from(left);
-    for (i, w) in col_widths.iter().enumerate() {
-        if i > 0 {
-            s.push(mid);
-        }
-        s.push_str(&"─".repeat(w + 2));
-    }
-    s.push(right);
-    s
-}
+
 
 fn split_table_row(line: &str) -> Vec<String> {
     let t = line.trim();
@@ -2202,7 +2243,12 @@ fn render_plain(text: &str) -> Vec<PreviewLine> {
 }
 
 fn pl(spans: Vec<(String, PreviewStyle)>) -> PreviewLine {
-    PreviewLine { spans, image: None }
+    PreviewLine { spans, image: None, block: PreviewBlock::Flow }
+}
+
+/// A row that is structurally something other than flowed text.
+fn pb(spans: Vec<(String, PreviewStyle)>, block: PreviewBlock) -> PreviewLine {
+    PreviewLine { spans, image: None, block }
 }
 
 #[cfg(test)]
@@ -2303,13 +2349,119 @@ mod tests {
     fn md_table_renders() {
         let md = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |\n";
         let lines = render_markdown_t(md);
-        assert!(lines.len() >= 5, "got {} lines", lines.len());
+        // Three rows, and only three: the border rows and the `|---|` spec row
+        // are not content. This used to be five lines and two of them were
+        // drawings.
+        assert_eq!(lines.len(), 3, "got {} lines", lines.len());
         assert!(has_style(&lines, "Name", PreviewStyle::Bold));
-        assert!(lines.iter().any(|l| {
-            l.spans
-                .iter()
-                .any(|(t, _)| t.contains('┌') || t.contains('├') || t.contains('└'))
-        }));
+
+        let PreviewBlock::TableRow { cells, header, first, last, .. } = &lines[0].block else {
+            panic!("row 0 is not a table row: {:?}", lines[0].block);
+        };
+        assert!(*header && *first && !*last);
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0][0].0, "Name");
+        assert_eq!(cells[1][0].0, "Age");
+
+        let PreviewBlock::TableRow { cells, header, last, .. } = &lines[2].block else {
+            panic!("row 2 is not a table row");
+        };
+        assert!(!*header && *last);
+        assert_eq!(cells[0][0].0, "Bob");
+    }
+
+    #[test]
+    fn a_table_cell_is_never_padded() {
+        // The regression this whole change exists to prevent. Padding a cell to
+        // a width measured in MONOSPACE CELLS is what made the table crooked
+        // the moment the face drew it in anything else.
+        let md = "| a | longer heading |\n|---|---|\n| x | y |\n";
+        for line in render_markdown_t(md) {
+            let PreviewBlock::TableRow { cells, .. } = &line.block else { continue };
+            for cell in cells {
+                for (text, _) in cell {
+                    assert_eq!(text.trim(), text.as_str(), "cell was padded: {text:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_table_carries_its_column_alignment() {
+        let md = "| l | c | r |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n";
+        let lines = render_markdown_t(md);
+        let PreviewBlock::TableRow { aligns, .. } = &lines[0].block else {
+            panic!("not a table row");
+        };
+        assert_eq!(aligns, &[ColAlign::Left, ColAlign::Center, ColAlign::Right]);
+    }
+
+    #[test]
+    fn nothing_draws_a_box_with_characters_any_more() {
+        // The property, held over every construct at once. A face that measures
+        // its own glyphs cannot use a drawing that was padded for someone
+        // else's — so the renderer must not produce one.
+        let md = "# Title\n\n---\n\n> quoted\n\n```rust\nfn main() {}\n```\n\n\
+                  | a | b |\n|---|---|\n| 1 | 2 |\n";
+        for line in render_markdown_t(md) {
+            for (text, _) in &line.spans {
+                for ch in "┌┐└┘├┤┬┴┼│┃─".chars() {
+                    assert!(
+                        !text.contains(ch),
+                        "{ch:?} is still drawn into the text: {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_code_block_is_a_run_with_two_ends() {
+        let lines = render_markdown_t("```rust\nlet a = 1;\nlet b = 2;\n```\n");
+        let code: Vec<&PreviewLine> = lines
+            .iter()
+            .filter(|l| matches!(l.block, PreviewBlock::Code { .. }))
+            .collect();
+        assert_eq!(code.len(), 3, "language row plus two body rows");
+        assert_eq!(code[0].block, PreviewBlock::Code { first: true, last: false });
+        assert_eq!(code[0].spans[0].0, "rust", "the first row names the language");
+        assert_eq!(code[2].block, PreviewBlock::Code { first: false, last: true });
+    }
+
+    #[test]
+    fn a_fence_with_no_language_still_opens_and_closes() {
+        let lines = render_markdown_t("```\nplain\n```\n");
+        let code: Vec<&PreviewBlock> = lines
+            .iter()
+            .map(|l| &l.block)
+            .filter(|b| matches!(b, PreviewBlock::Code { .. }))
+            .collect();
+        assert_eq!(code.first(), Some(&&PreviewBlock::Code { first: true, last: false }));
+        assert_eq!(code.last(), Some(&&PreviewBlock::Code { first: false, last: true }));
+    }
+
+    #[test]
+    fn a_quote_says_how_deep_it_is() {
+        let lines = render_markdown_t("> outer\n>> inner\n");
+        let depths: Vec<u8> = lines
+            .iter()
+            .filter_map(|l| match l.block {
+                PreviewBlock::Quote { depth } => Some(depth),
+                _ => None,
+            })
+            .collect();
+        assert!(!depths.is_empty(), "no quote rows");
+        assert!(depths.iter().any(|d| *d >= 1));
+    }
+
+    #[test]
+    fn a_rule_is_a_rule_and_not_fifty_six_dashes() {
+        let lines = render_markdown_t("a\n\n---\n\nb\n");
+        let rule = lines
+            .iter()
+            .find(|l| l.block == PreviewBlock::Rule)
+            .expect("no rule row");
+        assert!(rule.spans.is_empty(), "a rule carries no text: {:?}", rule.spans);
     }
 
     #[test]
