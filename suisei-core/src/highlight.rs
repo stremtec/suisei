@@ -178,6 +178,16 @@ pub fn highlight_line(line: &str, ext: Option<&str>) -> Vec<(TokenKind, usize, u
 /// `phtml`, `sbt`, …) resolve to their language's rules instead of falling
 /// through to the generic set. Anything with no grammar — `nim`, `kt`, `vue`,
 /// `sql` — is still matched by its own spelling below.
+impl LangRules {
+    /// What this language starts a line comment with, if it has one.
+    ///
+    /// `None` is a real answer and not a gap: JSON has no comment to toggle,
+    /// and inserting one would produce a file that will not parse.
+    pub fn line_comment(&self) -> Option<&'static str> {
+        self.line_comment
+    }
+}
+
 pub fn rules_for_ext(ext: Option<&str>) -> LangRules {
     let canonical = ext
         .and_then(crate::lang::Lang::from_ext)
@@ -217,6 +227,12 @@ pub fn rules_for_ext(ext: Option<&str>) -> LangRules {
 }
 
 pub struct LangRules {
+    /// What this language starts a line comment with.
+    ///
+    /// Read by the highlighter and, since ⌘/, by the editor: the table already
+    /// knew `//` for twenty-five languages and nothing outside this file could
+    /// ask. A fact core holds that never reaches a control is the same bug
+    /// four times over in this codebase — see `line_comment()`.
     line_comment: Option<&'static str>,
     pub keywords: &'static [&'static str],
     pub types: &'static [&'static str],

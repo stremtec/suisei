@@ -4726,6 +4726,13 @@ final class EngineBridge: ObservableObject {
 
     // MARK: - LSP face surfaces
 
+    /// ⌘/ — comment or uncomment the lines the selection touches.
+    func toggleComment() {
+        guard let engine else { return }
+        suisei_engine_toggle_comment(engine)
+        refreshChrome()
+    }
+
     func formatDocument() {
         guard let engine else { return }
         cancelPointerSession()

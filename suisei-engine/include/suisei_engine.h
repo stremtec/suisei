@@ -989,6 +989,8 @@ void suisei_engine_set_terminal_title(SuiseiEngine *ptr, uint64_t tab_id,
 
 /* LSP face surfaces — same App methods the TUI dispatches (gd / format / rename / code actions). */
 void suisei_engine_format_document(SuiseiEngine *ptr);
+/* Comment or uncomment the lines the selection touches. */
+void suisei_engine_toggle_comment(SuiseiEngine *ptr);
 void suisei_engine_goto_definition(SuiseiEngine *ptr);
 void suisei_engine_rename_symbol(SuiseiEngine *ptr, const char *new_name);
 void suisei_engine_code_actions(SuiseiEngine *ptr);

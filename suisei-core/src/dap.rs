@@ -3834,12 +3834,6 @@ error: aborting due to 1 previous error
         assert!(!d.datatip_pending);
     }
 
-    /// A refusal clears the spinner and stays out of the console.
-    ///
-    /// The failure branch of `handle_response` returns early, so without its
-    /// own arm there the pending flag stayed set forever and the popover span
-    /// on a keyword that was never going to have a value.
-    #[test]
     /// Closing the debug panel stops the hover.
     ///
     /// Reported twice. The first time the face was telling core the wrong
@@ -3868,6 +3862,12 @@ error: aborting due to 1 previous error
         assert!(!d.datatip_pending);
     }
 
+    /// A refusal clears the spinner and stays out of the console.
+    ///
+    /// The failure branch of `handle_response` returns early, so without its
+    /// own arm there the pending flag stayed set forever and the popover span
+    /// on a keyword that was never going to have a value.
+    #[test]
     fn a_refused_datatip_stops_waiting_and_says_nothing() {
         let mut d = DapClient::default();
         d.panel_open = true;

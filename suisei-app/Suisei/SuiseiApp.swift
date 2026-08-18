@@ -198,6 +198,12 @@ struct SuiseiApp: App {
 
         // Editor — LSP / edit actions reachable from the menu bar.
         CommandMenu("Editor") {
+            // The key pressed most often in this menu, so it goes first.
+            Button("Toggle Comment") {
+                engine.toggleComment()
+            }
+            .keyboardShortcut("/", modifiers: .command)
+
             Button("Format Document") {
                 engine.formatDocument()
             }

@@ -191,6 +191,23 @@ impl SelectionSet {
         set
     }
 
+    /// Rebuild from a list of SELECTIONS, keeping index `primary` primary.
+    ///
+    /// `carets` collapses each one to its head, which is right after an insert
+    /// and wrong after an edit that has to keep the reader's range — ⌘/ moves
+    /// the text under a selection and the selection has to stay on it.
+    pub fn spans(selections: Vec<Selection>, primary: usize) -> Self {
+        if selections.is_empty() {
+            return Self::new();
+        }
+        let mut set = Self {
+            primary: primary.min(selections.len() - 1),
+            selections,
+        };
+        set.normalise_keeping_primary();
+        set
+    }
+
     /// Index of the primary within the current (sorted) selection list.
     pub fn primary_index(&self) -> usize {
         self.primary

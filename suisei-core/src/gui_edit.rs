@@ -1185,3 +1185,181 @@ mod tests {
         assert_eq!(app.sel.primary().head, Position::new(0, 3));
     }
 }
+
+// ── ⌘/ ─────────────────────────────────────────────────────────────────────
+
+impl App {
+    /// Comment or uncomment every line the selection touches.
+    ///
+    /// The token comes from `highlight::rules_for_ext`, which has known it for
+    /// twenty-five languages since the highlighter was written and had no way
+    /// to be asked.
+    ///
+    /// Returns false when this language has no line comment — JSON has none,
+    /// and inventing one produces a file that will not parse.
+    pub fn toggle_line_comment(&mut self) -> bool {
+        let rules = crate::highlight::rules_for_ext(self.file_extension().as_deref());
+        let Some(token) = rules.line_comment() else {
+            self.message = "No line comment in this file type".into();
+            return false;
+        };
+        let rows = self.comment_rows();
+        if rows.is_empty() {
+            return false;
+        }
+
+        // Uncomment only when EVERY line that could be commented already is.
+        // Mixed goes the other way — so a block half-commented by hand becomes
+        // wholly commented, and pressing again restores it.
+        let mut any_content = false;
+        let all_commented = rows.iter().all(|&row| {
+            let line = self.buffer.line(row);
+            if line.trim().is_empty() {
+                return true;
+            }
+            any_content = true;
+            line.trim_start().starts_with(token)
+        });
+
+        self.push_undo();
+        self.edit_run = crate::app::EditRun::None;
+        if all_commented && any_content {
+            for &row in &rows {
+                self.uncomment_row(row, token);
+            }
+        } else {
+            // At the SHALLOWEST indentation in the block, not at column zero.
+            // A comment token jammed against the left margin destroys the
+            // shape of the code it is commenting out, and the shape is how
+            // anyone reads what they just switched off.
+            let col = rows
+                .iter()
+                .map(|&row| self.buffer.line(row))
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| visual_indent(&line, self.tab_width))
+                .min()
+                .unwrap_or(0);
+            let alone = rows.len() == 1;
+            for &row in &rows {
+                self.comment_row(row, token, col, alone);
+            }
+        }
+        self.sync_after_comment(&rows);
+        true
+    }
+
+    /// Every buffer row any caret or selection touches, once each, in order.
+    ///
+    /// A selection that ENDS at column zero does not include that last row:
+    /// dragging down to the start of a line selects the lines above it, and
+    /// commenting one the user cannot see selected is a surprise.
+    fn comment_rows(&self) -> Vec<usize> {
+        let last = self.buffer.line_count().saturating_sub(1);
+        let mut rows: Vec<usize> = Vec::new();
+        for sel in self.sel.all() {
+            let (start, end) = (sel.start(), sel.end());
+            let stop = if end.row > start.row && end.col == 0 {
+                end.row - 1
+            } else {
+                end.row
+            };
+            for row in start.row..=stop.min(last) {
+                if !rows.contains(&row) {
+                    rows.push(row);
+                }
+            }
+        }
+        rows.sort_unstable();
+        rows
+    }
+
+    fn comment_row(&mut self, row: usize, token: &str, col: usize, alone: bool) {
+        let line = self.buffer.line(row);
+        // A blank line inside a block gets nothing — a trailing `// ` on an
+        // empty line is litter. A blank line ON ITS OWN does get one: pressing
+        // ⌘/ on an empty line means "start a comment here", and that is the
+        // only reading of it.
+        if line.trim().is_empty() && !alone {
+            return;
+        }
+        let at = byte_col_for_visual(&line, col, self.tab_width);
+        self.buffer.cursor = Position { row, col: at };
+        self.buffer.insert_str(&format!("{token} "));
+    }
+
+    fn uncomment_row(&mut self, row: usize, token: &str) {
+        let line = self.buffer.line(row);
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with(token) {
+            return;
+        }
+        let indent = line.len() - trimmed.len();
+        // The token, and ONE space after it if the comment was written the way
+        // this writes them. Two spaces are the reader's, not ours.
+        let mut width = token.len();
+        if trimmed[token.len()..].starts_with(' ') {
+            width += 1;
+        }
+        self.buffer.delete_range(
+            Position { row, col: indent },
+            Position {
+                row,
+                col: indent + width,
+            },
+        );
+    }
+
+    /// Put the caret back where the reader left it, allowing for what moved.
+    fn sync_after_comment(&mut self, rows: &[usize]) {
+        let mut out: Vec<Selection> = Vec::new();
+        for sel in self.sel.all() {
+            let fix = |p: Position| -> Position {
+                let len = self.buffer.line(p.row).len();
+                Position {
+                    row: p.row.min(self.buffer.line_count().saturating_sub(1)),
+                    col: p.col.min(len),
+                }
+            };
+            out.push(Selection {
+                anchor: fix(sel.anchor),
+                head: fix(sel.head),
+                goal_x: None,
+            });
+        }
+        let primary = self.sel.primary_index();
+        self.sel = crate::selection::SelectionSet::spans(out, primary);
+        self.buffer.cursor = self.sel.primary().head;
+        let _ = rows;
+    }
+}
+
+/// How far into the line the first non-space character sits, in visual columns.
+fn visual_indent(line: &str, tab_width: usize) -> usize {
+    let mut col = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += tab_width - (col % tab_width.max(1)),
+            _ => break,
+        }
+    }
+    col
+}
+
+/// The byte offset a visual column lands on, clamped to the line's own indent.
+fn byte_col_for_visual(line: &str, want: usize, tab_width: usize) -> usize {
+    let mut col = 0;
+    for (i, c) in line.char_indices() {
+        if col >= want {
+            return i;
+        }
+        match c {
+            ' ' => col += 1,
+            '\t' => col += tab_width - (col % tab_width.max(1)),
+            // Past the indentation: a line shallower than the block's minimum
+            // takes the token at its own start rather than inside its text.
+            _ => return i,
+        }
+    }
+    line.len()
+}

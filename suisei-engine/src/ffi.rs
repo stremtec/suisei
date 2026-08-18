@@ -3961,6 +3961,21 @@ pub extern "C" fn suisei_engine_format_document(ptr: *mut SuiseiEngine) {
     }
 }
 
+/// ⌘/ — comment or uncomment the lines the selection touches.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_toggle_comment(ptr: *mut SuiseiEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).0.app_mut().toggle_line_comment();
+        // A full recompose, not paint-only: the text changed, so the
+        // highlighter, the outline and the diagnostics all have a new document
+        // to answer about.
+        (*ptr).0.recompose();
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_goto_definition(ptr: *mut SuiseiEngine) {
     if ptr.is_null() {
