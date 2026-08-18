@@ -767,13 +767,7 @@ impl Engine {
         let git_wb_before = self.app.git_wb.open;
         let palette_before = self.app.palette.open;
         self.app.dispatch(ev);
-        // GUI contract: no core-side close animations. `preview.close()` only
-        // sets `closing` and keeps `open` until the TUI's per-frame
-        // anim_progress() finishes it — a tick this face never runs, so the
-        // panel stayed open forever and re-toggling re-opened it instead.
-        if self.app.preview.closing {
-            self.app.close_preview_immediate();
-        }
+        self.settle_preview_close();
         let caret_after = self.app.buffer.cursor();
         let ver_after = self.app.buffer.version();
         let file_after = self.app.filename.clone();
@@ -1682,8 +1676,28 @@ impl Engine {
     /// Preview could paste into a running process.
     pub fn toggle_preview(&mut self) {
         self.app.toggle_preview();
+        self.settle_preview_close();
         self.shell.dirty = true;
         self.recompose();
+    }
+
+    /// Finish a close the GUI has no animator to finish.
+    ///
+    /// GUI contract: no core-side close animations. `App::close_preview` only
+    /// raises `closing` and leaves `open` set until the TUI's per-frame
+    /// `anim_progress()` reaches zero and calls `finish_close`. This face runs
+    /// no such tick, so a preview told to close stayed open forever — and
+    /// `App::toggle_preview` reads `open && closing` as "closing, so re-open",
+    /// which is why pressing the button again brought it straight back.
+    ///
+    /// It lived inline in `dispatch` and covered only the keyboard. Every other
+    /// way in — the panel's ✕, the View menu, the toolbar — reaches
+    /// `toggle_preview` directly and had nothing, which is every route a mouse
+    /// can take. One method, called by both.
+    fn settle_preview_close(&mut self) {
+        if self.app.preview.closing {
+            self.app.close_preview_immediate();
+        }
     }
 
     /// Open a terminal TAB, or close it when one is already focused.
@@ -5458,6 +5472,60 @@ mod tests {
             !eng.app.message.contains("Preview"),
             "closed preview must not leave stale status text"
         );
+    }
+
+    /// The same, through the route a MOUSE takes.
+    ///
+    /// `preview_toggle_closes_without_anim_tick` above is the keyboard. The
+    /// panel's ✕, the View menu and the toolbar all call
+    /// `Engine::toggle_preview` directly, which had no settle of its own: the
+    /// preview stayed `open && closing`, and the next click read that as
+    /// "closing, so re-open". Reported as "프리티 프리뷰가 닫히지도 않음".
+    #[test]
+    fn the_button_closes_the_preview_too() {
+        let mut eng = eng_with_text("# title\n\nbody\n");
+
+        eng.toggle_preview();
+        assert!(eng.app.preview.open, "the button opens it");
+
+        eng.toggle_preview();
+        assert!(
+            !eng.app.preview.open,
+            "and closes it (closing={})",
+            eng.app.preview.closing
+        );
+        assert!(!eng.app.preview.closing, "with nothing left half-closed");
+
+        // Not sticky the other way either: a third press opens a fresh one
+        // rather than doing nothing.
+        eng.toggle_preview();
+        assert!(eng.app.preview.open, "a third press opens it again");
+    }
+
+    /// Closing by button and closing by key must leave the same state — the
+    /// mode included, or the editor keeps swallowing keys for a panel that is
+    /// no longer there.
+    #[test]
+    fn both_preview_routes_leave_the_editor_in_the_same_place() {
+        let toggle = KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        );
+
+        let mut by_key = eng_with_text("# t\n\nb\n");
+        by_key.dispatch_key(toggle.clone());
+        by_key.app.mode = Mode::Editor;
+        by_key.dispatch_key(toggle);
+
+        let mut by_button = eng_with_text("# t\n\nb\n");
+        by_button.toggle_preview();
+        by_button.app.mode = Mode::Editor;
+        by_button.toggle_preview();
+
+        assert_eq!(by_button.app.preview.open, by_key.app.preview.open);
+        assert_eq!(by_button.app.preview.closing, by_key.app.preview.closing);
+        assert_eq!(by_button.app.mode, by_key.app.mode);
+        assert!(by_button.app.preview.lines.is_empty(), "and nothing left over");
     }
 
     /// A schedule fires on elapsed time, not on how often the frame timer runs.

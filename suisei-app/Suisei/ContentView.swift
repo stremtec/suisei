@@ -5809,7 +5809,20 @@ struct ContentView: View {
     @ViewBuilder
     private func previewLineView(_ line: PreviewLineItem) -> some View {
         let runs = parsePreviewRuns(line.text, fallback: line.style)
-        if isTableLike(line.text) {
+        if isRule(line.text) {
+            // A RULE, drawn as one. Core emits it as a run of `═`/`─` as wide
+            // as the heading's character count — right for a terminal, where
+            // the heading is the same monospaced cell width. Here the heading
+            // is 22pt proportional and the rule was being drawn at 13pt, so it
+            // stopped somewhere under the middle of the title. Nothing about
+            // its length was ever meant to survive a font change.
+            //
+            // Before `isTableLike`, which a run of `─` also matches.
+            Rectangle()
+                .fill(theme.separator)
+                .frame(height: 1)
+                .padding(.vertical, 3)
+        } else if isTableLike(line.text) {
             Text(line.text.unicodeScalars.filter { !(0xE000...0xE0FF).contains($0.value) }
                 .reduce(into: "") { $0.unicodeScalars.append($1) })
                 .font(.system(size: 12, design: .monospaced))
@@ -5819,21 +5832,50 @@ struct ContentView: View {
             Text(" ")
                 .font(previewFont(line.style))
                 .foregroundStyle(previewColor(line.style))
-        } else if runs.count == 1 {
-            let r = runs[0]
-            Text(r.text.isEmpty ? " " : r.text)
-                .font(previewFont(r.style))
-                .foregroundStyle(previewColor(r.style))
         } else {
-            // Multi-span: wrap runs in an HStack (avoids deprecated Text.+ on macOS 26).
-            HStack(alignment: .firstTextBaseline, spacing: 0) {
-                ForEach(Array(runs.enumerated()), id: \.offset) { _, r in
-                    Text(r.text.isEmpty ? " " : r.text)
-                        .font(previewFont(r.style))
-                        .foregroundStyle(previewColor(r.style))
-                }
+            // ONE `Text`, styled per run — so it WRAPS.
+            //
+            // These runs were an `HStack`, and an HStack does not wrap: any
+            // paragraph carrying inline emphasis (bold, italic, `code`, a
+            // link) was laid out on a single infinite line and ran out of the
+            // panel. That is most paragraphs in most Markdown, which is most of
+            // what "렌더링도 구림" was looking at. A single `Text` built from an
+            // `AttributedString` lays out as one paragraph and breaks lines
+            // where a paragraph should, mixed fonts and all — and it is not the
+            // deprecated `Text.+` the HStack was avoiding.
+            Text(previewAttributed(runs))
+        }
+    }
+
+    /// The runs of one preview line as a single styled string.
+    private func previewAttributed(_ runs: [PreviewRun]) -> AttributedString {
+        var out = AttributedString()
+        for r in runs {
+            var piece = AttributedString(r.text)
+            piece.font = previewFont(r.style)
+            piece.foregroundColor = previewColor(r.style)
+            out.append(piece)
+        }
+        return out
+    }
+
+    /// A horizontal rule: nothing but rule characters.
+    ///
+    /// Deliberately NOT the box-drawing set — a table's border is made of the
+    /// same `─` plus corners and tees, and it has to stay text so its columns
+    /// line up with the cells above and below it.
+    private func isRule(_ text: String) -> Bool {
+        var sawRule = false
+        for ch in text {
+            let v = ch.unicodeScalars.first?.value ?? 0
+            if (0xE000...0xE0FF).contains(v) { continue }
+            switch ch {
+            case "═", "─", "━": sawRule = true
+            case " ": continue
+            default: return false
             }
         }
+        return sawRule
     }
 
     private struct PreviewRun {
@@ -5870,7 +5912,7 @@ struct ContentView: View {
     private func isTableLike(_ text: String) -> Bool {
         var pipes = 0
         for ch in text {
-            if ch == "|" || ch == "│" || ch == "┌" || ch == "└" || ch == "─" || ch == "├" {
+            if "|│┌┐└┘─├┤┬┴┼".contains(ch) {
                 pipes += 1
                 if pipes >= 2 { return true }
             }
