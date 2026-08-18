@@ -52,3 +52,4 @@ feature.txt
 # One-off UI probes. Each answered a question about an AppKit control once and
 # has no caller.
 scripts/*_probe*.swift
+.zcode/
