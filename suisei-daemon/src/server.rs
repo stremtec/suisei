@@ -6,18 +6,94 @@
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::protocol::{Frame, Opcode, PROTOCOL_VERSION, Status};
 use crate::state::DaemonState;
 
-/// Bind the daemon socket, clearing a stale socket file from a prior run first
+/// How long a daemon may go without a single client before it gives up.
+///
+/// An evicted daemon has no way back: its socket node belongs to whoever took
+/// it, so nothing can ever connect to it again. It used to keep running anyway
+/// — one was found alive twenty-four days after it was started, still
+/// re-opening the menu-bar agent every twenty seconds. Silence for this long
+/// means either that, or an editor that started a daemon and went away.
+///
+/// Well beyond any live client's rhythm: an editor heartbeats and the menu-bar
+/// agent polls, both far inside this.
+pub const IDLE_EXIT: Duration = Duration::from_secs(150);
+
+/// Ask whoever owns `path` which protocol it speaks.
+///
+/// `None` means nobody is listening — no node, a dead node left by a crash, or
+/// a refused connection. `Some(v)` is a LIVE daemon and `v` is its version,
+/// taken from the handshake rather than assumed: that is the one fact that
+/// decides whether a second daemon should stand down or replace it.
+pub fn probe(path: &Path) -> Option<u16> {
+    let mut stream = UnixStream::connect(path).ok()?;
+    stream.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
+    stream.set_write_timeout(Some(Duration::from_millis(500))).ok()?;
+    Frame::control(Opcode::Hello).write_to(&mut stream).ok()?;
+    let reply = Frame::read_from(&mut stream).ok()?;
+    match reply.opcode {
+        Opcode::HelloAck => Some(reply.version),
+        // A Nak carries the daemon's own version in the payload — that is the
+        // case this exists for, an old daemon left behind by an app update.
+        Opcode::HelloNak => {
+            let v = reply.payload.get(..2)?;
+            Some(u16::from_le_bytes([v[0], v[1]]))
+        }
+        _ => None,
+    }
+}
+
+/// Ask the daemon at `path` to stop, and wait for it to let go of the socket.
+///
+/// Used only when the live daemon speaks a different protocol — an app update
+/// left it behind. Returns whether the socket actually came free.
+pub fn request_shutdown(path: &Path, wait: Duration) -> bool {
+    if let Ok(mut stream) = UnixStream::connect(path) {
+        let _ = Frame::control(Opcode::Hello).write_to(&mut stream);
+        let _ = Frame::control(Opcode::Shutdown).write_to(&mut stream);
+    }
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        if probe(path).is_none() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    probe(path).is_none()
+}
+
+/// Bind the daemon socket, clearing a **dead** socket node left by a prior run
 /// (a leftover node refuses `bind` with `EADDRINUSE`). Creates the parent dir.
+///
+/// **It will not evict a live daemon.** This used to `remove_file` first, no
+/// questions asked, so every start took the socket from whatever was serving
+/// and left it running with a listener nothing could reach. That is not
+/// theoretical: on the machine this was found on, a daemon from twenty-four
+/// days earlier was still alive beside today's, and every launch in between had
+/// added another. Each of them kept re-opening the menu-bar agent, and the
+/// status the user saw came from whichever one currently held the socket —
+/// which is not the one the editor was reporting to. "lsp 도, dap 도 잘 안뜨고
+/// 좀 불안정함."
+///
+/// `AddrInUse` here means a daemon is serving, and the caller decides what that
+/// means — stand down, or replace it. Putting the check in `bind` is
+/// deliberate: no caller can forget it.
 pub fn bind(path: &Path) -> io::Result<UnixListener> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    if probe(path).is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "a daemon is already serving this socket",
+        ));
     }
     match std::fs::remove_file(path) {
         Ok(()) => {}
@@ -32,13 +108,26 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
 /// managers' live view.
 pub fn serve(listener: UnixListener, state: Arc<DaemonState>) {
     let next_client = AtomicU64::new(1);
+    let seen = Arc::new(Mutex::new(Instant::now()));
+    watch_for_idleness(Arc::clone(&seen));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                if let Ok(mut last) = seen.lock() {
+                    *last = Instant::now();
+                }
                 let state = Arc::clone(&state);
+                let seen = Arc::clone(&seen);
                 let client = next_client.fetch_add(1, Ordering::Relaxed);
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, state, client) {
+                    let result = handle_client(stream, state, client);
+                    // On the way out too: a long-lived connection is a client
+                    // that was there the whole time, and only its close proves
+                    // when it stopped being there.
+                    if let Ok(mut last) = seen.lock() {
+                        *last = Instant::now();
+                    }
+                    if let Err(e) = result {
                         if e.kind() != io::ErrorKind::UnexpectedEof {
                             eprintln!("suisei-daemon: client error: {e}");
                         }
@@ -48,6 +137,32 @@ pub fn serve(listener: UnixListener, state: Arc<DaemonState>) {
             Err(e) => eprintln!("suisei-daemon: accept error: {e}"),
         }
     }
+}
+
+/// Exit when nothing has talked to us for [`IDLE_EXIT`].
+///
+/// The point is not to save memory. A daemon that has been evicted from its
+/// socket **cannot be reached by anything, ever** — and it used to keep running
+/// on that basis for weeks, re-opening the menu-bar agent on a timer the whole
+/// while. Silence is the only signal such a daemon can still act on, and this
+/// is it acting on it.
+///
+/// `bind` refusing to evict is what stops this happening again; this is what
+/// clears the ones already out there, on the first launch that carries it.
+fn watch_for_idleness(seen: Arc<Mutex<Instant>>) {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(15));
+            let quiet = seen.lock().map(|t| t.elapsed()).unwrap_or_default();
+            if quiet >= IDLE_EXIT {
+                eprintln!(
+                    "suisei-daemon: no client for {}s — exiting",
+                    quiet.as_secs()
+                );
+                std::process::exit(0);
+            }
+        }
+    });
 }
 
 /// One connection: require a compatible `Hello`, then loop over frames until
@@ -422,6 +537,53 @@ mod tests {
         drop(l1); // leaves the socket node on disk
         // Second bind must succeed by removing the stale node.
         let _l2 = bind(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The bug that let a daemon from twenty-four days ago still be running.
+    ///
+    /// A dead node is cleared (above); a LIVE daemon is not. Taking the socket
+    /// from one does not stop it — it goes on running, unreachable, supervising
+    /// its own menu-bar agent — and the status the user reads then comes from
+    /// whichever of them happens to hold the socket rather than the one their
+    /// editor is talking to.
+    #[test]
+    fn bind_refuses_to_evict_a_live_daemon() {
+        let path = tmp_sock("live");
+        let listener = bind(&path).unwrap();
+        let state = DaemonState::new();
+        thread::spawn(move || serve(listener, state));
+
+        let err = bind(&path).expect_err("a second bind must not take the socket");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        // …and the first one is still serving, which is the half that matters.
+        assert_eq!(probe(&path), Some(PROTOCOL_VERSION));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn probe_says_nothing_is_there_when_nothing_is() {
+        let path = tmp_sock("empty");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(probe(&path), None, "no node at all");
+
+        let listener = bind(&path).unwrap();
+        drop(listener); // node on disk, nobody listening
+        assert_eq!(probe(&path), None, "a dead node is not a daemon");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The version comes off the wire, not from this binary. It is what decides
+    /// whether a second daemon stands down or replaces the first, so reading it
+    /// from the wrong place would make an update either fail to take or evict a
+    /// daemon that was doing its job.
+    #[test]
+    fn probe_reports_the_serving_daemons_version() {
+        let path = tmp_sock("version");
+        let listener = bind(&path).unwrap();
+        let state = DaemonState::new();
+        thread::spawn(move || serve(listener, state));
+        assert_eq!(probe(&path), Some(PROTOCOL_VERSION));
         let _ = std::fs::remove_file(&path);
     }
 }

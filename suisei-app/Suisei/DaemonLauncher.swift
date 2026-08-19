@@ -2,15 +2,30 @@ import Foundation
 
 /// Starts the Suisei daemon on app launch, **detached** so it outlives the app
 /// (macOS reparents a spawned child to launchd on app exit — we never wait on
-/// or kill it). The daemon in turn launches the menu-bar agent. Idempotent: if
-/// the socket already accepts a connection, the daemon is up and we do nothing.
+/// or kill it). The daemon in turn launches the menu-bar agent. Idempotent
+/// because the DAEMON makes it so — it probes the socket and stands down when
+/// one of its own version is already serving. See `ensureRunning`.
 ///
 /// This is the pragmatic form of arch-plan §1.5's launchd LaunchAgent — good
 /// enough for "open the app → daemon appears; close the app → daemon stays".
 enum DaemonLauncher {
     static func ensureRunning() {
-        let sock = socketPath()
-        if isDaemonUp(sock) { return }
+        // **Always spawn it. The daemon decides.**
+        //
+        // This used to skip the spawn whenever something ACCEPTED a connection
+        // on the socket, which answers the wrong question: "is a daemon
+        // running" rather than "is a daemon that can serve THIS app running".
+        // After an update the old daemon is still there and still accepting, so
+        // the new one was never started — and the old one refuses the editor's
+        // handshake with a version Nak, so nothing could report. The app looked
+        // like it had started its daemon (it had, weeks ago) and the menu bar
+        // showed no LSP and no DAP.
+        //
+        // The daemon knows how to answer this properly: it probes the socket,
+        // stands down when a daemon of its own version is serving, and asks an
+        // older one to quit before taking over. One place owns the decision,
+        // and it is the place that can read the version off the wire. The cost
+        // is a process that exits immediately on most launches.
         guard let bin = daemonBinaryPath() else {
             NSLog("Suisei: daemon binary not found — menu-bar status unavailable")
             return
@@ -55,26 +70,5 @@ enum DaemonLauncher {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/SuiseiDaemonAgent.app").path
         return FileManager.default.fileExists(atPath: bundled) ? bundled : nil
-    }
-
-    private static func isDaemonUp(_ path: String) -> Bool {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
-        defer { close(fd) }
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let cap = MemoryLayout.size(ofValue: addr.sun_path)
-        let pathC = Array(path.utf8CString)
-        guard pathC.count <= cap else { return false }
-        withUnsafeMutablePointer(to: &addr.sun_path) { raw in
-            raw.withMemoryRebound(to: CChar.self, capacity: cap) { dst in
-                for (i, b) in pathC.enumerated() { dst[i] = b }
-            }
-        }
-        return withUnsafePointer(to: &addr) { ap in
-            ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
-            }
-        }
     }
 }
