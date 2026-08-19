@@ -3113,23 +3113,25 @@ struct ContentView: View {
                                 }
                                 .padding(.horizontal, 1)
                             }
-                            // Width from the MODEL, never from measuring the
-                            // thing being sized.
+                            // Hug the chips, up to a cap — and get there
+                            // WITHOUT measuring them.
                             //
-                            // This used to read the chips' own laid-out width
-                            // back out through `onGeometryChange` and feed it to
-                            // the frame that constrains them — a cycle, and it
-                            // could settle on one chip's worth. Then adding a
-                            // shell scrolled to the last chip inside a window
-                            // that only fit one, which is exactly "shell 1 만
-                            // 있는 상태에서 + 하니 shell 2 만 렌더됨": the first
-                            // chip was still there, one pixel to the left of a
-                            // viewport too narrow to show it.
+                            // It first read the chips' laid-out width back
+                            // through `onGeometryChange` and fed it to the
+                            // frame constraining those same chips: a cycle that
+                            // could settle at one chip's worth. Then it
+                            // estimated the width from the session count, which
+                            // has no cycle but over-reserves — every chip
+                            // budgeted at its maximum, so three short ones
+                            // pushed `+` far to the right of anything drawn.
                             //
-                            // A count times a bounded chip width has no such
-                            // loop. `terminalChipWidth` is a cap the chip itself
-                            // honours, so the arithmetic and the layout agree.
-                            .frame(width: min(260, chipStripWidth))
+                            // `frame(maxWidth:)` then `fixedSize` needs neither.
+                            // The frame's ideal width is the content's, clamped
+                            // to the cap, and `fixedSize` makes the ScrollView
+                            // take that ideal instead of whatever the header
+                            // offers. Nothing is read back, nothing is guessed.
+                            .frame(maxWidth: 260)
+                            .fixedSize(horizontal: true, vertical: false)
                             .onChange(of: shells.dockActive) { _, i in
                                 withAnimation(.snappy(duration: 0.2)) {
                                     proxy.scrollTo(i, anchor: .center)
@@ -3280,61 +3282,62 @@ struct ContentView: View {
         }
     }
 
-    /// The widest a shell chip is allowed to be.
-    ///
-    /// A cap, not a fixed size — a chip narrower than this stays narrow. It
-    /// exists so `chipStripWidth` can be arithmetic instead of a measurement:
-    /// a shell that renames itself to something long truncates rather than
-    /// silently making the strip's own estimate wrong.
-    private static let terminalChipMaxWidth: CGFloat = 104
-
-    /// How wide the chip strip wants to be, from the session COUNT.
-    private var chipStripWidth: CGFloat {
-        let n = CGFloat(max(1, shells.dock.count))
-        return n * Self.terminalChipMaxWidth + (n - 1) * 3 + 2
-    }
-
     private func terminalSessionChip(_ i: Int) -> some View {
         let active = i == shells.dockActive
-        return Button {
+        // The dock strip's own ink, NOT `Color.secondary`.
+        //
+        // This is why "shell 1, 2 는 렌더는 안되지만 클릭은 됨": they were being
+        // drawn, in near-black on near-black. The dock paints one dark fill
+        // across its whole region regardless of the editor theme, and the
+        // semantic colours follow the WINDOW's appearance — so in a light
+        // window an inactive chip was dark grey on a dark strip and the only
+        // visible one was the active chip, which is tinted with the accent.
+        // `dockHeaderFg`/`dockHeaderDim` exist for exactly this and the chips
+        // were the one thing in the header not using them.
+        let ink = active ? accent : dockHeaderDim
+        return HStack(spacing: 4) {
+            Image(systemName: "terminal")
+                .font(.system(size: 8, weight: .semibold))
+            // The shell's own name once it reports one (OSC 0/2), so a
+            // running `make` or an ssh session says so on its chip.
+            Text(shells.dockTitle(i))
+                .font(.system(size: 10, weight: active ? .semibold : .regular))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 62, alignment: .leading)
+            if active, shells.dock.count > 1 {
+                // A real Button, and the row around it is NOT one — that is
+                // the whole fix for "쉘 닫기가 작동 안함". The chip used to be
+                // a `Button` whose label contained this `Button`, and the
+                // outer one swallowed the tap: the × was drawn, was hoverable,
+                // and could never fire. A tap gesture on the row leaves the
+                // nested button its own hit area.
+                Button {
+                    shells.closeDockSession(i)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(ink)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Close Shell")
+                .accessibilityLabel("Close \(shells.dockTitle(i))")
+            }
+        }
+        .foregroundStyle(ink)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(
+            Capsule(style: .continuous)
+                .fill(active ? accent.opacity(0.16) : dockHeaderFg.opacity(0.10))
+        )
+        .contentShape(Capsule(style: .continuous))
+        .onTapGesture {
             shells.selectDockSession(i)
             engine.focusTerminal(true)
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "terminal")
-                    .font(.system(size: 8, weight: .semibold))
-                // The shell's own name once it reports one (OSC 0/2), so a
-                // running `make` or an ssh session says so on its chip.
-                Text(shells.dockTitle(i))
-                    .font(.system(size: 10, weight: active ? .semibold : .regular))
-                    .lineLimit(1)
-                    // A shell that reports a long title (`make`, an ssh host)
-                    // must not widen its chip past what `chipStripWidth`
-                    // budgeted for it, or the strip's arithmetic and its layout
-                    // stop agreeing and we are back to a clipped first chip.
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 62, alignment: .leading)
-                if active, shells.dock.count > 1 {
-                    Button {
-                        shells.closeDockSession(i)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 7, weight: .bold))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Close Shell")
-                }
-            }
-            .foregroundStyle(active ? accent : Color.secondary)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(active ? accent.opacity(0.14) : Color.primary.opacity(0.05))
-            )
-            .contentShape(Capsule(style: .continuous))
         }
-        .buttonStyle(.plain)
+        .accessibilityAddTraits(active ? [.isSelected] : [])
     }
 
     /// The "Open Terminal · ⌃T" prompt, when the debug area is up with no shell.
