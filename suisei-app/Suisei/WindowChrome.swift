@@ -159,6 +159,27 @@ enum WindowChrome {
     /// silent no-op the next time it moves — and a no-op here looks exactly
     /// like the bug.
     private static func clearTitlebarMaterial(in window: NSWindow) {
+        clearTitlebarMaterial(inFrameViewOf: window)
+        // …and in the window AppKit makes for fullscreen.
+        //
+        // Entering fullscreen does not keep the titlebar in this window. AppKit
+        // moves it into an `NSToolbarFullScreenWindow` of its own — a child of
+        // ours — and everything above ran against `window.contentView.superview`,
+        // which no longer contains it. So the band that is transparent in a
+        // normal window came back opaque the moment the window went fullscreen,
+        // painted by a surface we had never touched and following an appearance
+        // we had never set: black over a light theme, white over a dark one,
+        // which is the giveaway that it is not ours.
+        for child in window.childWindows ?? [] {
+            guard String(describing: type(of: child)).contains("FullScreen") else { continue }
+            if child.appearance?.name != window.appearance?.name {
+                child.appearance = window.appearance
+            }
+            clearTitlebarMaterial(inFrameViewOf: child)
+        }
+    }
+
+    private static func clearTitlebarMaterial(inFrameViewOf window: NSWindow) {
         guard let frameView = window.contentView?.superview else { return }
         for view in frameView.subviews
         where String(describing: type(of: view)).contains("TitlebarContainer") {
@@ -180,14 +201,18 @@ enum WindowChrome {
     /// band is an effect view that was missed, a layer with a colour of its
     /// own, or the content showing through correctly and simply being a colour
     /// nobody expected. Those are three different fixes.
-    private nonisolated(unsafe) static var dumpedTitlebar = false
+    /// One dump per fullscreen state, not one per launch. The band is wrong in
+    /// fullscreen and right outside it, so a diagnostic that fires once — on a
+    /// windowed launch — reports the state nobody asked about.
+    private nonisolated(unsafe) static var dumpedFor: Set<Bool> = []
 
     static func dumpTitlebar(_ window: NSWindow) {
-        guard !dumpedTitlebar,
+        let full = window.styleMask.contains(.fullScreen)
+        guard !dumpedFor.contains(full),
               ProcessInfo.processInfo.environment["SUISEI_DIAG"]?
                   .lowercased().contains("titlebar") == true,
               let frameView = window.contentView?.superview else { return }
-        dumpedTitlebar = true
+        dumpedFor.insert(full)
 
         func walk(_ v: NSView, _ depth: Int) {
             let name = String(describing: type(of: v))
@@ -209,10 +234,29 @@ enum WindowChrome {
             for child in v.subviews { walk(child, depth + 1) }
         }
 
-        NSLog("[suisei/titlebar] window bg=\(window.backgroundColor) opaque=\(window.isOpaque)")
+        NSLog(
+            "[suisei/titlebar] fullscreen=\(full) window=\(type(of: window)) "
+                + "appearance=\(window.appearance?.name.rawValue ?? "nil") "
+                + "bg=\(window.backgroundColor) opaque=\(window.isOpaque)"
+        )
         for v in frameView.subviews
         where String(describing: type(of: v)).contains("Titlebar") {
             walk(v, 0)
+        }
+        // The child windows too, because in fullscreen the titlebar is not in
+        // this window at all — AppKit hosts it in one of these. A dump that
+        // walks only `window` in fullscreen reports on an empty band and says
+        // everything is fine.
+        for child in window.childWindows ?? [] {
+            NSLog(
+                "[suisei/titlebar] CHILD \(type(of: child)) "
+                    + "frame=\(child.frame.integral) "
+                    + "appearance=\(child.appearance?.name.rawValue ?? "nil") "
+                    + "bg=\(child.backgroundColor) opaque=\(child.isOpaque)"
+            )
+            if let root = child.contentView?.superview ?? child.contentView {
+                walk(root, 1)
+            }
         }
     }
 
@@ -286,6 +330,20 @@ struct ThemedWindowChrome: NSViewRepresentable {
     final class Coordinator {
         var applied: Applied?
         weak var window: NSWindow?
+        /// Re-apply when the window goes fullscreen and when it comes back.
+        ///
+        /// Nothing this view watches changes at that moment — same theme, same
+        /// window, same everything — so `updateNSView` correctly does nothing,
+        /// and the titlebar work would never run again. But fullscreen is
+        /// exactly when AppKit rebuilds the titlebar somewhere else (see
+        /// `clearTitlebarMaterial`), so it is exactly when the work has to run.
+        var fullScreenObservers: [NSObjectProtocol] = []
+
+        deinit {
+            for token in fullScreenObservers {
+                NotificationCenter.default.removeObserver(token)
+            }
+        }
     }
 
     private func apply(_ nsView: NSView, _ coordinator: Coordinator) {
@@ -295,6 +353,30 @@ struct ThemedWindowChrome: NSViewRepresentable {
         )
         coordinator.window = nsView.window
         apply(nsView)
+        observeFullScreen(nsView, coordinator)
+    }
+
+    private func observeFullScreen(_ nsView: NSView, _ coordinator: Coordinator) {
+        guard coordinator.fullScreenObservers.isEmpty, let window = nsView.window else { return }
+        let names: [Notification.Name] = [
+            NSWindow.didEnterFullScreenNotification,
+            NSWindow.didExitFullScreenNotification,
+        ]
+        coordinator.fullScreenObservers = names.map { name in
+            NotificationCenter.default.addObserver(
+                forName: name, object: window, queue: .main
+            ) { [weak nsView] _ in
+                apply(nsView ?? NSView())
+                // Again a beat later: on the way IN, the fullscreen window that
+                // hosts the titlebar can still be under construction when this
+                // notification arrives, and a pass that finds no child window
+                // has nothing to fix.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    guard let nsView else { return }
+                    apply(nsView)
+                }
+            }
+        }
     }
 
     private func apply(_ nsView: NSView) {
