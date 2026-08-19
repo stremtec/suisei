@@ -382,6 +382,17 @@ final class TerminalSessions: ObservableObject {
         dockActive = min(dockActive, max(0, dock.count - 1))
     }
 
+    /// The view of the chip that is showing, if a shell exists yet.
+    ///
+    /// So that focus can be handed to the docked shell from OUTSIDE a view
+    /// update — see `EngineBridge.claimDockTerminalKeyboard`. Everything else
+    /// here is asked for by a view that is about to draw it; this is asked for
+    /// by the thing that just decided the shell owns the keyboard.
+    var activeDockView: PaneTerminalView? {
+        guard dock.indices.contains(dockActive) else { return nil }
+        return sessions[.dock(dock[dockActive])]?.view
+    }
+
     /// What a dock chip is called: the shell's own title, else its ordinal.
     func dockTitle(_ index: Int) -> String {
         guard dock.indices.contains(index) else { return "Shell" }
@@ -589,14 +600,31 @@ struct TerminalDockSurface: NSViewRepresentable {
         let term = session.view
         term.onFocus = { [weak engine] in engine?.focusTerminal(true) }
         guard host.mount(term) else {
-            // Already mounted, so this is not an arrival — but core may say the
-            // terminal is focused while no view holds the keyboard at all.
-            // `setDebugArea` clears a stale field's focus a tenth of a second
-            // after opening, and a claim that landed before that got wiped by
-            // it. Taking the keyboard from *nobody* is safe; taking it from a
-            // view that has it is not, which is why this asks.
-            if engine.focus == .terminal,
-               let window = term.window, window.firstResponder === window
+            // Already mounted, so this is not an arrival — and **that is not
+            // the same as focused.** The claim above is one-shot: `mount`
+            // returns false ever after, so whatever happens to the first
+            // responder later, nothing here asked for it again.
+            //
+            // Something does happen to it. `EditorCanvasView` claims the
+            // keyboard from `viewDidMoveToWindow`, which fires whenever a
+            // canvas is added to the window — a split, a font change, the
+            // debug area opening under it. One steal is permanent: the shell
+            // was drawn, was selected, the status line said `keys → shell`,
+            // and every keystroke went into the document. That is the whole of
+            // "이젠 도킹 터미널에 입력이 안됨", and it is why the previous
+            // condition here (`firstResponder === window`, i.e. take it only
+            // from NOBODY) could never recover from it.
+            //
+            // Core's focus is the authority, so this takes the keyboard back
+            // from the EDITOR — but never from a field the user deliberately
+            // typed into. The find bar, the tree filter and the palette are
+            // native text controls precisely so AppKit owns their editing;
+            // yanking the keyboard out of one mid-word would be this fix
+            // becoming the next bug.
+            if engine.focus == .terminal, let window = term.window,
+               let responder = window.firstResponder,
+               !(responder is TerminalKeySurface),
+               !(responder is NSTextView), !(responder is NSTextField)
             {
                 window.makeFirstResponder(term)
             }

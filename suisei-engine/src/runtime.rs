@@ -1328,10 +1328,20 @@ impl Engine {
     /// Position-only scroll sync (no recompose): keeps Core's `scroll` tracking
     /// the native clip during covered scrolling so the next caret op / publish
     /// never snaps the viewport. The paint band already covers ±overscan.
+    ///
+    /// **Accepted during a drag**, unlike `scroll_to` and `scroll_by_frac`.
+    /// Those two are a WHEEL arriving mid-selection, where the guard is right:
+    /// core should not be shoved around by momentum while the pointer is
+    /// deciding what is selected. This one is the face reporting where its clip
+    /// actually is — and a drag that leaves the viewport autoscrolls, which is
+    /// exactly a clip that moves while the pointer is down. Refusing it meant
+    /// core's stored position stayed at wherever the drag STARTED, and the
+    /// first thing that re-applied it after mouse-up put the view back there:
+    /// "마우스 드래그로 오토 가로스크롤 되는것까진 잘 되는데 그 상태에서 클릭
+    /// 풀면 그대로 맨 왼쪽으로 스크롤이 복귀함." Vertically it hid, because
+    /// `update_scroll` re-derives the top line from the cursor row on every
+    /// drag step and so healed itself; there is no such repair for the pan.
     pub fn scroll_sync(&mut self, line: u32, hscroll_cols: u32) {
-        if self.pointer_down && self.pointer_moved {
-            return;
-        }
         self.app.scroll_to_line(line as usize);
         if !self.app.wrap_lines {
             self.app.set_hscroll(hscroll_cols as usize);
@@ -5647,6 +5657,40 @@ mod tests {
             eng.app.scroll >= 118 && eng.app.scroll <= 127,
             "scroll {} should stay near the synced viewport",
             eng.app.scroll
+        );
+    }
+
+    /// A drag that leaves the viewport autoscrolls, and the face reports where
+    /// its clip landed. Core has to keep that, or mouse-up restores the
+    /// position the drag started from — reported as the horizontal pan
+    /// snapping back to column zero the instant the button came up.
+    #[test]
+    fn a_drag_that_autoscrolls_leaves_core_where_the_view_ended_up() {
+        let long = format!("{}\n", "x".repeat(400));
+        let mut eng = eng_with_text(&long.repeat(40));
+        eng.resize(800.0, 400.0, 18.0, 9.0, 2.0);
+        eng.app.wrap_lines = false;
+
+        // Down at the left edge, then a drag rightwards: `pointer_moved` is now
+        // set, which is what used to make every later report be dropped.
+        eng.click_at(0, 0, false);
+        eng.drag_to(0, 60);
+        assert!(eng.pointer_moved, "a drag past the down cell is a drag");
+
+        // The face autoscrolls and says so, twice, the way `clipBoundsChanged`
+        // does at 30 Hz while the pointer is held outside the view.
+        eng.scroll_sync(0, 40);
+        eng.drag_to(0, 120);
+        eng.scroll_sync(0, 90);
+        assert_eq!(eng.app.hscroll, 90, "core must track the pan during a drag");
+
+        // Mouse-up publishes, and the face reads core's copy back. It has to be
+        // the position the view is actually at.
+        eng.mouse_up();
+        assert_eq!(
+            eng.app.hscroll, 90,
+            "the pan must survive the end of the drag (got {})",
+            eng.app.hscroll
         );
     }
 

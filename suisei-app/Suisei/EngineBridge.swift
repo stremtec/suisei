@@ -4276,6 +4276,7 @@ final class EngineBridge: ObservableObject {
 
     func focusTerminalPane(_ index: Int) {
         reclaimKeyboardFromTextFields()
+        releaseNavigatorSelection()
         focusPane(index)
     }
 
@@ -4285,9 +4286,75 @@ final class EngineBridge: ObservableObject {
         // does nothing about the window's first responder, so with the project
         // tree's filter still focused the shell was handed the keyboard in
         // name only and every keystroke went on landing in that filter.
-        if on { reclaimKeyboardFromTextFields() }
+        if on {
+            reclaimKeyboardFromTextFields()
+            releaseNavigatorSelection()
+        }
         suisei_engine_focus_terminal(engine, on ? 1 : 0)
         refreshChrome()
+        if on { claimDockTerminalKeyboard() }
+    }
+
+    /// Open the docked shell and run a line in it.
+    ///
+    /// **This is what "install it for me" means here.** The alternative — fork
+    /// the command with a pipe and show a spinner — hides the one thing the
+    /// user needs: an install is the editor changing their machine with their
+    /// own toolchain, and it can ask for a password, refuse on PEP 668, or
+    /// print a version conflict that only a human can decide about. Running it
+    /// in a real terminal means every one of those is visible and answerable,
+    /// and the transcript stays there afterwards.
+    ///
+    /// (Homebrew, for the record, needs no `y`: `brew install` is
+    /// non-interactive by default — that prompt belongs to `apt` and `dnf`. It
+    /// is `sudo`, on the few formulae that need it, that would have blocked a
+    /// piped install, and in a terminal the user simply types the password.)
+    func runInDockTerminal(_ command: String) {
+        guard !command.isEmpty else { return }
+        // The editor window, not whatever is frontmost — this is usually
+        // pressed from Settings, which is its own window and would otherwise
+        // stay in front of the shell doing the work.
+        if let win = NSApp.windows.first(where: { $0.contentViewController != nil
+            && $0.identifier != WindowChrome.settingsIdentifier
+            && $0.identifier != WindowChrome.gitWorkbenchIdentifier
+            && !($0 is NSPanel) })
+        {
+            win.makeKeyAndOrderFront(nil)
+        }
+        setDebugArea(true)
+        // A shell that has just been forked is still sourcing its rc files.
+        // The bytes would not be lost — the tty buffers them — but they would
+        // be echoed into the middle of a prompt being drawn, which reads as a
+        // mangled command. One beat is enough for the prompt to settle.
+        let delay = TerminalSessions.shared.activeDockView == nil ? 0.45 : 0.1
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard let term = TerminalSessions.shared.activeDockView else { return }
+            term.send(txt: command + "\n")
+            self.claimDockTerminalKeyboard()
+        }
+    }
+
+    /// Put the window's keyboard on the docked shell, now.
+    ///
+    /// `reclaimKeyboardFromTextFields` above only takes the keyboard AWAY from
+    /// a field; it hands it to nobody, and the view that should have it lives
+    /// inside a SwiftUI representable whose claim fires once, at mount. Between
+    /// those two facts the shell could end up focused in core and holding no
+    /// keyboard at all — which is what the user sees as a terminal that cannot
+    /// be typed into.
+    ///
+    /// Deferred one turn: the callers are SwiftUI actions (a chip tap, the
+    /// panel's own tap, the Debug-area button), and SwiftUI settles its focus
+    /// after the action returns. Claiming inside the action means claiming
+    /// first and losing.
+    func claimDockTerminalKeyboard() {
+        DispatchQueue.main.async {
+            guard let term = TerminalSessions.shared.activeDockView,
+                  let window = term.window,
+                  window.firstResponder !== term
+            else { return }
+            window.makeFirstResponder(term)
+        }
     }
 
     /// Where a docked shell should start. Core's answer to "which directory is
@@ -5089,6 +5156,37 @@ final class EngineBridge: ObservableObject {
 
     // MARK: - Keys
 
+    /// What the project tree has selected, and whether that selection is what
+    /// the next key is about.
+    ///
+    /// ⌘⌫ is Finder's binding and the one every Mac user tries first, and Move
+    /// to Trash was reachable only from the context menu — you had to know to
+    /// right-click. The obvious way to wire it, `.focusable()` + `.onKeyPress`
+    /// on the tree, was tried and reverted: `.onKeyPress` needs a FOCUSED view,
+    /// the only view to mark is the sidebar's ScrollView which is mounted for
+    /// the whole session, and SwiftUI's focus system then owned the window's
+    /// first responder — which is what stopped the docked terminal being
+    /// typable.
+    ///
+    /// So the tree does not take the keyboard at all. It says what it has
+    /// selected and whether it was the last thing the user acted on, and the
+    /// key monitor — which sees every key before anyone — answers ⌘⌫ from that.
+    /// `active` is cleared by the first key that goes to a document, so
+    /// "click a folder, press ⌘⌫" trashes it while "click a folder, type,
+    /// press ⌘⌫" is the editor's, which is the ordering a user would predict.
+    ///
+    /// Not `@Published`: this is read synchronously inside a key event and
+    /// written from a row tap. Publishing it would invalidate the whole
+    /// window's body on every click in the tree for the benefit of nobody.
+    var navigatorSelection: String = ""
+    var navigatorSelectionIsActive: Bool = false
+
+    /// The keyboard has moved on. Called wherever a key or a click is a
+    /// statement that some OTHER surface is what the user is working in.
+    func releaseNavigatorSelection() {
+        navigatorSelectionIsActive = false
+    }
+
     /// True when key events belong to the editor shell (never alerts, open/save
     /// panels, the Settings / Welcome windows, or a focused native text field —
     /// e.g. the project-tree Filter — those keep native handling).
@@ -5216,6 +5314,23 @@ final class EngineBridge: ObservableObject {
             // Swallowing keys during a modal (clone-URL alert, save panel) made
             // those text fields untypable — pass through anything non-editor.
             guard self.editorOwnsKeyEvents else { return event }
+            // ⌘⌫ — Move to Trash, when the tree's selection is what the user is
+            // working on. See `navigatorSelection` for why this lives in the
+            // monitor and not on the tree itself. Bare ⌫ is deliberately NOT
+            // here: it is the editor's, always.
+            // `contains` plus three exclusions rather than `flags == .command`:
+            // the flag set can carry `.function` / `.numericPad` depending on
+            // the keyboard, and an equality test would silently stop matching.
+            if event.keyCode == 51, flags.contains(.command),
+               !flags.contains(.shift), !flags.contains(.option),
+               !flags.contains(.control),
+               self.navigatorSelectionIsActive, !self.navigatorSelection.isEmpty
+            {
+                NotificationCenter.default.post(
+                    name: .suiseiTrashNavigatorSelection, object: nil
+                )
+                return nil
+            }
             if event.modifierFlags.contains(.command) {
                 let c = event.charactersIgnoringModifiers?.lowercased() ?? ""
                 let hasCtrl = event.modifierFlags.contains(.control)
@@ -5302,6 +5417,11 @@ final class EngineBridge: ObservableObject {
                 }
                 return nil
             }
+            // Anything that gets this far is a key for a document or a shell,
+            // so the tree's selection is no longer what is being acted on. This
+            // is what keeps ⌘⌫ from trashing a folder the user selected, typed
+            // a paragraph, and forgot about.
+            self.releaseNavigatorSelection()
             // Plain typing goes to the canvas's NSTextInputClient path so macOS
             // runs the input method (Hangul et al.) and resolves the standard
             // key bindings. Swallowing it here is what made IME impossible.

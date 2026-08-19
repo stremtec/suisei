@@ -117,23 +117,28 @@ struct ProjectTreeView: View {
                     reveal(path, using: proxy)
                 }
                 .onAppear { reveal(engine.chrome.filename, using: proxy) }
-                // ⌘⌫ lived here as `.focusable()` + `.onKeyPress`, and it
-                // **broke typing in the docked terminal.**
+                // ⌘⌫ — Finder's binding, and the one every Mac user reaches
+                // for. Move to Trash used to be context-menu only, so deleting
+                // a file required knowing to right-click.
                 //
-                // `.onKeyPress` only fires on a focused view, so the tree had
-                // to become one — and this is the sidebar's ScrollView, mounted
-                // for the whole session. SwiftUI's focus system then owns first
-                // responder, while `TerminalDockSurface` re-claims the keyboard
-                // only when NOBODY has it (`window.firstResponder === window`).
-                // So the shell was drawn, was selected, and could not be typed
-                // into.
-                //
-                // A window-wide focus target is too much to spend on a delete
-                // shortcut. Move to Trash stays on the context menu until this
-                // can be done without one — the honest options are a menu
-                // command gated on a surface-focus value the engine already
-                // owns, or an AppKit-level tree that can take the responder on
-                // click and give it back.
+                // The key is caught by the key monitor, not here. This lived
+                // here once as `.focusable()` + `.onKeyPress` and **broke
+                // typing in the docked terminal**: `.onKeyPress` only fires on
+                // a focused view, the only view to mark is this ScrollView
+                // which is mounted for the whole session, and SwiftUI's focus
+                // system then held the window's first responder for good. The
+                // tree takes no keyboard at all now — it publishes what it has
+                // selected (see `navigatorSelection`) and does the deleting
+                // when told.
+                .onReceive(
+                    NotificationCenter.default.publisher(for: .suiseiTrashNavigatorSelection)
+                ) { _ in
+                    // Re-checked here rather than trusted from the monitor: the
+                    // root is not a thing this view may delete, and the
+                    // selection can have gone stale between the key and this.
+                    guard !selectedPath.isEmpty, selectedPath != rootPath else { return }
+                    trash(selectedPath)
+                }
                 }
 
                 // Filter bar: the rounded capsule alone. The bare [+] that
@@ -297,6 +302,13 @@ struct ProjectTreeView: View {
 
         return Button {
             selectedPath = path
+            // The tree is what the user is acting on, as of this click. ⌘⌫ is
+            // answered from these two fields — see `navigatorSelection`. Set
+            // from the CLICK and not from `selectedPath` itself: the selection
+            // also moves when the editor opens a file from somewhere else, and
+            // that is not the user pointing at the tree.
+            engine.navigatorSelection = path
+            engine.navigatorSelectionIsActive = !isRoot
             if isDir {
                 if expanded.contains(path) {
                     withAnimation(.smooth(duration: 0.26)) {
@@ -616,6 +628,11 @@ struct ProjectTreeView: View {
         Self.invalidateCache()
         onRefresh()
         if selectedPath == path { selectedPath = "" }
+        // A second ⌘⌫ must not aim at what the first one already trashed.
+        if engine.navigatorSelection == path {
+            engine.navigatorSelection = ""
+            engine.releaseNavigatorSelection()
+        }
     }
 
     /// Pick a destination folder and move there. The dragging path can only

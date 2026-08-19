@@ -632,6 +632,10 @@ private struct EditorSceneRoot: View {
 extension Notification.Name {
     static let suiseiOpenSettingsWindow = Notification.Name("suisei.openSettingsWindow")
     static let suiseiOpenGitWorkbenchWindow = Notification.Name("suisei.openGitWorkbenchWindow")
+    /// ⌘⌫ arrived while the project tree's selection was the live one. Posted
+    /// by the key monitor, which is the only thing that sees the key; answered
+    /// by the tree, which owns `trash` and the selection itself.
+    static let suiseiTrashNavigatorSelection = Notification.Name("suisei.trashNavigatorSelection")
     static let suiseiNavProject = Notification.Name("suisei.nav.project")
     static let suiseiNavScm = Notification.Name("suisei.nav.scm")
     static let suiseiNavFind = Notification.Name("suisei.nav.find")

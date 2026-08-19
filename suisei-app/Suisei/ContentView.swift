@@ -1193,6 +1193,12 @@ struct ContentView: View {
                 // single.
                 withAnimation(.snappy(duration: 0.28)) { debugTab = .terminal }
                 engine.uiDebugVisible = true
+                // ⌃T does not go through `focusTerminal` — core toggles the
+                // flag and this observer is the whole of the face's answer —
+                // so the keyboard has to be asked for here as well. A no-op
+                // when the shell is being forked for the first time (there is
+                // no view yet); the mount claims for that case.
+                engine.claimDockTerminalKeyboard()
             } else {
                 engine.uiDebugVisible = false
             }

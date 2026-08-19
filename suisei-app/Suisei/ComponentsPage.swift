@@ -211,13 +211,18 @@ private struct ComponentRow: View {
         }
     }
 
-    /// The command, and a button that puts it on the clipboard.
+    /// The command, a button that runs it, and a button that copies it.
     ///
-    /// Copy rather than Run. These lines install software globally with the
-    /// user's own toolchain — `pip3 install`, `go install`, `npm i -g` — and an
-    /// editor that runs them for you is an editor that changes your machine
-    /// from a settings page. The clipboard puts it in front of the terminal
-    /// where the user can read it first.
+    /// **Install runs it in the docked terminal**, not through a pipe with a
+    /// spinner over it. These lines install software globally with the user's
+    /// own toolchain — `pip3 install`, `go install`, `npm i -g` — and any of
+    /// them can ask for a password, refuse under PEP 668, or print a conflict
+    /// only a human can settle. A terminal is where all three are visible and
+    /// answerable, and the transcript is still there afterwards. It is one
+    /// press either way; what it is not is hidden.
+    ///
+    /// Copy stays, because reading a command before running it is a legitimate
+    /// thing to want, and because the shell you trust may not be this one.
     private var installRow: some View {
         HStack(spacing: 8) {
             Text(item.install)
@@ -227,6 +232,11 @@ private struct ComponentRow: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 8)
+            Button("Install") {
+                EngineBridge.shared.runInDockTerminal(item.install)
+            }
+            .controlSize(.small)
+            .help("Run this in Suisei's terminal")
             Button(copied == item.id ? "Copied" : "Copy") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(item.install, forType: .string)

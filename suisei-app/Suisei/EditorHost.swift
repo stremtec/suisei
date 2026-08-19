@@ -780,6 +780,17 @@ final class EditorScrollView: NSScrollView {
         }
     }
 
+    /// Tell core where the clip is, this instant, throttle be damned.
+    ///
+    /// For the end of a drag. The throttled push above samples at 30 Hz, so the
+    /// last stretch of an autoscroll — the fast part, at the end, when the
+    /// pointer has been held outside the longest — can be a hundred points that
+    /// core never heard about. The publish that follows mouse-up reads core's
+    /// copy back.
+    func pushClipPositionToCore() {
+        syncCorePosition(force: true)
+    }
+
     /// Position-only Core sync — throttled ~30Hz; never recomposes.
     private func syncCorePosition(force: Bool) {
         let now = CACurrentMediaTime()
@@ -1508,6 +1519,23 @@ final class EditorCanvasView: NSView {
         guard paneIndex == wantsFocus, let win = window else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.window === win else { return }
+            // Never off a TERMINAL.
+            //
+            // A canvas is added to a window for reasons that have nothing to
+            // do with who should be typing — a split is installed, the font
+            // changes, the debug area opens underneath. This claimed from
+            // whatever held the keyboard as long as it was not another canvas,
+            // and the docked shell takes the keyboard as it mounts, one runloop
+            // before this runs. So opening the terminal handed it the keyboard
+            // and this took it straight back, permanently: nothing re-claimed
+            // for the shell afterwards. "이젠 도킹 터미널에 입력이 안됨."
+            //
+            // Both halves of the test are needed. The responder check covers a
+            // shell that already has it; the focus check covers the window
+            // where core has just said `terminal` and the claim for it is still
+            // one turn away.
+            if win.firstResponder is TerminalKeySurface { return }
+            if self.engine?.focus == .terminal { return }
             if !(win.firstResponder is EditorCanvasView) {
                 win.makeFirstResponder(self)
             }
@@ -4510,6 +4538,16 @@ final class EditorCanvasView: NSView {
         commitMarkedTextForDocumentAction()
         window?.makeFirstResponder(self)
         guard let engine else { return }
+        // Taking the keyboard is only half of it: core still says the shell is
+        // focused, and the docked terminal now enforces that on every publish
+        // by taking the keyboard back. A click in a document is the plainest
+        // statement there is that the document owns typing, so say it here,
+        // rather than at mouse-UP where `finishDrag` says it — that one is
+        // deliberately skipped when the click turned into a drag, and a drag is
+        // still a click on this pane.
+        if engine.focus == .terminal { engine.focusTerminal(false) }
+        // …and the tree's selection is no longer what a key is about.
+        engine.releaseNavigatorSelection()
         // Whatever part of this pane was hit, the click is a statement about
         // THIS pane. Core has to agree before anything below runs, because
         // everything below acts on the live document: `toggleBreakpointLine`
@@ -4790,6 +4828,11 @@ final class EditorCanvasView: NSView {
             engine.pointerDoubleAbsolute(row: row, col: col)
         }
         engine.pointerUp()
+        // Where the view actually ENDED UP, before the publish below hands the
+        // face core's idea of it back. An autoscrolling drag moves the clip
+        // while the pointer is down, and that is the one kind of scrolling core
+        // used to refuse to hear about — see `Engine::scroll_sync`.
+        scrollView?.pushClipPositionToCore()
         engine.refreshChrome()
         isBlockDrag = false
         // A plain click places the caret and resumes typing; a drag leaves its
