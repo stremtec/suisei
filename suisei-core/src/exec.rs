@@ -73,6 +73,13 @@ const EXTRA_DIRS: &[&str] = &[
     "~/.dotnet/tools",       // dotnet tool install --global csharp-ls
     "~/.ghcup/bin",          // ghcup, for a Haskell toolchain not from brew
     "~/.pub-cache/bin",      // dart pub global activate
+    // `cs install metals` — the line printed for Scala. Coursier's install
+    // directory on macOS is an Application Support folder, and it is added to
+    // `PATH` by `cs setup` writing a profile, which a Finder-launched app does
+    // not read. Measured: `metals` sitting here while the page said Scala had
+    // no server. Nothing else is in the habit of putting binaries under
+    // Application Support, which is precisely why it was missed.
+    "~/Library/Application Support/Coursier/bin",
 ];
 
 /// Node version managers that keep one directory per installed version.

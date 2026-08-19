@@ -2467,7 +2467,19 @@ pub extern "C" fn suisei_engine_status_extra(
     1
 }
 
-pub const SUISEI_MAX_SETTINGS_ROWS: usize = 48;
+/// How many settings rows cross the ABI.
+///
+/// **It was 48, and the table is 65.** The writer clamps with a `min`, so the
+/// last seventeen rows were dropped without a word: fourteen languages off the
+/// end of Language Servers, and all three Source Control rows — which is why
+/// that page appeared to exist for nothing. "세팅에 소스 컨트롤은 왜 있어?
+/// 암것도 안뜨고." It was not empty by design; it was empty by arithmetic.
+///
+/// 96 is headroom for the two lists that grow — themes and the language
+/// catalogue — and `settings_rows_fit_the_abi` fails the build before a page
+/// can silently lose its tail again. The snapshot is pulled only while the
+/// Settings window is open, so the size buys nothing back by being tight.
+pub const SUISEI_MAX_SETTINGS_ROWS: usize = 96;
 pub const SUISEI_SETTINGS_LABEL: usize = 96;
 pub const SUISEI_SETTINGS_VALUE: usize = 64;
 pub const SUISEI_SETTINGS_GROUP: usize = 48;

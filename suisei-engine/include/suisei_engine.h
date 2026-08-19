@@ -516,7 +516,7 @@ typedef struct SuiseiStatusExtra {
   char branch[64];
 } SuiseiStatusExtra;
 
-#define SUISEI_MAX_SETTINGS_ROWS 48
+#define SUISEI_MAX_SETTINGS_ROWS 96
 #define SUISEI_SETTINGS_LABEL 96
 #define SUISEI_SETTINGS_VALUE 64
 #define SUISEI_SETTINGS_GROUP 48
