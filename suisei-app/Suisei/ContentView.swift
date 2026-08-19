@@ -278,7 +278,6 @@ struct ContentView: View {
     @StateObject private var projectIndex = ProjectIndex()
     /// Measured shell-chip row width — the header scroller hugs it until the
     /// chips outgrow the cap, so a single session sits right beside the "+".
-    @State private var terminalChipsWidth: CGFloat = 0
     @State private var debugTab: DebugAreaTab = .terminal
 
     /// The right rail answers "what is THIS", about the one thing selected —
@@ -3113,23 +3112,24 @@ struct ContentView: View {
                                     }
                                 }
                                 .padding(.horizontal, 1)
-                                // Its own ideal width, whatever is proposed.
-                                // The measurement below feeds the frame that
-                                // sizes this very ScrollView, so without this
-                                // the loop can settle on the CLIPPED width —
-                                // a window one chip wide, which is why adding a
-                                // shell showed the new chip and nothing else:
-                                // `scrollTo(last)` was landing on the only one
-                                // that fit.
-                                .fixedSize(horizontal: true, vertical: false)
-                                .onGeometryChange(for: CGFloat.self) { proxy in
-                                    proxy.size.width
-                                } action: { w in
-                                    terminalChipsWidth = w
-                                }
                             }
-                            // Hug the chips; scroll only once they pass the cap.
-                            .frame(width: min(260, max(1, terminalChipsWidth)))
+                            // Width from the MODEL, never from measuring the
+                            // thing being sized.
+                            //
+                            // This used to read the chips' own laid-out width
+                            // back out through `onGeometryChange` and feed it to
+                            // the frame that constrains them — a cycle, and it
+                            // could settle on one chip's worth. Then adding a
+                            // shell scrolled to the last chip inside a window
+                            // that only fit one, which is exactly "shell 1 만
+                            // 있는 상태에서 + 하니 shell 2 만 렌더됨": the first
+                            // chip was still there, one pixel to the left of a
+                            // viewport too narrow to show it.
+                            //
+                            // A count times a bounded chip width has no such
+                            // loop. `terminalChipWidth` is a cap the chip itself
+                            // honours, so the arithmetic and the layout agree.
+                            .frame(width: min(260, chipStripWidth))
                             .onChange(of: shells.dockActive) { _, i in
                                 withAnimation(.snappy(duration: 0.2)) {
                                     proxy.scrollTo(i, anchor: .center)
@@ -3280,6 +3280,20 @@ struct ContentView: View {
         }
     }
 
+    /// The widest a shell chip is allowed to be.
+    ///
+    /// A cap, not a fixed size — a chip narrower than this stays narrow. It
+    /// exists so `chipStripWidth` can be arithmetic instead of a measurement:
+    /// a shell that renames itself to something long truncates rather than
+    /// silently making the strip's own estimate wrong.
+    private static let terminalChipMaxWidth: CGFloat = 104
+
+    /// How wide the chip strip wants to be, from the session COUNT.
+    private var chipStripWidth: CGFloat {
+        let n = CGFloat(max(1, shells.dock.count))
+        return n * Self.terminalChipMaxWidth + (n - 1) * 3 + 2
+    }
+
     private func terminalSessionChip(_ i: Int) -> some View {
         let active = i == shells.dockActive
         return Button {
@@ -3294,6 +3308,12 @@ struct ContentView: View {
                 Text(shells.dockTitle(i))
                     .font(.system(size: 10, weight: active ? .semibold : .regular))
                     .lineLimit(1)
+                    // A shell that reports a long title (`make`, an ssh host)
+                    // must not widen its chip past what `chipStripWidth`
+                    // budgeted for it, or the strip's arithmetic and its layout
+                    // stop agreeing and we are back to a clipped first chip.
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 62, alignment: .leading)
                 if active, shells.dock.count > 1 {
                     Button {
                         shells.closeDockSession(i)

@@ -116,7 +116,9 @@ const ROWS: &[Row] = &[
         title: "debugpy",
         group: "Debugging",
         detail: "Python.",
-        install: "pip3 install debugpy",
+        // Filled in from the interpreter we actually probe — see
+        // `python_install`. A fixed `pip3 install debugpy` is wrong twice over.
+        install: "",
         probe: Probe::PythonModule("debugpy"),
     },
     Row {
@@ -178,12 +180,17 @@ pub fn catalog() -> Vec<Component> {
         } else {
             row.detail.to_string()
         };
+        let install = if row.id == "dap.debugpy" {
+            python_install("debugpy")
+        } else {
+            row.install.to_string()
+        };
         out.push(Component {
             id: row.id.to_string(),
             title: row.title.to_string(),
             group: row.group,
             detail,
-            install: row.install.to_string(),
+            install,
             state,
         });
     }
@@ -208,6 +215,49 @@ pub fn catalog() -> Vec<Component> {
     }
 
     out
+}
+
+/// The line that installs a Python package **into the interpreter we probe**.
+///
+/// Two things were wrong with the fixed `pip3 install debugpy`:
+///
+///   · **`pip3` need not belong to the `python3` we ask.** The probe imports
+///     the module with whichever `python3` `exec` finds. A machine with more
+///     than one Python installs into one and is then asked about another, and
+///     the page still says Not Installed after the user did exactly what it
+///     said. `python3 -m pip` cannot drift: it is the same interpreter.
+///
+///   · **PEP 668.** A Homebrew or distro Python ships an `EXTERNALLY-MANAGED`
+///     marker and refuses `pip install` outright — `--user` too. Measured on
+///     this machine: `error: externally-managed-environment`. So the page was
+///     printing a command that CANNOT WORK, and the user is left thinking the
+///     detection is broken when it is the instruction that is.
+///
+/// The marker is read from the interpreter's own `stdlib` path rather than
+/// guessed from the binary's location: a venv, pyenv build and Homebrew build
+/// all sit somewhere different and only the interpreter knows which it is.
+fn python_install(package: &str) -> String {
+    let Some(py) = crate::exec::find("python3").or_else(|| crate::exec::find("python")) else {
+        // Nothing to install into. Name the tool anyway — a user with no
+        // python3 needs to hear that first.
+        return format!("python3 -m pip install {package}");
+    };
+    let managed = std::process::Command::new(&py)
+        .arg("-c")
+        .arg("import os,sysconfig;print(os.path.exists(os.path.join(sysconfig.get_path('stdlib'),'EXTERNALLY-MANAGED')))")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "True")
+        .unwrap_or(false);
+    if managed {
+        // What actually works on such an install. Homebrew's Python is not
+        // macOS's, so this risks Homebrew's own packages and not the OS — the
+        // alternative honest answer is a virtualenv, and a debug adapter has to
+        // be importable by the interpreter that runs the code, which for now is
+        // this one.
+        format!("python3 -m pip install --break-system-packages {package}")
+    } else {
+        format!("python3 -m pip install {package}")
+    }
 }
 
 /// The grammars this build actually has, named.

@@ -57,6 +57,11 @@ const EXTRA_DIRS: &[&str] = &[
     "~/.npm-global/bin",     // the documented custom `npm prefix`
     "~/.asdf/shims",         // asdf
     "~/.nodenv/shims",       // nodenv
+    // `go install` — which is the line printed for Delve — writes to
+    // `$GOPATH/bin`, and the default GOPATH is `~/go`. Nothing else puts a
+    // binary there, and it was on no list, so the Go debug adapter was
+    // permanently "Not Installed" on machines that had just installed it.
+    "~/go/bin",
 ];
 
 /// Node version managers that keep one directory per installed version.
@@ -141,15 +146,71 @@ fn expand(dir: &str) -> Option<PathBuf> {
     }
 }
 
+/// The `PATH` the user's own login shell would hand them.
+///
+/// **Enumerating version managers is a losing game.** The list above covers
+/// nvm, fnm, Volta, pnpm, asdf and nodenv, and the machine this was written on
+/// keeps Node in `~/.hermes/node/bin` — on no list anywhere, and there will
+/// always be another one. The shell already knows where everything is, because
+/// the user's own profile is what put it there. So ask it, once.
+///
+/// `-l -i` because a PATH edit can live in either a login file
+/// (`.zprofile`, `.profile`) or an interactive one (`.zshrc`) — nvm's installer
+/// writes to the latter — and a shell started with only one of the two flags
+/// reads only half of what the user configured.
+///
+/// Bounded, and abandoned rather than waited on. A profile that opens an ssh
+/// agent or prints a banner can take a while, and the editor must not stall on
+/// it: after the deadline we take the static list and carry on. The worker
+/// thread still reaps the child, so nothing is left behind.
+fn login_shell_path() -> Option<OsString> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/zsh"));
+    // A shell we cannot run is not a shell. This also keeps the spawn off a
+    // path the user could not have configured anything in.
+    if !Path::new(&shell).is_file() {
+        return None;
+    }
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(&shell)
+            .args(["-l", "-i", "-c", "printf %s \"$PATH\""])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(out.ok().filter(|o| o.status.success()).map(|o| o.stdout));
+    });
+    let bytes = rx.recv_timeout(Duration::from_millis(1500)).ok()??;
+    let text = String::from_utf8(bytes).ok()?;
+    let text = text.trim();
+    // An interactive shell can print a banner before the value. Take the last
+    // line, which is what `printf` wrote, and require it to look like a PATH.
+    let line = text.lines().last()?.trim();
+    (!line.is_empty() && line.contains('/')).then(|| OsString::from(line))
+}
+
 /// Every directory to look in, in order: the inherited `PATH` first (a user who
 /// launched from a terminal, or set one deliberately, gets exactly what they
-/// asked for), then the standard locations that Finder's environment omits.
+/// asked for), then what the login shell knows, then the standard locations
+/// that Finder's environment omits.
 fn search_dirs() -> &'static [PathBuf] {
     static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     DIRS.get_or_init(|| {
         let mut out: Vec<PathBuf> = Vec::new();
         if let Some(path) = std::env::var_os("PATH") {
             out.extend(std::env::split_paths(&path));
+        }
+        // Second, not first: a `PATH` deliberately set for this process — by a
+        // terminal launch, or by a wrapper script — outranks whatever the
+        // user's profile would have said.
+        if let Some(shell_path) = login_shell_path() {
+            for p in std::env::split_paths(&shell_path) {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
         }
         for dir in EXTRA_DIRS {
             if let Some(p) = expand(dir) {
