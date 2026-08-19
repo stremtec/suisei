@@ -6496,6 +6496,44 @@ final class EngineBridge: ObservableObject {
         ))
     }
 
+    /// This build's version, as the updater's markers spell it.
+    static var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "0.0.0"
+    }
+
+    /// The version this install can go back to, or "".
+    ///
+    /// Pulled rather than published: it changes at most once per launch — the
+    /// swap that sets it happens before the UI exists — and only one page asks.
+    func rollbackVersion() -> String {
+        var buf = [CChar](repeating: 0, count: 64)
+        let n = Self.appVersion.withCString {
+            suisei_engine_update_rollback_version($0, &buf, 64)
+        }
+        return n > 0 ? String(cString: buf) : ""
+    }
+
+    /// Put the previous build back, and say what happened.
+    ///
+    /// One rename, the same one that installed this version, run the other way.
+    /// The app must be restarted afterwards: the running image is still this
+    /// version — its inode survives the exchange — which is exactly why the
+    /// swap is safe to do under a live process.
+    func rollBackToPreviousVersion() -> (ok: Bool, message: String) {
+        var buf = [CChar](repeating: 0, count: 256)
+        let app = Bundle.main.bundleURL.path
+        let rc = Self.appVersion.withCString { cur in
+            app.withCString { path in
+                suisei_engine_update_rollback(cur, path, &buf, 256)
+            }
+        }
+        let text = String(cString: buf)
+        return rc == 0
+            ? (true, text.isEmpty ? "Reverted." : "Reverted to \(text).")
+            : (false, text.isEmpty ? "Could not go back." : text)
+    }
+
     /// Empty the update working directory. Returns what the engine decided.
     ///
     /// It can refuse, and the refusals are the interesting part: the staged

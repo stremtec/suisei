@@ -440,3 +440,98 @@ fn measured_weights_replace_the_estimated_ones() {
         estimated.progress(60).fraction
     );
 }
+
+// ── The rollback ────────────────────────────────────────────────────────────
+//
+// The exchange leaves the build you were running at the staged path, and the
+// module has always said so — but nothing wrote down WHERE, and `clear_pending`
+// removed the only other record of that path one line after the swap. So the
+// old build sat in a cache directory as bytes nobody could name, and a user
+// whose new version would not launch had exactly one move left: download it
+// again. These are the tests for that not being true any more.
+
+/// Rolling back is the same rename in the other direction, and it must leave
+/// the same guarantee behind: a working editor at the app path at every
+/// instant, and the version you rejected still on disk.
+#[test]
+fn a_rollback_is_the_swap_run_backwards() {
+    let dir = scratch("rollback_swap");
+    let (staged, app) = (dir.join("staged.app"), dir.join("Suisei.app"));
+    make_app(&staged, "new");
+    make_app(&app, "old");
+
+    // Forward: the app becomes the new build, the old one lands at `staged`.
+    ub::swap(&staged, &app).expect("swap");
+    assert_eq!(
+        std::fs::read_to_string(app.join("Contents/MacOS/Suisei")).unwrap(),
+        "new"
+    );
+    assert_eq!(
+        std::fs::read_to_string(staged.join("Contents/MacOS/Suisei")).unwrap(),
+        "old",
+        "the build you were running is the rollback, and it is right there"
+    );
+
+    // Backward: the same call.
+    ub::swap(&staged, &app).expect("swap back");
+    assert_eq!(
+        std::fs::read_to_string(app.join("Contents/MacOS/Suisei")).unwrap(),
+        "old"
+    );
+    assert_eq!(
+        std::fs::read_to_string(staged.join("Contents/MacOS/Suisei")).unwrap(),
+        "new",
+        "and the version just rejected is still on disk, not deleted"
+    );
+}
+
+/// The marker is read with the same rules as `pending`, and for the same
+/// reason: it decides whether the editor replaces itself, so anything it cannot
+/// read whole must mean "do nothing".
+#[test]
+fn a_rollback_marker_is_refused_when_it_cannot_be_trusted() {
+    let dir = scratch("rollback_marker");
+    let old = dir.join("old.app");
+    make_app(&old, "0.1.1");
+    let marker = dir.join("rollback");
+    let good = Pending {
+        version: "0.1.1".into(),
+        sha: "-".into(),
+        app: old.clone(),
+    };
+    std::fs::write(&marker, good.serialise()).unwrap();
+    assert_eq!(
+        ub::pending_at(&marker, "0.1.2").map(|p| p.version),
+        Some("0.1.1".to_string()),
+        "a real previous build is offered"
+    );
+
+    // Already there. Rolling back into the version you are running is not a
+    // move, and offering it would be the page describing a no-op as a repair.
+    assert!(ub::pending_at(&marker, "0.1.1").is_none());
+
+    // Swept. `clear_cache` can take the whole working directory, and a marker
+    // that outlives its bundle would swap the app path with nothing.
+    std::fs::remove_dir_all(&old).unwrap();
+    assert!(
+        ub::pending_at(&marker, "0.1.2").is_none(),
+        "a marker whose bundle is gone offers nothing"
+    );
+
+    // Truncated by a crash mid-write.
+    std::fs::write(&marker, "version=0.1.1\n").unwrap();
+    assert!(ub::pending_at(&marker, "0.1.2").is_none());
+}
+
+/// A rollback and a staged update disagree about what should be installed at
+/// the next launch, and the staged one applies itself without asking. Going
+/// back has to take that with it or the next restart silently undoes it.
+#[test]
+fn going_back_forgets_the_update_it_walked_away_from() {
+    let dir = scratch("rollback_pending");
+    let app = dir.join("Suisei.app");
+    make_app(&app, "0.1.2");
+    // `roll_back` with nothing recorded is refused rather than guessed at.
+    let err = ub::roll_back("0.1.2", &app).unwrap_err();
+    assert!(err.contains("Nothing"), "got: {err}");
+}

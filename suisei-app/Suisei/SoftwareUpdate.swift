@@ -82,6 +82,11 @@ struct SoftwareUpdatePage: View {
     /// Empty the update working directory. The engine refuses while an update
     /// is staged or a build is running; the row disables itself first.
     var onClearCache: () -> Void = {}
+    /// The version this install can go back to, or "" when there is none.
+    var rollbackVersion: String = ""
+    /// Put the previous build back. The page asks first — this is the one
+    /// control here that changes which app the user owns.
+    var onRollBack: () -> Void = {}
     /// 0 idle · 1 cloning · 2 building · 3 staging · 4 ready · 5 failed.
     var buildPhase: UInt8 = 0
     var buildDetail: String = ""
@@ -150,6 +155,16 @@ struct SoftwareUpdatePage: View {
                 Text("Suisei asks GitHub for the newest version tag; it never sends anything about your files.")
             }
 
+            if !rollbackVersion.isEmpty {
+                Section {
+                    rollbackRow
+                } header: {
+                    Text("Previous Version")
+                } footer: {
+                    Text("The build you were running before the last update is still on this Mac. Going back is the same instant exchange that installed this one — nothing is downloaded or rebuilt.")
+                }
+            }
+
             Section {
                 cacheRow
             } header: {
@@ -190,6 +205,29 @@ struct SoftwareUpdatePage: View {
             Spacer(minLength: 8)
             Button("Clear") { onClearCache() }
                 .disabled(staged || busy || snap.cacheBytes == 0)
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// The way out of an update that did not work.
+    ///
+    /// Shown only when there is a build to go back TO, because the whole point
+    /// is that this is not advice — it is a rename of something already on
+    /// disk. `swap` has always left the old bundle at the staged path; until
+    /// now nothing wrote down where, so the only move left to a user whose new
+    /// version would not start was to download it again.
+    @ViewBuilder private var rollbackRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Suisei \(rollbackVersion)")
+                    .font(.body)
+                Text("Kept from the last update. Suisei quits when you go back.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button("Go Back…") { onRollBack() }
         }
         .padding(.vertical, 2)
     }

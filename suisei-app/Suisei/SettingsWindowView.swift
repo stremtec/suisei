@@ -23,6 +23,10 @@ struct SettingsWindowView: View {
     /// armed field would race the first for the key press.
     /// What stopped an update before it started, as one block of text.
     @State private var updateBlockers = ""
+    /// The version this install can go back to, or "" — see `rollbackRow`.
+    @State private var rollbackVersion = ""
+    @State private var confirmRollback = false
+    @State private var rollbackResult = ""
     @State private var recordingCommand: String?
     /// Why the last chord was refused. Cleared the moment another is offered.
     @State private var shortcutError: String?
@@ -597,6 +601,8 @@ struct SettingsWindowView: View {
                             }
                         },
                         onClearCache: { engine.clearUpdateCache() },
+                        rollbackVersion: rollbackVersion,
+                        onRollBack: { confirmRollback = true },
                         buildPhase: engine.sourceUpdatePhase(),
                         buildDetail: engine.sourceUpdateDetail(),
                         buildFraction: engine.sourceUpdateFraction(),
@@ -665,6 +671,47 @@ struct SettingsWindowView: View {
         // from another window. Leaving the page disarms whatever was recording,
         // so a field cannot sit waiting for a key nobody is going to press.
         .task(id: engine.keymapGeneration) { keyBindings = engine.keyBindings() }
+        // Going back replaces the app the user is running, so it asks — the
+        // one control on that page that changes which Suisei they own. The
+        // version is read once when the page appears: it is set by a swap that
+        // happened before this window existed and cannot move while it is open.
+        .task(id: selectedPageID) {
+            rollbackVersion = selectedPageID == .softwareUpdate
+                ? engine.rollbackVersion()
+                : ""
+        }
+        .alert(
+            "Go back to Suisei \(rollbackVersion)?",
+            isPresented: $confirmRollback
+        ) {
+            Button("Cancel", role: .cancel) { confirmRollback = false }
+            Button("Go Back", role: .destructive) {
+                let result = engine.rollBackToPreviousVersion()
+                guard result.ok else {
+                    rollbackResult = result.message
+                    return
+                }
+                // Restart, because the running image is still this version —
+                // its inode survived the exchange, which is the same property
+                // that makes the swap safe under a live process.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    NSApp.terminate(nil)
+                }
+            }
+        } message: {
+            Text("The version you are running now stays on this Mac, so you can come back to it. Suisei quits so the older build can start.")
+        }
+        .alert(
+            "Could not go back",
+            isPresented: Binding(
+                get: { !rollbackResult.isEmpty },
+                set: { if !$0 { rollbackResult = "" } }
+            )
+        ) {
+            Button("OK", role: .cancel) { rollbackResult = "" }
+        } message: {
+            Text(rollbackResult)
+        }
         // What stopped the update, before anything was downloaded. An alert
         // rather than a status line: the user just pressed a button and is
         // owed an answer about that press.

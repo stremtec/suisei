@@ -317,6 +317,15 @@ uint32_t suisei_engine_update_headline(const SuiseiEngine *ptr, char *out, uint3
 uint32_t suisei_engine_update_pending(const char *current, char *out, uint32_t cap);
 uint8_t suisei_engine_update_apply(const char *current, const char *app_path,
                                    char *err, uint32_t cap);
+/* The version this install can go back to, or "" — the other half of the
+   atomic exchange. `swap` leaves the build you were running at the staged
+   path; this is what remembers where. */
+uint32_t suisei_engine_update_rollback_version(const char *current, char *out,
+                                               uint32_t cap);
+/* Put the previous build back. 0 = done; `out` gets the version now installed,
+   or the reason it could not. */
+uint8_t suisei_engine_update_rollback(const char *current, const char *app_path,
+                                      char *out, uint32_t cap);
 
 /* Column selection. The block gesture speaks VISUAL columns — a rectangle is a
    rectangle on the screen, and a tab is one character and several columns. */

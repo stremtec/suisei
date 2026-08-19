@@ -382,6 +382,77 @@ pub fn clear_pending() {
     let _ = std::fs::remove_file(pending_path());
 }
 
+// ── Rollback ────────────────────────────────────────────────────────────────
+//
+// `swap` leaves the version you were running at the staged path. That has
+// always been true and the comment on it has always said so — but nothing
+// wrote down WHERE, and `clear_pending` then removed the only record of the
+// path, so the bundle sat in the cache as bytes nobody could name. A user whose
+// new version would not launch had one option left: download it again. Half the
+// reason for choosing an atomic exchange was being thrown away one line after
+// the exchange succeeded.
+//
+// The marker is the same three-line shape as `pending`, deliberately: it is
+// read at startup by the same kind of code, a human may have to look at it, and
+// "half-parses into something plausible" is not a state either file may have.
+
+/// The build you were running before the last update, if it is still there.
+pub fn rollback_path() -> PathBuf {
+    work_dir().join("rollback")
+}
+
+/// Record where the version we just left is sitting.
+///
+/// Called immediately after a successful `swap`, with the path the old bundle
+/// now occupies — which is the path the NEW one came from.
+pub fn set_rollback(version: &str, sha: &str, app: &Path) {
+    let marker = Pending {
+        version: version.to_string(),
+        // The sha of the build being replaced is not always known (a release
+        // installed from a DMG has none), and the rollback does not need it —
+        // it is carried so the file has one shape, and a dash keeps `parse`'s
+        // "no empty fields" rule without inventing a hash.
+        sha: if sha.is_empty() { "-".to_string() } else { sha.to_string() },
+        app: app.to_path_buf(),
+    };
+    if let Some(parent) = rollback_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = crate::fs_atomic::atomic_write_file(&rollback_path(), marker.serialise());
+}
+
+/// The version this install can go back to, if any.
+///
+/// Every check is a way the marker can be right and the rollback still wrong:
+/// the old bundle swept away by a cache clear, a marker naming the version we
+/// are already running (rolled back once already), a bundle that was never
+/// fully written.
+pub fn rollback_for(current_version: &str) -> Option<Pending> {
+    pending_at(&rollback_path(), current_version)
+}
+
+pub fn clear_rollback() {
+    let _ = std::fs::remove_file(rollback_path());
+}
+
+/// Put the previous build back.
+///
+/// The same `swap` in the other direction — which is the property the atomic
+/// exchange was chosen for, finally used. On success the marker is cleared: the
+/// build we just left is now sitting at the staged path, and offering to "roll
+/// back" into the version the user has just rejected is not a kindness.
+pub fn roll_back(current_version: &str, app: &Path) -> Result<String, String> {
+    let Some(p) = rollback_for(current_version) else {
+        return Err("Nothing to go back to.".to_string());
+    };
+    swap(&p.app, app)?;
+    clear_rollback();
+    // A staged update for the version we just walked away from would apply
+    // itself at the next launch and undo this silently.
+    clear_pending();
+    Ok(p.version)
+}
+
 /// Exchange two directory entries atomically.
 ///
 /// The whole safety argument of this module rests here. `rm -rf old && mv new

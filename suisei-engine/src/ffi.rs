@@ -1207,7 +1207,16 @@ pub extern "C" fn suisei_engine_update_apply(
     // the same failing swap on every launch from here on.
     suisei_core::update_build::clear_pending();
     match outcome {
-        Ok(()) => 0,
+        Ok(()) => {
+            // The exchange put the version we were running at `p.app`. Write
+            // that down NOW, in the one place that knows both halves — a line
+            // later `clear_pending` removes the only other record of the path,
+            // and the old build becomes bytes in a cache directory that nobody
+            // can name. That is what made "the new one will not launch" an
+            // unrecoverable position with a working editor sitting on disk.
+            suisei_core::update_build::set_rollback(&cur, "", &p.app);
+            0
+        }
         Err(e) => {
             if !err.is_null() && cap > 0 {
                 let buf = unsafe { std::slice::from_raw_parts_mut(err, cap as usize) };
@@ -1216,6 +1225,58 @@ pub extern "C" fn suisei_engine_update_apply(
             1
         }
     }
+}
+
+/// The version this install can go back to, or empty.
+///
+/// The other half of the atomic exchange. `swap` leaves the build you were
+/// running at the staged path, and it has always said so — but nothing wrote
+/// down where, so the only route out of a bad update was to download one again.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_rollback_version(
+    current: *const c_char,
+    out: *mut c_char,
+    cap: u32,
+) -> u32 {
+    if current.is_null() || out.is_null() || cap == 0 {
+        return 0;
+    }
+    let cur = unsafe { CStr::from_ptr(current) }.to_string_lossy().to_string();
+    let version = suisei_core::update_build::rollback_for(&cur)
+        .map(|p| p.version)
+        .unwrap_or_default();
+    let buf = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+    write_cstr(buf, &version);
+    version.len() as u32
+}
+
+/// Put the previous build back. Returns 0 on success.
+///
+/// The same rename as `suisei_engine_update_apply`, in the other direction, and
+/// with the same guarantee: before the call the app path holds this version,
+/// after it the previous one, and never nothing. `out` receives the version now
+/// installed on success and the reason on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_rollback(
+    current: *const c_char,
+    app_path: *const c_char,
+    out: *mut c_char,
+    cap: u32,
+) -> u8 {
+    if current.is_null() || app_path.is_null() {
+        return 1;
+    }
+    let cur = unsafe { CStr::from_ptr(current) }.to_string_lossy().to_string();
+    let app = unsafe { CStr::from_ptr(app_path) }.to_string_lossy().to_string();
+    let result = suisei_core::update_build::roll_back(&cur, std::path::Path::new(&app));
+    if !out.is_null() && cap > 0 {
+        let buf = unsafe { std::slice::from_raw_parts_mut(out, cap as usize) };
+        match &result {
+            Ok(v) => write_cstr(buf, v),
+            Err(e) => write_cstr(buf, e),
+        }
+    }
+    u8::from(result.is_err())
 }
 
 /// ⌥-drag down: start a rectangle at this cell.
