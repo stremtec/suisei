@@ -218,6 +218,18 @@ FIRST LAUNCH
   (On macOS Sequoia and later, right-click → Open no longer works for this.
   The Privacy & Security panel is the only way.)
 
+IF IT SAYS "DAMAGED AND CAN'T BE OPENED"
+  Nothing is damaged. That wording appears instead of the one above when the
+  download was tagged by the browser that fetched it, and there is no
+  Developer ID signature to check the tag against. There is no "Open Anyway"
+  button in this case — the tag has to come off first.
+
+  With Suisei already in Applications, open Terminal and run:
+
+      xattr -dr com.apple.quarantine /Applications/Suisei.app
+
+  Then open Suisei normally. Once only, same as above.
+
 IF YOU WOULD RATHER NOT
   That is a reasonable thing to decide. Nothing here needs you to trust a
   binary — the source is in the repository and builds with:
