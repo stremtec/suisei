@@ -189,7 +189,7 @@ enum WindowChrome {
             // container. Hidden rather than removed: it belongs to AppKit,
             // which may re-lay it out, and a hidden view it still owns survives
             // that where a removed one would be recreated.
-            hideEffectViews(in: view)
+            hideEffectViews(in: view, bandWidth: view.bounds.width)
         }
     }
 
@@ -235,6 +235,10 @@ enum WindowChrome {
         }
 
         NSLog(
+            "[suisei/titlebar] build=\(Bundle.main.bundlePath) "
+                + "v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")"
+        )
+        NSLog(
             "[suisei/titlebar] fullscreen=\(full) window=\(type(of: window)) "
                 + "appearance=\(window.appearance?.name.rawValue ?? "nil") "
                 + "bg=\(window.backgroundColor) opaque=\(window.isOpaque)"
@@ -260,13 +264,34 @@ enum WindowChrome {
         }
     }
 
-    private static func hideEffectViews(in view: NSView) {
+    /// Hide whatever is painting the band's material.
+    ///
+    /// **On macOS 26 that is no longer an `NSVisualEffectView`.** The titlebar
+    /// dump from a Tahoe machine contains not one `EFFECT` line — the tree is
+    /// `NSToolbarView › NSGlassContainerView › … › NSGlassEffectView`, and
+    /// neither glass class descends from `NSVisualEffectView`. So this walked
+    /// the whole titlebar, matched nothing, and reported success: the mechanism
+    /// that makes the band transparent has been a no-op on the OS the app is
+    /// built against.
+    ///
+    /// The glass is matched by NAME, because the classes are private, and by
+    /// SIZE, because not all of it is unwanted: the little pill behind the
+    /// trailing toolbar buttons is an `NSGlassEffectView` too (112×36 in that
+    /// dump) and it is meant to be there — it is what makes those buttons look
+    /// like Source Control's. Only glass as wide as the band it sits in is the
+    /// band's own backdrop.
+    private static func hideEffectViews(in view: NSView, bandWidth: CGFloat) {
         for child in view.subviews {
             if let effect = child as? NSVisualEffectView {
                 effect.isHidden = true
-            } else {
-                hideEffectViews(in: child)
+                continue
             }
+            let name = String(describing: type(of: child))
+            if name.contains("GlassEffectView"), child.frame.width >= bandWidth - 2 {
+                if !child.isHidden { child.isHidden = true }
+                continue
+            }
+            hideEffectViews(in: child, bandWidth: bandWidth)
         }
     }
 }
