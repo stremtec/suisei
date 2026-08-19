@@ -6,7 +6,7 @@ members = ["suisei-core", "suisei-engine", "suisei-daemon"]
 # (`grep -m1 '^version' Cargo.toml`) into Info.plist. Suisei starts its own
 # version line as an independent product.
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 # Custom source-available licence: closed source + 1-year-delayed public
 # release. Only the delayed snapshot (e.g. `2026dev`) is forkable, private-use
