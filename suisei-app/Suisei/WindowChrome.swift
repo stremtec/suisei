@@ -197,7 +197,46 @@ enum WindowChrome {
             // Painting it the theme's window background is what the band would
             // have looked like if our content HAD been behind it.
             if child.backgroundColor != background { child.backgroundColor = background }
+            paintBand(in: child, background: background)
         }
+    }
+
+    /// A view that fills the fullscreen toolbar window with the theme colour.
+    ///
+    /// `backgroundColor` on that window is not enough and the two screenshots
+    /// say why. Hover the top and the band is CORRECT — the toolbar slides down
+    /// under the menu bar, and where it lands our content is behind it and
+    /// shows through. Let go and it returns to the top, where our content does
+    /// not reach: in fullscreen AppKit insets the window below a toolbar it is
+    /// keeping visible, so the strip above is the system's own backdrop and the
+    /// window is merely floating on it. A non-opaque window whose frame view's
+    /// layer is `#000000 α0.00` paints no background of its own, so setting one
+    /// changed nothing.
+    ///
+    /// A real view, inserted below everything else, does. Tagged so it is found
+    /// and updated rather than stacked up: this runs on every SwiftUI update
+    /// and on both fullscreen transitions.
+    private static let bandIdentifier = NSUserInterfaceItemIdentifier("suisei.fullscreen.band")
+
+    private static func paintBand(in window: NSWindow, background: NSColor) {
+        guard let content = window.contentView else { return }
+        if let existing = content.subviews.first(where: { $0.identifier == bandIdentifier }) {
+            if existing.layer?.backgroundColor != background.cgColor {
+                existing.layer?.backgroundColor = background.cgColor
+            }
+            // Still at the bottom? A toolbar rebuild can leave it anywhere.
+            if content.subviews.first !== existing {
+                existing.removeFromSuperview()
+                content.addSubview(existing, positioned: .below, relativeTo: nil)
+            }
+            return
+        }
+        let fill = NSView(frame: content.bounds)
+        fill.identifier = bandIdentifier
+        fill.autoresizingMask = [.width, .height]
+        fill.wantsLayer = true
+        fill.layer?.backgroundColor = background.cgColor
+        content.addSubview(fill, positioned: .below, relativeTo: nil)
     }
 
     private static func clearTitlebarMaterial(inFrameViewOf window: NSWindow) {
