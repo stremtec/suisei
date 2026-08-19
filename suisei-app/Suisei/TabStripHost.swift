@@ -172,6 +172,13 @@ final class TabStripHostView: NSView {
 
     /// Extra drop of the 24pt chip row inside the band, so the strip sits on
     /// the same line as the native toolbar items beside it.
+    /// Re-attach when the window goes fullscreen and when it comes back.
+    ///
+    /// The strip changes WINDOWS at that moment (see `attach`), and nothing
+    /// SwiftUI watches changes with it — so without this it stayed parented to
+    /// whichever window it was in when the theme last moved.
+    var fullScreenObservers: [NSObjectProtocol] = []
+
     var rowDrop: CGFloat = 0 { didSet { needsDisplay = true } }
 
     /// Height of the titlebar band this occupies at the top of the content
@@ -1556,6 +1563,31 @@ struct TabStripHost: NSViewRepresentable {
     private func attach(_ strip: TabStripHostView, near anchor: NSView) {
         guard let window = anchor.window, let content = window.contentView
         else { return }
+        // **In fullscreen the band is a different window.** AppKit moves the
+        // titlebar into an `NSToolbarFullScreenWindow` that floats over the top
+        // of the screen, and the strip — pinned to the top of THIS window's
+        // frame view — ends up underneath it. It was invisible up there even
+        // while that window painted nothing, and once the band was given the
+        // theme colour it was covered outright: "탭바가 안보여".
+        //
+        // The chips belong wherever the band is. In fullscreen that is the
+        // toolbar window, beside the toolbar items rather than under them —
+        // added last, so it is above the colour laid in by `WindowChrome`.
+        if window.styleMask.contains(.fullScreen),
+           let bar = (window.childWindows ?? []).first(where: {
+               String(describing: type(of: $0)).contains("FullScreen")
+           }),
+           let barContent = bar.contentView
+        {
+            if strip.superview !== barContent || barContent.subviews.last !== strip {
+                strip.removeFromSuperview()
+                barContent.addSubview(strip)
+            }
+            strip.bandHeight = bandHeight
+            strip.pinToTop(of: barContent)
+            observeFullScreen(window, strip, anchor)
+            return
+        }
         // ABOVE the SwiftUI host, not inside it.
         //
         // Added as the content view's last subview the strip was correctly
@@ -1572,6 +1604,32 @@ struct TabStripHost: NSViewRepresentable {
         }
         strip.bandHeight = bandHeight
         strip.pinToTop(of: host)
+        observeFullScreen(window, strip, anchor)
+    }
+
+    /// Fullscreen changes which window the strip lives in, and SwiftUI has no
+    /// reason to update when it happens.
+    private func observeFullScreen(
+        _ window: NSWindow, _ strip: TabStripHostView, _ anchor: NSView
+    ) {
+        guard strip.fullScreenObservers.isEmpty else { return }
+        let names: [Notification.Name] = [
+            NSWindow.didEnterFullScreenNotification,
+            NSWindow.didExitFullScreenNotification,
+        ]
+        strip.fullScreenObservers = names.map { name in
+            NotificationCenter.default.addObserver(
+                forName: name, object: window, queue: .main
+            ) { [weak strip, weak anchor] _ in
+                guard let strip, let anchor else { return }
+                attach(strip, near: anchor)
+                // Again a beat later: entering fullscreen, the window that
+                // hosts the band may not exist yet when this arrives.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    attach(strip, near: anchor)
+                }
+            }
+        }
     }
 
     private func apply(context: Context) {
