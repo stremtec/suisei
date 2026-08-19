@@ -130,7 +130,7 @@ enum WindowChrome {
         }
 
         if opaque {
-            clearTitlebarMaterial(in: window)
+            clearTitlebarMaterial(in: window, background: background)
             dumpTitlebar(window)
         }
     }
@@ -158,7 +158,7 @@ enum WindowChrome {
     /// its shape changes between releases, so anything positional would be a
     /// silent no-op the next time it moves — and a no-op here looks exactly
     /// like the bug.
-    private static func clearTitlebarMaterial(in window: NSWindow) {
+    private static func clearTitlebarMaterial(in window: NSWindow, background: NSColor) {
         clearTitlebarMaterial(inFrameViewOf: window)
         // …and in the window AppKit makes for fullscreen.
         //
@@ -176,13 +176,39 @@ enum WindowChrome {
                 child.appearance = window.appearance
             }
             clearTitlebarMaterial(inFrameViewOf: child)
+            // **And then give it a colour of its own.**
+            //
+            // The dump from a fullscreen window settles what is up there: every
+            // surface in that window is hidden or clear. Both
+            // `NSTitlebarBackgroundView`s are HIDDEN — that is what
+            // `titlebarAppearsTransparent` does — the container's layer is
+            // `#000000 α0.00`, and every `NSVisualEffectView` sits inside one of
+            // those hidden parents. Nothing in it paints.
+            //
+            // So the band is showing what is BEHIND it, and behind a floating
+            // toolbar window in fullscreen is not our editor: it is whatever the
+            // fullscreen backdrop happens to be. Transparent is the right answer
+            // in a normal window, where our own content is under the band and
+            // shows through — it is the wrong answer here, where there is
+            // nothing of ours to show. Hence a slab whose colour has no relation
+            // to the theme, which is what "라이트모드일땐 검은색으로,
+            // 다크모드일땐 흰색으로" describes.
+            //
+            // Painting it the theme's window background is what the band would
+            // have looked like if our content HAD been behind it.
+            if child.backgroundColor != background { child.backgroundColor = background }
         }
     }
 
     private static func clearTitlebarMaterial(inFrameViewOf window: NSWindow) {
         guard let frameView = window.contentView?.superview else { return }
-        for view in frameView.subviews
-        where String(describing: type(of: view)).contains("TitlebarContainer") {
+        // Deep, not one level. In a normal window the container is a direct
+        // child of the frame view; in the fullscreen toolbar window it is a
+        // grandchild (`NSNextStepFrame › NSToolbarFullScreenContentView ›
+        // NSTitlebarContainerView`), so a one-level scan there matched nothing
+        // and did nothing — silently, which is the failure mode this whole file
+        // keeps warning about.
+        for view in titlebarContainers(in: frameView) {
             view.wantsLayer = true
             view.layer?.backgroundColor = NSColor.clear.cgColor
             // The effect view is a child of the titlebar view inside the
@@ -251,6 +277,13 @@ enum WindowChrome {
         // this window at all — AppKit hosts it in one of these. A dump that
         // walks only `window` in fullscreen reports on an empty band and says
         // everything is fine.
+        if let content = window.contentView {
+            NSLog(
+                "[suisei/titlebar] contentView=\(content.frame.integral) "
+                    + "contentLayoutRect=\(window.contentLayoutRect.integral) "
+                    + "frame=\(window.frame.integral)"
+            )
+        }
         for child in window.childWindows ?? [] {
             NSLog(
                 "[suisei/titlebar] CHILD \(type(of: child)) "
@@ -280,6 +313,19 @@ enum WindowChrome {
     /// dump) and it is meant to be there — it is what makes those buttons look
     /// like Source Control's. Only glass as wide as the band it sits in is the
     /// band's own backdrop.
+    /// Every titlebar container under `root`, however deep.
+    private static func titlebarContainers(in root: NSView) -> [NSView] {
+        var out: [NSView] = []
+        for child in root.subviews {
+            if String(describing: type(of: child)).contains("TitlebarContainer") {
+                out.append(child)
+            } else {
+                out.append(contentsOf: titlebarContainers(in: child))
+            }
+        }
+        return out
+    }
+
     private static func hideEffectViews(in view: NSView, bandWidth: CGFloat) {
         for child in view.subviews {
             if let effect = child as? NSVisualEffectView {
