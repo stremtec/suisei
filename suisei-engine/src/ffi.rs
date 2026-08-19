@@ -3990,6 +3990,40 @@ pub extern "C" fn suisei_engine_lsp_server(
     u8::from(lsp.server_running)
 }
 
+/// Is `word` a reserved word of the current file's language?
+///
+/// The third thing Quick Help needs to tell its cases apart, after "is a server
+/// attached" and "which one". A server that answers nothing about `import` is
+/// not a server with a problem — measured against pyright, hovering `argparse`
+/// returns a full module doc and the `import` beside it returns null, which is
+/// what a language server is supposed to do. Without this the card blamed the
+/// project for a question that has no answer.
+///
+/// The extension comes from the open document, so the caller passes only the
+/// word: two languages disagree about what is reserved, and the file decides.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_is_reserved_word(
+    ptr: *const SuiseiEngine,
+    word: *const c_char,
+) -> u8 {
+    if ptr.is_null() || word.is_null() {
+        return 0;
+    }
+    let Ok(word) = (unsafe { CStr::from_ptr(word) }).to_str() else {
+        return 0;
+    };
+    let eng = unsafe { &*ptr };
+    let ext = eng
+        .0
+        .app()
+        .filename
+        .as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    u8::from(suisei_core::highlight::is_reserved_word(ext.as_deref(), word))
+}
+
 /// One row a live reload touched. 8 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]

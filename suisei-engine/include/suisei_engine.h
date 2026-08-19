@@ -1026,6 +1026,9 @@ uint8_t suisei_engine_references(const SuiseiEngine *ptr,
    and `cap` are given. Lets a surface tell "no server for this language" from
    "the server had nothing to say about this symbol". */
 uint8_t suisei_engine_lsp_server(const SuiseiEngine *ptr, char *out, uint32_t cap);
+/* Is `word` reserved in the current file's language? Quick Help asks before it
+   blames a server for having nothing to say about `import`. */
+uint8_t suisei_engine_is_reserved_word(const SuiseiEngine *ptr, const char *word);
 
 void suisei_engine_request_hover(SuiseiEngine *ptr);
 uint8_t suisei_engine_hover_text(const SuiseiEngine *ptr, char *out, uint32_t cap);

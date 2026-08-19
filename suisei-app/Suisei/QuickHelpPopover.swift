@@ -114,6 +114,7 @@ struct QuickHelpCard: View {
 
     private var emptyHeadline: String {
         if symbol.isEmpty { return "Nothing to describe here." }
+        if engine.isReservedWord(symbol) { return "“\(symbol)” is a keyword." }
         return "No description."
     }
 
@@ -136,6 +137,19 @@ struct QuickHelpCard: View {
         let server = engine.lspServerName
         if server.isEmpty {
             return "No language server is attached to this file."
+        }
+        // A KEYWORD is the third case, and it was being reported as the second.
+        //
+        // Measured against pyright on the file this was reported from: hover
+        // `argparse` and it returns a full module doc; hover the `import`
+        // beside it and it returns null. Both are correct — a language server
+        // describes names, not syntax — but the card said the server "had
+        // nothing for this position — it may not have this file in its
+        // project", which blames a project that is fine and a server that is
+        // working, for a question that has no answer. "이거 왜 안뜸…? 임포트는
+        // 떠야지 적어도."
+        if engine.isReservedWord(symbol) {
+            return "\(server) describes names, not syntax. Try the name beside it."
         }
         return "\(server) had nothing for this position — it may not have this file in its project."
     }

@@ -4862,6 +4862,16 @@ final class EngineBridge: ObservableObject {
     /// surface that had nothing to show could only shrug in one way. Read on
     /// demand rather than published per frame: it changes when a server starts
     /// or dies, and the only thing that asks is a card that has just opened.
+    /// Is this word reserved in the open file's language?
+    ///
+    /// Core owns the answer — the highlighter's tables already list every
+    /// language's reserved words, including the ones it files under imports and
+    /// control flow, which is where Python keeps `import` and `return`.
+    func isReservedWord(_ word: String) -> Bool {
+        guard let engine, !word.isEmpty else { return false }
+        return word.withCString { suisei_engine_is_reserved_word(engine, $0) != 0 }
+    }
+
     func refreshLspServer() {
         guard let engine else {
             lspServerName = ""

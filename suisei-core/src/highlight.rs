@@ -188,6 +188,31 @@ impl LangRules {
     }
 }
 
+/// Is `word` one of this language's reserved words?
+///
+/// Asked when a language server answers nothing, because the two reasons it
+/// might are completely different and the app was reporting only one of them.
+/// Measured against pyright: hovering `argparse` returns a full module doc;
+/// hovering the `import` beside it returns **null**, and correctly — servers
+/// describe names, not syntax. The card said "pyright-langserver had nothing
+/// for this position — it may not have this file in its project", which blames
+/// a project that is fine, about a server that is working, for a question that
+/// has no answer.
+///
+/// Every category counts, not just `keywords`: `import` is in Python's
+/// `imports` list and `return` is in its `controls`, and a user hovering
+/// either of them is hovering syntax.
+pub fn is_reserved_word(ext: Option<&str>, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let rules = rules_for_ext(ext);
+    rules.keywords.contains(&word)
+        || rules.imports.contains(&word)
+        || rules.controls.contains(&word)
+        || rules.types.contains(&word)
+}
+
 pub fn rules_for_ext(ext: Option<&str>) -> LangRules {
     let canonical = ext
         .and_then(crate::lang::Lang::from_ext)
@@ -1219,5 +1244,39 @@ mod tests {
     fn capture_mapping() {
         assert_eq!(from_capture("function.macro"), Some(TokenKind::Macro));
         assert_eq!(from_capture("type.builtin"), Some(TokenKind::TypeName));
+    }
+
+    /// Quick Help asks this to tell "the server had nothing to say about this
+    /// NAME" — worth a word about the project — from "you hovered syntax",
+    /// which is not a fault at all.
+    #[test]
+    fn syntax_is_told_apart_from_names() {
+        // The one that was reported. `import` lives in Python's `imports`
+        // list, not `keywords`, so a test of `keywords` alone would pass while
+        // the card went on blaming the project.
+        assert!(is_reserved_word(Some("py"), "import"));
+        assert!(is_reserved_word(Some("py"), "return"), "controls count too");
+        assert!(is_reserved_word(Some("py"), "class"));
+        assert!(!is_reserved_word(Some("py"), "argparse"), "a module is a name");
+        assert!(!is_reserved_word(Some("py"), "load_encoder"));
+
+        // Languages disagree about what is reserved, so the file decides.
+        assert!(is_reserved_word(Some("rs"), "impl"));
+        assert!(!is_reserved_word(Some("py"), "impl"));
+        assert!(is_reserved_word(Some("go"), "func"));
+        assert!(!is_reserved_word(Some("rs"), "func"));
+
+        // And nothing is reserved when there is nothing to ask about.
+        assert!(!is_reserved_word(Some("py"), ""));
+
+        // With no extension the answer comes from the generic ruleset — the
+        // same one the painter falls back to. Deliberately NOT "unknown means
+        // no": if the editor is drawing `import` as a keyword in that file,
+        // Quick Help saying it is a name would be the two disagreeing about
+        // the same word on the same screen.
+        assert_eq!(
+            is_reserved_word(None, "import"),
+            rules_for_ext(None).imports.contains(&"import")
+        );
     }
 }
