@@ -227,6 +227,14 @@ pub struct SuiseiUpdateSnapshot {
     pub installing: u8,
     pub installed: u8,
     pub checking: u8,
+    /// How many things this page is asking the user to look at — the red dot
+    /// on the sidebar row, the way System Settings marks an available update.
+    /// A count rather than a flag because the sidebar sums several sources.
+    pub badge: u32,
+    /// Bytes the update working directory is holding. A source update clones
+    /// the repository and builds it, so this is gigabytes sitting in
+    /// `~/Library/Caches` where nobody looks.
+    pub cache_bytes: u64,
     pub current: [c_char; 64],
     pub latest: [c_char; 64],
     pub notes: [c_char; SUISEI_UPDATE_NOTES_CAP],
@@ -4656,12 +4664,48 @@ pub extern "C" fn suisei_engine_update(
     o.installing = u8::from(eng.0.app.update.installing);
     o.installed = u8::from(eng.0.app.update.installed);
     o.checking = u8::from(eng.0.app.update.is_checking());
+    o.badge = eng.0.app.update.badge();
+    // Measured on demand, not cached: the page is opened rarely and by someone
+    // who wants today's number. A walk of our own checkout costs milliseconds.
+    o.cache_bytes = suisei_core::update_build::cache_bytes();
     write_cstr(&mut o.current, env!("CARGO_PKG_VERSION"));
     if let Some(latest) = eng.0.app.update.latest.as_deref() {
         write_cstr(&mut o.latest, latest);
     }
     write_cstr(&mut o.notes, &eng.0.app.update.notes);
     1
+}
+
+/// Delete the update working directory. Returns bytes freed via `out_freed`.
+///
+/// Result: 1 cleared · 2 refused, an update is staged · 3 refused, a build is
+/// running · 0 bad arguments. **Refusing is the point.** The staged bundle
+/// lives in this directory, and the safety argument for source updates is that
+/// there is a working Suisei on disk at every instant — a cache button that
+/// threw away the update the user is waiting to restart into would be the one
+/// way to break that from inside the product.
+#[unsafe(no_mangle)]
+pub extern "C" fn suisei_engine_update_clear_cache(
+    ptr: *mut SuiseiEngine,
+    out_freed: *mut u64,
+) -> u8 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let eng = unsafe { &mut *ptr };
+    let building = eng.0.app.update.build_phase.is_some();
+    match suisei_core::update_build::clear_cache(env!("CARGO_PKG_VERSION"), building) {
+        Ok(freed) => {
+            if !out_freed.is_null() {
+                unsafe { *out_freed = freed };
+            }
+            // The page draws the size, so it has to hear that it changed.
+            eng.0.update_generation = eng.0.update_generation.wrapping_add(1);
+            1
+        }
+        Err(suisei_core::update_build::ClearRefused::UpdateStaged(_)) => 2,
+        Err(suisei_core::update_build::ClearRefused::BuildRunning) => 3,
+    }
 }
 
 #[unsafe(no_mangle)]

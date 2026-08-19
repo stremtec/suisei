@@ -7,6 +7,11 @@ struct SoftwareUpdateSnap: Equatable {
     var installing = false
     var installed = false
     var checking = false
+    /// How many things this page is asking the user to look at. Drives the red
+    /// dot on the sidebar row.
+    var badge: UInt32 = 0
+    /// Bytes the update working directory is holding.
+    var cacheBytes: UInt64 = 0
     var current = ""
     var latest = ""
     var notes = ""
@@ -21,6 +26,27 @@ final class SoftwareUpdateStore: ObservableObject {
 
     func publish(_ next: SoftwareUpdateSnap) {
         if next != snap { snap = next }
+    }
+}
+
+/// The red count beside a Settings sidebar row.
+///
+/// A circle rather than a `Capsule`, until it has to be one: at a single digit
+/// a capsule is a circle with rounding error, and the badge is almost always 1.
+/// `systemRed`, not the accent — this is System Settings' alert mark, and a
+/// badge in the user's chosen accent reads as decoration rather than as
+/// something waiting.
+struct SettingsBadge: View {
+    let count: UInt32
+
+    var body: some View {
+        Text(count > 99 ? "99+" : "\(count)")
+            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+            .foregroundStyle(.white)
+            .padding(.horizontal, count > 9 ? 5 : 0)
+            .frame(minWidth: 17, minHeight: 17)
+            .background(Capsule().fill(Color(nsColor: .systemRed)))
+            .accessibilityLabel("\(count) available")
     }
 }
 
@@ -53,6 +79,9 @@ struct SoftwareUpdatePage: View {
     var onInfo: () -> Void
     /// Build the tagged release on this machine and stage it for next launch.
     var onUpdate: () -> Void = {}
+    /// Empty the update working directory. The engine refuses while an update
+    /// is staged or a build is running; the row disables itself first.
+    var onClearCache: () -> Void = {}
     /// 0 idle · 1 cloning · 2 building · 3 staging · 4 ready · 5 failed.
     var buildPhase: UInt8 = 0
     var buildDetail: String = ""
@@ -114,10 +143,62 @@ struct SoftwareUpdatePage: View {
                 UpdateRow(title: "Installed Build", value: SuiseiBuild.installedName)
                 UpdateRow(title: "Engine", value: versionLabel)
             } footer: {
-                Text("Suisei checks for a newer GitHub release; it never sends anything about your files.")
+                // "release" was wrong from the day the check changed. Suisei
+                // asks `git ls-remote --tags`: a GitHub Release is an artifact
+                // to download, and a tag is a name for a commit — which is what
+                // an update that builds from source actually needs.
+                Text("Suisei asks GitHub for the newest version tag; it never sends anything about your files.")
+            }
+
+            Section {
+                cacheRow
+            } header: {
+                Text("Update Cache")
+            } footer: {
+                // Says what it is FOR, so the number is not alarming on its
+                // own. A build tree in a cache directory looks like a leak
+                // until you know an update is a local compile.
+                Text("An update is built on this Mac, so the source and the build tree are kept here. Clearing them costs nothing but the next update's first build.")
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// What the cache holds, and the one button that empties it.
+    ///
+    /// The button DISABLES itself while an update is staged rather than
+    /// offering and then refusing. The engine refuses either way — the staged
+    /// bundle lives in this directory and deleting it would be the one way to
+    /// break the "there is always a working Suisei on disk" rule from inside
+    /// the product — but a button that can be pressed and does nothing is a
+    /// worse way to say so than a button that is plainly not available.
+    @ViewBuilder private var cacheRow: some View {
+        let staged = snap.installed || buildPhase == 4
+        let busy = buildPhase > 0 && buildPhase < 4
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(cacheSizeLabel)
+                    .font(.body)
+                Text(staged
+                     ? "Kept until you restart — the update is in here."
+                     : (busy ? "In use by the build running now."
+                             : "Source and build tree from the last update."))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button("Clear") { onClearCache() }
+                .disabled(staged || busy || snap.cacheBytes == 0)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var cacheSizeLabel: String {
+        guard snap.cacheBytes > 0 else { return "Empty" }
+        return ByteCountFormatter.string(
+            fromByteCount: Int64(snap.cacheBytes), countStyle: .file
+        )
     }
 
     private var statusRow: some View {

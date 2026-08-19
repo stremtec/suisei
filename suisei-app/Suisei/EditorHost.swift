@@ -177,6 +177,8 @@ struct EditorHost: NSViewRepresentable {
 
 final class EditorScrollView: NSScrollView {
     let canvas = EditorCanvasView()
+    /// Pinned scope headers. Floats above the document; see `refreshSticky`.
+    let sticky = StickyHeaderView()
     weak var engine: EngineBridge? {
         didSet { canvas.engine = engine }
     }
@@ -238,6 +240,14 @@ final class EditorScrollView: NSScrollView {
         scrollerInsets = .init()
         documentView = canvas
         canvas.scrollView = self
+
+        sticky.canvas = canvas
+        sticky.isHidden = true
+        // `.vertical` = pinned against vertical scrolling, which is the axis
+        // the headers scroll off along. Horizontal panning still moves it with
+        // the document, so a pinned header stays lined up with the code under
+        // it when the view is scrolled right.
+        addFloatingSubview(sticky, for: .vertical)
 
         NotificationCenter.default.addObserver(
             self,
@@ -371,7 +381,22 @@ final class EditorScrollView: NSScrollView {
         // Visual rows, not buffer lines: a wrapped document is taller than its
         // line count and could not otherwise be scrolled to its own end.
         let count = canvas.totalVisualRows() + canvas.extraVisualRows
-        let docH = max(bounds.height, CGFloat(count) * lineH + 8)
+        // Room to scroll PAST the last line, which every editor has and this
+        // one did not: the slack was 8 points, so the end of a file could only
+        // ever sit at the bottom edge of the viewport.
+        //
+        // That is an editing problem, not a scrolling one. The last function in
+        // a file is the one being written, and it was the one you had to read
+        // along the bottom rim of the window with the caret an inch from the
+        // status bar. With this you can bring it up to where your eyes already
+        // are.
+        //
+        // A viewport minus three rows, not a whole viewport: something has to
+        // stay on screen or the scroll runs into blank space with no landmark,
+        // and three rows is enough to keep the end of the file in view while
+        // putting it anywhere you like above the fold.
+        let overscroll = max(8, bounds.height - lineH * 3)
+        let docH = max(bounds.height, CGFloat(count) * lineH + overscroll)
         // The engine owns the extent. The old budget was
         // `max(400, hScroll + 160)` — a width that GREW WITH THE SCROLL
         // POSITION, so every pan to the right made the document wider and the
@@ -731,9 +756,48 @@ final class EditorScrollView: NSScrollView {
         if RendererChoice.useMetal {
             canvas.viewportDidScroll()
         }
+        refreshSticky()
         postLiveMinimapLine()
         guard !suppressPush else { return }
         syncCorePosition(force: false)
+    }
+
+    /// Ring the editor while a file is over it.
+    ///
+    /// On the scroll view's LAYER rather than drawn by the canvas: the canvas
+    /// paints through Metal or CoreText depending on the renderer, and a
+    /// highlight drawn in `draw(_:)` would simply not appear under Metal. A
+    /// layer border is above both.
+    func showDropHighlight(_ on: Bool) {
+        wantsLayer = true
+        layer?.borderWidth = on ? 2 : 0
+        layer?.borderColor = on ? NSColor.controlAccentColor.cgColor : nil
+        layer?.cornerRadius = on ? 4 : 0
+    }
+
+    /// Re-ask which headers enclose the top row, and size the widget to them.
+    ///
+    /// Driven from the clip's bounds change rather than from a timer, so the
+    /// pinned rows and the rows under them can never describe different scroll
+    /// positions — they are computed from the same event.
+    ///
+    /// The top row is taken from `documentVisibleRect`, NOT from the widget's
+    /// own bottom edge. Measuring below the widget is the intuitive thing and
+    /// it oscillates: pinning a header hides the row that asked for it, which
+    /// un-pins it, which reveals the row again. The overlay covers the top of
+    /// the document; that is the trade sticky scroll makes everywhere.
+    func refreshSticky() {
+        let lineH = max(1, EditorMetrics.lineHeight)
+        let top = canvas.bufferRowOfVisual(Int(floor(documentVisibleRect.minY / lineH)))
+        let rows = canvas.stickyRows(topBufferRow: top)
+        sticky.lines = rows
+        guard !rows.isEmpty else { return }
+        sticky.frame = CGRect(
+            x: 0,
+            y: 0,
+            width: contentView.bounds.width,
+            height: CGFloat(rows.count) * lineH
+        )
     }
 
     /// Minimap indicator feed at FRAME rate — the 30Hz core-sync throttle made
@@ -1086,6 +1150,41 @@ extension EditorCanvasView {
     }
 }
 
+/// Sticky scroll: the scope headers you are inside, pinned above the viewport.
+///
+/// A floating subview of the scroll view rather than rows drawn into the
+/// document. `addFloatingSubview(_:for:)` is AppKit's own answer to "stays put
+/// while the document scrolls under it", and using it means the widget does not
+/// participate in the document's coordinate space at all — no interaction with
+/// soft-wrap geometry, no rows to keep out of the band, and it works whether
+/// the document below is painted by Metal or by CoreText.
+final class StickyHeaderView: NSView {
+    weak var canvas: EditorCanvasView?
+
+    var lines: [EditorLine] = [] {
+        didSet {
+            // Compare what is DRAWN. The engine rebuilds these rows on every
+            // pull, so identity always differs and a naive `!=` would repaint
+            // the widget on every scroll event.
+            let same = lines.count == oldValue.count
+                && zip(lines, oldValue).allSatisfy { $0.lineNo == $1.lineNo && $0.text == $1.text }
+            isHidden = lines.isEmpty
+            if !same { needsDisplay = true }
+        }
+    }
+
+    override var isFlipped: Bool { true }
+
+    /// Pinned headers are chrome, not content: clicks belong to the code that
+    /// is scrolling underneath, and swallowing them would make the top of the
+    /// viewport quietly dead to the mouse.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        canvas?.paintSticky(lines, in: bounds)
+    }
+}
+
 final class EditorCanvasView: NSView {
     /// Equatable so a theme change to ANY token invalidates the CTLine cache.
     /// The hand-written comparison this replaced stopped at `function`, so
@@ -1337,11 +1436,80 @@ final class EditorCanvasView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         if RendererChoice.useMetal { wantsLayer = true }
+        registerForDraggedTypes([.fileURL])
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         if RendererChoice.useMetal { wantsLayer = true }
+        registerForDraggedTypes([.fileURL])
+    }
+
+    // ── Dropping files onto the editor ─────────────────────────────────────
+    //
+    // At the AppKit layer, not as a SwiftUI `.onDrop`, because the editor
+    // surface is an `NSView` that may be painted by Metal — a SwiftUI drop
+    // modifier would have to be attached to a wrapper whose bounds are not
+    // quite the editor's, and the target you can see would not be the target
+    // that accepts.
+    //
+    // The tree already takes drops, but that one MOVES a file into a folder.
+    // This one OPENS. Same gesture, different surface, different verb — which
+    // is why they do not share code: `openPath` is the whole implementation
+    // here, and it already knows a directory opens as a project.
+
+    private var dropActive = false {
+        didSet {
+            guard dropActive != oldValue else { return }
+            scrollView?.showDropHighlight(dropActive)
+        }
+    }
+
+    /// The files in a drag, ignoring anything that is not one.
+    private func droppedFiles(_ sender: NSDraggingInfo) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self], options: options
+        ) as? [URL]
+        return urls ?? []
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard !droppedFiles(sender).isEmpty else { return [] }
+        dropActive = true
+        // `.copy`, not `.move`: opening a file leaves it where it is, and the
+        // cursor the user sees has to say so.
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        dropActive ? .copy : []
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        dropActive = false
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        dropActive = false
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        !droppedFiles(sender).isEmpty
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        dropActive = false
+        let files = droppedFiles(sender)
+        guard !files.isEmpty, let engine else { return false }
+        // Every file, in the order they were dragged, and the LAST one ends up
+        // focused — dropping four files and landing on the first would leave
+        // the user looking at something they have to click away from.
+        var opened = false
+        for url in files {
+            opened = engine.openPath(url.path) || opened
+        }
+        return opened
     }
 
     override var isFlipped: Bool { true }
@@ -1572,6 +1740,11 @@ final class EditorCanvasView: NSView {
         bandEnd = -1
         overdrawPredatesChange = true
         closeRevealIfItsChangeIsGone()
+        // Editing changes the fold structure, and the scroll position it was
+        // computed against has not moved — so the clip's bounds notification,
+        // which is the sticky widget's other trigger, will not fire. Typing a
+        // new `fn` above the viewport has to change what is pinned.
+        scrollView?.refreshSticky()
         if let sv = scrollView {
             let pad = EditorMetrics.lineHeight * 4
             setNeedsDisplay(sv.documentVisibleRect.insetBy(dx: 0, dy: -pad))
@@ -2683,6 +2856,73 @@ final class EditorCanvasView: NSView {
     }
 
     /// Bookmark-style breakpoint marker in the gutter (SF Symbol, accent tint).
+
+    // ── Sticky scroll ──────────────────────────────────────────────────────
+
+    /// How many scope headers may be pinned at once.
+    ///
+    /// Five is a viewport's worth of orientation and no more. Every pinned row
+    /// is a row of code the reader loses, so this trades directly against the
+    /// thing it exists to help with, and the trade stops being worth it fast.
+    static let stickyMax = 5
+
+    /// The headers enclosing the row at the top of the viewport.
+    func stickyRows(topBufferRow: Int) -> [EditorLine] {
+        guard let engine, topBufferRow > 0 else { return [] }
+        return engine.pullSticky(pane: paneIndex, top: topBufferRow, max: Self.stickyMax)
+    }
+
+    /// Paint pinned headers from the top of `rect`, in the current context.
+    ///
+    /// On the CANVAS rather than in the overlay view, because everything it
+    /// needs is here: the theme, the font, the gutter width, the shaped-line
+    /// cache. A painter of its own in the overlay would be a second place the
+    /// theme gets applied — and the whole point of a pinned header is that it
+    /// looks like the line it is a copy of.
+    ///
+    /// It also means sticky scroll is drawn once for both renderers. The
+    /// document goes through Metal or CoreText depending on `RendererChoice`;
+    /// the overlay is an ordinary AppKit view above both, so this is not a
+    /// third path — it is the only one.
+    func paintSticky(_ lines: [EditorLine], in rect: CGRect) {
+        guard !lines.isEmpty, let cg = NSGraphicsContext.current?.cgContext else { return }
+        let lineH = EditorMetrics.lineHeight
+        let gutter = EditorMetrics.gutter
+        let font = EditorMetrics.monospaced(EditorMetrics.fontSize, weight: .regular)
+        let ascent = font.ascender
+
+        // Opaque, because the document scrolls UNDER this. A translucent
+        // header shows the code sliding beneath the code, which reads as a
+        // rendering fault rather than as depth.
+        colors.bg.setFill()
+        rect.fill()
+
+        for (i, line) in lines.enumerated() {
+            let y = rect.minY + CGFloat(i) * lineH
+            let ln = gutterLine(line.lineNo, isCursor: false, font: font)
+            if ln.width > 0 {
+                cg.saveGState()
+                cg.textMatrix = .identity
+                cg.translateBy(x: gutter - EditorMetrics.gutterTextGap - ln.width, y: y + ascent)
+                cg.scaleBy(x: 1, y: -1)
+                CTLineDraw(ln.line, cg)
+                cg.restoreGState()
+            }
+            let ct = ctLine(for: line, font: font)
+            cg.saveGState()
+            cg.textMatrix = .identity
+            cg.translateBy(x: gutter, y: y + ascent)
+            cg.scaleBy(x: 1, y: -1)
+            CTLineDraw(ct, cg)
+            cg.restoreGState()
+        }
+
+        // One hairline under the stack — the edge the document disappears
+        // behind. Without it the pinned rows and the scrolling rows are one
+        // uninterrupted column of code that happens to skip.
+        colors.fg.withAlphaComponent(0.14).setFill()
+        CGRect(x: 0, y: rect.maxY - 1, width: rect.width, height: 1).fill()
+    }
 
     private func ctLine(for line: EditorLine, font: NSFont) -> CTLine {
         let key = PerfProbe.measure("    cacheKey") { cacheKey(for: line) }
@@ -3855,8 +4095,17 @@ final class EditorCanvasView: NSView {
     /// The buffer row a visual row belongs to — the identity when not wrapping.
     func bufferRowOfVisual(_ visualRow: Int) -> Int {
         let v = max(0, visualRow)
-        guard wrapCols > 0, let engine else { return v }
-        return engine.wrapBufferAt(pane: paneIndex, cols: wrapCols, visualRow: v).row
+        // Clamped to a line the document has. The canvas is deliberately taller
+        // than its content — see the overscroll in `fitCanvasToBounds` — so a
+        // viewport parked in that slack converts to a row past the end. Every
+        // caller feeds the answer somewhere that means a LINE: core's stored
+        // pane position, the minimap indicator, the drag hit test. Clamping in
+        // each of them would be the same `min` written three times, and the
+        // fourth caller would forget.
+        let last = max(0, Int(docLineCount) - 1)
+        guard wrapCols > 0, let engine else { return min(v, last) }
+        let row = engine.wrapBufferAt(pane: paneIndex, cols: wrapCols, visualRow: v).row
+        return min(row, last)
     }
 
     /// Which segment of a line the caret sits on, from the band core marked.
@@ -4516,7 +4765,17 @@ final class EditorCanvasView: NSView {
     /// tracking mask, which is what this does.
     private func trackDrag() {
         guard let win = window else { return }
-        NSEvent.startPeriodicEvents(afterDelay: 0.06, withPeriod: 1.0 / 45.0)
+        // At the DISPLAY's rate, not at 45 Hz. This drives the autoscroll, so
+        // its period is the scroll's frame time — 45 Hz on a 120 Hz panel is
+        // two and a half refreshes per step, which is seen as stepping rather
+        // than gliding no matter how smooth the speed curve is.
+        //
+        // The delay is the other half: 60 ms of it meant the first fraction of
+        // a second outside the view did nothing at all, and a drag that leaves
+        // and returns quickly never scrolled once.
+        let hz = Double(window?.screen?.maximumFramesPerSecond
+            ?? NSScreen.main?.maximumFramesPerSecond ?? 60)
+        NSEvent.startPeriodicEvents(afterDelay: 0.016, withPeriod: 1.0 / max(60, hz))
         engine?.projectIndex?.pause()
         defer {
             NSEvent.stopPeriodicEvents()
@@ -4589,39 +4848,67 @@ final class EditorCanvasView: NSView {
     private func autoscrollStep(toward point: CGPoint) {
         guard let clip = scrollView?.contentView else { return }
         let visible = visibleRect
-        var overshoot: CGFloat = 0
-        if point.y < visible.minY { overshoot = point.y - visible.minY }
-        else if point.y > visible.maxY { overshoot = point.y - visible.maxY }
-        guard overshoot != 0 else {
+
+        // BOTH axes. This read `point.y` alone, so dragging off the left or
+        // right edge of a long line simply never scrolled — the selection
+        // stopped at the edge of the viewport and stayed there. Nothing about
+        // the ramp below was ever vertical-specific; it just had one caller.
+        let overY: CGFloat = point.y < visible.minY
+            ? point.y - visible.minY
+            : (point.y > visible.maxY ? point.y - visible.maxY : 0)
+        let overX: CGFloat = point.x < visible.minX
+            ? point.x - visible.minX
+            : (point.x > visible.maxX ? point.x - visible.maxX : 0)
+        guard overY != 0 || overX != 0 else {
             autoscrollLeftViewAt = 0
             return
         }
 
         let now = CACurrentMediaTime()
         if autoscrollLeftViewAt == 0 { autoscrollLeftViewAt = now }
-
-        let lineH = EditorMetrics.lineHeight
-        let span = max(lineH * 6, visible.height * 0.4)
-        let ramp = min(abs(overshoot) / span, 1)
-        let eased = ramp * ramp * (3 - 2 * ramp)          // smoothstep
+        // The held ramp is SHARED by the axes: it measures how long the pointer
+        // has been outside, and a drag that goes out diagonally has been out
+        // once, not twice.
         let held = min((now - autoscrollLeftViewAt) / 1.5, 1)
         let sustain = 1 + 0.8 * (held * held * (3 - 2 * held))
-        let step = (lineH * 0.3 + lineH * 3.0 * eased) * sustain
-            * (overshoot < 0 ? -1 : 1)
+
+        /// One axis' step. `unit` is that axis' natural quantum — a line down,
+        /// a character across — so the two feel like the same speed rather than
+        /// the same number of points.
+        func advance(_ over: CGFloat, span: CGFloat, unit: CGFloat) -> CGFloat {
+            guard over != 0 else { return 0 }
+            let ramp = min(abs(over) / span, 1)
+            let eased = ramp * ramp * (3 - 2 * ramp)      // smoothstep
+            return (unit * 0.3 + unit * 3.0 * eased) * sustain * (over < 0 ? -1 : 1)
+        }
+
+        let lineH = EditorMetrics.lineHeight
+        let cell = max(1, EditorMetrics.cellWidth)
+        let dy = advance(overY, span: max(lineH * 6, visible.height * 0.4), unit: lineH)
+        let dx = advance(overX, span: max(cell * 12, visible.width * 0.4), unit: cell)
 
         let maxY = max(0, frame.height - visible.height)
-        let newY = min(max(0, visible.origin.y + step), maxY)
-        guard abs(newY - visible.origin.y) > 0.01 else { return }
-        clip.scroll(to: CGPoint(x: visible.origin.x, y: newY))
+        let maxX = max(0, frame.width - visible.width)
+        let newY = min(max(0, visible.origin.y + dy), maxY)
+        let newX = min(max(0, visible.origin.x + dx), maxX)
+        guard abs(newY - visible.origin.y) > 0.01 || abs(newX - visible.origin.x) > 0.01
+        else { return }
+        clip.scroll(to: CGPoint(x: newX, y: newY))
         scrollView?.reflectScrolledClipView(clip)
     }
 
     private func extendSelection(to point: CGPoint) {
         guard let engine else { return }
         // Clamp into the visible band so the hit test resolves against a row
-        // that actually exists after autoscrolling.
+        // that actually exists after autoscrolling — on BOTH axes, now that the
+        // view scrolls on both. An unclamped x past the right edge resolved to
+        // a column beyond the widest drawn glyph, so a horizontal drag-scroll
+        // selected to end-of-line and then stopped moving.
         let v = visibleRect
-        let clamped = CGPoint(x: point.x, y: min(max(point.y, v.minY + 1), v.maxY - 1))
+        let clamped = CGPoint(
+            x: min(max(point.x, v.minX + 1), v.maxX - 1),
+            y: min(max(point.y, v.minY + 1), v.maxY - 1)
+        )
         if isBlockDrag {
             let (row, col) = blockHit(clamped)
             engine.blockPointerDrag(row: row, col: col)

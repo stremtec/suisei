@@ -42,6 +42,9 @@ pub struct UpdateState {
     /// `:update` before any check finished — install as soon as one lands.
     install_after_check: bool,
     install_rx: Option<Receiver<Result<String, String>>>,
+    /// When `maybe_recheck` last let a check through. In memory, so an idle
+    /// tick costs a comparison rather than a stat of the throttle stamp.
+    last_poll: Option<std::time::Instant>,
     /// Bumped whenever anything the Software Update page draws changes.
     ///
     /// The page is pulled, not pushed: the face re-reads the snapshot only when
@@ -86,6 +89,44 @@ impl UpdateState {
             let newer = found.filter(|r| is_suisei_release(&r.tag) && is_newer(&r.tag, &current));
             let _ = tx.send(newer);
         });
+    }
+
+    /// Ask again if it has been long enough. The tick's entry point.
+    ///
+    /// Applying the config was the ONLY thing that ever started a check —
+    /// launch, and saving Settings. An editor is left open for days, so on a
+    /// machine that does not restart, "checks on startup" means it never hears
+    /// about an update at all. That is not a smaller version of the feature; it
+    /// is the feature not running.
+    ///
+    /// Two throttles, and they are not redundant. This one is in memory and
+    /// coarse, so the tick does not stat a file sixty times a second; the one
+    /// inside `start_check` is the 4h network stamp on disk, which is what
+    /// actually decides whether git is asked. Removing either one leaves a real
+    /// cost on a hot path.
+    pub fn maybe_recheck(&mut self, current: &str) {
+        const POLL: Duration = Duration::from_secs(15 * 60);
+        // Never interrupt work in progress. A check that lands mid-build would
+        // move `latest` out from under the version being compiled.
+        if self.check_rx.is_some() || self.installing || self.build_rx.is_some() {
+            return;
+        }
+        if let Some(t) = self.last_poll {
+            if t.elapsed() < POLL {
+                return;
+            }
+        }
+        self.last_poll = Some(std::time::Instant::now());
+        self.start_check(current);
+    }
+
+    /// How many things the Software Update page is asking the user to look at.
+    ///
+    /// One or zero — this is the red dot on the sidebar row, the way System
+    /// Settings marks "소프트웨어 업데이트 사용 가능". A count is the shape the
+    /// face wants because the sidebar sums several sources into one badge.
+    pub fn badge(&self) -> u32 {
+        u32::from(self.installed || self.latest.is_some())
     }
 
     /// Settings "Check Now" — ignore the 4h throttle.

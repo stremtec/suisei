@@ -724,6 +724,15 @@ typedef struct SuiseiUpdateSnapshot {
   uint8_t installing;
   uint8_t installed;
   uint8_t checking;
+  /* How many things this page is asking the user to look at — the red dot on
+     the sidebar row, the way System Settings marks an available update. A
+     count rather than a flag, because the sidebar sums several sources. */
+  uint32_t badge;
+  /* Bytes the update working directory is holding. A source update clones the
+     repository and builds it, so this is gigabytes in ~/Library/Caches where
+     nobody goes looking — and an editor that quietly keeps them for a job it
+     finished last week is indistinguishable from a leak. */
+  uint64_t cache_bytes;
   char current[64];
   char latest[64];
   char notes[SUISEI_UPDATE_NOTES_CAP];
@@ -733,6 +742,18 @@ uint8_t suisei_engine_update(const SuiseiEngine *ptr, SuiseiUpdateSnapshot *out)
 uint64_t suisei_engine_update_generation(const SuiseiEngine *ptr);
 void suisei_engine_update_check(SuiseiEngine *ptr);
 void suisei_engine_update_install(SuiseiEngine *ptr);
+
+/* Delete the update working directory; bytes freed come back in `out_freed`.
+
+   Result: 1 cleared · 2 refused, an update is staged · 3 refused, a build is
+   running · 0 bad arguments.
+
+   **Refusing is the point.** The staged bundle lives in this directory, and the
+   safety argument for source updates is that there is a working Suisei on disk
+   at every instant, with the atomic swap as the only destructive step. A cache
+   button that threw away the update the user is waiting to restart into would
+   be the one way to break that from inside the product. */
+uint8_t suisei_engine_update_clear_cache(SuiseiEngine *ptr, uint64_t *out_freed);
 
 #define SUISEI_MAX_SCM 48
 #define SUISEI_SCM_PATH 160
@@ -917,8 +938,36 @@ typedef struct SuiseiPreviewSnapshot {
   uint32_t count; /* lines filled in this chunk */
   uint32_t start; /* first line index of this chunk */
   uint8_t styles[SUISEI_MAX_PREVIEW];
+  /* Structural role per row: 0 flow · 1 rule · 2 quote · 3 code · 4 table row.
+
+     The core used to draw a table as `┌──┬──┐` and a quote as a `│` in column
+     one, padding text to a width measured in MONOSPACE CELLS. The face does not
+     draw in monospace cells, so the box was crooked and the rule ragged the
+     moment the font or the size differed from what the padding assumed — and
+     the face had started guessing the structure back out of the text
+     (`isRule`, `isTableLike`) to compensate. Now it is told.
+
+     A row's text never contains box-drawing. Inline formatting still rides in
+     the text as U+E000+style markers, because bold and links really are
+     properties of the text and survive a change of font. */
+  uint8_t blocks[SUISEI_MAX_PREVIEW];
+  /* Per-kind payload.
+       quote: nesting depth (1 = one `>`)
+       code:  bit0 first row of the run, bit1 last row
+       table: bit0 header row, bit1 first row, bit2 last row */
+  uint8_t block_args[SUISEI_MAX_PREVIEW];
+  /* Table rows: 2 bits of column alignment each, low column first
+     (0 left, 1 centre, 2 right). Eight columns fit; past that the face
+     left-aligns, which is the default anyway. */
+  uint16_t table_aligns[SUISEI_MAX_PREVIEW];
   char lines[SUISEI_MAX_PREVIEW][SUISEI_PREVIEW_LINE];
 } SuiseiPreviewSnapshot;
+
+/* A table row's cells are joined in `lines` by ASCII Unit Separator (0x1F).
+   A cell boundary has to be a character that cannot occur INSIDE a cell, and a
+   tab can — markdown splits rows on `|`, so a literal tab survives into the
+   cell text and would have split it again. */
+#define SUISEI_PREVIEW_CELL_SEP "\x1f"
 
 /* Load preview lines starting at `start` (0-based). Loop until start+count >= total. */
 uint8_t suisei_engine_preview(const SuiseiEngine *ptr, uint32_t start, SuiseiPreviewSnapshot *out);

@@ -6,6 +6,10 @@ import AppKit
 struct SettingsWindowView: View {
     @ObservedObject var engine: EngineBridge
     @ObservedObject private var accountStore = EngineBridge.shared.githubAccount
+    /// Observed for the SIDEBAR, not for the page — the page has its own
+    /// `@ObservedObject`. A badge that only refreshed while you were looking at
+    /// Software Update would be a badge that never told you anything.
+    @ObservedObject private var updateStore = EngineBridge.shared.softwareUpdate
     @Environment(\.dismiss) private var dismiss
     @State private var engineReferenceExpanded = false
     @State private var searchText = ""
@@ -400,9 +404,32 @@ struct SettingsWindowView: View {
     /// will solve in reasonable time.
     private func sidebarRow(_ page: Page) -> some View {
         Label {
-            Text(page.title)
+            HStack(spacing: 6) {
+                Text(page.title)
+                Spacer(minLength: 4)
+                if let n = badge(for: page) {
+                    SettingsBadge(count: n)
+                }
+            }
         } icon: {
             sidebarIcon(for: page, size: 20)
+        }
+    }
+
+    /// The red dot, and how many. `nil` means the row has nothing to say.
+    ///
+    /// This is the System Settings pattern the request pointed at — "소프트웨어
+    /// 업데이트 사용 가능" with a red 1 beside it. The number comes from the
+    /// ENGINE (`UpdateState::badge`), not from the page's own view state,
+    /// because the whole point of a badge is that it is visible while you are
+    /// somewhere else.
+    private func badge(for page: Page) -> UInt32? {
+        switch page.id {
+        case .softwareUpdate:
+            let n = updateStore.snap.badge
+            return n > 0 ? n : nil
+        default:
+            return nil
         }
     }
 
@@ -569,6 +596,7 @@ struct SettingsWindowView: View {
                                 updateBlockers = engine.sourceUpdateBlockers()
                             }
                         },
+                        onClearCache: { engine.clearUpdateCache() },
                         buildPhase: engine.sourceUpdatePhase(),
                         buildDetail: engine.sourceUpdateDetail(),
                         buildFraction: engine.sourceUpdateFraction(),

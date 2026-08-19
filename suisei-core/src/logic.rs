@@ -89,6 +89,208 @@ impl LogicGraph {
     }
 }
 
+/// How sure we are that a node ran, given where the program is stopped.
+///
+/// L4 of the plan: *"inferred paths, with 'inferred' on the drawing wherever
+/// the CFG had more than one way to reach the stopped node."*
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Certainty {
+    /// It ran. Every path from the entry to the stopped node goes through it,
+    /// so there was no way to be here without having been there.
+    Certain,
+    /// It MAY have run. Some path to the stopped node goes through it and some
+    /// path does not — the debugger knows where we are, not how we got here.
+    Inferred,
+    /// It did not run, or not yet: no path from it reaches the stopped node.
+    Unreached,
+}
+
+/// What a patch did to one node of a function's logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicChange {
+    /// Node id in the AFTER graph. Not in the before.
+    Added(usize),
+    /// Node id in the BEFORE graph. Gone from the after.
+    Removed(usize),
+    /// The same step, at a different place in the source.
+    Moved { before: usize, after: usize },
+}
+
+/// A patch, rendered as logic.
+///
+/// L5, and note the direction — §5 of the plan inverts the obvious one:
+///
+/// > **Generate the source edit; RENDER it as logic.**
+///
+/// Not the reverse. Deriving source from an approved logic change reviews an
+/// abstraction and then applies a *translation* of it, and any ambiguity in
+/// that translation means the diff the user approved and the diff that lands
+/// are two different things. So this takes two real texts, runs the SAME
+/// extractor that draws the view over each, and diffs the results. Whatever it
+/// shows, the patch is already the thing that will be written.
+///
+/// Matching is by (kind, label) in document order — a longest common
+/// subsequence, so two identical `call` steps in one function pair up with the
+/// right partners instead of the first one twice. A pair whose rows differ is
+/// `Moved`; everything unmatched is `Added` or `Removed`.
+pub fn diff(before: &LogicGraph, after: &LogicGraph) -> Vec<LogicChange> {
+    let key = |n: &LogicNode| (n.kind, n.label.clone());
+    let a: Vec<(LogicKind, String)> = before.nodes.iter().map(key).collect();
+    let b: Vec<(LogicKind, String)> = after.nodes.iter().map(key).collect();
+
+    // LCS table. The graphs are one function each — tens of nodes — so the
+    // quadratic table is a few hundred bytes and obviously correct beats
+    // clever.
+    let (n, m) = (a.len(), b.len());
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if a[i] == b[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            if before.nodes[i].start_row != after.nodes[j].start_row {
+                out.push(LogicChange::Moved {
+                    before: before.nodes[i].id,
+                    after: after.nodes[j].id,
+                });
+            }
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            out.push(LogicChange::Removed(before.nodes[i].id));
+            i += 1;
+        } else {
+            out.push(LogicChange::Added(after.nodes[j].id));
+            j += 1;
+        }
+    }
+    for k in i..n {
+        out.push(LogicChange::Removed(before.nodes[k].id));
+    }
+    for k in j..m {
+        out.push(LogicChange::Added(after.nodes[k].id));
+    }
+    out
+}
+
+/// Label every node by whether it must have run to reach `stopped`.
+///
+/// The honest version of "the path we took". A debugger stopped at a line knows
+/// **where the program is, not how it got there** — the call stack is recorded,
+/// the branch history is not. So the only thing that can be asserted is
+/// dominance: a node that lies on *every* route from the entry to the stopped
+/// node ran, and one that lies on *some* route might have.
+///
+/// Drawing the second kind the same as the first is the failure this exists to
+/// avoid. A reader who sees a highlighted `else` arm and takes it for fact has
+/// been told something the editor cannot know, and will look for the bug in the
+/// wrong half of the function.
+///
+/// Iterative dominators over a graph this size (one function) rather than
+/// Lengauer–Tarjan: a CFG built from a syntax tree has tens of nodes, and the
+/// simple fixpoint is a page of code that is obviously right.
+pub fn certainty(graph: &LogicGraph, stopped: usize) -> Vec<(usize, Certainty)> {
+    let n = graph.nodes.len();
+    if n == 0 || !graph.nodes.iter().any(|x| x.id == stopped) {
+        return Vec::new();
+    }
+    // Node id → index. Ids are assigned by the builder and need not be dense.
+    let index: std::collections::HashMap<usize, usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| (node.id, i))
+        .collect();
+    let Some(&stop_i) = index.get(&stopped) else {
+        return Vec::new();
+    };
+    let entry = 0usize;
+
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut succs: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for e in &graph.edges {
+        let (Some(&a), Some(&b)) = (index.get(&e.from), index.get(&e.to)) else {
+            continue;
+        };
+        succs[a].push(b);
+        preds[b].push(a);
+    }
+
+    // Which nodes can still reach the stopped node — a backward walk. Anything
+    // outside this set is `Unreached`: not "did not run" in general, but "no
+    // route from here arrives where we are", which is the same thing for a
+    // program that is sitting on that line right now.
+    let mut reaches = vec![false; n];
+    let mut stack = vec![stop_i];
+    reaches[stop_i] = true;
+    while let Some(v) = stack.pop() {
+        for &p in &preds[v] {
+            if !reaches[p] {
+                reaches[p] = true;
+                stack.push(p);
+            }
+        }
+    }
+
+    // Dominators, as sets, to a fixpoint. dom(entry) = {entry};
+    // dom(v) = {v} ∪ ⋂ dom(p) over predecessors p.
+    let mut dom: Vec<Vec<bool>> = vec![vec![true; n]; n];
+    dom[entry] = vec![false; n];
+    dom[entry][entry] = true;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for v in 0..n {
+            if v == entry {
+                continue;
+            }
+            let mut next = vec![true; n];
+            let mut any_pred = false;
+            for &p in &preds[v] {
+                any_pred = true;
+                for i in 0..n {
+                    next[i] &= dom[p][i];
+                }
+            }
+            if !any_pred {
+                // Unreachable from the entry — it dominates only itself, which
+                // keeps it out of the stopped node's dominator set.
+                next = vec![false; n];
+            }
+            next[v] = true;
+            if next != dom[v] {
+                dom[v] = next;
+                changed = true;
+            }
+        }
+    }
+
+    graph
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| {
+            let c = if dom[stop_i][i] {
+                Certainty::Certain
+            } else if reaches[i] {
+                Certainty::Inferred
+            } else {
+                Certainty::Unreached
+            };
+            (node.id, c)
+        })
+        .collect()
+}
+
 /// The node kinds a grammar spells its control flow with.
 ///
 /// **This is the bet.** If a table of node-kind names is enough, a new

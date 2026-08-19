@@ -332,6 +332,10 @@ pub struct App {
     pub gpu_acc: bool,
     /// Which-key style chord hints after prefix keys.
     pub key_hints: bool,
+    /// Settings → "Check for updates". Kept on `App` because the tick asks it
+    /// every frame, and the tick has no config — the two apply sites below are
+    /// the only readers of `Config`, by design.
+    pub update_check: bool,
     /// DAP debugger client + panel state.
     pub dap: crate::dap::DapClient,
     /// Build / Run / Test — the command, its output and its problems.
@@ -663,6 +667,8 @@ impl Default for App {
             blame: GitBlame::default(),
             folds: FoldState::new(),
             folds_key: None,
+            // Default-on, same as `Config::default`; the apply sites overwrite it.
+            update_check: true,
             scm: ScmPanel::new(),
             git_wb: GitWorkbench::new(),
             settings: SettingsPanel::new(),
@@ -882,6 +888,7 @@ impl App {
         self.gpu_hyperlinks = cfg.gpu_hyperlinks;
         self.gpu_acc = cfg.gpu_acc;
         self.key_hints = cfg.key_hints;
+        self.update_check = cfg.update_check;
         let mut servers = cfg.lsp_servers.clone();
         self.overlay_project_settings(&mut servers);
         self.lsp.apply_config(cfg.lsp_enabled, servers);
@@ -1996,6 +2003,7 @@ impl App {
         self.gpu_hyperlinks = cfg.gpu_hyperlinks;
         self.gpu_acc = cfg.gpu_acc;
         self.key_hints = cfg.key_hints;
+        self.update_check = cfg.update_check;
         // Saving YOUR settings must not drop the PROJECT's. The two apply
         // sites are the only places either is read, so both overlay.
         let mut servers = cfg.lsp_servers.clone();

@@ -488,6 +488,10 @@ fn render_markdown(text: &str, base: Option<&Path>, cell: (u32, u32)) -> Vec<Pre
     let lines: Vec<&str> = text.lines().collect();
     let mut li = 0;
     let mut in_code = false;
+    // A fence that named no language emits no header row, so the FIRST BODY row
+    // is the top of the block. This carries that across the one iteration
+    // between reading the fence and reading that row.
+    let mut code_open = false;
     let mut code_fence = String::new(); // "```" or "~~~"
     let mut code_lang = String::new();
     let mut footnotes: Vec<(String, String)> = Vec::new();
@@ -550,7 +554,12 @@ fn render_markdown(text: &str, base: Option<&Path>, cell: (u32, u32)) -> Vec<Pre
                     }
                 }
                 // still inside code
-                out.push(code_body_line(line));
+                let mut row = code_body_line(line);
+                if code_open {
+                    row.block = PreviewBlock::Code { first: true, last: false };
+                    code_open = false;
+                }
+                out.push(row);
                 li += 1;
                 continue;
             } else {
@@ -559,24 +568,32 @@ fn render_markdown(text: &str, base: Option<&Path>, cell: (u32, u32)) -> Vec<Pre
                 code_lang = rest.trim().to_string();
                 // strip info string extras (filename etc.) — first token is lang
                 let lang = code_lang.split_whitespace().next().unwrap_or("");
-                // The language, and only the language. A fence that named none
-                // gets an empty row that the face draws as the top of the
-                // block — it does not get the word "code", which said nothing
-                // a background does not already say.
-                out.push(pb(
-                    if lang.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![(lang.to_string(), PreviewStyle::CodeLang)]
-                    },
-                    PreviewBlock::Code { first: true, last: false },
-                ));
+                // The language, and only the language — and NO row at all when
+                // the fence named none. It used to get the word "code" in a
+                // drawn box; an empty header row instead would have spent a
+                // blank line at the top of every unlabelled block, which is
+                // the same waste with less to read. The first body row carries
+                // `first` in that case, exactly as an indented block does.
+                if lang.is_empty() {
+                    code_open = true;
+                } else {
+                    out.push(pb(
+                        vec![(lang.to_string(), PreviewStyle::CodeLang)],
+                        PreviewBlock::Code { first: true, last: false },
+                    ));
+                }
                 li += 1;
                 continue;
             }
         }
         if in_code {
-            out.push(code_body_line(line));
+            let mut row = code_body_line(line);
+            // An unlabelled fence emitted no header, so this is the top.
+            if code_open {
+                row.block = PreviewBlock::Code { first: true, last: false };
+                code_open = false;
+            }
+            out.push(row);
             li += 1;
             continue;
         }
@@ -2429,15 +2446,33 @@ mod tests {
     }
 
     #[test]
-    fn a_fence_with_no_language_still_opens_and_closes() {
+    fn a_fence_with_no_language_spends_no_row_saying_so() {
+        // No header row at all: there is no language to print, and an empty one
+        // would put a blank line at the top of every unlabelled block. The one
+        // body row is therefore both ends of the run.
         let lines = render_markdown_t("```\nplain\n```\n");
+        let code: Vec<(&PreviewBlock, &str)> = lines
+            .iter()
+            .filter(|l| matches!(l.block, PreviewBlock::Code { .. }))
+            .map(|l| (&l.block, l.spans.first().map_or("", |s| s.0.as_str())))
+            .collect();
+        assert_eq!(code.len(), 1, "{code:?}");
+        assert_eq!(code[0].0, &PreviewBlock::Code { first: true, last: true });
+        assert_eq!(code[0].1, "plain");
+    }
+
+    #[test]
+    fn an_unlabelled_fence_brackets_a_longer_body() {
+        let lines = render_markdown_t("```\none\ntwo\nthree\n```\n");
         let code: Vec<&PreviewBlock> = lines
             .iter()
             .map(|l| &l.block)
             .filter(|b| matches!(b, PreviewBlock::Code { .. }))
             .collect();
-        assert_eq!(code.first(), Some(&&PreviewBlock::Code { first: true, last: false }));
-        assert_eq!(code.last(), Some(&&PreviewBlock::Code { first: false, last: true }));
+        assert_eq!(code.len(), 3);
+        assert_eq!(code[0], &PreviewBlock::Code { first: true, last: false });
+        assert_eq!(code[1], &PreviewBlock::Code { first: false, last: false });
+        assert_eq!(code[2], &PreviewBlock::Code { first: false, last: true });
     }
 
     #[test]

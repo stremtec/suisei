@@ -374,6 +374,53 @@ struct PreviewLineItem: Equatable, Identifiable {
     var id: Int
     var text: String
     var style: UInt8
+    /// What this row IS, as opposed to what its characters look like.
+    ///
+    /// The face used to work this out by inspecting the text — a run of `─`
+    /// was a rule, two or more pipes was a table. That was reverse-engineering
+    /// a fact the core had and threw away, and it could not be made right:
+    /// a table's columns were padded to a width measured in monospace cells,
+    /// which is not the unit anything here is drawn in.
+    var block: PreviewBlock = .flow
+
+    /// A table row's cells, already split. Empty for every other kind.
+    var cells: [String] {
+        guard case .table = block else { return [] }
+        return text.components(separatedBy: "\u{1F}")
+    }
+}
+
+/// A preview row's structural role. Mirrors `suisei_core::preview::PreviewBlock`
+/// and the `blocks`/`block_args` pair on the wire.
+enum PreviewBlock: Equatable {
+    case flow
+    case rule
+    case quote(depth: Int)
+    case code(first: Bool, last: Bool)
+    case table(header: Bool, first: Bool, last: Bool, aligns: UInt16)
+
+    /// Column alignment, low column first. Past eight columns: leading.
+    func alignment(column: Int) -> Alignment {
+        guard case .table(_, _, _, let packed) = self, column < 8 else { return .leading }
+        switch (packed >> (column * 2)) & 0b11 {
+        case 1: return .center
+        case 2: return .trailing
+        default: return .leading
+        }
+    }
+
+    static func decode(_ kind: UInt8, _ arg: UInt8, _ aligns: UInt16) -> PreviewBlock {
+        switch kind {
+        case 1: return .rule
+        case 2: return .quote(depth: Int(arg))
+        case 3: return .code(first: arg & 1 != 0, last: arg & 2 != 0)
+        case 4:
+            return .table(
+                header: arg & 1 != 0, first: arg & 2 != 0, last: arg & 4 != 0, aligns: aligns
+            )
+        default: return .flow
+        }
+    }
 }
 
 struct PreviewSnap: Equatable {
@@ -3705,6 +3752,33 @@ final class EngineBridge: ObservableObject {
             UInt16(clamping: wrapCols), EditorMetrics.wideGlyphRatio, &band
         )
         guard ok != 0 else { return [] }
+        return Self.unpack(band, pane: pane)
+    }
+
+    /// The scope headers to pin above the viewport whose first line is `top`.
+    ///
+    /// A separate pull rather than a field on the band: the band is fetched
+    /// several times per frame at different offsets (overscan above, the
+    /// visible rows, overscan below) and the sticky set belongs to none of
+    /// those ranges — it belongs to the pane. Riding along would have made it
+    /// arrive three times with two of them wrong.
+    func pullSticky(pane: Int, top: Int, max maxRows: Int) -> [EditorLine] {
+        guard let engine, maxRows > 0 else { return [] }
+        var band = SuiseiBandC()
+        let ok = suisei_engine_sticky_band(
+            engine, UInt32(pane), UInt32(max(0, top)), UInt32(maxRows),
+            EditorMetrics.wideGlyphRatio, &band
+        )
+        guard ok != 0 else { return [] }
+        return Self.unpack(band, pane: pane)
+    }
+
+    /// `SuiseiBandC` → rows. One unpacker, because there is one wire format:
+    /// the field offsets below are hand-computed against the C struct, and a
+    /// second copy of them is a second thing to forget when the struct grows.
+    /// It grew once already — `fold` is appended AFTER the spans array so that
+    /// every offset above it kept its number.
+    private static func unpack(_ band: SuiseiBandC, pane: Int) -> [EditorLine] {
         var out: [EditorLine] = []
         let n = Int(band.count)
         let stride = MemoryLayout<SuiseiEditorLineC>.stride
@@ -3816,7 +3890,33 @@ final class EngineBridge: ObservableObject {
         // Chrome, not paint-only: the pane rects the layout is drawn from live
         // in the chrome snapshot, so a paint-only refresh moved the divider in
         // core and left the face drawing the old geometry.
-        refreshChrome()
+        //
+        // But not the WHOLE chrome — see below. A drag fires this on every
+        // pointer move.
+        refreshSplitOnly()
+    }
+
+    /// The pane rects, and nothing else.
+    ///
+    /// `refreshChrome` reassigns five `@Published` properties, and each one
+    /// invalidates ContentView's entire body before the next has even run — the
+    /// tab strip, both sidebars, every panel. A divider drag fires on every
+    /// pointer move, so moving one seam re-evaluated the whole window at
+    /// display rate. That is the lag; it was never the geometry.
+    ///
+    /// Core already takes the cheap road on its side (`split_resize` calls
+    /// `recompose_scroll`, not a full recompose, "so the full rebuild
+    /// re-tokenized every pane per pixel"). This is the other half of the same
+    /// fix, on the side that was still paying.
+    ///
+    /// The snapshot pull itself is not the cost — the struct is ~9 KB. What
+    /// costs is what the assignments invalidate, so exactly one is made.
+    private func refreshSplitOnly() {
+        guard let engine else { return }
+        var snap = SuiseiChromeSnapshot()
+        guard suisei_engine_chrome(engine, &snap) != 0 else { return }
+        let (_, split) = decodeEditorLinesAndSplit(from: snap, engine: engine)
+        if split != editorSplit { editorSplit = split }
     }
 
     struct MinimapData: Equatable {
@@ -6194,10 +6294,36 @@ final class EngineBridge: ObservableObject {
             installing: snap.installing != 0,
             installed: snap.installed != 0,
             checking: snap.checking != 0,
+            badge: snap.badge,
+            cacheBytes: snap.cache_bytes,
             current: cStringField(snap.current),
             latest: cStringField(snap.latest),
             notes: cStringField(snap.notes)
         ))
+    }
+
+    /// Empty the update working directory. Returns what the engine decided.
+    ///
+    /// It can refuse, and the refusals are the interesting part: the staged
+    /// bundle lives in this directory, so clearing while an update waits for
+    /// the next launch would delete the update. The engine is the one that
+    /// knows; the button only disables itself first so the user is not offered
+    /// something that will decline.
+    @discardableResult
+    func clearUpdateCache() -> String {
+        guard let engine else { return "" }
+        var freed: UInt64 = 0
+        let rc = suisei_engine_update_clear_cache(engine, &freed)
+        switch rc {
+        case 1:
+            let size = ByteCountFormatter.string(
+                fromByteCount: Int64(freed), countStyle: .file
+            )
+            return freed > 0 ? "Cleared \(size)" : "Nothing to clear"
+        case 2: return "An update is staged — restart to finish it first."
+        case 3: return "A build is running."
+        default: return "Could not clear the update cache."
+        }
     }
 
     private func refreshGitHubAccountIfNeeded() {
@@ -6676,11 +6802,29 @@ final class EngineBridge: ObservableObject {
             if n == 0 { break }
             withUnsafeBytes(of: snap.lines) { linesRaw in
                 withUnsafeBytes(of: snap.styles) { stylesRaw in
-                    let stylePtr = stylesRaw.bindMemory(to: UInt8.self)
-                    for i in 0..<n {
-                        let base = linesRaw.baseAddress!.advanced(by: i * lineCap)
-                        let text = String(cString: base.assumingMemoryBound(to: CChar.self))
-                        lines.append(PreviewLineItem(id: lines.count, text: text, style: stylePtr[i]))
+                    withUnsafeBytes(of: snap.blocks) { blocksRaw in
+                        withUnsafeBytes(of: snap.block_args) { argsRaw in
+                            withUnsafeBytes(of: snap.table_aligns) { alignsRaw in
+                                let stylePtr = stylesRaw.bindMemory(to: UInt8.self)
+                                let blockPtr = blocksRaw.bindMemory(to: UInt8.self)
+                                let argPtr = argsRaw.bindMemory(to: UInt8.self)
+                                let alignPtr = alignsRaw.bindMemory(to: UInt16.self)
+                                for i in 0..<n {
+                                    let base = linesRaw.baseAddress!.advanced(by: i * lineCap)
+                                    let text = String(
+                                        cString: base.assumingMemoryBound(to: CChar.self)
+                                    )
+                                    lines.append(PreviewLineItem(
+                                        id: lines.count,
+                                        text: text,
+                                        style: stylePtr[i],
+                                        block: PreviewBlock.decode(
+                                            blockPtr[i], argPtr[i], alignPtr[i]
+                                        )
+                                    ))
+                                }
+                            }
+                        }
                     }
                 }
             }

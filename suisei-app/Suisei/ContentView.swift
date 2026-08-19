@@ -2806,7 +2806,20 @@ struct ContentView: View {
             }
 
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                // `VStack`, not `LazyVStack`, and the reason is the ABI.
+                //
+                // The wire caps this column at 48 file rows and 40 commits
+                // (`SUISEI_MAX_SCM`, `SUISEI_MAX_SCM_GRAPH`), so the list can
+                // never be long enough for laziness to buy anything — and it
+                // was costing correctness. `scmSection` is a `@ViewBuilder`
+                // that returns a header AND a `ForEach` as one tuple, which
+                // `LazyVStack` treats as a single child of unknown height until
+                // it is materialised. With Changes non-empty there were enough
+                // of those to throw the content height off: an empty band under
+                // "History", and commits arriving one at a time as you
+                // scrolled past them. With no changes it looked fine, which is
+                // exactly the report.
+                VStack(alignment: .leading, spacing: 0) {
                     scmSection(title: "Staged Changes", rows: engine.chrome.scm.staged, empty: nil)
                     scmSection(
                         title: "Changes",
@@ -3090,11 +3103,25 @@ struct ContentView: View {
                         ScrollViewReader { proxy in
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 3) {
-                                    ForEach(0..<shells.dock.count, id: \.self) { i in
+                                    // Over the SESSION IDS, not `0..<count`.
+                                    // A `ForEach` on a range whose bound moves
+                                    // is the one form SwiftUI documents as
+                                    // constant-only; adding a shell left it
+                                    // describing the old set.
+                                    ForEach(Array(shells.dock.enumerated()), id: \.element) { i, _ in
                                         terminalSessionChip(i).id(i)
                                     }
                                 }
                                 .padding(.horizontal, 1)
+                                // Its own ideal width, whatever is proposed.
+                                // The measurement below feeds the frame that
+                                // sizes this very ScrollView, so without this
+                                // the loop can settle on the CLIPPED width —
+                                // a window one chip wide, which is why adding a
+                                // shell showed the new chip and nothing else:
+                                // `scrollTo(last)` was landing on the only one
+                                // that fit.
+                                .fixedSize(horizontal: true, vertical: false)
                                 .onGeometryChange(for: CGFloat.self) { proxy in
                                     proxy.size.width
                                 } action: { w in
@@ -5788,8 +5815,12 @@ struct ContentView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
-                        ForEach(engine.preview.lines) { line in
-                            previewLineView(line)
+                        // Grouped, because a table's columns have to agree with
+                        // each other and a row cannot know how wide the row
+                        // above wanted to be. One `Grid` per run of table rows;
+                        // one background per run of code rows.
+                        ForEach(previewGroups(engine.preview.lines)) { group in
+                            previewGroupView(group)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .textSelection(.enabled)
                         }
@@ -5805,29 +5836,135 @@ struct ContentView: View {
         .onAppear { engine.refreshPreview() }
     }
 
+    /// A run of preview rows that has to be laid out together, or a single row.
+    private enum PreviewGroup: Identifiable {
+        case line(PreviewLineItem)
+        case table([PreviewLineItem])
+        case code([PreviewLineItem])
+
+        /// The first row's id. Rows are numbered in document order and a group
+        /// owns a contiguous run, so the first id is unique across groups.
+        var id: Int {
+            switch self {
+            case .line(let l): return l.id
+            case .table(let r), .code(let r): return r.first?.id ?? -1
+            }
+        }
+    }
+
+    /// Fold consecutive rows of the same block into one group.
+    private func previewGroups(_ lines: [PreviewLineItem]) -> [PreviewGroup] {
+        var out: [PreviewGroup] = []
+        var run: [PreviewLineItem] = []
+        // `nil` = not in a run. Tables and code runs never abut a run of the
+        // other kind without a `.flow` row between them, but the flush below
+        // does not rely on that.
+        var runIsTable = false
+
+        func flush() {
+            guard !run.isEmpty else { return }
+            out.append(runIsTable ? .table(run) : .code(run))
+            run = []
+        }
+
+        for line in lines {
+            switch line.block {
+            case .table:
+                if !run.isEmpty && !runIsTable { flush() }
+                runIsTable = true
+                run.append(line)
+            case .code:
+                if !run.isEmpty && runIsTable { flush() }
+                runIsTable = false
+                run.append(line)
+            default:
+                flush()
+                out.append(.line(line))
+            }
+        }
+        flush()
+        return out
+    }
+
+    @ViewBuilder
+    private func previewGroupView(_ group: PreviewGroup) -> some View {
+        switch group {
+        case .line(let line):
+            previewLineView(line)
+        case .table(let rows):
+            previewTable(rows)
+        case .code(let rows):
+            previewCodeBlock(rows)
+        }
+    }
+
+    /// A real grid. Columns are measured by the FACE, in the font it is about
+    /// to draw with — which is the whole reason the core stopped padding them.
+    private func previewTable(_ rows: [PreviewLineItem]) -> some View {
+        let columns = rows.map { $0.cells.count }.max() ?? 0
+        return Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+            ForEach(rows) { row in
+                GridRow {
+                    ForEach(0..<columns, id: \.self) { i in
+                        let cell = i < row.cells.count ? row.cells[i] : ""
+                        Text(previewAttributed(parsePreviewRuns(cell, fallback: row.style)))
+                            .frame(maxWidth: .infinity, alignment: row.block.alignment(column: i))
+                    }
+                }
+                if case .table(let header, _, _, _) = row.block, header {
+                    Divider().gridCellUnsizedAxes(.horizontal)
+                }
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    /// One background behind the whole run, rounded at both ends — rather than
+    /// a box drawn per row out of `┌` and `└`, which is what a terminal has to
+    /// do and what this used to receive.
+    private func previewCodeBlock(_ rows: [PreviewLineItem]) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(rows) { row in
+                Text(previewAttributed(parsePreviewRuns(row.text, fallback: row.style)))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.055))
+        )
+        .padding(.vertical, 4)
+    }
+
     /// Renders a preview line; multi-span lines pack U+E000+style markers from Core.
     @ViewBuilder
     private func previewLineView(_ line: PreviewLineItem) -> some View {
         let runs = parsePreviewRuns(line.text, fallback: line.style)
-        if isRule(line.text) {
-            // A RULE, drawn as one. Core emits it as a run of `═`/`─` as wide
-            // as the heading's character count — right for a terminal, where
-            // the heading is the same monospaced cell width. Here the heading
-            // is 22pt proportional and the rule was being drawn at 13pt, so it
-            // stopped somewhere under the middle of the title. Nothing about
-            // its length was ever meant to survive a font change.
-            //
-            // Before `isTableLike`, which a run of `─` also matches.
+        if case .rule = line.block {
+            // A RULE, drawn as one — and now because the CORE said so, not
+            // because the text happened to be a run of `─`. It used to arrive
+            // as fifty-six dashes sized for a terminal's cells, and the guess
+            // that recovered it had to be tried before the table guess, since a
+            // table's border matched the same characters.
             Rectangle()
                 .fill(theme.separator)
                 .frame(height: 1)
                 .padding(.vertical, 3)
-        } else if isTableLike(line.text) {
-            Text(line.text.unicodeScalars.filter { !(0xE000...0xE0FF).contains($0.value) }
-                .reduce(into: "") { $0.unicodeScalars.append($1) })
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(fg.opacity(0.92))
-                .lineLimit(1)
+        } else if case .quote(let depth) = line.block {
+            // The bar is drawn, not typed. It used to be a `│ ` glued to the
+            // front of the text, which meant it came along when you copied the
+            // quote and sat at the text's size rather than the row's.
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(0..<max(1, min(depth, 4)), id: \.self) { _ in
+                    Rectangle()
+                        .fill(theme.separator)
+                        .frame(width: 2)
+                }
+                Text(previewAttributed(runs))
+                Spacer(minLength: 0)
+            }
+            .fixedSize(horizontal: false, vertical: true)
         } else if runs.isEmpty {
             Text(" ")
                 .font(previewFont(line.style))
@@ -5859,24 +5996,12 @@ struct ContentView: View {
         return out
     }
 
-    /// A horizontal rule: nothing but rule characters.
-    ///
-    /// Deliberately NOT the box-drawing set — a table's border is made of the
-    /// same `─` plus corners and tees, and it has to stay text so its columns
-    /// line up with the cells above and below it.
-    private func isRule(_ text: String) -> Bool {
-        var sawRule = false
-        for ch in text {
-            let v = ch.unicodeScalars.first?.value ?? 0
-            if (0xE000...0xE0FF).contains(v) { continue }
-            switch ch {
-            case "═", "─", "━": sawRule = true
-            case " ": continue
-            default: return false
-            }
-        }
-        return sawRule
-    }
+    // `isRule` and `isTableLike` lived here. Both read a row's TEXT to work out
+    // what the row was — a run of `─` meant a rule, two or more pipes meant a
+    // table — because the core drew both with box characters and sent no
+    // structure. They were guesses that could not be made right: the rule
+    // arrived sized in a terminal's cells and the table's columns were padded
+    // for a font nothing here draws in. The core sends `blocks` now.
 
     private struct PreviewRun {
         var text: String
@@ -5909,16 +6034,6 @@ struct ContentView: View {
     }
 
     /// Table / box-drawing lines must be monospaced or the pipes shear apart.
-    private func isTableLike(_ text: String) -> Bool {
-        var pipes = 0
-        for ch in text {
-            if "|│┌┐└┘─├┤┬┴┼".contains(ch) {
-                pipes += 1
-                if pipes >= 2 { return true }
-            }
-        }
-        return false
-    }
 
     private func previewFont(_ style: UInt8) -> Font {
         switch style {
@@ -6139,7 +6254,10 @@ struct ContentView: View {
                         let axis = seam.vertical ? size.width : size.height
                         engine.splitResize(seam.a, seam.b, delta: Double(delta / max(1, axis)))
                     },
-                    onEnd: {}
+                    // One full pull when the drag ENDS. During it only the pane
+                    // rects are republished, so anything else that moved while
+                    // the seam did catches up here — once, not per pixel.
+                    onEnd: { engine.refreshChrome() }
                 )
                 .frame(
                     width: seam.vertical ? 7 : size.width * (seam.to - seam.from),
@@ -6354,6 +6472,32 @@ struct ContentView: View {
                 .menuStyle(.borderlessButton)
             }
             Spacer(minLength: 4)
+
+            // Turn this pane into a shell, and back.
+            //
+            // The action existed only as ⌃⇧T. A keyboard-only shortcut is not
+            // an accessible control: VoiceOver cannot find it, it does not
+            // appear in the header it acts on, and a user who has never read
+            // the shortcut list has no way to discover that a pane can BE a
+            // terminal at all. The header is where the pane's identity already
+            // lives — the glyph on the left is already saying which kind it is.
+            Button {
+                engine.focusPane(pane.id)
+                engine.toggleTerminalTab()
+                focused = false
+            } label: {
+                Image(systemName: pane.isTerminal ? "doc.text" : "terminal")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(pane.isTerminal ? accent : .secondary)
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help(pane.isTerminal ? "Back to the editor (⌃⇧T)" : "Terminal in this pane (⌃⇧T)")
+            .accessibilityLabel(pane.isTerminal ? "Editor" : "Terminal")
+            .accessibilityHint(pane.isTerminal
+                ? "Shows the document in this pane again"
+                : "Runs a shell in this pane")
+
             paneSplitMenu(pane: pane)
 
             Button {
@@ -6368,7 +6512,18 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .help("Close pane")
+            .accessibilityLabel("Close pane")
+            .accessibilityHint("Closes \(title)")
         }
+        // The header names the pane as one thing to VoiceOver. Its parts are
+        // buttons in their own right — they stay reachable — but a reader
+        // moving between panes hears "main.rs, editor, focused" rather than
+        // four separate fragments.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
+        .accessibilityValue(
+            (pane.isTerminal ? "Terminal" : "Editor") + (pane.focused ? ", focused" : "")
+        )
         .padding(.horizontal, 8)
         .frame(height: ContentView.editorHeaderHeight)
         .background(pane.focused ? editorBg : shellBase.opacity(0.55))
@@ -6452,7 +6607,10 @@ struct ContentView: View {
         paneIndex: Int,
         showFocusRing: Bool
     ) -> some View {
-        let focusedPane = paneIndex == engine.editorSplit.focus || !engine.editorSplit.isSplit
+        // `focusedPane` was computed here and never read. `showFocusRing` is
+        // the parameter that answers the same question, and it is decided by
+        // the caller — which knows about the panel focus this expression did
+        // not. Two answers, one of them unused, is one too many.
         let pane: EditorPaneSnap? = {
             if engine.editorSplit.isSplit,
                paneIndex >= 0,

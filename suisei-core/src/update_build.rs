@@ -279,6 +279,76 @@ pub fn pending_path() -> PathBuf {
     work_dir().join("pending")
 }
 
+/// Bytes the update working directory is holding.
+///
+/// A source update clones the repository and builds it, so this is a checkout
+/// plus a `target/` — gigabytes, sitting in `~/Library/Caches` where nobody
+/// goes looking. The Software Update page shows the number because an editor
+/// that quietly keeps several gigabytes for a job it finished last week is
+/// indistinguishable from a leak.
+///
+/// Walks rather than asking the filesystem: there is no portable "size of this
+/// directory" that counts what `du` counts, and the tree is our own — a
+/// checkout and a build, not a user's home.
+pub fn cache_bytes() -> u64 {
+    fn walk(dir: &Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        let mut total = 0u64;
+        for e in entries.flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            // `metadata` follows symlinks and `symlink_metadata` does not; a
+            // build tree has links into itself, and following them would count
+            // the same bytes twice or walk forever.
+            if meta.is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                total = total.saturating_add(walk(&e.path()));
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+        total
+    }
+    walk(&work_dir())
+}
+
+/// What `clear_cache` refuses to do, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClearRefused {
+    /// A built update is waiting for the next launch. Deleting the cache would
+    /// delete the update itself.
+    UpdateStaged(String),
+    /// A build is running right now.
+    BuildRunning,
+}
+
+/// Delete the update working directory. Returns the bytes freed.
+///
+/// **Refuses while an update is staged.** The staged bundle lives in this
+/// directory, and the whole safety argument for source updates is that there is
+/// a working Suisei on disk at every instant — a "clear cache" button that
+/// silently throws away the update the user is waiting to restart into would be
+/// the one way to break that from inside the product.
+///
+/// `building` is passed in rather than detected here: whether a build thread is
+/// alive is `UpdateState`'s fact, and this module does not own it.
+pub fn clear_cache(current_version: &str, building: bool) -> Result<u64, ClearRefused> {
+    if building {
+        return Err(ClearRefused::BuildRunning);
+    }
+    if let Some(p) = pending_for(current_version) {
+        return Err(ClearRefused::UpdateStaged(p.version));
+    }
+    let freed = cache_bytes();
+    // A failure to remove is not a failure to report: the directory may be
+    // partly gone, and the number above is what was there when we looked.
+    let _ = std::fs::remove_dir_all(work_dir());
+    Ok(freed)
+}
+
 /// The update waiting for this launch, if there is a real one.
 pub fn pending_for(current_version: &str) -> Option<Pending> {
     pending_at(&pending_path(), current_version)

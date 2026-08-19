@@ -938,6 +938,12 @@ impl Engine {
         // every line and re-measures every indent. Guarded on (buffer version,
         // tab width), so an idle frame costs a comparison.
         self.app.folds_refresh();
+        // Ask GitHub again if it has been long enough. Launch used to be the
+        // only time Suisei looked, so a machine that stays awake never heard
+        // about an update. Coarse in-memory throttle inside, then the 4h stamp.
+        if self.app.update_check {
+            self.app.update.maybe_recheck(env!("CARGO_PKG_VERSION"));
+        }
         // The generation moves on a STATE change, not on a message. "Already
         // up to date" is the outcome with nothing to print, so keying the face's
         // refresh off the message left the page spinning for exactly the users
