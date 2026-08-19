@@ -7,7 +7,7 @@ pub use scene::{
     BREAKPOINT_DECORATED, BREAKPOINT_DISABLED, ChromeScene, DEBUG_FRAME, DEBUG_STOPPED,
     EditorLineScene, VALUE_EXTENT, VALUE_FIRST,
     VALUE_LAST, VALUE_WRITE, FrameDiff, OutlineItemScene, PaneScene,
-    ShellState, Viewport, build_editor_band, build_outline_public, build_sticky_band, compose,
+    ShellState, Viewport, build_editor_band, build_outline_public, compose,
     patch_chrome_editor_scroll,
 };
 // Caret placement, for the FFI's cheap caret pull. The same two functions the

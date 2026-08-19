@@ -3755,24 +3755,6 @@ final class EngineBridge: ObservableObject {
         return Self.unpack(band, pane: pane)
     }
 
-    /// The scope headers to pin above the viewport whose first line is `top`.
-    ///
-    /// A separate pull rather than a field on the band: the band is fetched
-    /// several times per frame at different offsets (overscan above, the
-    /// visible rows, overscan below) and the sticky set belongs to none of
-    /// those ranges — it belongs to the pane. Riding along would have made it
-    /// arrive three times with two of them wrong.
-    func pullSticky(pane: Int, top: Int, max maxRows: Int) -> [EditorLine] {
-        guard let engine, maxRows > 0 else { return [] }
-        var band = SuiseiBandC()
-        let ok = suisei_engine_sticky_band(
-            engine, UInt32(pane), UInt32(max(0, top)), UInt32(maxRows),
-            EditorMetrics.wideGlyphRatio, &band
-        )
-        guard ok != 0 else { return [] }
-        return Self.unpack(band, pane: pane)
-    }
-
     /// `SuiseiBandC` → rows. One unpacker, because there is one wire format:
     /// the field offsets below are hand-computed against the C struct, and a
     /// second copy of them is a second thing to forget when the struct grows.

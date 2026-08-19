@@ -933,11 +933,6 @@ impl Engine {
         if self.app.update.poll_build() {
             need_full = true;
         }
-        // Sticky scroll asks which folds enclose the top row on every composed
-        // frame, so the ranges have to be current — but `rebuild_folds` clones
-        // every line and re-measures every indent. Guarded on (buffer version,
-        // tab width), so an idle frame costs a comparison.
-        self.app.folds_refresh();
         // Ask GitHub again if it has been long enough. Launch used to be the
         // only time Suisei looked, so a machine that stays awake never heard
         // about an update. Coarse in-memory throttle inside, then the 4h stamp.
@@ -2020,20 +2015,6 @@ impl Engine {
         wide_ratio: u16,
     ) -> (Vec<crate::compositor::EditorLineScene>, u32) {
         crate::compositor::build_editor_band(&self.app, pane, start, rows, wrap_cols, wide_ratio)
-    }
-
-    /// The scope headers to pin above `top_row`, as ordinary editor rows.
-    ///
-    /// Pulled by the face on the same beat as the band, so the pinned headers
-    /// and the rows under them can never describe different scroll positions.
-    pub fn sticky_band(
-        &self,
-        pane: usize,
-        top_row: usize,
-        max: usize,
-        wide_ratio: u16,
-    ) -> Vec<crate::compositor::EditorLineScene> {
-        crate::compositor::build_sticky_band(&self.app, pane, top_row, max, wide_ratio)
     }
 
     /// Which document a pane is showing, as a tab index.

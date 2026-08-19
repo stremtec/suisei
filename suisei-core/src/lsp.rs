@@ -98,6 +98,12 @@ pub struct LspClient {
     pub error: Option<String>,
     /// Soft notice (binary missing, method unsupported). Status shows dim hint.
     pub soft_error: Option<String>,
+    /// The file we have already explained a missing server for.
+    ///
+    /// Hover fires on pointer movement, so an unconditional notice would
+    /// rewrite the status line continuously. One per document is enough — the
+    /// answer does not change while the file is open.
+    missing_notice_for: Option<String>,
     /// Last few stderr lines from the server (debug / soft_error detail).
     pub stderr_tail: String,
     current_uri: String,
@@ -273,6 +279,7 @@ impl Default for LspClient {
             code_lens_gen: 0,
             error: None,
             soft_error: None,
+            missing_notice_for: None,
             stderr_tail: String::new(),
             current_uri: String::new(),
             opened_uri: String::new(),
@@ -949,6 +956,42 @@ impl LspClient {
         self.send_raw(&msg);
     }
 
+    /// Say why nothing happened, at the moment the user asked.
+    ///
+    /// The startup hint already exists — `soft_error` is set when the server's
+    /// binary is missing — but the pump shows it once, while the file is
+    /// opening, and only if the status line happens to be free. Nobody is
+    /// asking a question then. Ten minutes later they hover, or ⌘-click a
+    /// symbol, and get **silence**: `request_position` returned early and said
+    /// nothing. That is not a broken feature, it is an unanswered one, and it
+    /// is indistinguishable from a broken one from the outside.
+    ///
+    /// Named for the FILE, not the language, because a project with a `.ts` and
+    /// a `.py` in it has two different missing answers.
+    fn note_missing_server(&mut self, path: &str) {
+        if self.missing_notice_for.as_deref() == Some(path) {
+            return;
+        }
+        self.missing_notice_for = Some(path.to_string());
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // The configured command for this language, so the message names the
+        // server the editor would actually have started.
+        let Some(cmd) = default_server_for_ext(canonical_ext(&ext)) else {
+            return;
+        };
+        let Some(bin) = cmd.split_whitespace().next() else {
+            return;
+        };
+        self.soft_error = Some(format!(
+            "No language server running for this file — {bin} is not installed. {}",
+            install_command(bin)
+        ));
+    }
+
     fn request_position(
         &mut self,
         kind: PendingReq,
@@ -958,6 +1001,7 @@ impl LspClient {
         col: usize,
     ) {
         if !self.server_running {
+            self.note_missing_server(path);
             return;
         }
         let uri = path_to_uri(&abs_path(path));

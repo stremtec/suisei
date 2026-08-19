@@ -528,7 +528,7 @@ pub fn build_editor_band(
         0
     };
     let sel = if focused { app.selected_range() } else { None };
-    let lines = build_lines_at(app, tab, start, rows, Some(caret_vcol), sel, focused, wrap_cols, wide_ratio, None);
+    let lines = build_lines_at(app, tab, start, rows, Some(caret_vcol), sel, focused, wrap_cols, wide_ratio);
     (lines, total)
 }
 
@@ -2383,7 +2383,6 @@ fn build_visible_lines_from_buffer(
         // chrome snapshot, which the GUI does not render from.
         0,
         scene_wide_default(),
-        None,
     )
 }
 
@@ -2407,16 +2406,6 @@ fn build_lines_at(
     // a pushed value has an ordering question that a parameter does not.
     wrap_cols: u16,
     wide_ratio: u16,
-    // When set, draw exactly THESE buffer rows instead of walking forward from
-    // `band_start`. Sticky scroll needs a handful of rows from a handful of
-    // places in the file, assembled with the band's own styling so a pinned
-    // header and the same line scrolled into view are the same picture.
-    //
-    // A row list rather than N calls: the setup above this loop resolves the
-    // breakpoint map and the debugger's stopped file, and both canonicalize
-    // paths — syscalls. Five calls to the contiguous form would pay for that
-    // five times per frame, while scrolling.
-    explicit: Option<&[usize]>,
 ) -> Vec<EditorLineScene> {
     let buf = buffer_for_tab(app, tab);
     let total = buf.line_count();
@@ -2587,21 +2576,11 @@ fn build_lines_at(
     // hop. Counting rows WALKED would spend the whole band inside a closed
     // fold and draw nothing below it; walking row by row would make a single
     // closed fold over 100k lines cost 100k lookups per frame.
-    // An explicit list drives the walk from its own first entry; `band_start`
-    // is then only the visual origin, and the caller passes 0 for it.
-    let mut at = 0usize;
-    let mut row = match explicit {
-        Some(e) => match e.first() {
-            Some(r) => *r,
-            None => return lines,
-        },
-        None => band_start,
-    };
-    let budget = explicit.map_or(rows, <[usize]>::len);
+    let mut row = band_start;
     let mut drawn_rows = 0usize;
     // Cap matches the FFI packed budget (SUISEI_MAX_LINES = 256) minus headroom;
     // must stay ≥ OVERSCAN_ABOVE + viewport rows or the visible bottom goes blank.
-    while drawn_rows < budget && lines.len() < 240 {
+    while drawn_rows < rows && lines.len() < 240 {
         if row >= total {
             break;
         }
@@ -2635,18 +2614,8 @@ fn build_lines_at(
         // the end of a truncated line.
         let raw = char_prefix(buf.line(row), ROW_BYTES + 1);
         let text = suisei_core::wrap::drawn_row(raw, app.tab_width);
-        // A band that is a WINDOW onto the document carries the caret and the
-        // selection. An explicit row list is not a window — it is a set of
-        // copies pinned above one — and a caret drawn on the pinned copy of the
-        // caret's line shows the user two of them.
-        //
-        // The suppression has to be HERE and not at the call site: `is_cursor`
-        // comes from comparing row numbers and the selection is looked up from
-        // the app, so passing `caret_vcol: None` and `sel: None` suppresses
-        // neither. A test caught exactly that.
-        let decorated = explicit.is_none();
-        let is_cursor_row = decorated && row == cursor_row;
-        let (sel_v0, sel_v1) = if decorated && use_live_syntax && is_current {
+        let is_cursor_row = row == cursor_row;
+        let (sel_v0, sel_v1) = if use_live_syntax && is_current {
             // `.or(sel)` keeps vim's visual range, which lives outside the GUI
             // set: the fallback can only paint rows the primary already covers,
             // because `selection_on_line` drops a range that misses the row.
@@ -2932,79 +2901,13 @@ fn build_lines_at(
             });
             visual_row = visual_row.saturating_add(1);
         }
-        row = match explicit {
-            // A list is a list — folds do not get to skip entries in it. The
-            // rows were already chosen by someone who knew which were visible.
-            Some(e) => {
-                at += 1;
-                match e.get(at) {
-                    Some(r) => *r,
-                    None => break,
-                }
-            }
-            None => match folds {
-                Some(f) => f.next_visible(row),
-                None => row + 1,
-            },
+        row = match folds {
+            Some(f) => f.next_visible(row),
+            None => row + 1,
         };
     }
     lines
 }
-
-/// The scope headers to pin above the viewport, drawn as ordinary editor rows.
-///
-/// Built through `build_lines_at` rather than a renderer of its own, so a
-/// pinned `fn foo() {` and the same line scrolled into view are the same
-/// picture — same syntax spans, same tab expansion, same truncation. A second
-/// assembler here would be a second place for the theme to be applied, and it
-/// would drift.
-///
-/// `wrap_cols` is 0 on purpose: a pinned header is one row. Soft-wrapping it
-/// would push the document down by a variable amount as you scroll.
-pub fn build_sticky_band(
-    app: &App,
-    pane: usize,
-    top_row: usize,
-    max: usize,
-    wide_ratio: u16,
-) -> Vec<EditorLineScene> {
-    let live_panes = if app.split.is_split() {
-        app.split.pane_count()
-    } else {
-        1
-    };
-    if pane >= live_panes || max == 0 {
-        return Vec::new();
-    }
-    // Folding is the ACTIVE document's, and so is the fold structure sticky
-    // scroll reads. A background pane would be pinning headers computed from
-    // another file's indentation.
-    let (tab, focused) = if !app.split.is_split() {
-        (app.current_buffer(), true)
-    } else {
-        let n = app.split.pane_count().max(1);
-        let idx = pane.min(n.saturating_sub(1));
-        (
-            if idx == app.split.focus_index() {
-                app.current_buffer()
-            } else {
-                app.split.panes.get(idx).map(|p| app.pane_tab(p)).unwrap_or(0)
-            },
-            idx == app.split.focus_index(),
-        )
-    };
-    if !focused || tab != app.current_buffer() {
-        return Vec::new();
-    }
-    let rows = app.sticky_headers(top_row, max);
-    if rows.is_empty() {
-        return Vec::new();
-    }
-    // No caret and no selection: the caret is down in the document, and
-    // painting it on a pinned copy of its line would show two.
-    build_lines_at(app, tab, 0, rows.len(), None, None, true, 0, wide_ratio, Some(&rows))
-}
-
 
 /// UTF-16 offset of the character that starts at terminal cell column `vcol`.
 /// Bridges the core's cell grid to the renderer's glyph advances.
@@ -3322,7 +3225,7 @@ mod unicode_overlay_tests {
         app.search.input = "한글".into();
         app.recompute_search("한글", false);
         app.search.current = 1;
-        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200, None);
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200);
         let kinds: Vec<u8> = lines[0]
             .spans
             .iter()
@@ -3344,7 +3247,7 @@ mod unicode_overlay_tests {
         assert_eq!(app.search.pattern.as_deref(), Some("suisei"));
         assert_eq!(app.search.matches.len(), 2);
 
-        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200, None);
+        let lines = build_lines_at(&app, 0, 0, 1, Some(0), None, true, 0, 200);
         assert!(
             lines[0]
                 .spans

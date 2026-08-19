@@ -177,8 +177,6 @@ struct EditorHost: NSViewRepresentable {
 
 final class EditorScrollView: NSScrollView {
     let canvas = EditorCanvasView()
-    /// Pinned scope headers. Floats above the document; see `refreshSticky`.
-    let sticky = StickyHeaderView()
     weak var engine: EngineBridge? {
         didSet { canvas.engine = engine }
     }
@@ -240,14 +238,6 @@ final class EditorScrollView: NSScrollView {
         scrollerInsets = .init()
         documentView = canvas
         canvas.scrollView = self
-
-        sticky.canvas = canvas
-        sticky.isHidden = true
-        // `.vertical` = pinned against vertical scrolling, which is the axis
-        // the headers scroll off along. Horizontal panning still moves it with
-        // the document, so a pinned header stays lined up with the code under
-        // it when the view is scrolled right.
-        addFloatingSubview(sticky, for: .vertical)
 
         NotificationCenter.default.addObserver(
             self,
@@ -756,7 +746,6 @@ final class EditorScrollView: NSScrollView {
         if RendererChoice.useMetal {
             canvas.viewportDidScroll()
         }
-        refreshSticky()
         postLiveMinimapLine()
         guard !suppressPush else { return }
         syncCorePosition(force: false)
@@ -773,31 +762,6 @@ final class EditorScrollView: NSScrollView {
         layer?.borderWidth = on ? 2 : 0
         layer?.borderColor = on ? NSColor.controlAccentColor.cgColor : nil
         layer?.cornerRadius = on ? 4 : 0
-    }
-
-    /// Re-ask which headers enclose the top row, and size the widget to them.
-    ///
-    /// Driven from the clip's bounds change rather than from a timer, so the
-    /// pinned rows and the rows under them can never describe different scroll
-    /// positions — they are computed from the same event.
-    ///
-    /// The top row is taken from `documentVisibleRect`, NOT from the widget's
-    /// own bottom edge. Measuring below the widget is the intuitive thing and
-    /// it oscillates: pinning a header hides the row that asked for it, which
-    /// un-pins it, which reveals the row again. The overlay covers the top of
-    /// the document; that is the trade sticky scroll makes everywhere.
-    func refreshSticky() {
-        let lineH = max(1, EditorMetrics.lineHeight)
-        let top = canvas.bufferRowOfVisual(Int(floor(documentVisibleRect.minY / lineH)))
-        let rows = canvas.stickyRows(topBufferRow: top)
-        sticky.lines = rows
-        guard !rows.isEmpty else { return }
-        sticky.frame = CGRect(
-            x: 0,
-            y: 0,
-            width: contentView.bounds.width,
-            height: CGFloat(rows.count) * lineH
-        )
     }
 
     /// Minimap indicator feed at FRAME rate — the 30Hz core-sync throttle made
@@ -1147,41 +1111,6 @@ extension EditorCanvasView {
     private func engine_refreshAfterAccessibilityMove() {
         engine?.refreshAfterAccessibilityMove()
         NSAccessibility.post(element: self, notification: .selectedTextChanged)
-    }
-}
-
-/// Sticky scroll: the scope headers you are inside, pinned above the viewport.
-///
-/// A floating subview of the scroll view rather than rows drawn into the
-/// document. `addFloatingSubview(_:for:)` is AppKit's own answer to "stays put
-/// while the document scrolls under it", and using it means the widget does not
-/// participate in the document's coordinate space at all — no interaction with
-/// soft-wrap geometry, no rows to keep out of the band, and it works whether
-/// the document below is painted by Metal or by CoreText.
-final class StickyHeaderView: NSView {
-    weak var canvas: EditorCanvasView?
-
-    var lines: [EditorLine] = [] {
-        didSet {
-            // Compare what is DRAWN. The engine rebuilds these rows on every
-            // pull, so identity always differs and a naive `!=` would repaint
-            // the widget on every scroll event.
-            let same = lines.count == oldValue.count
-                && zip(lines, oldValue).allSatisfy { $0.lineNo == $1.lineNo && $0.text == $1.text }
-            isHidden = lines.isEmpty
-            if !same { needsDisplay = true }
-        }
-    }
-
-    override var isFlipped: Bool { true }
-
-    /// Pinned headers are chrome, not content: clicks belong to the code that
-    /// is scrolling underneath, and swallowing them would make the top of the
-    /// viewport quietly dead to the mouse.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func draw(_ dirtyRect: NSRect) {
-        canvas?.paintSticky(lines, in: bounds)
     }
 }
 
@@ -1740,11 +1669,6 @@ final class EditorCanvasView: NSView {
         bandEnd = -1
         overdrawPredatesChange = true
         closeRevealIfItsChangeIsGone()
-        // Editing changes the fold structure, and the scroll position it was
-        // computed against has not moved — so the clip's bounds notification,
-        // which is the sticky widget's other trigger, will not fire. Typing a
-        // new `fn` above the viewport has to change what is pinned.
-        scrollView?.refreshSticky()
         if let sv = scrollView {
             let pad = EditorMetrics.lineHeight * 4
             setNeedsDisplay(sv.documentVisibleRect.insetBy(dx: 0, dy: -pad))
@@ -2856,73 +2780,6 @@ final class EditorCanvasView: NSView {
     }
 
     /// Bookmark-style breakpoint marker in the gutter (SF Symbol, accent tint).
-
-    // ── Sticky scroll ──────────────────────────────────────────────────────
-
-    /// How many scope headers may be pinned at once.
-    ///
-    /// Five is a viewport's worth of orientation and no more. Every pinned row
-    /// is a row of code the reader loses, so this trades directly against the
-    /// thing it exists to help with, and the trade stops being worth it fast.
-    static let stickyMax = 5
-
-    /// The headers enclosing the row at the top of the viewport.
-    func stickyRows(topBufferRow: Int) -> [EditorLine] {
-        guard let engine, topBufferRow > 0 else { return [] }
-        return engine.pullSticky(pane: paneIndex, top: topBufferRow, max: Self.stickyMax)
-    }
-
-    /// Paint pinned headers from the top of `rect`, in the current context.
-    ///
-    /// On the CANVAS rather than in the overlay view, because everything it
-    /// needs is here: the theme, the font, the gutter width, the shaped-line
-    /// cache. A painter of its own in the overlay would be a second place the
-    /// theme gets applied — and the whole point of a pinned header is that it
-    /// looks like the line it is a copy of.
-    ///
-    /// It also means sticky scroll is drawn once for both renderers. The
-    /// document goes through Metal or CoreText depending on `RendererChoice`;
-    /// the overlay is an ordinary AppKit view above both, so this is not a
-    /// third path — it is the only one.
-    func paintSticky(_ lines: [EditorLine], in rect: CGRect) {
-        guard !lines.isEmpty, let cg = NSGraphicsContext.current?.cgContext else { return }
-        let lineH = EditorMetrics.lineHeight
-        let gutter = EditorMetrics.gutter
-        let font = EditorMetrics.monospaced(EditorMetrics.fontSize, weight: .regular)
-        let ascent = font.ascender
-
-        // Opaque, because the document scrolls UNDER this. A translucent
-        // header shows the code sliding beneath the code, which reads as a
-        // rendering fault rather than as depth.
-        colors.bg.setFill()
-        rect.fill()
-
-        for (i, line) in lines.enumerated() {
-            let y = rect.minY + CGFloat(i) * lineH
-            let ln = gutterLine(line.lineNo, isCursor: false, font: font)
-            if ln.width > 0 {
-                cg.saveGState()
-                cg.textMatrix = .identity
-                cg.translateBy(x: gutter - EditorMetrics.gutterTextGap - ln.width, y: y + ascent)
-                cg.scaleBy(x: 1, y: -1)
-                CTLineDraw(ln.line, cg)
-                cg.restoreGState()
-            }
-            let ct = ctLine(for: line, font: font)
-            cg.saveGState()
-            cg.textMatrix = .identity
-            cg.translateBy(x: gutter, y: y + ascent)
-            cg.scaleBy(x: 1, y: -1)
-            CTLineDraw(ct, cg)
-            cg.restoreGState()
-        }
-
-        // One hairline under the stack — the edge the document disappears
-        // behind. Without it the pinned rows and the scrolling rows are one
-        // uninterrupted column of code that happens to skip.
-        colors.fg.withAlphaComponent(0.14).setFill()
-        CGRect(x: 0, y: rect.maxY - 1, width: rect.width, height: 1).fill()
-    }
 
     private func ctLine(for line: EditorLine, font: NSFont) -> CTLine {
         let key = PerfProbe.measure("    cacheKey") { cacheKey(for: line) }

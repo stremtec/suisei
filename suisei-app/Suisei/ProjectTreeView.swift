@@ -117,6 +117,28 @@ struct ProjectTreeView: View {
                     reveal(path, using: proxy)
                 }
                 .onAppear { reveal(engine.chrome.filename, using: proxy) }
+                // ⌘⌫ — Finder's own binding, and the one every Mac user tries
+                // first. The action existed only in the context menu, so the
+                // ONLY way to delete a file was to know to right-click: a
+                // keyboard reaching for the obvious key found nothing, because
+                // nothing here took the keyboard at all.
+                //
+                // `focusable` + `onKeyPress` rather than a hidden button with
+                // `.keyboardShortcut`, which would arm ⌘⌫ application-wide and
+                // fire while the caret was in a document.
+                .focusable()
+                .focusEffectDisabled()
+                // `keys:` rather than the single-key overload: that one hands
+                // the action no `KeyPress`, so the ⌘ could not be checked and
+                // a bare ⌫ would have deleted the file too.
+                .onKeyPress(keys: [.delete]) { press in
+                    guard press.modifiers.contains(.command),
+                          !selectedPath.isEmpty,
+                          selectedPath != rootPath
+                    else { return .ignored }
+                    trash(selectedPath)
+                    return .handled
+                }
                 }
 
                 // Filter bar: the rounded capsule alone. The bare [+] that

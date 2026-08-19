@@ -1920,45 +1920,6 @@ pub extern "C" fn suisei_engine_editor_band(
     1
 }
 
-/// Scope headers to pin above the viewport when `top_row` is its first line.
-///
-/// Reuses `SuiseiBandC` rather than introducing a shape of its own: these ARE
-/// editor rows — same struct, same unpacker on the face, and therefore the same
-/// drawing. `count` is the number pinned, `doc_line_count` is left at 0 because
-/// a sticky band is not a window onto the document and has no length to report.
-///
-/// Returns an empty band, not a failure, when nothing is enclosing: the top of
-/// a file and a flat file are ordinary states, not errors.
-#[unsafe(no_mangle)]
-pub extern "C" fn suisei_engine_sticky_band(
-    ptr: *const SuiseiEngine,
-    pane: u32,
-    top_row: u32,
-    max_rows: u32,
-    wide_ratio: u16,
-    out: *mut SuiseiBandC,
-) -> u8 {
-    if ptr.is_null() || out.is_null() {
-        return 0;
-    }
-    let eng = unsafe { &*ptr };
-    unsafe {
-        std::ptr::write_bytes(out as *mut u8, 0, size_of::<SuiseiBandC>());
-    }
-    let o = unsafe { &mut *out };
-    let max = (max_rows as usize).min(SUISEI_BAND_MAX);
-    let lines = eng
-        .0
-        .sticky_band(pane as usize, top_row as usize, max, wide_ratio);
-    o.start_row = top_row;
-    let n = lines.len().min(SUISEI_BAND_MAX);
-    o.count = n as u32;
-    for (i, line) in lines.iter().take(n).enumerate() {
-        write_editor_line(&mut o.lines[i], line);
-    }
-    1
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn suisei_engine_split_resize(
     ptr: *mut SuiseiEngine,

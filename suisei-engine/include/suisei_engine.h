@@ -250,23 +250,6 @@ uint8_t suisei_engine_editor_band(
     const SuiseiEngine *ptr, uint32_t pane, uint32_t start_row, uint32_t max_rows,
     uint16_t wrap_cols, uint16_t wide_ratio, SuiseiBandC *out);
 
-/* Sticky scroll: the scope headers that ENCLOSE `top_row`, outermost first,
-   as ordinary editor rows in the same `SuiseiBandC` — same struct, same
-   unpacker, therefore the same drawing as the line scrolled into view.
-
-   Truncated from the inner end at `max_rows`: with more nesting than room,
-   `mod` + `impl` + `fn` says where you are and the innermost `if`s do not.
-   These rows never carry a caret or a selection — the caret is down in the
-   document and a pinned copy of its line would show a second one. They are
-   never soft-wrapped either; a pinned header is one row, or the document
-   would shift by a varying amount as you scroll.
-
-   `doc_line_count` is 0: a sticky band is not a window onto the document and
-   has no length to report. An empty band is the ordinary answer at the top of
-   a file and in a file with no nesting, not a failure. */
-uint8_t suisei_engine_sticky_band(
-    const SuiseiEngine *ptr, uint32_t pane, uint32_t top_row, uint32_t max_rows,
-    uint16_t wide_ratio, SuiseiBandC *out);
 
 /* Soft-wrap geometry for the same pane at the same columns. Cached per pane
    against the document version, so asking all three per frame builds nothing.

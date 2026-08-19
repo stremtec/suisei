@@ -43,7 +43,57 @@ const EXTRA_DIRS: &[&str] = &[
     "~/.local/bin",          // pipx, uv, and the XDG convention
     "~/.bun/bin",
     "/opt/local/bin",        // MacPorts
+    // ── Node, which is where the JavaScript and TypeScript servers live ──
+    //
+    // `typescript-language-server` is installed with `npm i -g` — the line
+    // this editor prints when it is missing — and on a developer's Mac Node
+    // itself usually comes from a version manager, not from Homebrew. None of
+    // those put their `bin` anywhere above, so Suisei concluded the server was
+    // not installed on machines that had it, and hover and ⌘-click did nothing
+    // and said nothing. **This is the exact bug `exec` exists to end**,
+    // recurring for a different toolchain.
+    "~/.volta/bin",          // Volta
+    "~/Library/pnpm",        // pnpm's global bin on macOS
+    "~/.npm-global/bin",     // the documented custom `npm prefix`
+    "~/.asdf/shims",         // asdf
+    "~/.nodenv/shims",       // nodenv
 ];
+
+/// Node version managers that keep one directory per installed version.
+///
+/// nvm and fnm have no fixed `bin` — the path carries the version
+/// (`~/.nvm/versions/node/v22.3.0/bin`), so the only way to find a globally
+/// installed tool is to look at what is there. Every version is searched,
+/// newest first by name: a tool installed under an old Node still runs, and
+/// preferring the newest matches what the shell would have picked.
+const VERSIONED_NODE_DIRS: &[(&str, &str)] = &[
+    ("~/.nvm/versions/node", "bin"),
+    ("~/.fnm/node-versions", "installation/bin"),
+    ("~/Library/Application Support/fnm/node-versions", "installation/bin"),
+];
+
+/// Every per-version `bin` under the managers above, newest name first.
+fn node_version_dirs() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for (root, tail) in VERSIONED_NODE_DIRS {
+        let Some(base) = expand(root) else { continue };
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        let mut versions: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        // By NAME, descending. Not semver-aware — `v9` sorts above `v10` —
+        // which is wrong only in the order two installed versions are tried,
+        // and both are searched either way.
+        versions.sort();
+        versions.reverse();
+        out.extend(versions.into_iter().map(|v| v.join(tail)).filter(|p| p.is_dir()));
+    }
+    out
+}
 
 /// Apple's own toolchain, which is on nobody's `PATH`.
 ///
@@ -108,6 +158,11 @@ fn search_dirs() -> &'static [PathBuf] {
                 }
             }
         }
+        for p in node_version_dirs() {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
         // Last: a tool the user installed themselves outranks Apple's copy.
         for p in developer_dirs() {
             if !out.contains(&p) {
@@ -141,8 +196,28 @@ pub fn find(program: &str) -> Option<PathBuf> {
         let p = PathBuf::from(program);
         return p.exists().then_some(p);
     }
-    search_dirs()
+    if let Some(hit) = search_dirs()
         .iter()
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable(candidate))
+    {
+        return Some(hit);
+    }
+    // Only on a MISS, and only then: rescan the version-manager directories.
+    //
+    // `search_dirs` is a `OnceLock`, which is right for a list of fixed paths —
+    // a directory created later is still searched, because the lookup stats the
+    // candidate rather than the directory. The versioned roots are different:
+    // they are DISCOVERED by reading the filesystem, so a Node installed after
+    // launch would be invisible until a restart.
+    //
+    // That is exactly the flow the Components page invites — copy the command,
+    // run it in a terminal, press Refresh — and "Not Installed" after doing
+    // what the page told you to do is the worst answer the page can give.
+    // A miss already means the whole list came up empty, so one extra
+    // directory read costs nothing anybody waits on.
+    node_version_dirs()
+        .into_iter()
         .map(|dir| dir.join(program))
         .find(|candidate| is_executable(candidate))
 }
