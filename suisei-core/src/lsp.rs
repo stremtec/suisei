@@ -986,9 +986,17 @@ impl LspClient {
         let Some(bin) = cmd.split_whitespace().next() else {
             return;
         };
+        let how = install_command(bin);
+        let docs = install_docs(bin);
+        let tail = if !how.is_empty() {
+            format!("Install: {how}")
+        } else if !docs.is_empty() {
+            format!("Builds: {docs}")
+        } else {
+            "Set its command in Settings \u{2192} Language Servers.".to_string()
+        };
         self.soft_error = Some(format!(
-            "No language server running for this file — {bin} is not installed. {}",
-            install_command(bin)
+            "No language server running for this file — {bin} is not installed. {tail}"
         ));
     }
 
@@ -2447,6 +2455,15 @@ fn extract_json_array(s: &str) -> Option<String> {
 /// and two copies of it would drift the moment one of them was corrected.
 /// A page that shows a command the user can copy needs the command alone; the
 /// error message wraps it in a sentence.
+///
+/// **Every entry here is a command that runs.** It was not: `zls` said "see
+/// https://…", `dart` said "install the Dart SDK", and both were printed into
+/// a page whose button runs the string. Two of them named packages that do not
+/// exist on macOS at all — `brew install lemminx` and `npm i -g
+/// js-debug-adapter` (a 404 on the registry). A row that cannot be installed
+/// says so with an empty string and carries a link instead; see
+/// [`install_docs`]. Checked against `brew info` and `npm view` rather than
+/// from memory, which is how the wrong ones got here.
 pub fn install_command(bin: &str) -> &'static str {
     match bin {
         "rust-analyzer" => "rustup component add rust-analyzer",
@@ -2459,7 +2476,7 @@ pub fn install_command(bin: &str) -> &'static str {
         "yaml-language-server" => "npm i -g yaml-language-server",
         "taplo" => "cargo install taplo-cli --locked",
         "bash-language-server" => "npm i -g bash-language-server",
-        "zls" => "see https://github.com/zigtools/zls",
+        "zls" => "brew install zls",
         "jdtls" => "brew install jdtls",
         "vscode-json-language-server" | "vscode-html-language-server"
         | "vscode-css-language-server" => "npm i -g vscode-langservers-extracted",
@@ -2468,22 +2485,51 @@ pub fn install_command(bin: &str) -> &'static str {
         "sourcekit-lsp" => "xcode-select --install",
         "csharp-ls" => "dotnet tool install --global csharp-ls",
         "kotlin-language-server" => "brew install kotlin-language-server",
-        "metals" => "brew install coursier/formulas/coursier && cs install metals",
-        "haskell-language-server-wrapper" => "ghcup install hls",
+        "metals" => "brew install coursier && cs install metals",
+        "haskell-language-server-wrapper" => "brew install haskell-language-server",
         "elixir-ls" => "brew install elixir-ls",
-        "nimlsp" => "nimble install nimlsp",
-        "dart" => "install the Dart SDK",
+        "nimlsp" => "brew install nim && nimble install nimlsp",
+        "dart" => "brew install dart-sdk",
         "r-languageserver" => "R -e 'install.packages(\"languageserver\")'",
-        "lemminx" => "brew install lemminx",
-        "cmake-language-server" => "pipx install cmake-language-server",
+        "cmake-language-server" => "brew install cmake-language-server",
         "vue-language-server" => "npm i -g @vue/language-server",
         "svelteserver" => "npm i -g svelte-language-server",
-        _ => "install the language server, or set its command in Settings",
+        // No macOS package. Both are release downloads and nothing more; the
+        // link is in `install_docs`.
+        "lemminx" | "js-debug-adapter" => "",
+        // **Empty, not a sentence.** This used to answer "install the language
+        // server, or set its command in Settings" — fine inside `install_hint`,
+        // which wraps it in prose, and a landmine for the Components page,
+        // which hands what it gets to a shell. A server nobody has written a
+        // line for has no line; both callers are written to say so.
+        _ => "",
+    }
+}
+
+/// Where a tool with no one-line install comes from.
+///
+/// Empty for everything a package manager already carries — a link beside a
+/// working `brew install` would be a second answer to a question that has one.
+/// These two have no macOS package at all, and the honest thing to hand
+/// someone is the page that publishes the builds.
+pub fn install_docs(bin: &str) -> &'static str {
+    match bin {
+        "lemminx" => "https://github.com/eclipse-lemminx/lemminx/releases",
+        "js-debug-adapter" => "https://github.com/microsoft/vscode-js-debug/releases",
+        _ => "",
     }
 }
 
 fn install_hint(bin: &str) -> String {
-    format!("LSP `{bin}` not found — install: {}", install_command(bin))
+    let cmd = install_command(bin);
+    if cmd.is_empty() {
+        let docs = install_docs(bin);
+        if docs.is_empty() {
+            return format!("LSP `{bin}` not found — set its command in Settings.");
+        }
+        return format!("LSP `{bin}` not found — builds: {docs}");
+    }
+    format!("LSP `{bin}` not found — install: {cmd}")
 }
 
 /// Build a valid `initialize` request body (tested for brace-balance).

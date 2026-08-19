@@ -7894,6 +7894,9 @@ struct ComponentItem: Identifiable, Equatable {
     var detail: String
     /// The line that installs it. Empty when there is nothing to run.
     var install: String
+    /// Where the builds are published, for the components no package manager
+    /// carries. Empty whenever `install` is a command — one answer per row.
+    var docs: String
     var state: State
 
     var isPresent: Bool { state != .missing }
@@ -7928,6 +7931,7 @@ enum ComponentProbe {
                 group: cstr(&row.group),
                 detail: cstr(&row.detail),
                 install: cstr(&row.install),
+                docs: cstr(&row.docs),
                 state: state
             ))
         }

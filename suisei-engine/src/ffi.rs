@@ -6811,6 +6811,7 @@ pub struct SuiseiKeyBindingC {
 pub const SUISEI_COMPONENT_DETAIL_CAP: usize = 320;
 pub const SUISEI_COMPONENT_INSTALL_CAP: usize = 192;
 pub const SUISEI_COMPONENT_PATH_CAP: usize = 320;
+pub const SUISEI_COMPONENT_DOCS_CAP: usize = 160;
 
 /// One row of Settings → Components.
 #[repr(C)]
@@ -6823,6 +6824,9 @@ pub struct SuiseiComponentC {
     pub detail: [c_char; SUISEI_COMPONENT_DETAIL_CAP],
     /// The line that installs it. Empty when there is nothing to run.
     pub install: [c_char; SUISEI_COMPONENT_INSTALL_CAP],
+    /// Where the builds are published, for the two components no package
+    /// manager carries. Empty whenever `install` is a command.
+    pub docs: [c_char; SUISEI_COMPONENT_DOCS_CAP],
     /// WHERE it was found — a developer Mac has three `clangd`s and a stale one
     /// first, so which copy answered is the useful half of "installed".
     pub path: [c_char; SUISEI_COMPONENT_PATH_CAP],
@@ -6876,6 +6880,7 @@ pub extern "C" fn suisei_engine_components_row(index: u32, out: *mut SuiseiCompo
     write_cstr(&mut o.group, c.group);
     write_cstr(&mut o.detail, &c.detail);
     write_cstr(&mut o.install, &c.install);
+    write_cstr(&mut o.docs, &c.docs);
     let (state, path) = match &c.state {
         suisei_core::components::Availability::Bundled => (2u8, String::new()),
         suisei_core::components::Availability::Present(p) => (1u8, p.display().to_string()),

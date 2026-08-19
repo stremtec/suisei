@@ -1435,6 +1435,7 @@ typedef struct {
   char group[32];
   char detail[320];
   char install[192];
+  char docs[160]; /* where the builds are, when no package manager has them */
   char path[320];
   uint8_t state; /* 0 missing · 1 present · 2 bundled */
   uint8_t _pad[7];

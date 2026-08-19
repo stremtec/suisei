@@ -461,8 +461,8 @@ fn key_binding_row_layout() {
 #[test]
 fn component_row_layout() {
     use suisei_engine::ffi::{
-        SUISEI_COMPONENT_DETAIL_CAP, SUISEI_COMPONENT_INSTALL_CAP, SUISEI_COMPONENT_PATH_CAP,
-        SUISEI_TITLE_CAP, SuiseiComponentC,
+        SUISEI_COMPONENT_DETAIL_CAP, SUISEI_COMPONENT_DOCS_CAP, SUISEI_COMPONENT_INSTALL_CAP,
+        SUISEI_COMPONENT_PATH_CAP, SUISEI_TITLE_CAP, SuiseiComponentC,
     };
     assert_eq!(
         size_of::<SuiseiComponentC>(),
@@ -470,6 +470,7 @@ fn component_row_layout() {
             + 32
             + SUISEI_COMPONENT_DETAIL_CAP
             + SUISEI_COMPONENT_INSTALL_CAP
+            + SUISEI_COMPONENT_DOCS_CAP
             + SUISEI_COMPONENT_PATH_CAP
             + 8,
         "SuiseiComponentC size — update suisei_engine.h with it"
@@ -482,5 +483,19 @@ fn component_row_layout() {
     assert_eq!(
         offset_of!(SuiseiComponentC, detail),
         64 + SUISEI_TITLE_CAP + 32
+    );
+    // `docs` was added AFTER `install`, so everything from `path` on moved.
+    // The header is written by hand — this is what catches the day it is not.
+    assert_eq!(
+        offset_of!(SuiseiComponentC, docs),
+        64 + SUISEI_TITLE_CAP + 32 + SUISEI_COMPONENT_DETAIL_CAP + SUISEI_COMPONENT_INSTALL_CAP
+    );
+    assert_eq!(
+        offset_of!(SuiseiComponentC, path),
+        64 + SUISEI_TITLE_CAP
+            + 32
+            + SUISEI_COMPONENT_DETAIL_CAP
+            + SUISEI_COMPONENT_INSTALL_CAP
+            + SUISEI_COMPONENT_DOCS_CAP
     );
 }

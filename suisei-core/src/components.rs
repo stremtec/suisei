@@ -61,6 +61,9 @@ pub struct Component {
     pub detail: String,
     /// The shell line that installs it. Empty when there is nothing to run.
     pub install: String,
+    /// Where the builds are published, for the components no package manager
+    /// carries. Empty whenever `install` is a command — one answer per row.
+    pub docs: String,
     pub state: Availability,
 }
 
@@ -99,6 +102,8 @@ struct Row {
     group: &'static str,
     detail: &'static str,
     install: &'static str,
+    /// See [`Component::docs`]. Empty unless `install` is.
+    docs: &'static str,
     probe: Probe,
 }
 
@@ -109,6 +114,7 @@ const ROWS: &[Row] = &[
         group: "Debugging",
         detail: "Rust, C, C++, Objective-C and Swift. Ships inside Xcode and the Command Line Tools.",
         install: "xcode-select --install",
+        docs: "",
         probe: Probe::Binary(&["lldb-dap", "codelldb", "lldb-vscode"]),
     },
     Row {
@@ -119,6 +125,7 @@ const ROWS: &[Row] = &[
         // Filled in from the interpreter we actually probe — see
         // `python_install`. A fixed `pip3 install debugpy` is wrong twice over.
         install: "",
+        docs: "",
         probe: Probe::PythonModule("debugpy"),
     },
     Row {
@@ -127,14 +134,21 @@ const ROWS: &[Row] = &[
         group: "Debugging",
         detail: "Go.",
         install: "go install github.com/go-delve/delve/cmd/dlv@latest",
+        docs: "",
         probe: Probe::Binary(&["dlv"]),
     },
     Row {
         id: "dap.js",
         title: "js-debug",
         group: "Debugging",
-        detail: "Node.js and JavaScript.",
-        install: "npm i -g js-debug-adapter",
+        detail: "Node.js and JavaScript. No packaged build for macOS — unpack a \
+release and point Settings at its `dapDebugServer.js`.",
+        // `npm i -g js-debug-adapter` was printed here and **the package does
+        // not exist**: the registry answers 404. Microsoft publishes the DAP
+        // as a release tarball and nothing else, on npm or in Homebrew, so
+        // there is no line to run and the row says so with a link.
+        install: "",
+        docs: "https://github.com/microsoft/vscode-js-debug/releases",
         probe: Probe::Binary(&["js-debug-adapter"]),
     },
     Row {
@@ -145,6 +159,7 @@ const ROWS: &[Row] = &[
         // actually compiled in, or the page is describing a different build.
         detail: "",
         install: "",
+        docs: "",
         probe: Probe::Builtin,
     },
     Row {
@@ -153,6 +168,7 @@ const ROWS: &[Row] = &[
         group: "Included",
         detail: "glTF, GLB and FBX open in a viewer rather than as binary text.",
         install: "",
+        docs: "",
         probe: Probe::Builtin,
     },
     Row {
@@ -161,6 +177,7 @@ const ROWS: &[Row] = &[
         group: "Included",
         detail: "A real PTY, in a tab or beside the editor.",
         install: "",
+        docs: "",
         probe: Probe::Builtin,
     },
 ];
@@ -191,6 +208,7 @@ pub fn catalog() -> Vec<Component> {
             group: row.group,
             detail,
             install,
+            docs: row.docs.to_string(),
             state,
         });
     }
@@ -207,6 +225,7 @@ pub fn catalog() -> Vec<Component> {
             group: "Language Servers",
             detail: (*command).to_string(),
             install: crate::lsp::install_command(bin).to_string(),
+            docs: crate::lsp::install_docs(bin).to_string(),
             state: match crate::exec::find(bin) {
                 Some(p) => Availability::Present(p),
                 None => Availability::Missing,
@@ -338,11 +357,17 @@ mod tests {
         // The rule the page exists for. A row that reports "not installed" and
         // stops is worth less than no row at all: it names a problem and hands
         // back nothing.
+        //
+        // A command OR a link, since two of these have no macOS package and
+        // used to satisfy this test with a line that could not work — `brew
+        // install lemminx`, `npm i -g js-debug-adapter`. "Says how to get it"
+        // was always the rule; only `install` being the sole way to say it was
+        // ever the assumption.
         for c in catalog() {
             if c.state == Availability::Missing {
                 assert!(
-                    !c.install.is_empty(),
-                    "{} is missing and offers no way to install it",
+                    !c.install.is_empty() || !c.docs.is_empty(),
+                    "{} is missing and offers neither a command nor a link",
                     c.id
                 );
             }

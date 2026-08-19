@@ -62,6 +62,17 @@ const EXTRA_DIRS: &[&str] = &[
     // binary there, and it was on no list, so the Go debug adapter was
     // permanently "Not Installed" on machines that had just installed it.
     "~/go/bin",
+    // ── Where the REST of the install lines put their output ──
+    //
+    // Same failure as `~/go/bin`, four more times: a command the page tells
+    // you to run, which succeeds, and leaves the binary somewhere nothing
+    // looks — so the row still says Not Installed and the instruction reads as
+    // a lie. Each of these is the documented default of the tool named in
+    // `lsp::install_command`.
+    "~/.nimble/bin",         // nimble install nimlsp
+    "~/.dotnet/tools",       // dotnet tool install --global csharp-ls
+    "~/.ghcup/bin",          // ghcup, for a Haskell toolchain not from brew
+    "~/.pub-cache/bin",      // dart pub global activate
 ];
 
 /// Node version managers that keep one directory per installed version.

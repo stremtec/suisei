@@ -265,8 +265,12 @@ private struct ComponentRow: View {
                     .truncationMode(.middle)
                     .textSelection(.enabled)
             }
-            if item.state == .missing, !item.install.isEmpty {
-                installRow
+            if item.state == .missing {
+                if !item.install.isEmpty {
+                    installRow
+                } else if !item.docs.isEmpty {
+                    docsRow
+                }
             }
         }
         .padding(.vertical, 2)
@@ -313,6 +317,28 @@ private struct ComponentRow: View {
     ///
     /// Copy stays, because reading a command before running it is a legitimate
     /// thing to want, and because the shell you trust may not be this one.
+    /// For the components no package manager carries.
+    ///
+    /// A link and not a disabled Install button: there is no command, and a
+    /// button that cannot be pressed says "later" when the answer is "not this
+    /// way". These two are real downloads that a person unpacks and points
+    /// Settings at, and the page that publishes them is the whole help we have.
+    private var docsRow: some View {
+        HStack(spacing: 8) {
+            Text(item.docs)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            Button("Get Builds…") {
+                if let url = URL(string: item.docs) { NSWorkspace.shared.open(url) }
+            }
+            .controlSize(.small)
+        }
+        .padding(.top, 1)
+    }
+
     private var installRow: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
