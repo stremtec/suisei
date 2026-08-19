@@ -50,7 +50,13 @@ struct ComponentsPage: View {
                 if !rows.isEmpty {
                     Section {
                         ForEach(rows) { item in
-                            ComponentRow(item: item, copied: $copied)
+                            ComponentRow(item: item, copied: $copied) {
+                                // An install that finished changes the answer to
+                                // the question this page exists to ask, so ask
+                                // it again rather than assuming the command did
+                                // what it said.
+                                Task { await reload() }
+                            }
                         }
                     } header: {
                         Text(group)
@@ -145,10 +151,94 @@ struct ComponentsPage: View {
     }
 }
 
+/// Runs a component's install line in the background.
+///
+/// A background job and not the terminal, because an install is a chore, not a
+/// session: the user pressed a button on a settings page and wants to carry on
+/// reading it while the download happens. The terminal is still one press away
+/// when it is needed — see the failure row — and that is where the answer to
+/// "it wants a password" or "the whole log, please" lives.
+///
+/// A **login** shell (`-l`), not `Process` on the binary directly. An app
+/// launched from Finder inherits `/usr/bin:/bin:/usr/sbin:/sbin` and nothing
+/// else — no Homebrew, no cargo, no npm prefix, none of the version managers —
+/// so `brew`/`pip3`/`go` would not even be found. This is the same reasoning
+/// `exec::login_shell_path` documents on the core side.
+@MainActor
+final class ComponentInstaller: ObservableObject {
+    static let shared = ComponentInstaller()
+
+    enum Progress: Equatable {
+        case running
+        case failed(String)
+    }
+
+    /// Keyed by component id. A finished-and-successful install leaves NO entry:
+    /// the row's own probe says "Installed", and two sources for one fact is
+    /// how they come to disagree.
+    @Published private(set) var progress: [String: Progress] = [:]
+
+    private init() {}
+
+    func install(_ id: String, command: String, onFinish: @escaping () -> Void) {
+        guard !command.isEmpty, progress[id] != .running else { return }
+        progress[id] = .running
+        Task.detached(priority: .utility) {
+            let failure = Self.run(command)
+            await MainActor.run {
+                if let failure {
+                    self.progress[id] = .failed(failure)
+                } else {
+                    self.progress.removeValue(forKey: id)
+                }
+                onFinish()
+            }
+        }
+    }
+
+    /// Nil on success; the useful end of the output on failure.
+    private nonisolated static func run(_ command: String) -> String? {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let proc = Process()
+        proc.executableURL = URL(
+            fileURLWithPath: FileManager.default.isExecutableFile(atPath: shell)
+                ? shell : "/bin/zsh"
+        )
+        proc.arguments = ["-l", "-c", command]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        // No tty: anything that insists on one (a `sudo` password) fails here
+        // rather than hanging forever waiting on a prompt nobody can see.
+        proc.standardInput = FileHandle.nullDevice
+        do {
+            try proc.run()
+        } catch {
+            return error.localizedDescription
+        }
+        // Drained BEFORE the wait. A pipe has a finite buffer, and an installer
+        // that prints more than it holds would block writing while we blocked
+        // waiting — the classic deadlock, and `npm i -g` prints plenty.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        guard proc.terminationStatus != 0 else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+        let lines = text
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let tail = lines.suffix(2).joined(separator: " · ")
+        if tail.isEmpty { return "Exit code \(proc.terminationStatus)." }
+        return tail.count > 240 ? String(tail.prefix(240)) + "…" : tail
+    }
+}
+
 /// One component: what it is, whether it is here, and the line that gets it.
 private struct ComponentRow: View {
     var item: ComponentItem
     @Binding var copied: String?
+    var onInstalled: () -> Void
+    @ObservedObject private var installer = ComponentInstaller.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -224,25 +314,59 @@ private struct ComponentRow: View {
     /// Copy stays, because reading a command before running it is a legitimate
     /// thing to want, and because the shell you trust may not be this one.
     private var installRow: some View {
-        HStack(spacing: 8) {
-            Text(item.install)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: 8)
-            Button("Install") {
-                EngineBridge.shared.runInDockTerminal(item.install)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(item.install)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                if installer.progress[item.id] == .running {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Installing…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button("Install") {
+                        ComponentInstaller.shared.install(
+                            item.id, command: item.install, onFinish: onInstalled
+                        )
+                    }
+                    .controlSize(.small)
+                    .help("Download and install this in the background")
+                }
+                Button(copied == item.id ? "Copied" : "Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(item.install, forType: .string)
+                    copied = item.id
+                }
+                .controlSize(.small)
             }
-            .controlSize(.small)
-            .help("Run this in Suisei's terminal")
-            Button(copied == item.id ? "Copied" : "Copy") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(item.install, forType: .string)
-                copied = item.id
+            // What the installer actually said, and a way to watch it say more.
+            // A background job that fails silently is worse than one that was
+            // never offered; and the reasons these fail — a password, a version
+            // conflict, PEP 668 — are exactly the ones a person has to see in
+            // full and answer, which is what the terminal is for.
+            if case .failed(let why)? = installer.progress[item.id] {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(Color(nsColor: .systemYellow))
+                    Text(why)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    Spacer(minLength: 8)
+                    Button("Open in Terminal") {
+                        EngineBridge.shared.runInDockTerminal(item.install)
+                    }
+                    .controlSize(.small)
+                }
             }
-            .controlSize(.small)
         }
         .padding(.top, 1)
     }

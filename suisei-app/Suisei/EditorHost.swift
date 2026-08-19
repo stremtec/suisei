@@ -4833,6 +4833,15 @@ final class EditorCanvasView: NSView {
         // while the pointer is down, and that is the one kind of scrolling core
         // used to refuse to hear about — see `Engine::scroll_sync`.
         scrollView?.pushClipPositionToCore()
+        // …and nothing may place the view afterwards. `update_scroll` runs on
+        // every drag step and arms a Caret intent, which `apply` honours on the
+        // first publish once the drag is over — `revealCaret`, re-deriving a
+        // position from the caret's glyph and core's column arithmetic. A drag
+        // ends with the caret INSIDE the viewport by construction (see the
+        // clamp in `extendSelection`), so there is nothing left to reveal and
+        // every answer it can give is a small move away from where the user
+        // just dragged to. That is the last of the pan drifting left on mouse-up.
+        engine.clearScrollIntent()
         engine.refreshChrome()
         isBlockDrag = false
         // A plain click places the caret and resumes typing; a drag leaves its

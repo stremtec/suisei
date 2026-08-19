@@ -472,9 +472,26 @@ final class TerminalHostView: NSView {
     /// focus only on a real arrival.
     @discardableResult
     func mount(_ term: PaneTerminalView) -> Bool {
+        // Whatever else is in this box comes OUT first.
+        //
+        // Without this the box accumulated shells. `mount` only ever added, so
+        // switching chips left the previous shell's view still a subview, with
+        // the new one drawn on top of it — and switching BACK hit the
+        // `superview === self` early return, which reordered nothing. You were
+        // then looking at the other shell: "shell 1에 codexx 쳐놓고 shell 2 열고
+        // codexxxx 쓰고 shell 1 가니 codexxxx로 되어있음." Both processes were
+        // alive and distinct the whole time; only one of them was visible, and
+        // it was the wrong one.
+        var displaced = false
+        for sub in subviews where sub !== term {
+            sub.removeFromSuperview()
+            displaced = true
+        }
         if term.superview === self {
             if term.frame != bounds { term.frame = bounds }
-            return false
+            // A chip switch that uncovered this shell IS an arrival as far as
+            // the keyboard is concerned — the caller claims focus on a true.
+            return displaced
         }
         term.removeFromSuperview()
         term.frame = bounds
