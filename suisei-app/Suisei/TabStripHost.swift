@@ -913,6 +913,16 @@ final class TabStripHostView: NSView {
     private func startDisplayLink() {
         if displayLink == nil {
             let link = displayLink(target: self, selector: #selector(tick))
+            // Ask for the panel's full rate, as `AnimationTrace` and
+            // `SidebarTrace` do. Left unset, the range is `.default` and the
+            // system is free to settle a ProMotion display lower for content it
+            // judges undemanding — which a tab sliding under the pointer is
+            // not. The one animated surface here that did not ask.
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: 60,
+                maximum: 120,
+                preferred: 120
+            )
             link.add(to: .main, forMode: .common)
             displayLink = link
         }

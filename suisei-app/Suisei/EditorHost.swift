@@ -3509,7 +3509,7 @@ final class EditorCanvasView: NSView {
 
     private func startLiveFlashTimer() {
         guard liveFlashTimer == nil else { return }
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+        let t = Timer(timeInterval: EditorMetrics.frameInterval(on: window?.screen), repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             self.needsDisplay = true
             if self.engine?.live.isFlashing != true {
@@ -3556,7 +3556,7 @@ final class EditorCanvasView: NSView {
 
     private func startBreakpointAnimation() {
         guard bpAnimTimer == nil else { return }
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+        let t = Timer(timeInterval: EditorMetrics.frameInterval(on: window?.screen), repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             self.needsDisplay = true
             if self.bpAnim.isEmpty {
@@ -3919,7 +3919,7 @@ final class EditorCanvasView: NSView {
     private func syncLiveShift() {
         guard engine?.live.isShifting == true, liveOpenTimer == nil else { return }
         scrollView?.refitCanvas()
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+        let t = Timer(timeInterval: EditorMetrics.frameInterval(on: window?.screen), repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             self.scrollView?.refitCanvas()
             self.needsDisplay = true
@@ -4116,7 +4116,7 @@ final class EditorCanvasView: NSView {
         revealTimer?.invalidate()
         scrollView?.refitCanvas()
         needsDisplay = true
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+        let t = Timer(timeInterval: EditorMetrics.frameInterval(on: window?.screen), repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             // The document's height follows the reveal, or the scroller and the
             // content disagree about how far there is to go for its duration.
@@ -4424,7 +4424,7 @@ final class EditorCanvasView: NSView {
     private func startHoverAnimation() {
         hoverAnimTimer?.invalidate()
         needsDisplay = true
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+        let t = Timer(timeInterval: EditorMetrics.frameInterval(on: window?.screen), repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             self.needsDisplay = true
             let settled = self.hoveredHunk != nil
@@ -4863,7 +4863,7 @@ final class EditorCanvasView: NSView {
     private func startBracketFade() {
         bracketFadeTimer?.invalidate()
         let started = bracketShownAt
-        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+        let t = Timer(timeInterval: EditorMetrics.frameInterval(on: window?.screen), repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
             self.invalidateBracketRows()
             if CACurrentMediaTime() - started >= Self.bracketFlashDuration {

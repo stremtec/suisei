@@ -6260,33 +6260,77 @@ struct ContentView: View {
     /// `ratio` and `1 - ratio` and handed the second to every pane after the
     /// first. The tree already knows the answer; this just draws it.
     @ViewBuilder
+    /// The split desk.
+    ///
+    /// A view of its own, observing `SplitStore` — **not** a `some View` built
+    /// inside `ContentView.body`. A divider drag moves the pane rects and
+    /// nothing else, and `@ObservedObject` wakes on the OBJECT: while these
+    /// rects lived on the bridge, dragging a seam re-evaluated this whole
+    /// window's body at pointer rate, tab strip and sidebars and panels
+    /// included. Now the drag wakes this struct and the panes inside it.
+    ///
+    /// The pieces it needs from `ContentView` come in as closures. They capture
+    /// a struct, so calling them from here is calling ContentView's own methods
+    /// — what they must NOT do is run inside ContentView's body, which is the
+    /// thing being kept asleep.
     private func splitEditorLayout(size: CGSize) -> some View {
-        let panes = engine.editorSplit.panes
-        let pathH = ContentView.editorHeaderHeight
+        SplitDesk(
+            split: engine.splitStore,
+            size: size,
+            fg: fg,
+            accent: accent,
+            headerHeight: ContentView.editorHeaderHeight,
+            column: { pane, contentSize in
+                AnyView(editorColumn(pane: pane, contentSize: contentSize))
+            },
+            seams: { panes in paneSeams(panes) },
+            structureKey: { panes in paneStructureKey(panes) },
+            onResize: { a, b, delta in engine.splitResize(a, b, delta: delta) },
+            onResizeEnd: { engine.splitResizeEnd() }
+        )
+    }
+}
+
+/// See `ContentView.splitEditorLayout`.
+private struct SplitDesk: View {
+    @ObservedObject var split: SplitStore
+    let size: CGSize
+    let fg: Color
+    let accent: Color
+    let headerHeight: CGFloat
+    /// `AnyView` and not a generic parameter: `ContentView.body` is already at
+    /// the type-checker's limit, and one existential per pane per frame — two
+    /// to four of them — is not a cost anyone can measure.
+    let column: (EditorPaneSnap, CGSize) -> AnyView
+    let seams: ([EditorPaneSnap]) -> [ContentView.PaneSeam]
+    let structureKey: ([EditorPaneSnap]) -> String
+    let onResize: (Int, Int, Double) -> Void
+    let onResizeEnd: () -> Void
+
+    var body: some View {
+        let panes = split.snap.panes
+        let pathH = headerHeight
         return ZStack(alignment: .topLeading) {
             ForEach(Array(panes.enumerated()), id: \.element.id) { _, pane in
                 let w = max(40, size.width * pane.rect.width - 1)
                 let h = max(40, size.height * pane.rect.height - 1)
-                editorColumn(
-                    pane: pane,
-                    contentSize: CGSize(width: max(40, w - 4), height: max(40, h - pathH))
+                column(
+                    pane,
+                    CGSize(width: max(40, w - 4), height: max(40, h - pathH))
                 )
                 .frame(width: w, height: h)
                 .offset(x: size.width * pane.rect.minX, y: size.height * pane.rect.minY)
             }
-            ForEach(paneSeams(panes)) { seam in
+            ForEach(seams(panes)) { seam in
                 SplitDivider(
                     vertical: seam.vertical,
                     fg: fg,
                     accent: accent,
                     onDrag: { delta in
                         let axis = seam.vertical ? size.width : size.height
-                        engine.splitResize(seam.a, seam.b, delta: Double(delta / max(1, axis)))
+                        onResize(seam.a, seam.b, Double(delta / max(1, axis)))
                     },
-                    // One full pull when the drag ENDS. During it only the pane
-                    // rects are republished, so anything else that moved while
-                    // the seam did catches up here — once, not per pixel.
-                    onEnd: { engine.refreshChrome() }
+                    onEnd: onResizeEnd
                 )
                 .frame(
                     width: seam.vertical ? 7 : size.width * (seam.to - seam.from),
@@ -6321,9 +6365,11 @@ struct ContentView: View {
         // closed while an unsplit one — a different branch, untouched — glided.
         // Keying the suppression to the structure alone separates them: the key
         // moves only when the engine's own description of the panes does.
-        .animation(nil, value: paneStructureKey(panes))
+        .animation(nil, value: structureKey(panes))
     }
+}
 
+extension ContentView {
     /// What the ENGINE says the panes are, as one comparable value.
     ///
     /// Ids and rect fractions — deliberately not the pixel sizes, which move

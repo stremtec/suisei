@@ -285,6 +285,24 @@ struct SplitSnap: Equatable {
     static let empty = SplitSnap(focus: 0, panes: [])
 }
 
+/// The pane rectangles, on an object of their own.
+///
+/// **`@Published` invalidates every observer of the OBJECT, not of the
+/// property.** `ContentView` holds the bridge as `@ObservedObject`, so a
+/// divider drag — which moves four numbers and nothing else — re-evaluated the
+/// window's entire body on every pointer move: the tab strip, both sidebars,
+/// every panel, all of it, at pointer rate. `refreshSplitOnly` already cut that
+/// from five publishes per move to one; this cuts what the one publish wakes
+/// from the window down to the panes.
+///
+/// Same reasoning as `LiveMarks` and `ViewerControls`, and the same shape: the
+/// bridge still owns the value and `EngineBridge.editorSplit` still reads it,
+/// so nothing that only READS the split had to change. What changed is who is
+/// woken when it moves.
+final class SplitStore: ObservableObject {
+    @Published var snap: SplitSnap = .empty
+}
+
 struct TabItem: Equatable, Identifiable {
     /// Slot index — what every engine call takes.
     var id: Int
@@ -1026,6 +1044,30 @@ struct ChromeSnapshot: Equatable {
 /// Geometry constants shared with editor paint (must match hit-test).
 /// Font size is adjustable via Cmd+ / Cmd- (persisted).
 enum EditorMetrics {
+    /// One frame of the screen something is being drawn on.
+    ///
+    /// **Nothing that animates may name 60.** Six fade timers and the
+    /// selection-drag publish were written as `1.0 / 60.0`, so on a 120 Hz
+    /// panel every one of them ran a frame on, a frame off — half the display's
+    /// rate, which is exactly what a "low frame rate" looks like when the app's
+    /// own tick and its autoscroll are already at 120. Reported as "애니메이션
+    /// 프레임레이트도 좀 낮은 것 같아요", and it was not a feeling.
+    ///
+    /// Floored at 60 rather than trusted blindly: a screen that reports
+    /// something absurd must not make an animation run slower than it used to.
+    static func frameInterval(on screen: NSScreen?) -> TimeInterval {
+        let hz = screen?.maximumFramesPerSecond
+            ?? NSScreen.main?.maximumFramesPerSecond
+            ?? 60
+        return 1.0 / Double(max(60, hz))
+    }
+
+    /// The frame interval of whichever screen the app is on right now, for the
+    /// callers that have no view to ask (the bridge).
+    static var frameInterval: TimeInterval {
+        frameInterval(on: NSApp.keyWindow?.screen ?? NSApp.mainWindow?.screen)
+    }
+
     /// Xcode-like line-number strip (digits + git stripe + pad) — not a wide slab.
     static let gutterBase: CGFloat = 34
     static let defaultFontSize: CGFloat = 14
@@ -1366,7 +1408,10 @@ final class EngineBridge: ObservableObject {
     let live = LiveMarks()
     let softwareUpdate = SoftwareUpdateStore()
 
-    @Published private(set) var editorSplit: SplitSnap = .empty
+    /// The pane layout. Stored on `splitStore` — see [`SplitStore`] for why —
+    /// and read through here so the sixty-odd call sites keep their spelling.
+    let splitStore = SplitStore()
+    var editorSplit: SplitSnap { splitStore.snap }
     /// From Core only (`snap.scroll_frac`). Never a parallel face accumulator.
     @Published private(set) var editorScrollFrac: CGFloat = 0
     /// Horizontal pan (visual columns) when wrap is off.
@@ -2482,7 +2527,7 @@ final class EngineBridge: ObservableObject {
             if paint.hscroll != editorHScroll { editorHScroll = paint.hscroll }
             if paint.wrapLines != wrapLines { wrapLines = paint.wrapLines }
             if paint.lines != editorLines { editorLines = paint.lines }
-            if paint.split != editorSplit { editorSplit = paint.split }
+            if paint.split != editorSplit { splitStore.snap = paint.split }
         }
 
         var next = chrome
@@ -3172,7 +3217,10 @@ final class EngineBridge: ObservableObject {
             suisei_engine_drag(engine, row, col)
         }
         let now = CACurrentMediaTime()
-        if now - lastDragPublish >= (1.0 / 60.0) {
+        // The DISPLAY's frame, not 60 Hz. A selection drag repainting every
+        // 16.7 ms on a 120 Hz panel is every other frame, which is seen as the
+        // selection lagging the pointer however fast the engine answers.
+        if now - lastDragPublish >= EditorMetrics.frameInterval {
             lastDragPublish = now
             dragDirty = false
             refreshEditorPaintOnly()
@@ -3192,7 +3240,10 @@ final class EngineBridge: ObservableObject {
             suisei_engine_drag(engine, row, col)
         }
         let now = CACurrentMediaTime()
-        if now - lastDragPublish >= (1.0 / 60.0) {
+        // The DISPLAY's frame, not 60 Hz. A selection drag repainting every
+        // 16.7 ms on a 120 Hz panel is every other frame, which is seen as the
+        // selection lagging the pointer however fast the engine answers.
+        if now - lastDragPublish >= EditorMetrics.frameInterval {
             lastDragPublish = now
             dragDirty = false
             refreshEditorPaintOnly()
@@ -3866,9 +3917,25 @@ final class EngineBridge: ObservableObject {
     /// This replaced `splitSetRatio`, which addressed the single `ratio` that
     /// the entire layout shared — with three panes there are two dividers and
     /// both moved together.
+    /// A move the divider made that has not been published yet.
+    private var splitDirty = false
+    private var lastSplitPublish: CFTimeInterval = 0
+
     func splitResize(_ a: Int, _ b: Int, delta: Double) {
         guard let engine else { return }
+        // Core hears about EVERY move — it is a few float assignments and a
+        // clamp, and dropping one would lose travel the hand actually made.
         suisei_engine_split_resize(engine, UInt32(a), UInt32(b), Float(delta))
+        // The face hears about one per frame. A mouse reports at 125 Hz and up
+        // (a gaming mouse, 1000), so the publishes above the display's rate are
+        // work whose result is overwritten before a pixel of it is seen.
+        let now = CACurrentMediaTime()
+        guard now - lastSplitPublish >= EditorMetrics.frameInterval else {
+            splitDirty = true
+            return
+        }
+        lastSplitPublish = now
+        splitDirty = false
         // Chrome, not paint-only: the pane rects the layout is drawn from live
         // in the chrome snapshot, so a paint-only refresh moved the divider in
         // core and left the face drawing the old geometry.
@@ -3876,6 +3943,21 @@ final class EngineBridge: ObservableObject {
         // But not the WHOLE chrome — see below. A drag fires this on every
         // pointer move.
         refreshSplitOnly()
+    }
+
+    /// The divider was let go.
+    ///
+    /// The last move of a drag is the one the eye stops on, and it is the one
+    /// most likely to have been swallowed by the per-frame gate above — so it
+    /// is published here before anything else. Then one full pull, because
+    /// during the drag only the pane rects were republished and whatever else
+    /// moved with them has to catch up. Once, not per pixel.
+    func splitResizeEnd() {
+        if splitDirty {
+            splitDirty = false
+            refreshSplitOnly()
+        }
+        refreshChrome()
     }
 
     /// The pane rects, and nothing else.
@@ -3898,7 +3980,7 @@ final class EngineBridge: ObservableObject {
         var snap = SuiseiChromeSnapshot()
         guard suisei_engine_chrome(engine, &snap) != 0 else { return }
         let (_, split) = decodeEditorLinesAndSplit(from: snap, engine: engine)
-        if split != editorSplit { editorSplit = split }
+        if split != editorSplit { splitStore.snap = split }
     }
 
     struct MinimapData: Equatable {
@@ -5822,7 +5904,7 @@ final class EngineBridge: ObservableObject {
                 let rel = snap.relative_number != 0
                 if rel != relativeNumber { relativeNumber = rel }
                 if linesDiffer { editorLines = lines }
-                if split != editorSplit { editorSplit = split }
+                if split != editorSplit { splitStore.snap = split }
             }
         }
         // Preview can open/close without full shell rebuild — but only re-pull
@@ -6178,7 +6260,7 @@ final class EngineBridge: ObservableObject {
         PerfProbe.measure("  editor @Published block") {
             if lines != editorLines { editorLines = lines }
             PerfProbe.measure("    editorSplit publish") {
-                if split != editorSplit { editorSplit = split }
+                if split != editorSplit { splitStore.snap = split }
             }
             // Always adopt Core residual (caret/goto clear it to 0).
             let frac = CGFloat(snap.scroll_frac)
